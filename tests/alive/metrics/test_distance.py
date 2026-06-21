@@ -6,8 +6,10 @@ All tests are pure-numpy: no data files are read.
 from __future__ import annotations
 
 import hashlib
+import os
 import subprocess
 import sys
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -15,6 +17,7 @@ from scipy.spatial.distance import cdist
 
 from alive.metrics.distance import (
     DistanceError,
+    _deterministic_halves,
     energy_distance,
     equal_cell_sample,
     repeated_energy_distance,
@@ -26,7 +29,14 @@ from alive.metrics.distance import (
 # Helpers
 # ---------------------------------------------------------------------------
 
-RNG = np.random.default_rng(0)
+# Pre-computed fixed arrays used as parametrize inputs.  We freeze these
+# at module-import time from a single fresh RNG so collection order never
+# affects their values (each draw is a separate .standard_normal call on an
+# RNG that is used only here and then discarded).
+_PARAM_RNG = np.random.default_rng(0)
+_PARAM_X_20_5 = _PARAM_RNG.standard_normal((20, 5))
+_PARAM_X_1_3 = _PARAM_RNG.standard_normal((1, 3))
+_PARAM_X_100_50 = _PARAM_RNG.standard_normal((100, 50))
 
 
 def _brute_energy_distance(x: np.ndarray, y: np.ndarray) -> float:
@@ -56,10 +66,10 @@ class TestEnergyDistanceIdentity:
     @pytest.mark.parametrize(
         "x",
         [
-            RNG.standard_normal((20, 5)),
-            RNG.standard_normal((1, 3)),
+            _PARAM_X_20_5,
+            _PARAM_X_1_3,
             np.zeros((10, 8)),
-            RNG.standard_normal((100, 50)),
+            _PARAM_X_100_50,
         ],
     )
     def test_identity(self, x: np.ndarray) -> None:
@@ -183,11 +193,16 @@ class TestEqualCellSample:
         assert sampled.shape == (30, 5)
 
     def test_no_replacement(self) -> None:
-        """All sampled rows must be distinct (no duplicate row indices)."""
-        rng = np.random.default_rng(0)
-        cells = rng.standard_normal((50, 3))
+        """All sampled rows must be distinct (no duplicate row indices).
+
+        We use integer-valued cells where each row is a unique integer so that
+        row-value equality ↔ index equality — no false positives from coincidental
+        float collisions.
+        """
+        # Each row is [i, i, i] so row values are unique by construction.
+        cells = np.arange(50 * 3, dtype=np.float64).reshape(50, 3)
         sampled = equal_cell_sample(cells, 50, seed_key=99)
-        # Check uniqueness by hashing rows
+        # With integer-valued distinct rows, tuple uniqueness == index uniqueness.
         row_hashes = {tuple(r) for r in sampled}
         assert len(row_hashes) == 50
 
@@ -259,22 +274,27 @@ class TestRepeatedEnergyDistance:
             )
 
     def test_result_within_per_repeat_range(self) -> None:
-        """The mean must lie within the range of per-repeat values (sanity)."""
-        # We compute it independently for several repeat calls to approximate the range
-        cap, min_c, block = 40, 10, 32
-        per_repeat = []
+        """The mean must equal the mean of per-repeat distances (not just be finite).
+
+        We reproduce the EXACT per-repeat seeds that repeated_energy_distance uses
+        internally:
+            per_seed = (seed_key, r)
+            x_sub = equal_cell_sample(x, n, seed_key=(per_seed, "x"))
+            y_sub = equal_cell_sample(y, n, seed_key=(per_seed, "y"))
+
+        so we can compute each repeat's energy distance ourselves and assert that
+        repeated_energy_distance(..., repeats=5) equals np.mean(per_repeat_values).
+        We also check that the mean lies within [min, max] of the per-repeat values.
+        """
+        cap, min_c, block, seed = 40, 10, 32, "sanity_range"
+        n = min(cap, len(self.x), len(self.y))  # mirrors repeated_energy_distance logic
+
+        per_repeat_values: list[float] = []
         for r in range(5):
-            # Simulate a single repeat by using repeats=1 with per-repeat seed
-            val = repeated_energy_distance(
-                self.x,
-                self.y,
-                cell_cap=cap,
-                min_cells=min_c,
-                repeats=1,
-                block_size=block,
-                seed_key=("sanity_range", r),
-            )
-            per_repeat.append(val)
+            per_seed = (seed, r)
+            x_sub = equal_cell_sample(self.x, n, seed_key=(per_seed, "x"))
+            y_sub = equal_cell_sample(self.y, n, seed_key=(per_seed, "y"))
+            per_repeat_values.append(energy_distance(x_sub, y_sub, block_size=block))
 
         mean_val = repeated_energy_distance(
             self.x,
@@ -283,12 +303,19 @@ class TestRepeatedEnergyDistance:
             min_cells=min_c,
             repeats=5,
             block_size=block,
-            seed_key="sanity_range",
+            seed_key=seed,
         )
-        # Mean cannot be below min or above max of per-repeat distances
-        # (Note: per-repeat seeds differ between the two calls so this is an approximate check;
-        #  we just verify the mean is non-negative and finite.)
-        assert 0.0 <= mean_val < np.inf
+
+        expected_mean = float(np.mean(per_repeat_values))
+        assert mean_val == pytest.approx(expected_mean, rel=1e-12, abs=1e-15), (
+            f"repeated_energy_distance returned {mean_val}, "
+            f"expected mean of per-repeat values {expected_mean}"
+        )
+        # Also verify mean lies within [min, max] of per-repeat distances
+        assert min(per_repeat_values) <= mean_val <= max(per_repeat_values) + 1e-15, (
+            f"Mean {mean_val} lies outside per-repeat range "
+            f"[{min(per_repeat_values)}, {max(per_repeat_values)}]"
+        )
 
     def test_non_negative(self) -> None:
         result = repeated_energy_distance(
@@ -329,26 +356,30 @@ class TestSelfDistanceFloor:
         assert a == pytest.approx(b)
 
     def test_halves_are_disjoint(self) -> None:
-        """Verify internally that the halving function produces non-overlapping indices.
+        """Directly verify that each repeat's two half-index arrays are disjoint and equal-size.
 
-        We do this indirectly: with a population of n distinct cells, the two halves
-        of the self-distance computation must not share any cells (otherwise the
-        "self-distance" would be 0). We check via a crafted scenario.
+        We use _deterministic_halves with the same per-repeat seed keys that
+        self_distance_floor uses internally (seed_key=(master, r)), and assert:
+          (a) both halves have equal length (N // 2), and
+          (b) the intersection of their index sets is empty.
         """
-        # If halves overlap, energy_distance of two identical halves = 0.
-        # We can't introspect directly, but we can check that the floor > 0 for a
-        # non-trivial diffuse cloud (which would only be 0 if both halves were identical).
-        floor = self_distance_floor(
-            self.diffuse_cloud,
-            cell_cap=80,
-            min_cells=10,
-            repeats=4,
-            block_size=32,
-            seed_key="disjoint",
-        )
-        assert floor > 0.0, (
-            "Self-distance floor of a diffuse cloud must be > 0 (halves must be distinct)"
-        )
+        N = len(self.diffuse_cloud)
+        master_key = "disjoint_direct"
+        for r in range(4):
+            per_seed = (master_key, r)
+            half1_idx, half2_idx = _deterministic_halves(self.diffuse_cloud, seed_key=per_seed)
+            # (a) equal size
+            assert len(half1_idx) == len(half2_idx), (
+                f"Repeat {r}: half1 size {len(half1_idx)} != half2 size {len(half2_idx)}"
+            )
+            assert len(half1_idx) == N // 2, (
+                f"Repeat {r}: expected half size {N // 2}, got {len(half1_idx)}"
+            )
+            # (b) disjoint
+            shared = set(half1_idx.tolist()) & set(half2_idx.tolist())
+            assert shared == set(), (
+                f"Repeat {r}: halves share indices {shared} — halves are NOT disjoint"
+            )
 
     def test_tight_cloud_smaller_than_diffuse(self) -> None:
         floor_tight = self_distance_floor(
@@ -402,10 +433,31 @@ class TestSlicedWasserstein:
         assert a == pytest.approx(b)
 
     def test_identity_approx_zero(self) -> None:
+        """SW(X, X) == 0 exactly (same object, same projections)."""
         rng = np.random.default_rng(0)
         x = rng.standard_normal((50, 5))
         result = sliced_wasserstein(x, x, n_projections=30, seed_key=0)
         assert result == pytest.approx(0.0, abs=1e-10)
+
+    def test_near_identity_two_draws_from_same_distribution(self) -> None:
+        """SW should be small (< 1.0) for two large samples from the same N(0,I) distribution
+        and strictly smaller than SW between two well-separated distributions.
+
+        This exercises the equal-size path (n == m) with genuinely distinct arrays,
+        unlike test_identity_approx_zero which compares X to itself.
+        """
+        rng = np.random.default_rng(12345)
+        x = rng.standard_normal((200, 5))
+        y = rng.standard_normal((200, 5))
+        y_far = y + 10.0  # clearly separated from x
+
+        sw_near = sliced_wasserstein(x, y, n_projections=50, seed_key=0)
+        sw_far = sliced_wasserstein(x, y_far, n_projections=50, seed_key=0)
+
+        assert sw_near < 1.0, f"SW between same-distribution draws too large: {sw_near}"
+        assert sw_far > sw_near, (
+            f"Separated clouds ({sw_far}) should give larger SW than same-distribution ({sw_near})"
+        )
 
     def test_grows_with_shift(self) -> None:
         rng = np.random.default_rng(0)
@@ -495,7 +547,8 @@ class TestSeedKeyStability:
             "repeats=3, block_size=16, seed_key='stable_test'); "
             "print(f'{r:.15f}')"
         )
-        import os
+        # Derive the project root portably: tests/alive/metrics/test_distance.py → root
+        _project_root = str(Path(__file__).parent.parent.parent.parent)
 
         env1 = {**os.environ, "PYTHONHASHSEED": "1"}
         env2 = {**os.environ, "PYTHONHASHSEED": "99999"}
@@ -505,14 +558,14 @@ class TestSeedKeyStability:
             capture_output=True,
             text=True,
             env=env1,
-            cwd="/Users/jam/ALIVE",
+            cwd=_project_root,
         )
         res2 = subprocess.run(
             [sys.executable, "-c", code],
             capture_output=True,
             text=True,
             env=env2,
-            cwd="/Users/jam/ALIVE",
+            cwd=_project_root,
         )
         assert res1.returncode == 0, f"Process 1 failed: {res1.stderr}"
         assert res2.returncode == 0, f"Process 2 failed: {res2.stderr}"

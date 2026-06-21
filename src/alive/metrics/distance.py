@@ -404,6 +404,41 @@ def repeated_energy_distance(
 # ---------------------------------------------------------------------------
 
 
+def _deterministic_halves(
+    cells: np.ndarray,
+    *,
+    seed_key: object,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return the two disjoint half-index arrays produced by a single shuffle-and-split.
+
+    This is the documented split rule used inside :func:`self_distance_floor` for a
+    single repeat *r*: call with ``seed_key=(master_key, r)`` to reproduce repeat *r*
+    exactly.  Exposed as a semi-private helper so tests can verify disjointness and
+    equal size without accessing internals.
+
+    Parameters
+    ----------
+    cells : np.ndarray
+        Shape (N, d).
+    seed_key : object
+        Seed key for the shuffle (matches the per-repeat key used internally).
+
+    Returns
+    -------
+    tuple[np.ndarray, np.ndarray]
+        ``(half1_idx, half2_idx)`` — the index arrays of the two halves.  Both
+        have length ``N // 2``.  They are always disjoint by construction (non-
+        overlapping slices of a permutation).
+    """
+    N = len(cells)
+    half_available = N // 2
+    rng = _make_rng(seed_key)
+    shuffled_idx = rng.permutation(N)
+    half1_idx = shuffled_idx[:half_available]
+    half2_idx = shuffled_idx[half_available : 2 * half_available]
+    return half1_idx, half2_idx
+
+
 def self_distance_floor(
     cells: np.ndarray,
     *,
@@ -478,11 +513,8 @@ def self_distance_floor(
 
     distances: list[float] = []
     for r in range(repeats):
-        rng = _make_rng((seed_key, r))
-        # Shuffle to create two disjoint halves
-        shuffled_idx = rng.permutation(N)
-        half1_idx = shuffled_idx[:half_available]
-        half2_idx = shuffled_idx[half_available : 2 * half_available]
+        # Shuffle to create two disjoint halves (use the shared helper for testability)
+        half1_idx, half2_idx = _deterministic_halves(cells, seed_key=(seed_key, r))
 
         half1 = cells[half1_idx]
         half2 = cells[half2_idx]
