@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import random
 import tempfile
+import types
 from pathlib import Path
 
 import anndata
@@ -409,3 +410,128 @@ def test_to_dict_structure() -> None:
     for role in SPLIT_ROLES:
         assert role in d["assignments"]
         assert isinstance(d["assignments"][role], list)
+
+
+# ---------------------------------------------------------------------------
+# Fix 1: SplitManifest is genuinely immutable (MappingProxyType fields)
+# ---------------------------------------------------------------------------
+
+
+def test_fields_are_mapping_proxy() -> None:
+    """All four dict fields must be MappingProxyType instances after construction."""
+    m = _make_manifest()
+    for field in ("fractions", "assignments", "exclusions", "counts"):
+        value = getattr(m, field)
+        assert isinstance(value, types.MappingProxyType), (
+            f"Field {field!r} should be MappingProxyType, got {type(value).__name__}"
+        )
+
+
+def test_fractions_mutation_raises_after_checksum() -> None:
+    """After checksum is accessed, mutating fractions must raise TypeError."""
+    m = _make_manifest()
+    _ = m.checksum  # populate the cached_property
+    with pytest.raises(TypeError):
+        m.fractions["base_train"] = 0.0  # type: ignore[index]
+
+
+def test_dict_fields_read_only() -> None:
+    """All four dict fields must raise TypeError on attempted mutation."""
+    m = _make_manifest()
+    with pytest.raises(TypeError):
+        m.fractions["base_train"] = 0.0  # type: ignore[index]
+    with pytest.raises(TypeError):
+        m.assignments["base_train"] = ()  # type: ignore[index]
+    with pytest.raises(TypeError):
+        m.exclusions["x"] = "reason"  # type: ignore[index]
+    with pytest.raises(TypeError):
+        m.counts["base_train"] = 0  # type: ignore[index]
+
+
+def test_read_fields_are_mapping_proxy() -> None:
+    """Fields loaded via SplitManifest.read() must also be MappingProxyType."""
+    ids = _make_ids(40)
+    m = build_manifest(ids, _FRACTIONS, _SEED)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        path = Path(tmpdir) / "manifest.json"
+        m.write(path)
+        m2 = SplitManifest.read(path)
+    for field in ("fractions", "assignments", "exclusions", "counts"):
+        value = getattr(m2, field)
+        assert isinstance(value, types.MappingProxyType), (
+            f"Field {field!r} from read() should be MappingProxyType, got {type(value).__name__}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Fix 3: Hamilton remainder distribution + tie-breaking with exact asserts
+# ---------------------------------------------------------------------------
+
+
+def test_remainder_distribution_n7() -> None:
+    """n=7, registered fractions 0.45/0.25/0.15/0.15: exercise the remainder path.
+
+    Arithmetic:
+      floors  = [floor(7*0.45), floor(7*0.25), floor(7*0.15), floor(7*0.15)]
+              = [3, 1, 1, 1]  → sum = 6, leftover = 1
+      remainders = [7*0.45 - 3, 7*0.25 - 1, 7*0.15 - 1, 7*0.15 - 1]
+                 = [0.15,       0.75,        0.05,        0.05]
+      largest remainder → method_development (index 1, remainder 0.75)
+      → method_development gets the extra unit
+    Expected: base_train=3, method_development=2, conformal_calibration=1, sealed_evaluation=1
+    """
+    ids = _make_ids(7)
+    m = build_manifest(ids, _FRACTIONS, _SEED)
+
+    assert m.counts["base_train"] == 3
+    assert m.counts["method_development"] == 2
+    assert m.counts["conformal_calibration"] == 1
+    assert m.counts["sealed_evaluation"] == 1
+    assert sum(m.counts[r] for r in SPLIT_ROLES) == 7
+
+
+def test_remainder_tie_breaking() -> None:
+    """Exercise the tie-break path where two roles share the largest remainder.
+
+    We need two roles to have identical (and largest) fractional remainders so
+    the SPLIT_ROLES-order tie-break is invoked.
+
+    Construction: use fractions 0.50/0.50/0.00/0.00 via a custom SplitFractions
+    and n=3.
+
+      floors  = [floor(3*0.5), floor(3*0.5), floor(3*0.0), floor(3*0.0)]
+              = [1, 1, 0, 0]  → sum = 2, leftover = 1
+      remainders = [0.5, 0.5, 0.0, 0.0]
+      Tied: base_train (index 0) and method_development (index 1) share remainder 0.5.
+      SPLIT_ROLES-order tie-break → index 0 (base_train) wins the extra unit.
+    Expected: base_train=2, method_development=1, conformal_calibration=0, sealed_evaluation=0
+    """
+    tie_fracs = SplitFractions(
+        base_train=0.50,
+        method_development=0.50,
+        conformal_calibration=0.00,
+        sealed_evaluation=0.00,
+    )
+    ids = _make_ids(3)
+    m = build_manifest(ids, tie_fracs, _SEED)
+
+    assert m.counts["base_train"] == 2
+    assert m.counts["method_development"] == 1
+    assert m.counts["conformal_calibration"] == 0
+    assert m.counts["sealed_evaluation"] == 0
+    assert sum(m.counts[r] for r in SPLIT_ROLES) == 3
+
+
+# ---------------------------------------------------------------------------
+# Fix 4: split_of uses O(1) cached reverse index
+# ---------------------------------------------------------------------------
+
+
+def test_split_of_uses_reverse_index() -> None:
+    """split_of must return the correct role for all assigned IDs (O(1) path)."""
+    ids = _make_ids(100)
+    m = build_manifest(ids, _FRACTIONS, _SEED)
+    # Trigger _id_to_role build, then query all IDs
+    for role in SPLIT_ROLES:
+        for pid in m.assignments[role]:
+            assert m.split_of(pid) == role

@@ -50,6 +50,7 @@ True
 from __future__ import annotations
 
 import json
+import types
 from collections.abc import Collection, Mapping
 from dataclasses import dataclass
 from functools import cached_property
@@ -104,25 +105,51 @@ class SplitManifest:
     ----------
     seed : int
         The integer seed used to permute the sorted IDs.
-    fractions : dict[str, float]
+    fractions : Mapping[str, float]
         Mapping from each role in :data:`SPLIT_ROLES` to its target fraction.
-    assignments : dict[str, tuple[str, ...]]
+        Stored internally as a :class:`types.MappingProxyType` so callers cannot
+        mutate it in place and silently invalidate the cached checksum.
+    assignments : Mapping[str, tuple[str, ...]]
         Mapping from each role to a **sorted** tuple of assigned perturbation IDs.
-    exclusions : dict[str, str]
+        Also stored as a :class:`types.MappingProxyType`.
+    exclusions : Mapping[str, str]
         Mapping from excluded perturbation ID to a human-readable reason.
-    counts : dict[str, int]
+        Also stored as a :class:`types.MappingProxyType`.
+    counts : Mapping[str, int]
         Per-role counts plus ``"excluded"`` and ``"eligible_total"``.
+        Also stored as a :class:`types.MappingProxyType`.
     """
 
     seed: int
-    fractions: dict[str, float]
-    assignments: dict[str, tuple[str, ...]]
-    exclusions: dict[str, str]
-    counts: dict[str, int]
+    fractions: Mapping[str, float]
+    assignments: Mapping[str, tuple[str, ...]]
+    exclusions: Mapping[str, str]
+    counts: Mapping[str, int]
+
+    def __post_init__(self) -> None:
+        """Convert all mutable dict fields to read-only MappingProxyType.
+
+        Uses ``object.__setattr__`` because the dataclass is frozen.  A fresh
+        ``dict(value)`` copy is made first so the proxy never aliases a caller's
+        dict, preventing any indirect mutation path.
+        """
+        for field_name in ("fractions", "assignments", "exclusions", "counts"):
+            value = getattr(self, field_name)
+            if not isinstance(value, types.MappingProxyType):
+                object.__setattr__(self, field_name, types.MappingProxyType(dict(value)))
 
     # ------------------------------------------------------------------
     # Query helpers
     # ------------------------------------------------------------------
+
+    @cached_property
+    def _id_to_role(self) -> dict[str, str]:
+        """Reverse index: perturbation ID → role (built once on first access)."""
+        mapping: dict[str, str] = {}
+        for role in SPLIT_ROLES:
+            for pid in self.assignments[role]:
+                mapping[pid] = role
+        return mapping
 
     def split_of(self, perturbation_id: str) -> str:
         """Return the role assigned to *perturbation_id*.
@@ -142,13 +169,12 @@ class SplitManifest:
         ManifestError
             If *perturbation_id* is not assigned to any role.
         """
-        for role in SPLIT_ROLES:
-            # assignments[role] is a sorted tuple; linear scan is fine for query use
-            if perturbation_id in self.assignments[role]:
-                return role
-        raise ManifestError(
-            f"Perturbation ID {perturbation_id!r} is not assigned to any role in this manifest."
-        )
+        try:
+            return self._id_to_role[perturbation_id]
+        except KeyError:
+            raise ManifestError(
+                f"Perturbation ID {perturbation_id!r} is not assigned to any role in this manifest."
+            )
 
     def ids_for(self, role: str) -> tuple[str, ...]:
         """Return the sorted tuple of IDs assigned to *role*.
@@ -382,8 +408,11 @@ def build_manifest(
     for k in range(leftover):
         int_counts[role_indices_by_remainder[k]] += 1
 
-    # Sanity — should never fail given valid SplitFractions
-    assert sum(int_counts) == n, "Largest-remainder counts must sum to n"
+    # Sanity — should never fail given valid SplitFractions (not stripped by -O)
+    if sum(int_counts) != n:
+        raise ManifestError(
+            f"Largest-remainder counts sum to {sum(int_counts)}, expected {n}; split-algorithm bug."
+        )
 
     # ------------------------------------------------------------------
     # 4. Partition the permuted array
