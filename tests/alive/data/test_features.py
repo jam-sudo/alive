@@ -693,6 +693,26 @@ def test_esm2encoder_encode_residues_output_length_matches_input() -> None:
     assert len(result) == 3
 
 
+def test_esm2encoder_init_rejects_too_small_batch_budget() -> None:
+    """__init__ defends the max_batch_tokens >= max_residues + 2 invariant.
+
+    Guards direct construction so a too-small budget can never silently build an
+    over-budget singleton bucket (the config-driven path is validated separately
+    by load_config).
+    """
+    from alive.data.features import Esm2Encoder, FeatureError
+
+    with pytest.raises(FeatureError, match="max_batch_tokens"):
+        Esm2Encoder(max_residues=20, max_batch_tokens=21)  # 21 < 20 + 2
+    # Boundary: exactly max_residues + 2 is allowed.
+    enc = Esm2Encoder(max_residues=20, max_batch_tokens=22)
+    assert enc.dim == 1280
+    with pytest.raises(FeatureError, match="long_sequence_policy"):
+        Esm2Encoder(long_sequence_policy="window")
+    with pytest.raises(FeatureError, match="max_residues"):
+        Esm2Encoder(max_residues=0)
+
+
 def test_esm2encoder_encode_residues_reassembly_in_input_order() -> None:
     """encode_residues must return arrays in INPUT order, not bucket order.
 
@@ -717,7 +737,9 @@ def test_esm2encoder_encode_residues_reassembly_in_input_order() -> None:
     seqs = ["A" * 10, "B" * 3, "C" * 10, "D" * 1]
     # Sorted desc by length: idx 0 (len 10), idx 2 (len 10), idx 1 (len 3), idx 3 (len 1)
     # With budget=12: idx 0 alone, idx 2 alone, idx 1+3 together.
-    enc = Esm2Encoder(max_residues=20, max_batch_tokens=12)
+    # max_residues=10 keeps the budget guard satisfied (12 >= 10+2) while the
+    # budget=12 still forces the same multi-bucket layout for the 10-len seqs.
+    enc = Esm2Encoder(max_residues=10, max_batch_tokens=12)
     enc._forward_bucket = _stub  # type: ignore[method-assign]
 
     result = enc.encode_residues(seqs)

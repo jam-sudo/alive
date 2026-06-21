@@ -372,6 +372,20 @@ class Esm2Encoder:
         long_sequence_policy: str = "error",
         max_batch_tokens: int = 16384,
     ) -> None:
+        # Defensive validation (config-driven callers are also validated by
+        # load_config; this guards direct construction so a too-small budget can
+        # never silently build an over-budget singleton bucket).
+        if max_residues < 1:
+            raise FeatureError(f"max_residues must be >= 1, got {max_residues}.")
+        if long_sequence_policy not in ("error", "truncate"):
+            raise FeatureError(
+                f"long_sequence_policy must be 'error' or 'truncate', got {long_sequence_policy!r}."
+            )
+        if max_batch_tokens < max_residues + 2:
+            raise FeatureError(
+                f"max_batch_tokens ({max_batch_tokens}) must be >= max_residues + 2 "
+                f"({max_residues + 2}) so a single max-length sequence always fits one batch."
+            )
         # Store config ONLY — no torch import, no model load.
         self._model_name = model_name
         self._max_residues = max_residues
