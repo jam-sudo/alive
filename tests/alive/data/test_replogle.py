@@ -8,7 +8,6 @@ TDD order: tests are written first; the implementation must pass all of them.
 
 from __future__ import annotations
 
-import tempfile
 from pathlib import Path
 
 import anndata
@@ -17,7 +16,7 @@ import pandas as pd
 import pytest
 import scipy.sparse as sp
 
-from alive.data.replogle import DatasetSchema, ReplogleIndex, SchemaError, build_index
+from alive.data.replogle import DatasetSchema, SchemaError, build_index
 
 # ---------------------------------------------------------------------------
 # Fixture helpers
@@ -162,7 +161,7 @@ class TestEligibility:
         assert "external feature" in idx.exclusions["geneC"].lower()
 
     def test_combined_exclusion_cell_count_wins(self) -> None:
-        """A pert that fails BOTH cell count and feature availability → recorded with some reason."""
+        """A pert failing BOTH cell count and feature availability → recorded with some reason."""
         adata = _make_adata(n_ctrl=80, pert_cells={"geneA": 100, "geneB": 10})
         schema = DatasetSchema(perturbation_key=PERT_KEY, control_value=CTRL_VAL)
         idx = build_index(adata, schema, min_cells=64, available_feature_ids={"geneA"})
@@ -413,3 +412,67 @@ class TestBackedPath:
             np.testing.assert_array_equal(
                 idx_path.perturbation_indices[pert], idx_mem.perturbation_indices[pert]
             )
+
+
+# ---------------------------------------------------------------------------
+# 8. Dense ndarray validation path (Fix 2)
+# ---------------------------------------------------------------------------
+
+
+class TestDenseNdarrayValidation:
+    """Cover the dense-ndarray branch of _validate_expression_values.
+
+    Every other test fixture uses csr_matrix; these tests exercise the
+    bounded row-chunk loop with counts_chunk=2 so the loop iterates more
+    than once for a 5-row matrix.
+    """
+
+    def _make_dense_adata(
+        self,
+        n_ctrl: int = 80,
+        pert_n: int = 100,
+        X_dense: np.ndarray | None = None,
+    ) -> anndata.AnnData:
+        """Build an AnnData with a dense np.ndarray X."""
+        n_pert = pert_n
+        labels = [CTRL_VAL] * n_ctrl + ["geneA"] * n_pert
+        n_cells = len(labels)
+        n_g = N_GENES
+        if X_dense is None:
+            X_dense = np.ones((n_cells, n_g), dtype=np.float32)
+        obs = pd.DataFrame({PERT_KEY: labels}, index=[f"cell{i}" for i in range(n_cells)])
+        var = pd.DataFrame(index=GENE_IDS)
+        return anndata.AnnData(X=X_dense, obs=obs, var=var)
+
+    def test_dense_valid_counts_succeeds(self) -> None:
+        """build_index must succeed when X is a valid dense np.ndarray."""
+        adata = self._make_dense_adata()
+        schema = DatasetSchema(perturbation_key=PERT_KEY, control_value=CTRL_VAL)
+        # counts_chunk=2 forces the chunk loop to iterate many times
+        idx = build_index(adata, schema, min_cells=10, counts_chunk=2)
+        assert idx.n_cells == 180
+        assert "geneA" in idx.eligible_perturbations
+
+    def test_dense_negative_value_raises(self) -> None:
+        """A negative value anywhere in the dense X must raise SchemaError."""
+        n_ctrl, n_pert = 80, 100
+        n_cells = n_ctrl + n_pert
+        X_dense = np.ones((n_cells, N_GENES), dtype=np.float32)
+        # Insert a negative in the third chunk (row index 4 with counts_chunk=2)
+        X_dense[4, 0] = -1.0
+        adata = self._make_dense_adata(n_ctrl=n_ctrl, pert_n=n_pert, X_dense=X_dense)
+        schema = DatasetSchema(perturbation_key=PERT_KEY, control_value=CTRL_VAL)
+        with pytest.raises(SchemaError, match="[Nn]egative|nonneg"):
+            build_index(adata, schema, min_cells=10, counts_chunk=2)
+
+    def test_dense_nonfinite_value_raises(self) -> None:
+        """A non-finite value anywhere in the dense X must raise SchemaError."""
+        n_ctrl, n_pert = 80, 100
+        n_cells = n_ctrl + n_pert
+        X_dense = np.ones((n_cells, N_GENES), dtype=np.float32)
+        # Insert inf in the second chunk (row index 3 with counts_chunk=2)
+        X_dense[3, 2] = np.inf
+        adata = self._make_dense_adata(n_ctrl=n_ctrl, pert_n=n_pert, X_dense=X_dense)
+        schema = DatasetSchema(perturbation_key=PERT_KEY, control_value=CTRL_VAL)
+        with pytest.raises(SchemaError, match="[Ff]inite|inf"):
+            build_index(adata, schema, min_cells=10, counts_chunk=2)

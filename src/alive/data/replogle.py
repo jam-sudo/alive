@@ -55,6 +55,7 @@ import scipy.sparse as sp
 
 if TYPE_CHECKING:
     import anndata as _anndata
+    import pandas as pd
 
 
 # ---------------------------------------------------------------------------
@@ -158,13 +159,14 @@ class ReplogleIndex:
         SchemaError
             If *perturbation_id* is not found in :attr:`perturbation_indices`
             (e.g. it is the control label, or it never appeared in the data).
+            Chained from a :exc:`KeyError` for traceback clarity.
         """
         if perturbation_id not in self.perturbation_indices:
             raise SchemaError(
-                f"Perturbation label {perturbation_id!r} is unknown: "
+                f"unknown perturbation '{perturbation_id}': "
                 "it does not appear in perturbation_indices.  "
                 "Use control_indices for control cells."
-            )
+            ) from KeyError(perturbation_id)
         return self.perturbation_indices[perturbation_id]
 
     def is_eligible(self, perturbation_id: str) -> bool:
@@ -398,7 +400,7 @@ def _build_index_from_adata(
 # ---------------------------------------------------------------------------
 
 
-def _validate_labels(pert_series: "pd.Series") -> None:  # noqa: F821
+def _validate_labels(pert_series: "pd.Series") -> None:
     """Raise SchemaError if any perturbation label is NaN, None, or empty.
 
     Parameters
@@ -406,8 +408,6 @@ def _validate_labels(pert_series: "pd.Series") -> None:  # noqa: F821
     pert_series : pd.Series
         The obs column holding perturbation labels.
     """
-    import pandas as pd
-
     # Check for NaN / None
     if pert_series.isna().any():
         raise SchemaError(
@@ -415,7 +415,8 @@ def _validate_labels(pert_series: "pd.Series") -> None:  # noqa: F821
             "All cells must have a valid perturbation label."
         )
 
-    # Check for empty strings (after converting to str for safety)
+    # Check for empty strings (after converting to str for safety).
+    # Note: astype(str) empty-check runs AFTER the isna() check above, so NaN is already handled.
     str_series = pert_series.astype(str)
     empty_mask = str_series.str.strip() == ""
     if empty_mask.any():
@@ -509,7 +510,8 @@ def _validate_expression_values(
                             "All count values must be nonnegative."
                         )
             else:
-                # Unexpected: chunk came back dense anyway; validate it
+                # Unexpected: chunk came back dense anyway; validate it.
+                # Operates on a bounded chunk (<= counts_chunk rows), not the whole matrix.
                 chunk_arr = np.asarray(chunk)
                 if not np.isfinite(chunk_arr).all():
                     raise SchemaError(
