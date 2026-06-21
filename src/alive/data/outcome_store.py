@@ -7,7 +7,8 @@ It is the ONLY path for reading observed perturbed cell populations.
   blocked for any id assigned to the ``sealed_evaluation`` split.
 - The single audited path (:meth:`ReplogleOutcomeStore.evaluate_sealed_once`)
   permits exactly ONE access per ``run_id``, enforced durably across processes
-  via a JSONL audit file written BEFORE the data is returned.
+  via a JSONL audit file written BEFORE data is materialised (fail-safe: a
+  crash during materialisation still burns the run_id).
 - Control cells are accessible via :meth:`ReplogleOutcomeStore.read_controls`.
 
 Global invariant — no global densification
@@ -37,6 +38,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
+import anndata as ad
 import numpy as np
 import scipy.sparse as sp
 
@@ -267,11 +269,14 @@ class ReplogleOutcomeStore:
         # 2. Check durable audit: refuse if run_id already recorded
         self._assert_not_previously_accessed(run_id)
 
-        # 3. Materialise data
-        populations = self._materialise_populations(ids)
-
-        # 4. Write durable audit record BEFORE returning (so a crash still counts)
+        # 3. Claim the access by writing the durable audit record FIRST.
+        #    A crash during materialisation (step 4) still counts as a consumed
+        #    access — the run_id is permanently burned.  Never reopen the seal
+        #    by crash-retrying with the same run_id; use a new run_id instead.
         self._write_audit_record(run_id, ids)
+
+        # 4. Materialise data (after the audit is on disk)
+        populations = self._materialise_populations(ids)
 
         return populations
 
@@ -304,16 +309,11 @@ class ReplogleOutcomeStore:
         Returns
         -------
         int
-            Count of non-empty JSON lines in the audit file, or 0 if the file
-            does not exist.
+            Count of valid JSON records in the audit file, or 0 if the file
+            does not exist.  Uses :meth:`_read_audit_records` so that corrupt
+            or partially written lines raise rather than inflating the count.
         """
-        if not self._audit_path.exists():
-            return 0
-        count = 0
-        for line in self._audit_path.read_text(encoding="utf-8").splitlines():
-            if line.strip():
-                count += 1
-        return count
+        return len(self._read_audit_records())
 
     # ------------------------------------------------------------------
     # Private helpers
@@ -354,8 +354,6 @@ class ReplogleOutcomeStore:
         np.ndarray
             Dense ``(len(row_indices), n_genes)`` array.
         """
-        import anndata as ad
-
         if isinstance(self._source, (str, Path)):
             # Backed file: open, slice, close
             adata = ad.read_h5ad(Path(self._source), backed="r")
@@ -427,8 +425,9 @@ class ReplogleOutcomeStore:
     def _write_audit_record(self, run_id: str, ids: list[str]) -> None:
         """Append an immutable audit record to the durable JSONL audit file.
 
-        The record is written BEFORE the materialised data is returned so that a
-        crash mid-evaluation still counts as an access (fail-safe toward sealing).
+        Called by :meth:`evaluate_sealed_once` BEFORE materialisation so that a
+        crash during data loading still counts as an access (fail-safe toward
+        sealing).  The run_id is permanently burned once this record is written.
 
         Parameters
         ----------

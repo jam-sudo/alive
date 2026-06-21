@@ -404,44 +404,59 @@ class TestControls:
 
 
 # ---------------------------------------------------------------------------
-# 9. Bounded materialization sentinel
+# 9. Bounded materialization sentinel (I2: stateless — no module-level mutable)
 # ---------------------------------------------------------------------------
 
 
-class _NoGlobalToarrayCSR(sp.csr_matrix):
-    """Sparse subclass that raises if the entire matrix is densified at once."""
+def _make_no_global_toarray_csr(full_n_cells: int) -> type:
+    """Return a CSR subclass that blocks densification of the full matrix.
 
-    def toarray(self, order=None, out=None):  # type: ignore[override]
-        # Allow per-population row-slices (bounded): the slice produces a new
-        # csr_matrix whose shape[0] < self.shape[0].  Only block full-matrix calls.
-        if self.shape[0] == _full_matrix_n_cells:
-            raise AssertionError("Global toarray() called on full matrix — bounded densify only!")
-        return super().toarray(order=order, out=out)
+    The sentinel is STATELESS: the full cell count is captured at construction
+    time via a closure, so no module-level mutable global is needed and the
+    class is safe to use in parallel test runs.
 
-    def todense(self, order=None, out=None):  # type: ignore[override]
-        if self.shape[0] == _full_matrix_n_cells:
-            raise AssertionError("Global todense() called on full matrix — bounded densify only!")
-        return super().todense(order=order, out=out)
+    ``toarray``/``todense`` raise only when called on a matrix whose row count
+    equals *full_n_cells* (the original full matrix).  Sliced sub-matrices
+    (fewer rows) are allowed — that is exactly the bounded per-population
+    densify the store legitimately performs.
+    """
 
+    class _NoGlobalToarrayCSR(sp.csr_matrix):  # type: ignore[misc]
+        """CSR matrix that refuses full-matrix densification."""
 
-_full_matrix_n_cells: int = 0  # set per-test
+        def toarray(self, order=None, out=None):  # type: ignore[override]
+            if self.shape[0] == full_n_cells:
+                raise AssertionError(
+                    "Global toarray() called on full matrix — bounded densify only!"
+                )
+            return super().toarray(order=order, out=out)
+
+        def todense(self, order=None, out=None):  # type: ignore[override]
+            if self.shape[0] == full_n_cells:
+                raise AssertionError(
+                    "Global todense() called on full matrix — bounded densify only!"
+                )
+            return super().todense(order=order, out=out)
+
+    return _NoGlobalToarrayCSR
 
 
 class TestBoundedMaterialization:
     def test_no_global_densify_on_unsealed_read(self, tmp_path: Path) -> None:
-        global _full_matrix_n_cells
-
         n_ctrl = 40
         pert_cells = {f"gene{i}": 20 for i in range(8)}
         labels: list[str] = [_CTRL_VAL] * n_ctrl
         for label, n in pert_cells.items():
             labels.extend([label] * n)
         n_cells = len(labels)
-        _full_matrix_n_cells = n_cells  # sentinel tracks this
+
+        # I2 fix: sentinel class is constructed with the cell count in a closure;
+        # no module-level mutable global.
+        NoGlobalToarrayCSR = _make_no_global_toarray_csr(n_cells)
 
         X_inner = sp.random(n_cells, _N_GENES, density=0.5, format="csr", dtype=np.float32)
         X_inner.data[:] = 1.0
-        X = _NoGlobalToarrayCSR(X_inner)
+        X = NoGlobalToarrayCSR(X_inner)
 
         obs = pd.DataFrame({_PERT_KEY: labels}, index=[f"c{i}" for i in range(n_cells)])
         var = pd.DataFrame(index=_GENE_IDS)
@@ -464,3 +479,45 @@ class TestBoundedMaterialization:
         _ = store.read_unsealed(unsealed_ids[:2])
         _ = store.read_controls()
         _ = store.evaluate_sealed_once("run-bounded", sealed_ids)
+
+
+# ---------------------------------------------------------------------------
+# 10. Fail-safe ordering: audit written BEFORE materialization (I1)
+# ---------------------------------------------------------------------------
+
+
+class TestFailSafeAuditOrdering:
+    def test_failed_materialization_still_burns_run_id(self, tmp_path: Path) -> None:
+        """A crash during _materialise_populations must still consume the run_id.
+
+        The audit record is written BEFORE materialisation.  If materialisation
+        then raises, the run_id is permanently burned: a subsequent call with
+        the same run_id must raise SealingError and sealed_access_count == 1.
+        """
+        adata = _make_adata()
+        store, _, sealed_ids = _build_store(adata, tmp_path)
+        assert sealed_ids
+
+        # Monkeypatch: make _materialise_populations raise after the audit write.
+        original_materialise = store._materialise_populations
+
+        def _failing_materialise(ids: list) -> dict:
+            raise RuntimeError("simulated OOM during materialisation")
+
+        store._materialise_populations = _failing_materialise  # type: ignore[method-assign]
+
+        # The call must raise (from the injected failure).
+        with pytest.raises(RuntimeError, match="simulated OOM"):
+            store.evaluate_sealed_once("run-burned", sealed_ids)
+
+        # (a) The audit record must have been written before the failure.
+        assert store.sealed_access_count == 1, (
+            "audit record must be written before materialisation so a crash still counts"
+        )
+
+        # Restore original materialise so we can test the re-access check.
+        store._materialise_populations = original_materialise  # type: ignore[method-assign]
+
+        # (b) A subsequent call with the same run_id must be refused — the seal is burned.
+        with pytest.raises(SealingError):
+            store.evaluate_sealed_once("run-burned", sealed_ids)
