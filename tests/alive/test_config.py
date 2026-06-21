@@ -342,7 +342,7 @@ def test_run_id_deterministic_across_key_order(tmp_path):
 
     cfg1 = load_config(p1)
     cfg2 = load_config(p2)
-    assert cfg1.run_id == cfg2.run_id
+    assert cfg1.config_digest == cfg2.config_digest
 
 
 def test_run_id_changes_with_manifest_seed(tmp_path):
@@ -357,21 +357,21 @@ def test_run_id_changes_with_manifest_seed(tmp_path):
 
     cfg1 = load_config(p1)
     cfg2 = load_config(p2)
-    assert cfg1.run_id != cfg2.run_id
+    assert cfg1.config_digest != cfg2.config_digest
 
 
 def test_run_id_is_hex_string(tmp_path):
     cfg = load_config(CANON_CONFIG)
-    rid = cfg.run_id
+    rid = cfg.config_digest
     assert isinstance(rid, str)
     assert len(rid) == 16
     int(rid, 16)  # must be valid hex
 
 
 def test_run_id_stable_across_calls():
-    """Calling run_id multiple times on the same Config returns the same value."""
+    """Calling config_digest multiple times on the same Config returns the same value."""
     cfg = load_config(CANON_CONFIG)
-    assert cfg.run_id == cfg.run_id
+    assert cfg.config_digest == cfg.config_digest
 
 
 # ---------------------------------------------------------------------------
@@ -418,13 +418,13 @@ def test_empty_registered_seeds_raises_config_error(tmp_path):
 
 def test_run_id_stable_across_processes():
     """run_id computed in a separate subprocess matches the in-process value."""
-    in_process_id = load_config(CANON_CONFIG).run_id
+    in_process_id = load_config(CANON_CONFIG).config_digest
     canon_path = str(CANON_CONFIG)
     code = (
         "from pathlib import Path; "
         "from alive.config import load_config; "
         f"cfg = load_config(Path({canon_path!r})); "
-        "print(cfg.run_id)"
+        "print(cfg.config_digest)"
     )
     result = subprocess.run(
         [sys.executable, "-c", code],

@@ -277,7 +277,7 @@ class SpyStore:
 def _config_sha(config: Config) -> str:
     from alive.provenance import sha256_json
 
-    return sha256_json({"run_id": config.run_id, "experiment": config.experiment})
+    return sha256_json({"run_id": config.config_digest, "experiment": config.experiment})
 
 
 # ===========================================================================
@@ -457,7 +457,7 @@ class TestScoresBeforeRisks:
             fdec,
             fb,
             config,
-            run_id=config.run_id,
+            run_id=config.config_digest,
         )
         assert result is not None
 
@@ -498,7 +498,7 @@ class TestFutilityForbidsSeal:
                 fdec,
                 fb,
                 config,
-                run_id=config.run_id,
+                run_id=config.config_digest,
             )
         assert real_store.sealed_access_count == 0
         assert spy.evaluate_calls == []
@@ -536,7 +536,7 @@ class TestEndToEnd:
             fdec,
             fb,
             config,
-            run_id=config.run_id,
+            run_id=config.config_digest,
         )
         # Valid set; near-random synthetic data should NOT certify a gate win.
         assert result.verdict in set(Verdict)
@@ -570,7 +570,7 @@ class TestLowNInvalid:
             fdec,
             fb,
             config,
-            run_id=config.run_id,
+            run_id=config.config_digest,
             result_path=out_path,
         )
         assert result.verdict == Verdict.INVALID_EVALUATION
@@ -603,7 +603,7 @@ class TestSingleSealedAccess:
             fdec,
             fb,
             config,
-            run_id=config.run_id,
+            run_id=config.config_digest,
         )
         # A second call with the same run_id must surface the sealing error.
         with pytest.raises(Exception):
@@ -617,7 +617,7 @@ class TestSingleSealedAccess:
                 fdec,
                 fb,
                 config,
-                run_id=config.run_id,
+                run_id=config.config_digest,
             )
 
 
@@ -647,7 +647,7 @@ class TestDeterminism:
                 fdec,
                 fb,
                 config,
-                run_id=config.run_id,
+                run_id=config.config_digest,
             )
             return result.checksum
 
@@ -688,7 +688,7 @@ class TestProvenanceWiring:
             tmp_path
         )
         cfg_digest = "f" * 64
-        ledger = self._ledger(run_id=config.run_id, config_sha256=cfg_digest)
+        ledger = self._ledger(run_id=config.config_digest, config_sha256=cfg_digest)
         ledger.record_artifact("config", cfg_digest)
         ledger.record_artifact("split_manifest", manifest.checksum)
         ledger.record_artifact("feature_bank", fb.checksum)
@@ -706,7 +706,7 @@ class TestProvenanceWiring:
             fdec,
             fb,
             config,
-            run_id=config.run_id,
+            run_id=config.config_digest,
             config_sha256=cfg_digest,
             ledger=ledger,
         )
@@ -717,7 +717,7 @@ class TestProvenanceWiring:
             tmp_path
         )
         cfg_digest = "f" * 64
-        ledger = self._ledger(run_id=config.run_id, config_sha256=cfg_digest)
+        ledger = self._ledger(run_id=config.config_digest, config_sha256=cfg_digest)
         ledger.record_artifact("config", cfg_digest)
         ledger.record_artifact("split_manifest", manifest.checksum)
         ledger.record_artifact("feature_bank", fb.checksum)
@@ -736,7 +736,7 @@ class TestProvenanceWiring:
             fdec,
             fb,
             config,
-            run_id=config.run_id,
+            run_id=config.config_digest,
             config_sha256=cfg_digest,
             ledger=ledger,
         )
@@ -786,7 +786,7 @@ class TestCalibrateConfigSha256:
     def test_conformal_artifact_config_sha256_not_run_id_when_digest_given(
         self, tmp_path: Path
     ) -> None:
-        """config_sha256 must NOT equal config.run_id when the full digest is passed."""
+        """config_sha256 must NOT equal config.config_digest when the full digest is passed."""
         config = _test_config()
         index, store, manifest, fb = _build_world(tmp_path, config=config, seed=6)
         base_art = fit_base(index, store, manifest, fb, config)
@@ -805,8 +805,8 @@ class TestCalibrateConfigSha256:
         )
 
         # The run_id is 16 chars; the full digest is 64 chars — they must differ.
-        assert conf.config_sha256 != config.run_id, (
-            "ConformalArtifact.config_sha256 must be the full digest, not config.run_id"
+        assert conf.config_sha256 != config.config_digest, (
+            "ConformalArtifact.config_sha256 must be the full digest, not config.config_digest"
         )
 
     def test_conformal_artifact_falls_back_to_run_id_without_digest(self, tmp_path: Path) -> None:
@@ -817,7 +817,7 @@ class TestCalibrateConfigSha256:
         method_lock, _fdec = develop_methods_stage(index, store, manifest, base_art, fb, config)
 
         conf = calibrate(index, store, manifest, base_art, method_lock, fb, config)
-        assert conf.config_sha256 == config.run_id
+        assert conf.config_sha256 == config.config_digest
 
 
 # ===========================================================================
@@ -874,7 +874,7 @@ class TestRequireEncoderMatch:
             fdec,
             fb,
             esm_config,
-            run_id=esm_config.run_id,
+            run_id=esm_config.config_digest,
             require_encoder_match=True,
         )
         # Provenance check must have failed due to encoder mismatch.
@@ -899,7 +899,7 @@ class TestRequireEncoderMatch:
             fdec,
             fb,
             config,
-            run_id=config.run_id,
+            run_id=config.config_digest,
             require_encoder_match=False,
         )
         # With the default, the encoder leg never fires: the result is NOT

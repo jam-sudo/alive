@@ -458,13 +458,13 @@ def develop_methods_stage(
         feature_bank,
         populations,
         response_cfg=config.response_space,
-        run_id=config.run_id,
+        run_id=config.config_digest,
     )
 
     md = config.method_development
     # Provenance link to the locked config: the CLI threads the FULL config
     # digest (sha256 of the config file); pure unit tests fall back to run_id.
-    config_sha = config_sha256 if config_sha256 is not None else config.run_id
+    config_sha = config_sha256 if config_sha256 is not None else config.config_digest
     method_lock = develop_methods(
         ids,
         features,
@@ -534,7 +534,7 @@ def calibrate(
     config_sha256 : str or None
         Full 64-char SHA-256 digest of the locked config file.  The CLI
         always passes this; pure unit tests may omit it (falls back to
-        ``config.run_id`` so existing tests remain valid).
+        ``config.config_digest`` so existing tests remain valid).
 
     Returns
     -------
@@ -548,14 +548,24 @@ def calibrate(
     ref_ids = [pid for pid in manifest.ids_for("method_development") if feature_bank.has(pid)]
     ref_pops = store.read_unsealed(ref_ids)
     _ref_ids, ref_features, ref_errors, ref_ensemble_means = perturbation_inputs(
-        base, rs, feature_bank, ref_pops, response_cfg=config.response_space, run_id=config.run_id
+        base,
+        rs,
+        feature_bank,
+        ref_pops,
+        response_cfg=config.response_space,
+        run_id=config.config_digest,
     )
 
     # Calibration query set.
     cal_ids = [pid for pid in manifest.ids_for("conformal_calibration") if feature_bank.has(pid)]
     cal_pops = store.read_unsealed(cal_ids)
     _cal_ids, cal_features, cal_errors, cal_ensemble_means = perturbation_inputs(
-        base, rs, feature_bank, cal_pops, response_cfg=config.response_space, run_id=config.run_id
+        base,
+        rs,
+        feature_bank,
+        cal_pops,
+        response_cfg=config.response_space,
+        run_id=config.config_digest,
     )
 
     cal_scores = gate_and_comparator_scores(
@@ -570,8 +580,8 @@ def calibrate(
     cal_gate_scores = cal_scores["gate"]
 
     # Thread the full config digest like the other stages; fall back to
-    # config.run_id only for pure unit tests that do not pass the digest.
-    cfg_sha = config_sha256 if config_sha256 is not None else config.run_id
+    # config.config_digest only for pure unit tests that do not pass the digest.
+    cfg_sha = config_sha256 if config_sha256 is not None else config.config_digest
     return build_conformal_artifact(
         cal_errors,
         cal_gate_scores,
@@ -857,7 +867,7 @@ def evaluate_sealed_once(
     # --- Provenance (carry-forward fix a): REAL ledger hash verification. ----
     # The full config digest (fix c) is threaded from the CLI; pure unit tests
     # fall back to run_id so existing direct callers keep working.
-    cfg_digest = config_sha256 if config_sha256 is not None else config.run_id
+    cfg_digest = config_sha256 if config_sha256 is not None else config.config_digest
     expected_checksums = {
         "config": cfg_digest,
         "split_manifest": manifest.checksum,

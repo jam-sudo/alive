@@ -52,8 +52,9 @@ The console entry point is `alive` (declared in `pyproject.toml`). Run it throug
 uv run alive cartographer <command> [options]
 ```
 
-All commands operate on a single **run**, identified by a `run_id` that is a deterministic hash of
-the committed config (`config.run_id`). Artifacts for a run live under:
+All commands operate on a single **run**, identified by a `run_id` that is a deterministic composite
+hash of the config **plus** the data card, the raw expression file, and the protein-sequence
+mapping — so the same config on different data is a different run. Artifacts for a run live under:
 
 ```
 <artifacts-root>/cartographer/<run_id>/
@@ -134,6 +135,9 @@ a temp path and drives the full command sequence.
 
 ## Integrity behaviors (enforced by the CLI)
 
+- **`prepare` refuses to overwrite an existing run directory** (clean exit `2`). Because the
+  `run_id` is the composite hash of config + data card + raw expression file + protein-sequence
+  mapping, the same inputs always map to the same directory; runs are immutable.
 - **`evaluate-once` refuses** (clean non-zero exit) unless the persisted `FutilityDecision.status`
   is `CONTINUE_CONFIRMATORY` — the sealed cohort never opens otherwise.
 - **`calibrate` runs in either branch**, so a futility-stopped run still ships its conformal error

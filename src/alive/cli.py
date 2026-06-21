@@ -2,7 +2,9 @@
 
 Exposes the ``alive cartographer`` subcommand group, one subcommand per staged
 function in :mod:`alive.experiment.real_runner`, each persisting/loading its
-artifact(s) from ``artifacts/cartographer/<run_id>/`` (``run_id == config.run_id``).
+artifact(s) from ``artifacts/cartographer/<run_id>/``.  The ``run_id`` is the
+composite immutable identifier (:func:`alive.provenance.compute_run_id`) binding
+the config to the data card, raw expression file, and protein-sequence mapping.
 
 Subcommands::
 
@@ -43,7 +45,12 @@ import numpy as np
 
 from alive.config import ConfigError, load_config
 from alive.conformal.error_bound import ConformalArtifact, ConformalError
-from alive.data.features import FeatureError, MockSequenceEncoder, build_feature_bank
+from alive.data.features import (
+    FeatureError,
+    MockSequenceEncoder,
+    build_feature_bank,
+    canonical_mapping_sha256,
+)
 from alive.data.manifest import ManifestError, SplitManifest, build_manifest_from_index
 from alive.data.outcome_store import ReplogleOutcomeStore, SealingError
 from alive.data.preprocess import PreprocessError, ResponseSpace
@@ -64,7 +71,14 @@ from alive.experiment.real_runner import (
     perturbation_inputs,
 )
 from alive.metrics.selective import normalize_by_mean
-from alive.provenance import LedgerError, RunLedger, capture_environment, sha256_file
+from alive.provenance import (
+    LedgerError,
+    RunLedger,
+    capture_environment,
+    compute_run_id,
+    sha256_file,
+    sha256_json,
+)
 from alive.types import OperationalStatus
 
 # ---------------------------------------------------------------------------
@@ -251,10 +265,6 @@ def cmd_prepare(args: argparse.Namespace) -> int:
     config_path = Path(args.config)
     data_card_path = Path(args.data_card)
     config = load_config(config_path)
-    run_id = config.run_id
-
-    run_dir = _run_dir(Path(args.artifacts_root), run_id)
-    run_dir.mkdir(parents=True, exist_ok=True)
 
     data_card = json.loads(data_card_path.read_text(encoding="utf-8"))
 
@@ -266,6 +276,36 @@ def cmd_prepare(args: argparse.Namespace) -> int:
                 "provenance must be declared separately from the expression source)."
             )
 
+    # P1-1 FIX: load sequences FIRST so feature eligibility is determined BEFORE
+    # building the index/manifest.  This ensures excluded perturbations (missing or
+    # ambiguous sequences) never enter any split.
+    sequences = json.loads(Path(data_card["sequences"]).read_text(encoding="utf-8"))
+    gene_sequences = {g: list(seqs) for g, seqs in sequences.items()}
+    usable_gene_ids = usable_feature_genes(gene_sequences)
+
+    # #4 / P1-2: derive the COMPOSITE immutable run_id BEFORE creating the run
+    # directory.  Binding the config to the exact data, raw expression file, and
+    # protein-sequence mapping means the same config on different data yields a
+    # different run directory (spec §11.2).  ``raw_data_sha256`` is computed once
+    # here and reused for the ``raw_data`` ledger artifact (no double-hash).
+    h5ad = data_card["h5ad"]
+    config_digest = config.config_digest
+    data_card_digest = sha256_json(data_card)
+    raw_data_sha256 = _raw_data_hash(h5ad, data_card)
+    sequence_mapping_sha256 = canonical_mapping_sha256(gene_sequences)
+    run_id = compute_run_id(
+        config_digest, data_card_digest, raw_data_sha256, sequence_mapping_sha256
+    )
+
+    run_dir = _run_dir(Path(args.artifacts_root), run_id)
+    if run_dir.exists():
+        raise CliError(
+            f"run directory for run-id {run_id!r} already exists at {run_dir}. "
+            "Runs are immutable; prepare refuses to overwrite. Remove it deliberately "
+            "or change the config/data to start a new run."
+        )
+    run_dir.mkdir(parents=True, exist_ok=False)
+
     # Snapshot the config + data card under the run dir (immutable inputs).
     (run_dir / "config.snapshot.yaml").write_text(
         config_path.read_text(encoding="utf-8"), encoding="utf-8"
@@ -274,20 +314,12 @@ def cmd_prepare(args: argparse.Namespace) -> int:
         json.dumps(data_card, sort_keys=True, separators=(",", ":")), encoding="utf-8"
     )
 
-    # P1-1 FIX: load sequences FIRST so feature eligibility is determined BEFORE
-    # building the index/manifest.  This ensures excluded perturbations (missing or
-    # ambiguous sequences) never enter any split.
-    sequences = json.loads(Path(data_card["sequences"]).read_text(encoding="utf-8"))
-    gene_sequences = {g: list(seqs) for g, seqs in sequences.items()}
-    usable_gene_ids = usable_feature_genes(gene_sequences)
-
     schema = DatasetSchema(
         perturbation_key=data_card["perturbation_key"],
         control_value=data_card["control_value"],
         gene_id_key=data_card.get("gene_id_key"),
         counts_layer=data_card.get("counts_layer"),
     )
-    h5ad = data_card["h5ad"]
     # Pass usable_gene_ids so build_index excludes feature-missing perturbations
     # and records them in index.exclusions with reason "no external feature".
     index = build_index(
@@ -359,8 +391,11 @@ def cmd_prepare(args: argparse.Namespace) -> int:
     )
     ledger = RunLedger(run_id=run_id, config_sha256=config_sha256, environment=environment)
     ledger.record_artifact("config", config_sha256)
-    ledger.record_artifact("raw_data", _raw_data_hash(h5ad, data_card))
-    ledger.record_artifact("sequence_mapping", feature_bank.provenance.mapping_sha256)
+    # Reuse the raw_data hash computed for the composite run_id (no double-hash).
+    ledger.record_artifact("raw_data", raw_data_sha256)
+    # sequence_mapping_sha256 == feature_bank.provenance.mapping_sha256 by
+    # construction (canonical_mapping_sha256 is the shared helper).
+    ledger.record_artifact("sequence_mapping", sequence_mapping_sha256)
     ledger.record_artifact("split_manifest", manifest.checksum)
     ledger.record_artifact("feature_bank", feature_bank.checksum)
     ledger.write(run_dir / "ledger.json")
@@ -384,8 +419,6 @@ def _raw_data_hash(h5ad: str, data_card: dict) -> str:
     path = Path(h5ad)
     if path.exists():
         return sha256_file(path)
-    from alive.provenance import sha256_json
-
     return sha256_json({"raw_data_uri": data_card.get("raw_data_uri", h5ad)})
 
 
@@ -417,7 +450,7 @@ def cmd_develop(args: argparse.Namespace) -> int:
         feature_bank,
         populations,
         response_cfg=config.response_space,
-        run_id=config.run_id,
+        run_id=config.config_digest,
     )
 
     md = config.method_development
@@ -529,7 +562,10 @@ def cmd_evaluate_once(args: argparse.Namespace) -> int:
         futility,
         feature_bank,
         config,
-        run_id=config.run_id,
+        # The actual run identity is the composite run_id (= the run directory
+        # name the user passes), NOT the config digest.  Result provenance, the
+        # sealed-access audit, and deterministic seed-keys must all carry it.
+        run_id=args.run_id,
         config_sha256=config_sha256,
         ledger=ledger,
         result_path=run_dir / "result.json",

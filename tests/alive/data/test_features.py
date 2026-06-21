@@ -23,7 +23,23 @@ from alive.data.features import (
     _apply_length_policy,
     _bucket_indices,
     build_feature_bank,
+    canonical_mapping_sha256,
 )
+
+
+def test_canonical_mapping_sha_matches_built_bank() -> None:
+    """canonical_mapping_sha256 must equal the digest build_feature_bank records."""
+    mapping = {"G1": ["MAAA"], "G2": ["MBBB"]}
+    pre = canonical_mapping_sha256(mapping)
+    bank = build_feature_bank(
+        mapping,
+        MockSequenceEncoder(dim=8),
+        sequence_source="uniprot-2024-01",
+        id_mapping_version="ensembl-110",
+        standardize_on=["G1", "G2"],
+    )
+    assert pre == bank.provenance.mapping_sha256
+
 
 # ---------------------------------------------------------------------------
 # Helpers

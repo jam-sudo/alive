@@ -195,8 +195,110 @@ def _run(argv: list[str], artifacts_root: Path) -> int:
     return cli.main([*argv, "--artifacts-root", str(artifacts_root)])
 
 
-def _run_id(config_path: Path) -> str:
-    return load_config(config_path).run_id
+def _run_id(config_path: Path, data_card_path: Path) -> str:
+    """Compute the composite immutable run_id exactly as ``cmd_prepare`` does."""
+    from alive.cli import _raw_data_hash
+    from alive.data.features import canonical_mapping_sha256
+    from alive.provenance import compute_run_id, sha256_json
+
+    config = load_config(config_path)
+    data_card = json.loads(data_card_path.read_text(encoding="utf-8"))
+    sequences = json.loads(Path(data_card["sequences"]).read_text(encoding="utf-8"))
+    gene_sequences = {g: list(seqs) for g, seqs in sequences.items()}
+    return compute_run_id(
+        config.config_digest,
+        sha256_json(data_card),
+        _raw_data_hash(data_card["h5ad"], data_card),
+        canonical_mapping_sha256(gene_sequences),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Helpers: composite run_id (data sensitivity + existing-dir refusal).
+# ---------------------------------------------------------------------------
+
+
+def _prepare_world(world_dir: Path, *, mutate_counts: bool = False) -> tuple[Path, Path]:
+    """Build a world under ``world_dir``; optionally perturb the h5ad counts.
+
+    The config is held fixed across calls (same seed) so that only the raw
+    expression file differs when ``mutate_counts=True`` — isolating the
+    data-sensitivity of the composite run_id.
+    """
+    world_dir.mkdir(parents=True, exist_ok=True)
+    config_path, data_card_path = _write_world(world_dir, seed=3)
+    if mutate_counts:
+        data_card = json.loads(data_card_path.read_text(encoding="utf-8"))
+        h5ad_path = Path(data_card["h5ad"])
+        adata = anndata.read_h5ad(h5ad_path)
+        dense = adata.X.toarray()
+        dense[0, 0] = dense[0, 0] + 1.0  # one-cell, one-gene count bump
+        adata.X = sp.csr_matrix(dense.astype(np.float32))
+        adata.write_h5ad(h5ad_path)
+    return config_path, data_card_path
+
+
+def _prepare_and_get_run_id(world_dir: Path, *, mutate_counts: bool = False, capsys=None) -> str:
+    """Build a world, run ``prepare``, and return the run_id printed by ``prepare``.
+
+    Capturing the printed value (rather than recomputing) makes the test exercise
+    the actual id that ``cmd_prepare`` names the run directory with.
+    """
+    import contextlib
+    import io
+
+    config_path, data_card_path = _prepare_world(world_dir, mutate_counts=mutate_counts)
+    root = _artifacts_root(world_dir)
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        rc = _run(
+            [
+                "cartographer",
+                "prepare",
+                "--config",
+                str(config_path),
+                "--data-card",
+                str(data_card_path),
+                "--mock-encoder",
+            ],
+            root,
+        )
+    assert rc == 0
+    printed = buf.getvalue().strip().splitlines()[-1].strip()
+    # The printed id must name an existing run directory under the artifacts root.
+    assert (root / "cartographer" / printed).is_dir()
+    return printed
+
+
+def _rerun_prepare(world_dir: Path, *, run_id: str) -> int:
+    """Re-run ``prepare`` on the SAME world (identical inputs) and return rc."""
+    config_path = world_dir / "config.yaml"
+    data_card_path = world_dir / "data_card.json"
+    root = _artifacts_root(world_dir)
+    return _run(
+        [
+            "cartographer",
+            "prepare",
+            "--config",
+            str(config_path),
+            "--data-card",
+            str(data_card_path),
+            "--mock-encoder",
+        ],
+        root,
+    )
+
+
+def test_prepare_run_id_changes_with_data(tmp_path: Path) -> None:
+    rid1 = _prepare_and_get_run_id(tmp_path / "a")  # default fixture data
+    rid2 = _prepare_and_get_run_id(tmp_path / "b", mutate_counts=True)  # same config, altered h5ad
+    assert rid1 != rid2  # composite id is data-sensitive
+
+
+def test_prepare_refuses_existing_run_dir(tmp_path: Path) -> None:
+    rid = _prepare_and_get_run_id(tmp_path)
+    rc = _rerun_prepare(tmp_path, run_id=rid)  # identical inputs → dir already exists
+    assert rc == 2  # refuses to overwrite an existing run directory
 
 
 # ---------------------------------------------------------------------------
@@ -226,7 +328,7 @@ class TestEndToEndContinue:
     def test_full_pipeline_confirmatory(self, tmp_path: Path) -> None:
         config_path, data_card_path = _write_world(tmp_path, seed=3)
         root = _artifacts_root(tmp_path)
-        run_id = _run_id(config_path)
+        run_id = _run_id(config_path, data_card_path)
         run_dir = root / "cartographer" / run_id
 
         assert (
@@ -291,7 +393,7 @@ class TestEndToEndFutility:
     def test_futility_refuses_and_ships_conformal(self, tmp_path: Path) -> None:
         config_path, data_card_path = _write_world(tmp_path, seed=3)
         root = _artifacts_root(tmp_path)
-        run_id = _run_id(config_path)
+        run_id = _run_id(config_path, data_card_path)
         run_dir = root / "cartographer" / run_id
 
         assert (
@@ -382,7 +484,7 @@ class TestReportSchemaLock:
     def test_futility_schema_is_locked(self, tmp_path: Path) -> None:
         config_path, data_card_path = _write_world(tmp_path, seed=3)
         root = _artifacts_root(tmp_path)
-        run_id = _run_id(config_path)
+        run_id = _run_id(config_path, data_card_path)
         run_dir = root / "cartographer" / run_id
 
         _run(
@@ -433,7 +535,7 @@ class TestReportSchemaLock:
     def test_confirmatory_schema_has_verdict_evidence(self, tmp_path: Path) -> None:
         config_path, data_card_path = _write_world(tmp_path, seed=3)
         root = _artifacts_root(tmp_path)
-        run_id = _run_id(config_path)
+        run_id = _run_id(config_path, data_card_path)
         run_dir = root / "cartographer" / run_id
 
         _run(
@@ -478,7 +580,7 @@ class TestReportNeverRecomputes:
     def test_report_reads_persisted_artifacts(self, tmp_path: Path) -> None:
         config_path, data_card_path = _write_world(tmp_path, seed=3)
         root = _artifacts_root(tmp_path)
-        run_id = _run_id(config_path)
+        run_id = _run_id(config_path, data_card_path)
         run_dir = root / "cartographer" / run_id
 
         _run(
@@ -526,7 +628,7 @@ class TestSecondEvaluateOnce:
     def test_second_call_exits_cleanly(self, tmp_path: Path, capsys) -> None:
         config_path, data_card_path = _write_world(tmp_path, seed=3)
         root = _artifacts_root(tmp_path)
-        run_id = _run_id(config_path)
+        run_id = _run_id(config_path, data_card_path)
         run_dir = root / "cartographer" / run_id
 
         _run(
@@ -566,7 +668,7 @@ class TestProvenanceWired:
     def test_tampered_ledger_hash_yields_invalid(self, tmp_path: Path) -> None:
         config_path, data_card_path = _write_world(tmp_path, seed=3)
         root = _artifacts_root(tmp_path)
-        run_id = _run_id(config_path)
+        run_id = _run_id(config_path, data_card_path)
         run_dir = root / "cartographer" / run_id
 
         _run(
@@ -641,11 +743,17 @@ class TestConsoleEntryPoint:
 
 class TestDeterminism:
     def test_same_inputs_same_run_id_and_report(self, tmp_path: Path) -> None:
-        def _pipeline(sub: Path) -> tuple[str, dict]:
-            sub.mkdir(parents=True, exist_ok=True)
-            config_path, data_card_path = _write_world(sub, seed=5)
-            root = _artifacts_root(sub)
-            run_id = _run_id(config_path)
+        # The composite run_id binds the data card verbatim (which embeds the
+        # input file PATHS); "same inputs" therefore means the SAME world (one
+        # config, one data card, one h5ad).  We run the identical world through
+        # two separate artifacts roots and assert the run_id and report match.
+        world = tmp_path / "world"
+        world.mkdir(parents=True, exist_ok=True)
+        config_path, data_card_path = _write_world(world, seed=5)
+        expected_run_id = _run_id(config_path, data_card_path)
+
+        def _pipeline(root: Path) -> tuple[str, dict]:
+            run_id = _run_id(config_path, data_card_path)
             run_dir = root / "cartographer" / run_id
             _run(
                 [
@@ -669,9 +777,9 @@ class TestDeterminism:
             report = json.loads((run_dir / "report.json").read_text(encoding="utf-8"))
             return run_id, report
 
-        run_a, report_a = _pipeline(tmp_path / "a")
-        run_b, report_b = _pipeline(tmp_path / "b")
-        assert run_a == run_b
+        run_a, report_a = _pipeline(tmp_path / "root_a")
+        run_b, report_b = _pipeline(tmp_path / "root_b")
+        assert run_a == run_b == expected_run_id
         assert report_a["scientific_verdict"] == report_b["scientific_verdict"]
         # The verdict-bearing content is identical (modulo non-hashed env in provenance).
         report_a.pop("provenance", None)
@@ -709,7 +817,7 @@ class TestCliDevelopedParity:
         world_dir.mkdir(parents=True, exist_ok=True)
         config_path, data_card_path = _write_world(world_dir, seed=77)
         root = _artifacts_root(world_dir)
-        run_id = _run_id(config_path)
+        run_id = _run_id(config_path, data_card_path)
         run_dir = root / "cartographer" / run_id
 
         # === CLI path (cmd_prepare → cmd_fit → cmd_develop → cmd_futility) ===
@@ -868,7 +976,7 @@ class TestFeatureEligibilityBeforeSplit:
             ambiguous_genes=ambiguous,
         )
         root = _artifacts_root(tmp_path)
-        run_id = _run_id(config_path)
+        run_id = _run_id(config_path, data_card_path)
         run_dir = root / "cartographer" / run_id
 
         rc = _run(
@@ -965,7 +1073,7 @@ class TestMockEncoderFlag:
     def test_mock_encoder_flag_sets_encoder_kind(self, tmp_path: Path) -> None:
         config_path, data_card_path = _write_world(tmp_path, seed=42)
         root = _artifacts_root(tmp_path)
-        run_id = _run_id(config_path)
+        run_id = _run_id(config_path, data_card_path)
         run_dir = root / "cartographer" / run_id
 
         rc = _run(
@@ -1078,7 +1186,7 @@ class TestProteinSequenceProvenance:
 
         config_path, data_card_path = _write_world(tmp_path)
         root = _artifacts_root(tmp_path)
-        run_id = _run_id(config_path)
+        run_id = _run_id(config_path, data_card_path)
         run_dir = root / "cartographer" / run_id
 
         rc = _run(

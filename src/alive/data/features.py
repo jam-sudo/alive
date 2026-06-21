@@ -852,6 +852,41 @@ class FeatureBank:
 
 
 # ---------------------------------------------------------------------------
+# Canonical mapping digest
+# ---------------------------------------------------------------------------
+
+
+def _canonical_mapping(gene_sequences: Mapping[str, Sequence[str]]) -> dict[str, list[str]]:
+    """Canonicalise a gene→sequences mapping for stable hashing.
+
+    Returns a dict of ``gene -> sorted list of sequences`` with genes in sorted
+    order so that the serialisation is independent of input ordering.
+    """
+    return {gene: sorted(list(seqs)) for gene, seqs in sorted(gene_sequences.items())}
+
+
+def canonical_mapping_sha256(gene_sequences: Mapping[str, Sequence[str]]) -> str:
+    """SHA-256 hex of the canonical gene→protein-sequence mapping.
+
+    This is the exact value recorded as
+    :attr:`FeatureBankProvenance.mapping_sha256` by :func:`build_feature_bank`,
+    exposed so callers (e.g. the composite ``run_id``) can compute it without
+    building the full feature bank.
+
+    Parameters
+    ----------
+    gene_sequences : Mapping[str, Sequence[str]]
+        Mapping from gene ID to a sequence of candidate protein sequences.
+
+    Returns
+    -------
+    str
+        Lowercase hex-encoded SHA-256 of the canonical mapping.
+    """
+    return sha256_json(_canonical_mapping(gene_sequences))
+
+
+# ---------------------------------------------------------------------------
 # Builder
 # ---------------------------------------------------------------------------
 
@@ -963,9 +998,9 @@ def build_feature_bank(
     # 4. Provenance
     # ------------------------------------------------------------------
     # Canonical representation of gene_sequences for hashing: sorted dict
-    # of (gene -> sorted list of sequences).
-    canonical_mapping = {gene: sorted(list(seqs)) for gene, seqs in sorted(gene_sequences.items())}
-    mapping_sha256 = sha256_json(canonical_mapping)
+    # of (gene -> sorted list of sequences).  Shared with canonical_mapping_sha256
+    # so both produce the IDENTICAL digest.
+    mapping_sha256 = canonical_mapping_sha256(gene_sequences)
     features_sha256 = sha256_bytes(raw_matrix.tobytes())
 
     provenance = FeatureBankProvenance(
