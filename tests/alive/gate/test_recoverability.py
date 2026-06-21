@@ -107,6 +107,52 @@ class TestFeatureKnnMeanDistance:
         with pytest.raises(GateError):
             feature_knn_mean_distance(queries, refs, k=-1)
 
+    # --- LOO boundary tests ---
+
+    def test_loo_k_equals_n_refs_raises_gate_error(self) -> None:
+        """In LOO mode, k == n_refs is out of range: only n_refs-1 valid neighbors exist."""
+        rng = np.random.default_rng(50)
+        refs = rng.standard_normal((5, 3))
+        with pytest.raises(GateError, match="k"):
+            feature_knn_mean_distance(refs, refs, k=5, loo=True)
+
+    def test_loo_k_equals_n_refs_minus_1_finite(self) -> None:
+        """In LOO mode, k == n_refs-1 is the maximum valid k; result must be finite."""
+        rng = np.random.default_rng(51)
+        refs = rng.standard_normal((5, 3))
+        k = 4  # n_refs - 1
+        result = feature_knn_mean_distance(refs, refs, k=k, loo=True)
+        assert result.shape == (5,)
+        assert np.all(np.isfinite(result)), f"Expected finite values, got {result}"
+
+    def test_loo_k_equals_n_refs_minus_1_equals_brute_force(self) -> None:
+        """LOO k=n_refs-1 matches brute-force mean distance to all OTHER items."""
+        rng = np.random.default_rng(52)
+        n = 5
+        refs = rng.standard_normal((n, 3))
+        k = n - 1  # use all others
+
+        result = feature_knn_mean_distance(refs, refs, k=k, loo=True)
+
+        # Brute-force: for each item, mean distance to all OTHER items
+        expected = np.empty(n)
+        for i in range(n):
+            others = np.delete(refs, i, axis=0)
+            dists = np.sqrt(np.sum((others - refs[i]) ** 2, axis=1))
+            expected[i] = dists.mean()
+
+        np.testing.assert_allclose(result, expected, rtol=1e-10)
+
+    def test_non_loo_k_equals_n_refs_ok(self) -> None:
+        """Non-LOO k == n_refs is valid; should succeed and match brute-force."""
+        rng = np.random.default_rng(53)
+        refs = rng.standard_normal((5, 3))
+        queries = rng.standard_normal((3, 3))
+        k = 5
+        result = feature_knn_mean_distance(queries, refs, k=k, loo=False)
+        expected = _brute_knn_mean_dist(queries, refs, k)
+        np.testing.assert_allclose(result, expected, rtol=1e-10)
+
     def test_output_shape(self) -> None:
         rng = np.random.default_rng(3)
         refs = rng.standard_normal((12, 5))
@@ -252,6 +298,52 @@ class TestLocalResidual:
         with pytest.raises(GateError):
             local_residual(queries, refs, ref_errors, k=6)
 
+    def test_k_equals_n_refs_non_loo_ok(self) -> None:
+        """Non-LOO k == n_refs is valid: median over all refs."""
+        rng = np.random.default_rng(60)
+        n = 5
+        refs = rng.standard_normal((n, 3))
+        ref_errors = rng.uniform(0.1, 2.0, size=n)
+        queries = rng.standard_normal((3, 3))
+        result = local_residual(queries, refs, ref_errors, k=n)
+        expected = _brute_local_residual(queries, refs, ref_errors, k=n)
+        np.testing.assert_allclose(result, expected, rtol=1e-10)
+
+    def test_loo_k_equals_n_refs_raises_gate_error(self) -> None:
+        """In LOO mode, k == n_refs is out of range (only n_refs-1 valid neighbors)."""
+        rng = np.random.default_rng(61)
+        n = 5
+        refs = rng.standard_normal((n, 3))
+        ref_errors = rng.uniform(0.1, 2.0, size=n)
+        with pytest.raises(GateError, match="k"):
+            local_residual(refs, refs, ref_errors, k=n, loo=True)
+
+    def test_loo_k_equals_n_refs_minus_1_finite(self) -> None:
+        """In LOO mode, k == n_refs-1 is valid; result must be finite."""
+        rng = np.random.default_rng(62)
+        n = 5
+        refs = rng.standard_normal((n, 3))
+        ref_errors = rng.uniform(0.1, 2.0, size=n)
+        result = local_residual(refs, refs, ref_errors, k=n - 1, loo=True)
+        assert result.shape == (n,)
+        assert np.all(np.isfinite(result)), f"Expected finite values, got {result}"
+
+    def test_loo_k_equals_n_refs_minus_1_equals_brute_force(self) -> None:
+        """LOO k=n_refs-1 matches brute-force median of errors over all OTHER items."""
+        rng = np.random.default_rng(63)
+        n = 5
+        refs = rng.standard_normal((n, 3))
+        ref_errors = rng.uniform(0.1, 2.0, size=n)
+
+        result = local_residual(refs, refs, ref_errors, k=n - 1, loo=True)
+
+        expected = np.empty(n)
+        for i in range(n):
+            other_errors = np.delete(ref_errors, i)
+            expected[i] = np.median(other_errors)
+
+        np.testing.assert_allclose(result, expected, rtol=1e-10)
+
 
 # ---------------------------------------------------------------------------
 # ecdf_normalize
@@ -376,8 +468,8 @@ class TestTrustGate:
         r1n = ecdf_normalize(r1, gate.loo_r1)
         np.testing.assert_allclose(scores, r1n, rtol=1e-10)
 
-    def test_w_small_approaches_r4n(self) -> None:
-        """With w close to 0, score is dominated by R4n component."""
+    def test_w_small_formula_is_r4n_dominated(self) -> None:
+        """With w close to 0, score exactly equals w*R1n + (1-w)*R4n (R4n-dominated)."""
         rng = np.random.default_rng(21)
         ref_features = rng.standard_normal((20, 4))
         ref_errors = rng.uniform(0.1, 2.0, size=20)
@@ -419,6 +511,15 @@ class TestTrustGate:
         ref_errors = rng.uniform(size=10)
         with pytest.raises(GateError, match="w"):
             TrustGate.fit(ref_features, ref_errors, k=2, w=1.1)
+
+    def test_fit_k_equals_n_refs_raises_gate_error(self) -> None:
+        """TrustGate.fit uses LOO internally; k==n_refs is out of LOO range → GateError."""
+        rng = np.random.default_rng(25)
+        n = 10
+        ref_features = rng.standard_normal((n, 3))
+        ref_errors = rng.uniform(size=n)
+        with pytest.raises(GateError, match="k"):
+            TrustGate.fit(ref_features, ref_errors, k=n, w=0.5)
 
     def test_gate_combination_formula(self) -> None:
         """score = w*R1n + (1-w)*R4n verified manually for a small example."""

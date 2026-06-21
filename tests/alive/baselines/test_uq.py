@@ -181,6 +181,13 @@ class TestEnsembleDisagreement:
         scores = ed.score(means)
         assert scores.shape == (3,)
 
+    def test_score_before_fit_raises(self) -> None:
+        """Calling score() before fit() must raise an error (fitted state guard)."""
+        ed = EnsembleDisagreement()
+        means = np.zeros((3, 2, 4))
+        with pytest.raises((RuntimeError, AssertionError), match="fit"):
+            ed.score(means)
+
 
 # ---------------------------------------------------------------------------
 # RidgeErrorRegressor
@@ -272,22 +279,29 @@ class TestGbmErrorRegressor:
         np.testing.assert_array_equal(reg1.score(queries), reg2.score(queries))
 
     def test_different_seeds_may_differ(self) -> None:
-        """Different seeds typically produce different scores (probabilistic test)."""
-        ref_features, ref_errors = _make_data(n_refs=30)
+        """Different seeds produce different scores.
+
+        We use a fixture with enough refs and estimators that two different seeds
+        genuinely diverge.  The same-seed → identical case is in test_deterministic_given_seed.
+        """
+        # Use more refs and more estimators so random split choices actually diverge.
+        ref_features, ref_errors = _make_data(n_refs=60, seed=100)
         rng = np.random.default_rng(22)
-        queries = rng.standard_normal((5, 5))
+        queries = rng.standard_normal((10, 5))
 
         reg1 = GbmErrorRegressor()
-        reg1.fit(ref_features, ref_errors, n_estimators=20, seed=1)
+        reg1.fit(ref_features, ref_errors, n_estimators=50, seed=1)
         reg2 = GbmErrorRegressor()
-        reg2.fit(ref_features, ref_errors, n_estimators=20, seed=2)
+        reg2.fit(ref_features, ref_errors, n_estimators=50, seed=999)
 
-        # With enough estimators / trees, different seeds produce different orderings
-        # (may be equal by chance, but typically not for randomized splits)
         scores1 = reg1.score(queries)
         scores2 = reg2.score(queries)
-        # At least check both are valid floats; differences are probabilistic so no assert.
         assert scores1.shape == scores2.shape
+        # Different seeds must produce different predictions for this fixture.
+        assert not np.array_equal(scores1, scores2), (
+            "Expected different seeds to produce different GBM scores, but got identical results. "
+            "Increase n_refs, n_estimators, or choose more distinct seeds."
+        )
 
     def test_predicts_higher_near_high_error_refs(self) -> None:
         """GBM predicts higher score for queries near high-error references."""
@@ -384,6 +398,12 @@ class TestResidualOnly:
     def test_is_not_trust_gate_subclass(self) -> None:
         """ResidualOnly must not be a TrustGate or subclass thereof."""
         assert not issubclass(ResidualOnly, TrustGate)
+
+    def test_fit_k_equals_n_refs_raises_gate_error(self) -> None:
+        """ResidualOnly.fit uses LOO internally; k==n_refs is out of LOO range → GateError."""
+        ref_features, ref_errors = _make_data(n_refs=10)
+        with pytest.raises(GateError, match="k"):
+            ResidualOnly().fit(ref_features, ref_errors, k=10)
 
     def test_higher_score_near_high_error_refs(self) -> None:
         """ResidualOnly gives higher score near high-error reference points."""

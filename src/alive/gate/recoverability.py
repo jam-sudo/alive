@@ -125,6 +125,17 @@ def feature_knn_mean_distance(
     queries = np.asarray(queries, dtype=np.float64)
     refs = np.asarray(refs, dtype=np.float64)
 
+    # In LOO mode the effective neighbour pool is n_refs-1 (self excluded), so
+    # k == n_refs leaves no room for the self-slot — raise before touching data.
+    loo_active = loo and queries.shape[0] == n_refs
+    if loo_active and k >= n_refs:
+        raise GateError(
+            f"k={k!r} is out of range for LOO mode with {n_refs} reference items. "
+            f"In LOO mode the valid range is 1 <= k <= {n_refs - 1} "
+            "(each item's own slot is excluded, leaving n_refs-1 valid neighbours). "
+            "Reduce k or provide more reference items."
+        )
+
     # Pairwise squared Euclidean distances via (a-b)^2 = a^2 - 2ab + b^2
     # queries: (n_q, d), refs: (n_r, d)
     q_sq = np.sum(queries**2, axis=1, keepdims=True)  # (n_q, 1)
@@ -136,21 +147,14 @@ def feature_knn_mean_distance(
     dists = np.sqrt(sq_dists)  # (n_q, n_r)
 
     # LOO: mask out self-distances when n_queries == n_refs
-    if loo and queries.shape[0] == n_refs:
+    if loo_active:
         np.fill_diagonal(dists, np.inf)
 
     # Partial sort to find k nearest
     result = np.empty(queries.shape[0])
     if k == n_refs:
-        # No need to partial-sort when using all refs (or all minus self when loo)
-        # LOO case: diagonal is inf, so take k columns that are finite
-        if loo and queries.shape[0] == n_refs:
-            # After masking diagonal, each row has n_refs-1 finite distances
-            # Use full sort (n_refs is manageable)
-            sorted_dists = np.sort(dists, axis=1)  # infs will be last
-            result = sorted_dists[:, :k].mean(axis=1)
-        else:
-            result = dists.mean(axis=1)
+        # Non-LOO only (LOO + k==n_refs was rejected above): use all refs.
+        result = dists.mean(axis=1)
     else:
         # argpartition to get the k smallest indices per row
         part = np.argpartition(dists, k, axis=1)[:, :k]  # (n_q, k)
@@ -212,6 +216,17 @@ def local_residual(
     refs = np.asarray(refs, dtype=np.float64)
     ref_errors = np.asarray(ref_errors, dtype=np.float64)
 
+    # In LOO mode the effective neighbour pool is n_refs-1 (self excluded), so
+    # k == n_refs leaves no room for the self-slot — raise before touching data.
+    loo_active = loo and queries.shape[0] == n_refs
+    if loo_active and k >= n_refs:
+        raise GateError(
+            f"k={k!r} is out of range for LOO mode with {n_refs} reference items. "
+            f"In LOO mode the valid range is 1 <= k <= {n_refs - 1} "
+            "(each item's own slot is excluded, leaving n_refs-1 valid neighbours). "
+            "Reduce k or provide more reference items."
+        )
+
     # Pairwise distances
     q_sq = np.sum(queries**2, axis=1, keepdims=True)
     r_sq = np.sum(refs**2, axis=1, keepdims=True)
@@ -220,13 +235,20 @@ def local_residual(
     sq_dists = np.maximum(sq_dists, 0.0)
     dists = np.sqrt(sq_dists)
 
-    if loo and queries.shape[0] == n_refs:
+    if loo_active:
         np.fill_diagonal(dists, np.inf)
 
-    # For each query, find k nearest and take median of their errors
-    # argpartition for k nearest; ref_errors is 1-D so fancy index directly
-    part = np.argpartition(dists, k, axis=1)[:, :k]  # (n_q, k)
-    k_errors = ref_errors[part]  # (n_q, k) — errors of k nearest per query
+    # For each query, find k nearest and take median of their errors.
+    if k == n_refs:
+        # Non-LOO only (LOO + k==n_refs was rejected above): all refs are neighbours.
+        k_errors = ref_errors[np.newaxis, :].repeat(queries.shape[0], axis=0)
+    else:
+        # argpartition for k nearest; ref_errors is 1-D so fancy index directly.
+        # Note: when loo_active, the +inf diagonal ensures self is never selected
+        # among the k smallest (verified by the k < n_refs guard above).
+        part = np.argpartition(dists, k, axis=1)[:, :k]  # (n_q, k)
+        k_errors = ref_errors[part]  # (n_q, k) — errors of k nearest per query
+
     result = np.median(k_errors, axis=1)
 
     return result
@@ -394,9 +416,15 @@ class TrustGate:
     def score_loo(self) -> np.ndarray:
         """LOO abstain scores for the reference items themselves.
 
-        Computes R1 and R4 in LOO mode (each reference item excluded from
-        its own neighbour set), then ECDF-normalizes against ``loo_r1`` and
-        ``loo_r4`` respectively.
+        Returns ECDF-normalized scores computed from the precomputed ``loo_r1``
+        and ``loo_r4`` arrays stored by :meth:`fit`.  No kNN functions are called
+        here; the LOO raw values were computed once during ``fit`` and are reused.
+
+        The formula is::
+
+            R1n = ecdf_normalize(loo_r1, loo_r1)
+            R4n = ecdf_normalize(loo_r4, loo_r4)
+            score = w * R1n + (1 - w) * R4n
 
         This produces OOF-style (out-of-fold) scores for the reference bank
         items, used by Task 12 for OOF-style AURC diagnostics.

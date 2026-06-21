@@ -191,12 +191,18 @@ class EnsembleDisagreement:
             Shape ``(n_queries,)``.  Per-query mean pairwise Euclidean distance
             among ensemble members.  Higher = ABSTAIN.
 
+        Raises
+        ------
+        AssertionError
+            If ``fit()`` has not been called before ``score()``.
+
         Notes
         -----
         This method takes *ensemble member means*, not feature vectors — its
         signature differs from the other comparators because disagreement is
         measured in output space.
         """
+        assert self._fitted, "Call fit() before score()."
         means = np.asarray(ensemble_member_means, dtype=np.float64)
         n_queries, n_members, _ = means.shape
 
@@ -285,6 +291,13 @@ class RidgeErrorRegressor:
         -------
         np.ndarray
             Shape ``(n_queries,)``.  Predicted error.  Higher = ABSTAIN.
+
+        Notes
+        -----
+        Scores may be negative because ``Ridge.predict`` is unconstrained (no
+        non-negativity constraint).  This is acceptable: comparators are evaluated
+        by AURC, which is rank-based within each method.  Absolute score scales
+        are not mixed across methods; only the within-method ranking matters.
         """
         assert self._model is not None, "Call fit() before score()."
         return self._model.predict(np.asarray(query_features, dtype=np.float64))
