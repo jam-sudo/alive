@@ -398,6 +398,18 @@ def test_checksum_changes_on_sequence_source() -> None:
     assert bank1.checksum != bank2.checksum
 
 
+def test_checksum_changes_on_id_mapping_version() -> None:
+    """Feature bank checksum must differ when id_mapping_version changes."""
+    enc = _make_mock()
+    bank1 = build_feature_bank(
+        _SIMPLE_MAPPING, enc, sequence_source="v1", id_mapping_version="ensembl-110"
+    )
+    bank2 = build_feature_bank(
+        _SIMPLE_MAPPING, enc, sequence_source="v1", id_mapping_version="ensembl-111"
+    )
+    assert bank1.checksum != bank2.checksum
+
+
 def test_checksum_changes_on_mapping() -> None:
     enc = _make_mock()
     mapping2 = dict(_SIMPLE_MAPPING)
@@ -746,7 +758,7 @@ def test_provenance_carries_id_mapping_version() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 14. Esm2Encoder orchestration (no torch — stub _forward_bucket)
+# 15. Esm2Encoder orchestration (no torch — stub _forward_bucket)
 # ---------------------------------------------------------------------------
 
 

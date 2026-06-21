@@ -1104,6 +1104,7 @@ class TestProteinSequenceProvenance:
         ledger = RunLedger.read(run_dir / "ledger.json")
         assert ledger.artifact_sha("sequence_mapping") == bank.provenance.mapping_sha256
         assert ledger.artifact_sha("raw_data")  # expression hash still present & distinct
+        assert ledger.artifact_sha("raw_data") != ledger.artifact_sha("sequence_mapping")
 
     def test_prepare_refuses_data_card_missing_sequence_source(self, tmp_path: Path) -> None:
         rc = _run_prepare_with_data_card(tmp_path, drop_keys=["sequence_source"])
