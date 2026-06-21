@@ -6,6 +6,8 @@ Run with: uv run pytest -q tests/alive/test_config.py
 from __future__ import annotations
 
 import copy
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -24,23 +26,23 @@ CANON_CONFIG = (
 # ---------------------------------------------------------------------------
 
 
-def test_round_trip_loads(tmp_path):
+def test_round_trip_loads():
     """The canonical YAML loads without error."""
     cfg = load_config(CANON_CONFIG)
     assert cfg is not None
 
 
-def test_experiment_name(tmp_path):
+def test_experiment_name():
     cfg = load_config(CANON_CONFIG)
     assert cfg.experiment == "cartographer_trust_gate_k562_v1"
 
 
-def test_manifest_seed(tmp_path):
+def test_manifest_seed():
     cfg = load_config(CANON_CONFIG)
     assert cfg.manifest_seed == 20260621
 
 
-def test_split_fractions(tmp_path):
+def test_split_fractions():
     cfg = load_config(CANON_CONFIG)
     assert cfg.split_fractions.base_train == pytest.approx(0.45)
     assert cfg.split_fractions.method_development == pytest.approx(0.25)
@@ -48,7 +50,7 @@ def test_split_fractions(tmp_path):
     assert cfg.split_fractions.sealed_evaluation == pytest.approx(0.15)
 
 
-def test_response_space_fields(tmp_path):
+def test_response_space_fields():
     cfg = load_config(CANON_CONFIG)
     rs = cfg.response_space
     assert rs.normalization == "library_size_10000_log1p"
@@ -60,7 +62,7 @@ def test_response_space_fields(tmp_path):
     assert rs.energy_block_size == 256
 
 
-def test_perturbation_features(tmp_path):
+def test_perturbation_features():
     cfg = load_config(CANON_CONFIG)
     pf = cfg.perturbation_features
     assert pf.primary == "esm2_t33_650M_UR50D_mean_pool"
@@ -68,7 +70,7 @@ def test_perturbation_features(tmp_path):
     assert pf.missing_policy == "exclude_before_split"
 
 
-def test_base_model_fields(tmp_path):
+def test_base_model_fields():
     cfg = load_config(CANON_CONFIG)
     bm = cfg.base_model
     assert bm.family == "additive_ridge"
@@ -77,7 +79,7 @@ def test_base_model_fields(tmp_path):
     assert bm.ensemble_members == 20
 
 
-def test_method_development_fields(tmp_path):
+def test_method_development_fields():
     cfg = load_config(CANON_CONFIG)
     md = cfg.method_development
     assert md.cv_folds == 5
@@ -88,7 +90,7 @@ def test_method_development_fields(tmp_path):
     assert list(md.registered_seeds) == [11, 23, 47, 71, 101]
 
 
-def test_decision_fields(tmp_path):
+def test_decision_fields():
     cfg = load_config(CANON_CONFIG)
     d = cfg.decision
     assert d.target_selection_coverage == pytest.approx(0.70)
@@ -96,7 +98,7 @@ def test_decision_fields(tmp_path):
     assert d.minimum_sealed_perturbations == 200
 
 
-def test_inference_fields(tmp_path):
+def test_inference_fields():
     cfg = load_config(CANON_CONFIG)
     inf = cfg.inference
     assert inf.bootstrap_replicates == 10000
@@ -104,7 +106,7 @@ def test_inference_fields(tmp_path):
     assert inf.secondary_augrc_noninferiority_margin == pytest.approx(0.02)
 
 
-def test_futility_fields(tmp_path):
+def test_futility_fields():
     cfg = load_config(CANON_CONFIG)
     f = cfg.futility
     assert f.enabled is True
@@ -366,7 +368,69 @@ def test_run_id_is_hex_string(tmp_path):
     int(rid, 16)  # must be valid hex
 
 
-def test_run_id_stable_across_calls(tmp_path):
+def test_run_id_stable_across_calls():
     """Calling run_id multiple times on the same Config returns the same value."""
     cfg = load_config(CANON_CONFIG)
     assert cfg.run_id == cfg.run_id
+
+
+# ---------------------------------------------------------------------------
+# Fix 1: missing required keys must raise ConfigError (not KeyError)
+# ---------------------------------------------------------------------------
+
+
+def test_missing_top_level_section_raises_config_error(tmp_path):
+    """Omitting an entire required section (inference) raises ConfigError."""
+    d = _base_dict()
+    del d["inference"]
+    p = _write_yaml(tmp_path, d)
+    with pytest.raises(ConfigError, match="inference"):
+        load_config(p)
+
+
+def test_missing_nested_required_field_raises_config_error(tmp_path):
+    """Omitting a single nested field (inference.bootstrap_replicates) raises ConfigError."""
+    d = _base_dict()
+    del d["inference"]["bootstrap_replicates"]
+    p = _write_yaml(tmp_path, d)
+    with pytest.raises(ConfigError, match="bootstrap_replicates"):
+        load_config(p)
+
+
+# ---------------------------------------------------------------------------
+# Fix 2: empty registered_seeds must raise ConfigError
+# ---------------------------------------------------------------------------
+
+
+def test_empty_registered_seeds_raises_config_error(tmp_path):
+    """method_development.registered_seeds = [] raises ConfigError."""
+    d = _base_dict()
+    d["method_development"]["registered_seeds"] = []
+    p = _write_yaml(tmp_path, d)
+    with pytest.raises(ConfigError):
+        load_config(p)
+
+
+# ---------------------------------------------------------------------------
+# Fix 5: run_id is stable across processes
+# ---------------------------------------------------------------------------
+
+
+def test_run_id_stable_across_processes():
+    """run_id computed in a separate subprocess matches the in-process value."""
+    in_process_id = load_config(CANON_CONFIG).run_id
+    canon_path = str(CANON_CONFIG)
+    code = (
+        "from pathlib import Path; "
+        "from alive.config import load_config; "
+        f"cfg = load_config(Path({canon_path!r})); "
+        "print(cfg.run_id)"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    cross_process_id = result.stdout.strip()
+    assert cross_process_id == in_process_id

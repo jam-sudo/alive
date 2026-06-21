@@ -153,7 +153,7 @@ class BaseModel:
     ----------
     family : str
         Model family identifier.
-    ridge_grid : list[float]
+    ridge_grid : tuple[float, ...]
         Grid of ridge regularisation strengths to search over cross-validation.
     cv_folds : int
         Number of cross-validation folds.
@@ -175,15 +175,15 @@ class MethodDevelopment:
     ----------
     cv_folds : int
         Number of cross-validation folds used in method development.
-    k_grid : list[int]
+    k_grid : tuple[int, ...]
         Grid of neighbour counts for kNN-based methods.
-    feature_weight_grid : list[float]
+    feature_weight_grid : tuple[float, ...]
         Grid of feature weighting multipliers.
-    gbm_estimators_grid : list[int]
+    gbm_estimators_grid : tuple[int, ...]
         Grid of GBM tree counts.
-    ridge_grid : list[float]
+    ridge_grid : tuple[float, ...]
         Grid of ridge regularisation strengths.
-    registered_seeds : list[int]
+    registered_seeds : tuple[int, ...]
         Fixed random seeds for reproducible CV; must be unique.
     """
 
@@ -458,6 +458,48 @@ def _check_unknown_keys(section_name: str, data: dict, known: frozenset[str]) ->
         )
 
 
+def _require_key(section_name: str, data: dict, key: str) -> Any:
+    """Return ``data[key]``, raising ConfigError (not KeyError) if absent.
+
+    Parameters
+    ----------
+    section_name : str
+        Human-readable section name for error messages.
+    data : dict
+        The dict to look up.
+    key : str
+        The required key.
+
+    Returns
+    -------
+    Any
+        The value at ``data[key]``.
+    """
+    if key not in data:
+        raise ConfigError(f"Required key {key!r} is missing from {section_name!r}.")
+    return data[key]
+
+
+def _require_section(raw: dict, section: str) -> dict:
+    """Return ``raw[section]`` as a dict, raising ConfigError if absent.
+
+    Parameters
+    ----------
+    raw : dict
+        The top-level YAML dict.
+    section : str
+        The required top-level section name.
+
+    Returns
+    -------
+    dict
+        The section sub-dict.
+    """
+    if section not in raw:
+        raise ConfigError(f"Required top-level section {section!r} is missing from the config.")
+    return raw[section]
+
+
 def _validate_probability(name: str, value: float) -> None:
     """Raise ConfigError if *value* is not in the open interval (0, 1).
 
@@ -528,7 +570,13 @@ def load_config(path: str | Path) -> Config:
             _check_unknown_keys(section, raw[section], known)
 
     # -----------------------------------------------------------------------
-    # 3. split_fractions: values in (0,1), sum == 1.0 ± 1e-9, exact keys
+    # 3. Required top-level sections must be present
+    # -----------------------------------------------------------------------
+    for _required_section in _TOP_LEVEL_KEYS:
+        _require_section(raw, _required_section)
+
+    # -----------------------------------------------------------------------
+    # 4. split_fractions: values in (0,1), sum == 1.0 ± 1e-9, exact keys
     # -----------------------------------------------------------------------
     sf_raw: dict = raw["split_fractions"]
     _check_unknown_keys("split_fractions", sf_raw, _SECTION_KEYS["split_fractions"])
@@ -543,35 +591,48 @@ def load_config(path: str | Path) -> Config:
         raise ConfigError(f"split_fractions must sum to 1.0 (within 1e-9); got sum = {total!r}.")
 
     # -----------------------------------------------------------------------
-    # 4. inference.bootstrap_replicates >= 2000
+    # 5. inference.bootstrap_replicates >= 2000
     # -----------------------------------------------------------------------
-    br = raw["inference"]["bootstrap_replicates"]
+    inf_raw_v = raw["inference"]
+    br = _require_key("inference", inf_raw_v, "bootstrap_replicates")
     if br < 2000:
         raise ConfigError(
             f"inference.bootstrap_replicates must be >= 2000 for a scientific run; got {br!r}."
         )
 
     # -----------------------------------------------------------------------
-    # 5. decision.minimum_sealed_perturbations >= 1
+    # 6. decision.minimum_sealed_perturbations >= 1
     # -----------------------------------------------------------------------
-    msp = raw["decision"]["minimum_sealed_perturbations"]
+    d_raw_v = raw["decision"]
+    msp = _require_key("decision", d_raw_v, "minimum_sealed_perturbations")
     if msp < 1:
         raise ConfigError(f"decision.minimum_sealed_perturbations must be >= 1; got {msp!r}.")
 
     # -----------------------------------------------------------------------
-    # 6. Probability/coverage fields in (0, 1)
+    # 7. Probability/coverage fields in (0, 1)
     # -----------------------------------------------------------------------
-    _validate_probability("decision.conformal_alpha", raw["decision"]["conformal_alpha"])
     _validate_probability(
-        "decision.target_selection_coverage", raw["decision"]["target_selection_coverage"]
+        "decision.conformal_alpha",
+        _require_key("decision", d_raw_v, "conformal_alpha"),
     )
-    _validate_probability("inference.family_confidence", raw["inference"]["family_confidence"])
-    _validate_probability("futility.family_confidence", raw["futility"]["family_confidence"])
+    _validate_probability(
+        "decision.target_selection_coverage",
+        _require_key("decision", d_raw_v, "target_selection_coverage"),
+    )
+    _validate_probability(
+        "inference.family_confidence",
+        _require_key("inference", inf_raw_v, "family_confidence"),
+    )
+    fut_raw_v = raw["futility"]
+    _validate_probability(
+        "futility.family_confidence",
+        _require_key("futility", fut_raw_v, "family_confidence"),
+    )
 
     # -----------------------------------------------------------------------
-    # 7. futility.comparators: non-empty subset of known names
+    # 8. futility.comparators: non-empty subset of known names
     # -----------------------------------------------------------------------
-    comparators: list = raw["futility"]["comparators"]
+    comparators: list = _require_key("futility", fut_raw_v, "comparators")
     if not comparators:
         raise ConfigError("futility.comparators must be a non-empty list of comparator names.")
     unknown_comp = set(comparators) - _KNOWN_COMPARATORS
@@ -582,20 +643,22 @@ def load_config(path: str | Path) -> Config:
         )
 
     # -----------------------------------------------------------------------
-    # 8. Grid lists non-empty; registered_seeds non-empty and unique
+    # 9. Grid lists non-empty; registered_seeds non-empty and unique
     # -----------------------------------------------------------------------
+    bm_raw_v = raw["base_model"]
+    md_raw_v = raw["method_development"]
     grid_fields = [
-        ("base_model", "ridge_grid"),
-        ("method_development", "k_grid"),
-        ("method_development", "feature_weight_grid"),
-        ("method_development", "gbm_estimators_grid"),
-        ("method_development", "ridge_grid"),
+        ("base_model", bm_raw_v, "ridge_grid"),
+        ("method_development", md_raw_v, "k_grid"),
+        ("method_development", md_raw_v, "feature_weight_grid"),
+        ("method_development", md_raw_v, "gbm_estimators_grid"),
+        ("method_development", md_raw_v, "ridge_grid"),
     ]
-    for section, field_name in grid_fields:
-        lst = raw[section][field_name]
+    for section, section_data, field_name in grid_fields:
+        lst = _require_key(section, section_data, field_name)
         _validate_non_empty_list(f"{section}.{field_name}", lst)
 
-    seeds: list = raw["method_development"]["registered_seeds"]
+    seeds: list = _require_key("method_development", md_raw_v, "registered_seeds")
     _validate_non_empty_list("method_development.registered_seeds", seeds)
     if len(seeds) != len(set(seeds)):
         raise ConfigError(
@@ -614,42 +677,46 @@ def load_config(path: str | Path) -> Config:
     pf_raw = raw["perturbation_features"]
     pf = PerturbationFeatures(**pf_raw)
 
-    bm_raw = raw["base_model"]
+    bm_raw = bm_raw_v
     bm = BaseModel(
-        family=bm_raw["family"],
-        ridge_grid=tuple(bm_raw["ridge_grid"]),
-        cv_folds=bm_raw["cv_folds"],
-        ensemble_members=bm_raw["ensemble_members"],
+        family=_require_key("base_model", bm_raw, "family"),
+        ridge_grid=tuple(_require_key("base_model", bm_raw, "ridge_grid")),
+        cv_folds=_require_key("base_model", bm_raw, "cv_folds"),
+        ensemble_members=_require_key("base_model", bm_raw, "ensemble_members"),
     )
 
-    md_raw = raw["method_development"]
+    md_raw = md_raw_v
     md = MethodDevelopment(
-        cv_folds=md_raw["cv_folds"],
-        k_grid=tuple(md_raw["k_grid"]),
-        feature_weight_grid=tuple(md_raw["feature_weight_grid"]),
-        gbm_estimators_grid=tuple(md_raw["gbm_estimators_grid"]),
-        ridge_grid=tuple(md_raw["ridge_grid"]),
-        registered_seeds=tuple(md_raw["registered_seeds"]),
+        cv_folds=_require_key("method_development", md_raw, "cv_folds"),
+        k_grid=tuple(_require_key("method_development", md_raw, "k_grid")),
+        feature_weight_grid=tuple(
+            _require_key("method_development", md_raw, "feature_weight_grid")
+        ),
+        gbm_estimators_grid=tuple(
+            _require_key("method_development", md_raw, "gbm_estimators_grid")
+        ),
+        ridge_grid=tuple(_require_key("method_development", md_raw, "ridge_grid")),
+        registered_seeds=tuple(_require_key("method_development", md_raw, "registered_seeds")),
     )
 
-    d_raw = raw["decision"]
+    d_raw = d_raw_v
     d = Decision(**d_raw)
 
-    inf_raw = raw["inference"]
+    inf_raw = inf_raw_v
     inf = Inference(**inf_raw)
 
-    fut_raw = raw["futility"]
+    fut_raw = fut_raw_v
     fut = Futility(
-        enabled=fut_raw["enabled"],
-        comparators=tuple(fut_raw["comparators"]),
-        minimum_relevant_delta=fut_raw["minimum_relevant_delta"],
-        family_confidence=fut_raw["family_confidence"],
-        rule=fut_raw["rule"],
+        enabled=_require_key("futility", fut_raw, "enabled"),
+        comparators=tuple(_require_key("futility", fut_raw, "comparators")),
+        minimum_relevant_delta=_require_key("futility", fut_raw, "minimum_relevant_delta"),
+        family_confidence=_require_key("futility", fut_raw, "family_confidence"),
+        rule=_require_key("futility", fut_raw, "rule"),
     )
 
     return Config(
-        experiment=raw["experiment"],
-        manifest_seed=raw["manifest_seed"],
+        experiment=_require_key("(top level)", raw, "experiment"),
+        manifest_seed=_require_key("(top level)", raw, "manifest_seed"),
         split_fractions=sf,
         response_space=rs,
         perturbation_features=pf,
