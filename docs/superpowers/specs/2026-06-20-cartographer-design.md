@@ -1,298 +1,748 @@
-# CARTOGRAPHER — 신뢰·결정 레이어 · FINAL 설계 스펙
+# CARTOGRAPHER Trust-Gate — Scientific Design Specification v2
 
-> 상태: 설계 확정안 (project owner 검토용 / design doc 저장 예정). CARTOGRAPHER는 base predictor(형제 스펙 Model #1: encoder + 저랭크 operator + OT-CFM + NB decoder) **위에 얹는 TRUST/DECISION 레이어**다. 학습된 base는 1개, CARTOGRAPHER는 **held-out calibration만** 소비(N-ensemble 재학습 불필요).
->
-> 이 문서는 4개 컴포넌트(conformal-formulation / recoverability-gate / real-win-defense / experiments-simloop-killgates)를 통합하고, critique panel 3인(category-error / coverage-under-shift / simloop-feasibility, 전원 verdict=fixable·win-survives=true)의 **모든 fatal_flaw를 (a) 설계에 직접 반영하거나 (b) accepted risk + 완화책으로 명시**한 결과다. 가장 무거운 비판 — **"AURC는 score의 단조변환에 불변이고 conformal radius는 단조변환이므로, conformalized-baseline은 raw-distance와 byte-identical(검증: AURC 0.50127966 == 0.50127966)인 phantom이다"** — 을 §1·§3에 정면으로 박았다.
+> **상태:** K562 retrospective Trust-Gate MVP 과학 계약 확정안
+> **개정일:** 2026-06-21
+> **현재 범위:** Replogle K562 essential, scalar conformal error bound,
+> R1+R4 PREDICT/ABSTAIN routing
+> **비규범적 후속 범위:** R2/R3, causal masking, RPE1/Norman/Tahoe,
+> Active Cartography
 
 ---
 
-## 1. 한 줄 정의 + 진짜 win + 무엇이 table-stakes인가
+## 0. 문서 역할과 source-of-truth 계층
+
+이 문서는 CARTOGRAPHER가 **과학적으로 무엇을 주장할 수 있는지**를 고정한다.
+
+1. **Scientific claim contract:** 이 specification
+2. **Execution contract:**
+   `docs/superpowers/plans/2026-06-20-cartographer-mvp.md`
+3. **Runtime implementation:** `src/alive/`
+4. **Project-wide operational rules:** `CLAUDE.md`
+
+위 순위는 **scientific claim 도메인**에 적용된다. Safety, seal, leakage, governance invariant는
+`CLAUDE.md`(§3.1)가 최상위이며, 위 목록이 `CLAUDE.md`를 마지막에 두는 것은 claim 도메인 기준일
+뿐 governance 권위를 낮추는 것이 아니다. 두 도메인이 직접 충돌하면 — 예: safety invariant가
+어떤 claim 구성을 금지 — safety invariant가 우선하여 run을 중단시킨다.
+
+문서 간 충돌이 발견되면 편리한 쪽을 임의로 선택하지 않는다. Scientific run을 중단하고
+spec 또는 plan을 명시적으로 개정한 뒤 새 run ID를 만든다. 코드는 이 spec과 최신 plan에
+부합해야 하며, 현재 코드의 동작이 과학 계약을 자동으로 재정의하지 않는다.
+
+이 문서는 이전 CARTOGRAPHER 설계의 category-error, coverage-under-shift,
+simulated-loop critique를 계승하지만, 현재 MVP와 후속 연구를 분리한다.
+
+---
+
+## 1. 한 줄 정의, 과학 질문, 비주장
 
 ### 1.1 한 줄 정의
-CARTOGRAPHER는 base perturbation predictor의 각 쿼리 $q=(A,X_{\text{ctrl}},C)$ 출력에 대해 **(i) 분포값 conformal 공(in-distribution marginal 보장), (ii) recoverability 기반 PREDICT/ABSTAIN 라우팅**을 부여하는 신뢰·결정 레이어다. ABSTAIN = "예측 말고 실험하라". 1차 산출물은 coverage 숫자가 아니라 **predict-or-experiment 결정**이다.
 
-### 1.2 카테고리 오류 (acid test) — 무엇이 table-stakes이고 무엇이 win이 아닌가
-> **Conformal coverage의 marginal validity는 임의의 nonconformity score에 대해 성립한다(exchangeability만 가정).** 따라서 "우리는 90% coverage를 달성했고 baseline은 못 했다"는 **카테고리 오류**다. base predictor의 raw E-distance·ensemble variance·아무 score든 held-out calibration에 split-conformal을 씌우면 정확히 같은 marginal coverage가 나온다.
+CARTOGRAPHER Trust-Gate MVP는 frozen K562 perturbation predictor 위에서:
 
-그러므로 **coverage 달성 자체는 win이 아니라 입장료(table stakes)**다. 모든 비교 대상은 동일 base predictor를 wrap하고, 동일 calibration split에서, 동일 target coverage $1-\alpha$로 conformalize된 상태에서 출발한다(**Fair-Comparison Protocol, FCP**). coverage가 다르면 비교 무효.
+1. exchangeable perturbation query에 적용되는 **scalar global prediction-error bound**를
+   split conformal로 보정하고,
+2. perturbation-feature extrapolation(R1)과 local measured-error regression(R4)을 결합해
+   **PREDICT/ABSTAIN 순서**를 생성하는 leakage-controlled 신뢰 레이어다.
 
-**[FIX — category-error critique 1: BASELINE PHANTOM]** 더 날카롭게: **AURC(risk-coverage 곡선 면적)는 gate score의 임의 단조변환에 불변**이고, conformal radius는 calibration-quantile에 의한 단조변환이다. 따라서 "raw-distance"와 "conformalized raw-distance(=conformalized-baseline)"는 **AURC가 기계적으로 동일**하다(critique가 수치로 검증: 0.50127966 == 0.50127966). 즉 "category-error를 직격한다"던 별도 baseline B3는 **B2와 구별 불가능한 phantom**이다.
-- **결정:** 헤드라인 win은 **오직 두 실제 상대** — (i) raw-distance/base-radius, (ii) ensemble-variance(MC-dropout/flow-sample 분산) — 에 대해서만 측정한다. "conformalized baseline을 이겼다"를 **별도의 scalp으로 광고 금지**(같은 곡선, 같은 면적이므로). conformalized-baseline은 "coverage parity가 어떤 score든 달성됨"을 보여주는 sanity 표지로만 남긴다.
+`ABSTAIN`은 “이 예측의 사용을 권장하지 않는다”는 뜻이다. 현재 MVP에서는 실험을 실제로
+선택하거나 수행하는 `MEASURE` action이 아니다. Acquisition은 별도 Active Cartography
+protocol의 대상이다.
 
-### 1.3 진짜 win (category error를 피한, 측정가능 우위)
-coverage validity가 **건드릴 수 없는** 유일한 비환원적 양은 **같은 coverage·같은 예산에서의 라우팅 품질**이다. 헤드라인:
+### 1.2 과학 질문
 
-> **WIN A — Selective Risk–Coverage (AURC).** recoverability gate가 abstain 순서를 매겨 만든 risk-coverage 곡선의 AURC가, FCP 하의 raw-distance·ensemble-variance보다 **perturbation-level bootstrap 95% CI 하한 > 0**으로 낮다. **risk = 채택(=PREDICT)한 쿼리들의 실측 oracle E-distance**(conformal radius 아님 — radius로 재면 self-fulfilling 동어반복), coverage = 1−abstain율.
+> Frozen additive perturbation-response predictor에 대해, R1+R4 Trust-Gate가 완전히
+> held-out된 K562 perturbation의 실측 prediction error를 모든 사전등록 UQ comparator보다
+> 더 잘 순위화하는가?
 
-이것이 category error로 환원 불가능한 이유: 두 score가 같은 marginal coverage를 줘도 AURC는 자유롭게 다르다. AURC 우위는 validity가 못 건드리는 측정량이다.
+### 1.3 1차 endpoint
 
-**그러나 — 진짜 novelty 서사의 정직한 한계 (category-error critique 2,3):**
-- **R4(local calibration residual = dual-manifold kNN 이웃의 실측 base-error 중앙값)는 held-out base error 위에 직접 적합한 kNN 회귀자**다. "geometry를 식별성으로 읽는다"가 아니라 **목표(error)를 직접 추정**하는 것이다. R2/R4 ablation에서 R4가 win을 캐리하면(가장 가능성 높은 결과: a posteriori 잔차가 a priori geometry를 이긴다), **"operator-aware dual-manifold recoverability" novelty는 증발하고 "더 나은 error-ranking score"로 정직하게 relabel**한다. win은 real-but-mundane(더 나은 오차 랭킹)이며 category-distinct가 아니다.
-- **유일한 진짜 category-distinct 메커니즘(M1: amortized hypernetwork는 support 밖에서 low-variance·high-bias로 자신있게 틀린다 → ensemble-variance가 epistemic gap을 구조적으로 underestimate; R2 operator-projected identifiability가 이를 포착)은 base 모델이 곱셈 operator $U_gV_g^\top$를 비자명하게 쓴다는 데 contingent**하다. **그러나 형제 스펙(§2.4)이 인정하듯 base는 bias-only(CPA+CFM)로 self-reduce할 가능성이 높고**, 그러면 $V_g$가 underdetermined → R2는 노이즈 → S축이 generic OOD(R3)로 붕괴 → 헤드라인이 ensemble-variance와 동률일 공산이 크다. 이 contingency를 §3·§5·§7에 명시한다.
+Sealed K562 evaluation에서 selective AURC를 측정한다.
 
-### 1.4 table-stakes로 강등되는 것
-- **coverage 달성**(KILL-GATE #1) — 자격일 뿐 win 아님.
-- **"conformalized baseline을 이김"** — phantom이므로 win 주장에서 삭제.
-- **K562→RPE1 cross-context의 "finite-sample distribution-free coverage 보장"** — 아래 §3.4·§7에서 보듯 **존재하지 않으므로 모든 framing에서 삭제**.
-
----
-
-## 2. 시스템 구조 (math 포함)
-
-### 2.0 파이프라인
+```text
+risk(q) = measured energy distance(predicted population, observed population)
+delta_m = AURC_m - AURC_gate
 ```
-base predictor(frozen, 1개) ── 쿼리 q=(A, X_ctrl, C) ──▶ 예측 집단 P̂_q = {x̂_1..x̂_m}
-                                                            │
-        held-out calibration scores {s_i} ─────────────────┤
-                                                            ▼
-   (1) 분포값 conformal:  공 B(P̂_q, r̂_α)          [table-stakes, in-dist marginal]
-   (2) recoverability gate:  s(q) ──▶ PREDICT / ABSTAIN   [WIN A engine]
-                                                            ▼
-                              PREDICT → 공 + 보장 보고
-                              ABSTAIN → "run experiment" (triage)
+
+Gate의 1차 endpoint 통과 조건은 모든 사전등록 comparator에 대한 simultaneous one-sided
+family-wise 95% lower bound가 0보다 큰 것이다.
+
+### 1.4 명시적 비주장
+
+- Scalar error bound는 distribution-valued prediction set 또는 conformal ball이 아니다.
+- Coverage 달성 자체는 routing win이 아니다.
+- R4는 causal identifiability가 아니라 measured base error 위의 kNN regression이다.
+- Additive ridge base는 mechanistic virtual cell이 아니다.
+- K562 random perturbation split은 새로운 cell context 일반화를 검증하지 않는다.
+- ABSTAIN은 정보이득 최적화 또는 실험 acquisition이 아니다.
+- Synthetic fixture의 성공은 실제 K562 결과가 아니다.
+- 현재 MVP는 Active Cartographer가 아니다.
+
+---
+
+## 2. Category-error 방어와 진짜 win
+
+### 2.1 Coverage는 table stakes
+
+Exchangeability가 성립하면 어떤 적절한 nonconformity score도 split conformal로 동일한
+nominal marginal coverage를 얻을 수 있다. 따라서:
+
+> “우리 방법은 90% coverage를 달성했고 baseline은 못 했다”는 CARTOGRAPHER의 win이 아니다.
+
+현재 MVP의 conformal 산출물은 calibration error의 finite-sample quantile인 **하나의 scalar
+global bound**다. 이 bound는 각 eligible K562 perturbation에 적용되지만 query마다 다른
+bound가 아니며, prediction set의 크기나 모양을 비교하지 않는다.
+
+### 2.2 AURC와 단조변환
+
+AURC는 tie를 만들지 않는 strictly order-preserving transformation에 불변이다. 비엄격
+단조변환이 tie를 만들 수 있으므로 tie-breaking 규칙은 metric implementation에서 고정한다.
+
+`conformalized raw-distance`가 raw-distance와 동일한 순위를 보존한다면 별도 comparator
+또는 별도 성과로 광고하지 않는다. Conformal error bound는 routing score가 아니다.
+
+### 2.3 진짜 MVP win
+
+동일 base, 동일 splits, 동일 feature access, 동일 tuning budget 아래에서 gate가 실제 error를
+더 잘 순위화하는지가 유일한 헤드라인이다. Risk 축은 conformal bound나 gate score가 아니라
+sealed observed population으로 계산한 oracle energy distance다.
+
+### 2.4 Novelty의 상한
+
+Full gate가 residual-only를 직접 이겨야 R1의 added value가 존재한다. R4 또는 supervised
+error regressor가 모든 성과를 설명하면 결과는 “better error regression”이지
+recoverability/identifiability novelty가 아니다.
+
+---
+
+## 3. 데이터와 four-way split
+
+### 3.1 현재 dataset scope
+
+Confirmatory MVP는 Replogle **K562 essential**만 사용한다.
+
+RPE1, Norman, Tahoe, drug modality, combinatorial perturbation은 현재 scientific verdict에
+포함하지 않는다. 이들은 §14의 별도 후속 protocol 대상이다.
+
+### 3.2 Eligibility-before-split 계약
+
+Split 전에 다음만으로 eligible perturbation 집합을 확정한다.
+
+- schema-valid perturbation ID
+- 등록된 최소 cell count 충족
+- 명확한 external protein-sequence mapping
+- primary ESM feature 생성 가능
+
+Expression effect size, measured response strength, base error 또는 evaluation outcome을 사용한
+filtering은 금지한다. 모든 exclusion reason과 ID를 manifest에 기록한다.
+
+Feature availability를 확인하기 전에 split하거나, split 후 `feature_bank.has(id)`로 조용히
+건너뛰는 scientific run은 무효다.
+
+### 3.3 Four-way split
+
+Perturbation ID 단위로 다음 비율을 사용한다. Cell barcode 단위 split은 금지한다.
+
+```text
+base_train              45%
+method_development      25%
+conformal_calibration   15%
+sealed_evaluation       15%
 ```
-**전부 post-hoc**: base forward 1회 + calibration score 배열 연산. 재학습 0 → M5 24GB MPS에서 전량 실행 가능.
 
-### 2.1 Base predictor wrap + nonconformity score
-한 데이터 포인트 = cell이 아니라 **쿼리** $q$. nonconformity score = **집단-대-집단 분포거리**(per-gene scalar 아님):
-$$s(q)=D\big(\hat P_q,\,X^\star_{\text{post}}(q)\big),\quad D\in\{\text{E-distance(주)},\ \text{sliced-Wasserstein(부)},\ \text{MMD(감사)}\}.$$
-**주 score = E-distance**(scPerturb 표준, 기존 eval primitive 존재). SW는 covariance/다봉성 민감도 때문에 보조로 둔다 — 단 **SW를 주 score로 올리지 않는 이유는 critique의 self-falsification 함정**(§5·§7)이다.
+- `base_train`: response transform과 base predictor fit
+- `method_development`: OOF method tuning과 futility decision
+- `conformal_calibration`: scalar error bound와 PREDICT threshold calibration
+- `sealed_evaluation`: authorized evaluator에서 outcome을 정확히 한 번만 접근
 
-차원은 raw gene이 아니라 **train-only로 동결한 임베딩(PCA/HVG)**에서 측정(RPE1 outcome 절대 미사용, invariant #3). 임베딩은 사실상 score의 일부 → 동결하지 않으면 누출/불안정.
+Split은 eligible ID, registered seed, registered fractions에만 의존한다.
 
-추정 잡음 보정: $\hat P_q$·$X^\star$ 모두 유한표본이라 sampling bias가 있다. **self-distance floor**(같은 집단을 절반으로 쪼갠 거리; self-prediction 상한과 연결)를 noise ceiling으로 빼거나 동일 크기 subsample U-statistic 보정.
+### 3.4 Sealed outcome 계약
 
-### 2.2 Distribution-valued split-conformal (table-stakes 층)
-base는 **train fold에서만** 학습(RPE1 perturbed outcome 봉인). calibration fold $\mathcal{I}_{\text{cal}}$의 각 쿼리에서 $s_i=D(\hat P_{q_i}, X^\star_{q_i})$. 보정 분위수
-$$\hat r_\alpha=\mathrm{Quantile}\Big(\{s_i\};\ \tfrac{\lceil(n_c+1)(1-\alpha)\rceil}{n_c}\Big),\qquad B(\hat P_q,\hat r_\alpha)\ \text{출력}.$$
-보장: $\Pr[D(\hat P_q, X^\star_q)\le\hat r_\alpha]\ge 1-\alpha$.
+Fitting API에 full oracle array를 전달하지 않는다. Outcome store는 일반 unsealed read와
+`evaluate_sealed_once`를 구조적으로 분리한다.
 
-**exchangeability 단위 = (perturbation×cell-line) 쿼리. cell 아님.** 한 쿼리 = score 1개. cell barcode는 split 불침범(split contract). calibration 쿼리는 RPE1 outcome 강도로 선택 금지(invariant #4).
-
-**커버리지 타입 3층 등급화 (정직성 축):**
-- **L1 split = MARGINAL.** in-distribution(K562 held-out pert)에서만 정확. 기본 출력, "marginal"이라 명시 라벨.
-- **L2 Mondrian/group-conditional = per-cell-line/per-stratum.** 군별 $\hat r_\alpha^{(g)}$ → 군 내 조건부 보장(더 강한 주장). **단 §3.4·§6에서 보듯 n이 작아 사실상 무용**.
-- **L3 weighted = covariate-shift용 — 본 스펙에서 보장에서 강등(§3.4).**
-
-### 2.3 Recoverability gate (WIN A engine)
-두 매니폴드를 **base가 실제 쓰는 좌표계**에서 정의(별도 임베딩 학습 금지 — 누출·정렬어긋남 차단):
-- **P-manifold** = hypernetwork 입력 frozen feature $\phi_g$(ESM/GO/network; **cell-line 의존 baseline-expr은 분리** — 누출 C-5).
-- **S-manifold** = encoder 잠재 $z_{\text{ctrl}}$.
-
-non-recoverability 신호(높을수록 abstain):
-$$\textbf{R1 (P-거리):}\ r_P^{\text{knn}}(q)=\tfrac1k\!\sum_{j\in\text{kNN}(\phi_g)}\!\|\phi_g-\phi_{g_j}\|_{\Sigma^{-1}}\big/\rho_k(\phi_{g_j})\quad(\text{density-relative extrapolation})$$
-$$\textbf{R2 (operator-aware, contingent):}\ r_S^{\text{op}}(q)=\sum_{c}\frac{\|V_g^{(c)}\|^2}{\widehat{\mathrm{Var}}_{z\sim P_0^q}[V_g^{(c)\top}z]+\epsilon}\quad(\text{control이 operator read 좌표에 신호 없으면↑})$$
-$$\textbf{R3 (control OOD):}\ r_S^{\text{ood}}(q)=-\log\hat p_{\mathcal Z_{tr}}(P_0^q)\qquad\textbf{R4 (local residual):}\ r^{\text{loc}}(q)=\operatorname{median}_{g'\in\mathcal N_{PS}(q)}e_{g'}$$
-합성: 기본 = **transparent OR-게이트 + 단조결합** $s(q)=\max(\text{정규화 P축},\ \text{S축})$ 를 base로 $r^{\text{loc}}$로 보정. learned는 isotonic/monotone GBM 최소로만(calibration의 base error $e_{g'}$만 입력 — 그건 K562 held-out에서 계산, RPE1 outcome 미접촉).
-
-**[FIX — category-error 2: R4 relabel]** R4·및 MVP의 "kNN E-distance to calibration manifold"는 **error 위에 적합한 kNN 회귀자**임을 명시한다. R4가 win driver면 "더 나은 error-regressor"로 보고하고 identifiability novelty를 **철회**한다(§5 ablation 사전등록).
-
-### 2.4 라우팅 규칙
-- $s(q)$ 작고 covariate support 충분 → **PREDICT** + 공 보장.
-- $s(q)$ 크거나(공이 responder/non-responder를 둘 다 포함해 결정 무의미) support 부족 → **ABSTAIN → run experiment**.
-
-**[FIX — coverage-under-shift 2: selection-laundering 명시]** support 비중첩 영역을 ABSTAIN으로 보내면 **coverage가 깨질 cell들이 측정에서 제거**된다(selection-induced coverage inflation). 따라서 KILL-GATE #1은 coverage를 **triple로** 보고한다(§5): full-set(would-be-abstain을 uncovered로) / conditional-on-PREDICT / abstain-rate.
+- fit/develop/calibrate 단계의 sealed access count는 0이어야 한다.
+- `FUTILITY_STOPPED`이면 sealed access는 영구히 0이다.
+- Confirmatory branch는 sealed cohort를 정확히 한 번 연다.
+- Access record는 materialization 전에 durable audit에 기록한다.
+- Crash가 발생해도 같은 run ID로 seal을 다시 열지 않는다.
 
 ---
 
-## 3. 진짜 측정가능 우위 3종 + 강한 baseline + 헤드라인 win
+## 4. Perturbation feature와 response representation
 
-**FCP 공통:** 모든 비교 대상은 동일 base wrap + 동일 calibration split + 동일 marginal coverage. 차이는 score/gate에서만. coverage parity 깨지면 비교 무효.
+### 4.1 Primary perturbation feature
 
-### WIN A — Selective Risk–Coverage (★ 헤드라인, ROBUST)
-- **Falsifiable claim:** gate $g$로 정렬한 risk-coverage 곡선의 **AURC**(risk=실측 oracle E-distance)가 baseline AURC보다 perturbation-level bootstrap 95% CI 하한 > 0으로 낮다.
-- **이겨야 할 강한 baseline (phantom 제거 후 실제 2종):**
-  1. **raw-distance / base-radius** (= conformalized-baseline과 byte-identical AURC, 둘은 한 상대).
-  2. **ensemble-variance** (MC-dropout/flow-sample 분산; **cost-adjusted** — single-model이 강점이므로 K배 비용 치르고도 우리를 못 이겨야 진짜 win, 동률이어도 비용으로 win).
-  - 정규화용: random abstention(floor) / oracle abstention(ceiling).
-- **선행 floor 진단 [FIX — category-error 6]:** 곡선 전에 $\mathrm{corr}(s_{\text{gate}}, e_q) > \mathrm{corr}(s_{\text{base-radius}}, e_q)$ 를 perturbation-level bootstrap CI 하한 > 0으로 먼저 보인다. 단순 base radius가 라우팅을 대부분 설명하면 gate는 메커니즘 무관하게 무의미.
-- **AUGRC 동반 보고** [FIX — simloop critique]: AURC가 작동점 위험을 평균으로 희석한다는 알려진 결함 대응. 단일 작동점 cherry-pick 금지.
-- **헤드라인 측정 위치 [FIX — simloop critique]:** powered 헤드라인은 **in-distribution K562 held-out perturbation 풀**(쿼리 수 충분)에서 측정. **여기서 WIN A가 죽으면(gate == raw-distance) registered negative**이고 shift 질문은 moot.
+Primary perturbation representation은 pinned
+`esm2_t33_650M_UR50D` mean-pooled protein embedding이다.
 
-### WIN B — Distribution-valued가 heterogeneity를 포착 (MODERATE→FRAGILE, 보조)
-**[FIX — category-error 3 + coverage-under-shift 5: coverage 비교가 아니라 decision-region informativeness로 재정의]** scalar-interval(2603.02204류)은 per-gene **marginal** coverage를, distribution-ball은 **joint-distance** coverage를 통제한다 — 서로 다른 event라 "ball이 conditional coverage가 더 낫다"는 apples-to-oranges이고 score-choice 우위를 coverage 라벨로 밀반입한다. 따라서:
-- **재정의:** **같은 event(held-out 집단의 joint coverage)를 matched operational coverage로 맞춘 뒤, decision-region informativeness(ball volume / sliced-W radius / 유효 결정폭) 비교.** "conditional coverage" 주장 폐기.
-- **이겨야 할 baseline:** per-gene conformalized scalar interval(2603.02204 재현), pseudobulk-mean+conformalized scalar(invariant #6 직격), distribution-distance-but-unconditional(내부 ablation).
-- **치명적 전제 [invariant #9]:** responder/non-responder stratum은 **control/base만으로, RPE1 outcome 없이 사전등록**되어야 하고 **null/shuffle 대조**(라벨 섞으면 우위 소멸)를 통과해야 사용 가능. Replogle은 ~41% 유전자만 측정가능 신호 + E-test 검정력 200–500 cells/pert → bimodality가 cell-cycle/guide-efficacy/sampling과 교란.
-- **운명 결정 [FIX — coverage-under-shift 5: 조기·저비용 audit]:** 합성 bimodal + Norman 이질 쿼리에서 **SW/E-dist/MMD score-agreement check를 투자 전에 먼저** 실행. **이질성 우위가 SW에서만 나타나면 score artifact로 registered negative.** outcome-독립 stratum 정의가 신호 floor 위에서 존재하지 않으면 **WIN B를 synthetic-only로 강등하거나 완전 폐기.**
+Feature bank provenance는 최소한 다음을 포함한다.
 
-### WIN C — Simulated-loop sample-efficiency (FRAGILE→가장 약함, 마지막)
-- **Claim:** gate가 abstain한(=식별불가) 쿼리를 먼저 실험으로 reveal하면 고정 예산에서 누적 hit-rate(area-under-hit-curve)가 baseline보다 빠르게 오른다.
-- **baseline:** random / uncertainty(raw 분산) / ensemble-variance(BALD류) / largest-predicted-effect(greedy).
-- **[FIX — 3 critiques 공통: tautology 차단]** (a) loop에 **실제 calibration/base 갱신 단계** 필수(없으면 "abstain=고불확실=고오차" 동어반복), (b) "hit"을 **oracle effect-size로만** 정의(E-distance > 사전등록 null-specificity threshold), **절대 "base가 틀림"으로 정의 금지**(U2 tautology). 갱신 없는 offline replay는 **exploratory only**로만 보고.
+- exact encoder model revision
+- protein sequence database release
+- gene↔protein ID mapping version
+- mapping SHA-256
+- pooling rule
+- dtype와 feature dimension
+- encoded feature SHA-256
+- exclusion map
 
-### 헤드라인 win (한 줄)
-> **CARTOGRAPHER의 recoverability gate는, FCP 하의 raw-distance·ensemble-variance(cost-adjusted) 대비 selective risk-coverage AURC(risk=실측 oracle E-distance)를 perturbation-level bootstrap 95% CI 하한 > 0으로 낮춘다 — in-distribution K562에서 powered로 측정.** category error로 환원 불가능하고, single-base-model로 측정 가능하며, 1차 산출물(predict-or-experiment)과 직결되는 유일한 robust win. cross-context RPE1는 directional·underpowered로만 보고. WIN B/C는 supporting, 무너지면 registered negative.
+Feature standardization mean/scale은 usable `base_train` perturbation에만 fit한다.
 
----
+### 4.2 Scientific-mode encoder 계약
 
-## 4. 실험계획 (공개데이터 only, wet-lab 0) + 시뮬레이션 closed-loop + 데이터셋/split
+Scientific run에서 config가 ESM-2를 요청하면 ESM dependency, model load 또는 GPU execution
+실패는 fatal error다. Mock encoder로 자동 fallback하는 것은 금지한다.
 
-### 4.1 데이터셋 × 일반화 그리드
-| 데이터셋 | 역할 | CARTOGRAPHER 쓰임 | 그리드 |
-|---|---|---|---|
-| Replogle **K562**(day6, essential) | base 학습 + calibration pool | **powered 헤드라인(WIN A) 측정처** | A(seen), B(held-out gene) |
-| Replogle **RPE1**(day7, 공유 essential) | sealed external test | cross-context, **underpowered·directional만** | C, D |
-| **Norman**(K562 combos) | OOD stress | gate가 abstain해야 정답 → routing falsifier | combinatorial |
-| **Tahoe**(drugs) | 극단 OOD | 약물 modality=거의 전량 abstain이 정답 | modality-OOD |
+Mock encoder는 명시적인 `synthetic`/`ci` mode에서만 허용하며, 해당 artifact는 scientific
+verdict 입력으로 사용할 수 없다. Config primary encoder와 feature-bank provenance의 model
+revision과 pooling이 `{model_revision}_{pooling}_pool` cross-check로 일치하지 않으면 evaluation을
+거부한다. Feature dimension은 model revision에서 파생되므로 별도로 비교하지 않는다.
 
-Norman/Tahoe는 base를 "이기는" 데이터가 아니라 **gate가 모름을 abstain하는지** 측정하는 negative-control. circular하면 OOD에서도 high-confidence를 줄 것 → OOD가 순환성 falsifier.
+### 4.3 ESM batching 계약
 
-### 4.2 leakage 계약 (split contract 상속)
-calibration = base 미학습 held-out pert의 집단거리 score만. RPE1 outcome 미접촉(invariant #3). barcode/replicate/channel은 calibration↔test 분리. **baseline-expr feature는 P-거리에서 제외(C-5).** threshold/isotonic fit이 RPE1 outcome 보면 무효 — provenance 점검.
+전체 protein을 단일 batch로 처리하지 않는다.
 
-### 4.3 시뮬레이션 closed-loop + 순환성 해소법
-"oracle" = sealed RPE1(+Norman+Tahoe)를 한 번에 하나씩 공개하는 함수(wet-lab 없음). 예산 $B$ round: acquisition이 $q_t$ 선택 → oracle이 $X^\star(q_t)$ 공개 → calibration/base 갱신 → 누적 hit 기록.
+- sequence-length bucket 사용
+- config에 token budget 또는 batch size 등록
+- model maximum token length 사전 검증
+- 장문 sequence `error`(거부)/`truncate` policy 사전등록(현재 구현은 두 정책; window는 미구현)
+- batch마다 pooled vector만 CPU로 이동
+- A100 real-model smoke test 통과
 
-**순환성 4겹 방어 + 추가 fix:**
-1. **oracle 독립성:** hit/miss ground truth는 base 출력이 아니라 **sealed 실측** $X^\star$.
-2. **score-agnostic 동축 baseline:** 모든 정책이 같은 base 사용 → "base가 잘하는 영역" 이점은 공통 상쇄 → gate가 이기면 차이는 routing 품질에서만 옴.
-3. **OOD negative-control(Norman/Tahoe):** circular면 OOD에서 abstain 못 함 → 노출.
-4. **counterfactual masking(KILL-GATE #3):** calibration에서 특정 pert군 마스킹 → recoverability 판정이 인과적으로 바뀌어야 함.
-5. **[FIX — simloop critique: closed-loop tautology 제거]** per-round 재캘리브레이션은 exchangeability를 깬다. → batch(per-round 아님) 재캘리브레이션 + held-out exchangeable block, 또는 명시적 online/adaptive-conformal 채택. hit은 oracle effect-size로만 정의.
-6. **잔여 순환성 = accepted limitation:** base와 gate가 feature space 공유. base-독립 통계량(calibration-manifold kNN density)으로 최소화하되 완전 분리 불가 → ablation으로 누출 bound 정량화(gate-only-geometry vs gate-with-R2).
+장문 서열 정책 변경은 feature definition 변경이므로 새 run ID가 필요하다.
 
----
+### 4.4 Response space
 
-## 5. kill-gates (3종, go/no-go) — 실행순서 #1 → #3 → #2
+Controls와 `base_train` cells만 이용해 다음 transform을 fit한다.
 
-**[FIX — simloop critique: #3를 PRIMARY go/no-go로 승격]** #2는 cross-context n에서 underpowered, #1은 shift로 soft. **#3만이 잘 powered되고(마스킹 설계·seed 반복 가능) "recoverability gate"가 이름값을 하는지 가르는 sharp falsifier** → 프로젝트 go/no-go를 #3에 건다.
+```text
+library-size normalization to 10,000
+log1p
+2,000 HVGs
+50-dimensional PCA
+```
 
-### KILL-GATE #1 — Coverage validity (table-stakes, win 아님)
-- **가설:** 분포값 radius가 명목 $1-\alpha$ 달성.
-- **[FIX — coverage-under-shift 2: selection-laundering 차단] triple 보고 필수:** (i) full test set coverage(would-be-abstain을 worst-case/uncovered 할당), (ii) coverage-conditional-on-PREDICT, (iii) abstain rate. conditional만 통과 + 높은 abstain = gate가 자기 실패를 검열 → 그렇게 보고. 추가 체크: abstain threshold를 풀수록 coverage가 단조 degrade하는가? 아주 높은 abstain에서만 성립하면 보장은 vacuous.
-- **실패 시:** conformal/exchangeability 붕괴 → 디버그. 통과해도 win 아님.
+Method-development, conformal-calibration, sealed outcome으로 HVG/PCA를 refit하거나 recenter하지
+않는다. Transform state와 fit IDs를 checksum에 포함한다.
 
-### KILL-GATE #3 — Recoverability의 인과 falsification (★ PRIMARY go/no-go)
-- **가설:** gate 판정은 calibration geometry의 인과적 함수. 특정 pathway/pert cluster를 마스킹하면 그 영역 abstain율이 유의 상승. placebo(랜덤) 마스킹에선 $\Delta\approx0$.
-- **임계:** $\Delta_{\text{target}}-\Delta_{\text{placebo}}$의 95% CI 하한 > 0.
-- **실패 시:** gate는 식별성 아닌 base-confidence proxy → "recoverability gate" 명칭 철회, "conformalized-UQ"로 재명명(정직 보고). **+ R2/R4 ablation 동반 사전등록:** R4(local residual)가 win 캐리하면 "더 나은 error-ranking score"로 relabel, identifiability novelty 철회. R2가 category-distinct로 인정되려면 **R4를 ablate한 상태에서 R2가 ensemble-variance를 CI>0로 이겨야** 함.
+### 4.5 Equal-cell distance 계약
 
-### KILL-GATE #2 — Selective risk-coverage 우위 (헤드라인 win의 1차 측정)
-- **가설:** $\mathrm{AURC}_{\text{gate}} < \mathrm{AURC}_{\text{best-baseline}}$, 차이 perturbation-level bootstrap 95% CI 하한 > 0. **risk = 실측 oracle E-distance**(radius 아님). AUGRC 동반.
-- **baseline:** raw-distance(=conformalized-baseline, 한 상대) + ensemble-variance(cost-adjusted). conformalized-baseline을 별도 scalp으로 광고 금지.
-- **[FIX — simloop critique: 위치·검정력]** powered 측정은 **in-distribution K562**. **Cell C(K562→RPE1)는 $n_{\text{test}}\sim40\text{–}100$이라 최소검출 Cohen-d $\sim0.31\text{–}0.44$ → modest edge는 CI 안에 묻힘 → descriptive/directional로만 보고.**
-- **실패 시(in-dist에서):** "calibrated이나 routing은 baseline 동급" = category error 현실화 → **registered negative result**("conformal coverage 달성하나 selective utility는 baseline 못 이김"). CARTOGRAPHER 핵심 주장 사망.
+Primary risk는 frozen PCA space의 repeated equal-cell energy distance다.
 
-**무결성 가드(모든 곡선 공통):** coverage parity check(empirical coverage가 $1-\alpha$ bootstrap CI 안), self-reference 차단(risk=실측), null/shuffle 대조(섞으면 우위 소멸), cross-context 유지 검사(K562→RPE1 부호/유의 — 단 underpowered 인정), self-prediction 상한·random+transform sanity 동반.
+```text
+cell_cap                 96
+minimum cells            64
+sampling repeats          8
+energy block size       256
+```
+
+Sampling은 `(run_id, perturbation ID)`에서 결정적으로 파생한다. Write-once provenance(§11.2)가
+완료되어 run ID가 data-card/raw-data/sequence hash를 포함하면 sampling seed도 transitively data
+checksum에 묶인다(현재 run ID는 config digest 기반).
+Self-distance floor는 측정 신뢰성 진단이며 outcome-dependent exclusion에 사용하지 않는다.
 
 ---
 
-## 6. MVP 범위 + M5/A100 feasibility
+## 5. Frozen additive base predictor
 
-### 6.1 MVP — 헤드라인 win만 테스트하는 최소판
-- **목표:** "in-distribution K562에서 selective risk-coverage 우위(KILL-GATE #2)"를 가장 싸게 falsify. 단 **실행순서는 #1 → #3 → #2.**
-- **데이터:** K562 mini(calibration pool) + RPE1 공유 essential mini(sealed, directional only) + Norman/Tahoe 소량(abstain sanity).
-- **base:** 가장 가벼운 검증된 것(CFM-GP 또는 형제 Model #1 MVP, operator off·$b_g$만). 새 base 학습 금지, 단일 base + held-out calibration.
-- **gate:** calibration score 분포의 local density / kNN E-distance to calibration manifold + conformal radius. **이 MVP gate는 본질적으로 error 위 kNN 회귀**임을 명시(category-error 2) — 따라서 MVP에서 win이 나와도 "geometry/identifiability" 주장 금지, "better error-ranking"으로만 보고.
-- **simloop:** offline 시뮬레이션(전체 sealed 미리 보유, acquisition 순서만 재생) — **단 base 갱신 없으므로 WIN C는 exploratory only.**
-- **합격:** #1 triple 통과 + #3 target>placebo(CI>0) + #2 in-dist AURC CI>0 + corr-floor 진단 통과. 하나라도 실패 → registered negative 후 scope 재조정.
+### 5.1 현재 normative base
 
-### 6.2 n_cal 사전 사이징 (build 전 필수) [FIX — simloop critique: 지배적 feasibility 사실]
-**[S5] "200–500 cells/pert"는 한 score 계산용 cells-per-query이지 calibration set 크기가 아니다.** 실제 $n_{\text{cal}}$ = 쿼리(=score) 수다. ~41% measurable-null 필터 + cells/pert QC 후 **공유 essential K562↔RPE1 pert는 총 ~82(200 cells)–~820(2000 cells) scores**, 이걸 train/cal/test로 쪼갠다.
-- **결정:** 실제 manifest에서 **measurable 공유-essential pert 수 + in-dist held-out K562 pert 수를 build 전에 계산·사전등록**하고, 그 n에서 bootstrap-detectable AURC effect size를 보고한 뒤 실행.
-- **L2 Mondrian/L3 weighted는 이 n에서 산술적으로 거의 사망:** ~205 scores를 cell-line×effect-size×pathway로 쪼개면 군당 ~10–20 → 90% radius는 $n\ge9$여야 존재하고 $n\sim10\text{–}20$에서 분산 폭증 → radius 무용. **Mondrian/weighted는 사전등록 최소 군크기(≥30 scores/group) 미충족 시 비활성, L1 marginal + abstain-routing만 보고.** cross-context 쿼리 중 abstain되는 비율을 명시(=새 context use case가 얼마나 살아남는지).
+현재 MVP base는 deep operator/OT-CFM이 아니라 additive multi-output ridge다.
 
-### 6.3 M5 Pro(24GB) / A100 feasibility
-- conformal·gate·simloop 전부 post-hoc: base forward 1회 + calibration 배열 연산 → **재학습 없음** → 24GB MPS에서 도는 결정적 이유.
-- **mini(M5):** sparse AnnData chunked, frozen forward. E-distance/sliced-W는 calibration 집단(수백 cell)에 $\mathcal O(n^2d)$ 또는 sliced $\mathcal O(nL\log n)$. geomloss/POT는 단일 코드경로 고정 + **device-parity 수치 테스트**(cpu/mps/cuda 일치) 후 사용 — 안 그러면 mini win이 full에서 사라짐.
-- **full(A100):** 전체 Replogle+Norman+Tahoe + ensemble-variance baseline(seed 5–10 forward, 재학습 아닌 inference) + 전체 simloop. bootstrap(perturbation×seed) embarrassingly parallel.
-- **same code, config-only**(device/n/L/α). mini-only 분기 금지.
+```text
+standardized ESM feature(phi_g)
+    -> predicted PCA mean shift(phi_g @ W)
+    -> transformed control population translation
+```
 
----
+`W`와 ridge alpha는 `base_train` 내부 CV로만 fit한다. Base는 method development 전에 freeze한다.
 
-## 7. 정직한 risk + reframe + 유효 음성결과
+### 5.2 Ensemble baseline
 
-### 7.1 baseline phantom (category-error 1) — 처리
-conformalize는 AURC 랭킹을 안 바꾼다(검증 0.50127966==). → 실제 상대는 raw-distance + ensemble-variance 2종. "conformalized baseline을 이김"을 별도 win으로 광고 금지. **[설계 반영, 해결]**
+Paired perturbation bootstrap으로 20개 additive-ridge member를 만든다. 동일 resample index를
+feature와 measured outcome 양쪽에 적용한다. Ensemble disagreement는 output-space member mean
+dispersion으로 계산한다.
 
-### 7.2 R4 = error-regression (category-error 2) — accepted relabel
-R4·MVP gate는 error 위 kNN 회귀. R4가 win 캐리하면 "더 나은 UQ score"로 relabel, identifiability novelty 철회. R2가 R4-ablate 후 ensemble-variance를 CI>0로 이겨야 category-distinct. **[사전등록 ablation, accepted risk]**
+### 5.3 현재 base의 claim 상한
 
-### 7.3 R2가 base self-reduce에 contingent (category-error 3) — gated
-형제 Model #1이 bias-only로 self-reduce하면(자체 문헌이 예측) R2는 노이즈, S축이 R3로 붕괴, 헤드라인이 ensemble-variance와 동률. → **R2/operator 스토리를 base의 operator-vs-bias-only kill-gate 뒤에 gate.** base가 self-reduce하면 **사전등록된 negative**: "S축 differentiator dead, gate는 generic OOD로 후퇴, 헤드라인은 ensemble-variance와 tie 가능성." **[accepted risk + 명시]**
-
-### 7.4 coverage-under-shift — L3 정직 강등 (가장 중요한 reframe)
-**[FIX — coverage-under-shift 1: NOT-A-COVARIATE-SHIFT]** K562→RPE1은 cell-line+experiment+batch+endpoint(day6 vs day7) 동시 변동(CLAUDE.md line 47)이고, **invariant인 $P(\text{post-pop}\mid\text{pert,control,cell-line})$의 조건부가 cell-line에 따라 바뀌는 것이 곧 과학적 질문**이다. 이는 covariate shift가 아니라 **concept/conditional shift**다. Weighted conformal(Tibshirani 2019)은 $P(Y|X)$ 불변 하의 $P(X)$ 변화에만 finite-sample 보장을 준다. → **여기서는 가중치를 완벽히 알아도 어떤 차원의 distribution-free 보장도 없다.** L3 self-grade "weight 알면 정확"은 이 벤치마크에서 **거짓**.
-- **reframe:** L3 출력을 **"calibrated applicability-domain score"로 재명명. coverage 보장 아님. 이 정직한 reframe은 footnote가 아니라 헤드라인에 둔다.**
-- support 비중첩 영역은 $w$ 미정의/폭발 → gate ABSTAIN으로 라우팅(coverage 보장 강행 금지) → 단 이것이 selection bias이므로 §5 triple 보고로 노출.
-
-### 7.5 coverage-under-shift — calibration 검정력 부족
-$n_{\text{cal}}$이 low-hundreds, weighted-ESS $=(\sum w)^2/\sum w^2$가 <50 가능 → $\alpha=0.1$ 분위수가 넓고 불안정, KILL-GATE #1의 유한표본 slack $\epsilon$이 주장을 통째로 삼킬 수 있음. → **§6.2 사전 사이징. ESS가 안정 분위수를 못 받치면(radius CI 폭 > self-distance floor) 분포값 conformal 층을 단일 marginal radius로 축소하거나 폐기 — 불안정 radius를 보장으로 포장 금지.** **[accepted risk + 사전 게이트]**
-
-### 7.6 WIN B self-falsification (coverage-under-shift 4) — 조기 audit
-SW는 covariance 민감도 때문에 선택되었으므로 WIN B 우위가 SW에서만 나타날 prior가 높고, 그러면 자체 규칙상 score artifact = self-falsification. → **§3 WIN B audit를 투자 전 조기·저비용 실행, SW-only면 negative.** outcome-독립 stratum 정의 부재면 WIN B를 synthetic-only로 강등/폐기. **[설계 반영]**
-
-### 7.7 WIN C tautology (3 critiques 공통)
-abstain==high-error는 closed-loop 갱신 없으면 동어반복. → base/calibration 실제 갱신 + oracle effect-size hit 정의. 갱신 전엔 exploratory. **[설계 반영, C는 마지막·가장 약함]**
-
-### 7.8 그때의 reframe (win 무너질 때)
-- WIN A가 in-dist에서 죽으면 → **registered negative: "calibrated but not better at routing."** CARTOGRAPHER 핵심 주장 사망, 정직 공개.
-- WIN A가 in-dist 생존·cross-context 죽으면 → **"gate는 in-distribution K562에서 routing 개선(powered); cross-context RPE1는 directional, n 부족."** genuine win(라우팅 품질, coverage 비환원) 유지, cross-context trust layer는 overclaim 안 함.
-- R2 dead → **"gate = conformalized-UQ"로 재명명, identifiability 서사 폐기, 헤드라인은 better-error-ranking으로만.**
-- L3 → **"applicability-domain heuristic"으로만 판매. 보장 아님. decision layer를 팔고 guarantee를 팔지 않는다.**
-
-### 7.9 유효 음성결과 (registered negatives — overclaim 금지)
-1. **"conformal coverage는 달성하나 selective utility는 baseline 못 이김"**(category error 현실화).
-2. **"gate = base-confidence proxy, not identifiability"**(#3 실패).
-3. **"distribution-valued heterogeneity 우위는 SW score artifact"**(WIN B audit 실패).
-4. **"K562→RPE1는 covariate shift 아닌 concept shift → distribution-free coverage 보장 불가, applicability-domain만"**.
-5. **"R4(error-regression)가 win 캐리 → category-distinct novelty 없음, better UQ score일 뿐"**.
+Control population translation은 covariance, multimodality, cell-state-specific interaction을
+새로 생성하지 못한다. 따라서 이 MVP는 conditional population-transition surrogate이며
+mechanistic cell simulator 또는 full virtual cell로 주장하지 않는다.
 
 ---
 
-## 8. 미해결 질문 (owner 결정 필요)
+## 6. Scalar conformal error bound
 
-1. **[가장 중요] 헤드라인 측정 위치 확정.** simloop critique의 권고대로 powered 헤드라인을 **in-distribution K562**로 옮기고 cross-context RPE1를 directional로 강등하는가? 이는 "새 context 신뢰층"이라는 원래 selling point를 약화시킨다. owner가 (a) in-dist powered + cross-context directional(권장, 정직), 또는 (b) cross-context를 헤드라인 유지(높은 underpowered 실패확률 수용) 중 결정.
+### 6.1 Nonconformity score
 
-2. **risk metric 최종 고정.** WIN A의 risk를 E-distance(주) vs sliced-Wasserstein(부) — 둘이 AURC 순위를 다르게 매기면 어느 것을 primary로 preregister하고, 충돌 시 사전 규칙은? (E-dist는 gene-gene 의존성 미포착[S11], SW는 임베딩/projection 의존·self-falsification 위험.)
+각 perturbation query의 calibration error는 다음이다.
 
-3. **R2/operator 스토리의 운명을 base kill-gate에 거는가.** 형제 Model #1의 operator-vs-bias-only kill-gate가 통과해야 R2가 의미. 통과 못 하면(자체 문헌이 예측) S축을 R3-only로 운영해도 B1/B2를 이기는지 — 그 경우 헤드라인이 ensemble-variance와 tie면 프로젝트 핵심 win이 약해진다. 사전 입장 결정 필요.
+```text
+e(q) = repeated_energy_distance(base_prediction(q), observed_population(q))
+```
 
-4. **selective risk target $\alpha^*$의 정규화.** E-distance 절대값은 effect-size 의존(약효과 pert는 작은 E-dist가 정상) → effect-size 정규화 relative risk를 써야 abstain이 "effect 큰데 못 맞춤"을 타게팅. 정규화 정의 미확정.
+Primary score는 frozen PCA space의 energy distance다. Sliced-Wasserstein은 보조 진단으로만
+사용하며 confirmatory endpoint를 대체하지 않는다.
 
-5. **분포값 conformal 층 유지 vs 단일 marginal radius로 축소.** §6.2/§7.5의 ESS 사이징 결과에 따라 — distribution-valued radius가 불안정하면 cut. build 전 manifest 사이징 후 결정.
+### 6.2 Finite-sample bound
 
-6. **WIN B의 outcome-독립 responder stratum 정의가 존재하는가.** control/base만으로 noise floor 위에서 real bimodality를 잡는 데이터-비의존 기준(control 대비 effect-size 분위 / GMM 성분 수)이 invariant #9·#4를 안 깨고 가능한가? 없으면 WIN B는 synthetic-only로 강등.
+Calibration errors 수를 `n_cal`, miscoverage를 `alpha`라 하면:
 
-7. **simloop 갱신 정책.** ABSTAIN→실험으로 얻은 데이터를 calibration만 갱신(저비용·exchangeability 주의) vs base도 업데이트(루프 정합·비용↑). 솔로+A100 1장 제약 하 갱신 주기와 online conformal 채택 여부.
+```text
+k = ceil((n_cal + 1) * (1 - alpha))
+error_bound = kth_order_statistic(errors, min(k, n_cal))
+```
 
-8. **gate 합성 g_θ.** transparent OR-게이트 vs 작은 learned monotone(isotonic/GBM) — learned는 AURC↑이나 small calibration에서 누출·과적합. bootstrap CI 하 win을 더 안정적으로 주는 쪽을 mini-data로 결정(단 RPE1 outcome 미접촉 절차 명시).
+출력 명칭은 `scalar global prediction-error bound`다. `distribution ball`, `prediction set`,
+`conditional guarantee`로 부르지 않는다.
 
-9. **abstain ≠ 고정보이득.** recoverability-gate를 acquisition으로 직결하는 게 최적인가, 아니면 별도 정보이득 항과 결합해야 하는가(이미 충분히 본 영역=식별가능=PREDICT지만 정보이득 낮음).
+### 6.3 Coverage reporting
+
+- marginal error-bound coverage
+- selective error-bound coverage
+- selection coverage
+- effective covered fraction
+- abstain rate
+
+모든 sealed indicator가 하나의 random calibration quantile을 공유하므로 naive Binomial
+interval을 사용하지 않는다. Calibration validity는 exact split-conformal beta-binomial
+predictive acceptance band로 검사한다.
+
+Coverage failure는 `CALIBRATION_FAILURE`이며, 결과를 숨기거나 tolerance를 사후 확대하지
+않는다.
 
 ---
 
-### 부록: 한 줄 요약 (owner용)
-**CARTOGRAPHER는 단일 base predictor 위에 분포값 conformal 공(table-stakes, in-dist marginal)과 recoverability gate(PREDICT/ABSTAIN)를 post-hoc로 얹는 신뢰·결정 레이어다. coverage는 어떤 score든 달성하므로 win이 아니라 입장료이고, conformalized-baseline은 raw-distance와 AURC가 byte-identical한 phantom이다. 유일한 비환원적 헤드라인 win = in-distribution K562에서 selective risk-coverage AURC(risk=실측 oracle E-distance)가 raw-distance·ensemble-variance(cost-adjusted)를 perturbation-level bootstrap CI 하한>0으로 이기는 라우팅 품질이다. K562→RPE1는 covariate shift가 아니라 concept shift이므로 weighted conformal은 가중치를 알아도 보장이 없다 — L3는 coverage 보장이 아닌 applicability-domain heuristic으로 강등하고, cross-context는 underpowered directional로만 보고한다. go/no-go는 비싸고 underpowered한 AURC 비교(#2)가 아니라, 잘 powered되고 gate가 이름값을 하는지 가르는 causal-masking falsifier(#3)에 건다. R4(local residual)·MVP gate는 error 위 kNN 회귀이므로 win이 나도 identifiability가 아닌 better-error-ranking으로 정직 relabel하고, R2/operator 스토리는 base의 operator-vs-bias-only kill-gate에 contingent다. 무너지는 모든 축은 registered negative로 공개한다 — wet-lab 0, 공개데이터 only.**
+## 7. R1+R4 Trust-Gate
+
+### 7.1 R1 — feature extrapolation
+
+Standardized ESM feature space에서 method-development bank까지의 mean kNN distance다.
+Calibration reference를 계산할 때 self-neighbor를 leave-one-out으로 제외한다.
+
+### 7.2 R4 — local residual regression
+
+Feature-space kNN neighbor의 measured base error 중앙값이다. R4는 held-out error를 직접
+추정하는 error-aware UQ이며 causal identifiability가 아니다.
+
+### 7.3 Gate score
+
+```text
+gate(q) = w * ECDF(R1(q)) + (1-w) * ECDF(R4(q))
+```
+
+- `k ∈ {5, 10, 20, 40}`
+- `w ∈ {0.25, 0.50, 0.75, 1.00}`
+- `(k,w)`는 method-development OOF AURC로 선택
+- tie: larger `w`, then smaller `k`
+- `w=0`은 full gate가 아니라 residual-only comparator
+
+PREDICT threshold는 conformal-calibration **gate scores**의 preregistered 70% quantile로 정한다.
+Evaluation median 또는 evaluation outcome을 threshold에 사용하지 않는다.
+
+### 7.4 Added-value 조건
+
+```text
+delta_added = AURC_residual_only - AURC_full_gate
+```
+
+Full gate가 residual-only보다 직접 유의하게 우수해야 R1의 added value를 인정한다. 단순히
+residual-only가 다른 baseline을 이기지 못했다는 사실은 full gate의 가치를 증명하지 않는다.
 
 ---
 
-## 9. Active Cartography 결정 (능동 확장 검증 결과, 2026-06-20)
+## 8. Fair-Comparison Protocol과 comparator family
 
-**판정: keep-passive.** 능동학습 acquisition으로 "distribution-valued recoverability"를 쓰는 Active Cartography는 검증 결과 **EPIG(arXiv 2304.08151) + GO-CBED(2507.07359)의 재매개변수화로 환원**되고(점수 4–5 < passive 6), R4 error-regressor가 win을 캐리하면 BALD/uncertainty-sampling 동어반복으로 더 얇아진다. in-context(PFN) 루프 시너지는 실재하나 PFNs4BO/Tab-AICL 선행 → 비용 절감일 뿐 통계적 novelty 아님. wet-lab 없는 시뮬 루프는 일반화 순환을 **원리적으로 해소 불가** → 최대 정직 주장 = "fixed public-oracle 하 sample-efficiency benchmark", discovery-acceleration 아님.
+### 8.1 공정 비교 계약
 
-**채택 형태 = 조건부 hybrid (adopt 아님).** passive CARTOGRAPHER를 본체로 유지하고, 능동 layer는 **단일 사전등록 falsification 실험(P5 gate)으로만** 추가한다:
-> P5: distribution-valued recoverability acquisition이 **EPIG와 GO-CBED-lite를 둘 다**, 동일 frozen base/oracle/budget, **R4 ablate(R2-only)**, effect-size-stratified hit-curve(hit=oracle E-dist>τ, "base가 틀림" 정의 금지), perturbation-level bootstrap 95% CI 하한>0으로 이겨야 함. + corr(recoverability,hit) > corr(base-radius,hit), CI>0.
-> 하나라도 fail → **registered negative**("reparametrization, no distinct gain") — 이것이 ALIVE가 줄 수 있는 정직한 가치.
+모든 learned routing method는 동일한 다음 자원을 받는다.
 
-**비협상 전제:** online-conformal(ACI) 명시 채택, oracle-effect-size hit 정의(절대 base-error 아님). 가장 가능성 높은 결과 = 동률 = registered negative.
+- standardized ESM features
+- method-development measured errors
+- OOF folds
+- registered seeds
+- tuning budget
+- frozen base predictions
 
-### 9.1 Active Cartography 2회차 iterate (환원 재확인, 2026-06-20)
+평가 outcome을 연 뒤 comparator를 추가·삭제하거나 best baseline만 사후 선택하지 않는다.
 
-distribution-free / misspecification 각도로 환원을 정면 공격한 결과: **여전히 reduces-but-useful-niche (점수 5 < passive 6).** trust-acquisition 통합은 ASPEST/OCS-ARC/SCRC로 완전 환원(정리-형태 기여 아님 → engineering). coverage-story도 conformal-AL(CoPAL)로 환원.
+### 8.2 사전등록 comparator
 
-**유일하게 살아남은 비환원 축 (genuine, 단 가설):**
-> 분포값(cell population) 출력에서, frozen·misspecified base 하에, conformal-recoverability를 **acquisition TARGET 자체**로 쓰는 것이 conformalize된 misspecified-EIG-ranking보다 selective-AURC에서 낫고 gap이 misspecification에 단조 확대.
+1. nearest-feature distance
+2. ensemble disagreement
+3. Ridge error regressor
+4. gradient-boosted error regressor
+5. residual-only kNN error score
 
-regime-match는 real(단일세포엔 calibrated population posterior 부재 → EPIG가 틀린 모델 위 계산). 그러나 **경험적 ranking claim일 뿐 증명 불가**, modal 결과 = tie, 가장 가까운 위협 = Stanton(BO+conformal)·LOCBO·RIAD(2506.07805, misspec-robust Bayesian AL).
+Random/oracle abstention은 descriptive floor/ceiling으로만 보고하며 confirmatory comparator
+family에는 포함하지 않는다.
 
-**P5 ladder (이 한 축을 falsify하는 유일한 길 — 빌드 필요):**
-- misspecification ladder(x): K562→RPE1 concept shift / operator-off under-param / pathway masking / HVG-PCA distortion.
-- comparator(필수): **conformalized-EPIG**(빼면 straw-man) + GO-CBED-lite + conformal-recoverability, frozen base/oracle/budget 동일.
-- 측정(y): selective-AURC(risk=oracle E-dist) + effect-size-stratified hit-curve.
-- GO 조건: gap이 misspecification에 단조 확대 + perturbation-level bootstrap 95% CI 하한>0 (in-dist tie 허용).
-- KILL: conformalized-EPIG가 모든 level에서 tie → coverage-fix뿐 / gap이 misspec-무관 → generic-AL / R4가 win 캐리 → uncertainty-sampling 동어반복. 어느 하나라도 → registered negative.
-- cap: active loop가 exchangeability를 깸 → win 주장 구간(OOD, n_cal 수백, ESS<50)에서 보장이 vacuous할 수 있음. claim 상한.
+### 8.3 OOF method development
 
-**결론: 개념적 iteration 소진. 이 한 축은 데이터로만 답한다 → P5 실험을 빌드해야 resolve됨.**
+모든 hyperparameter는 `method_development` 내부 fixed five-fold OOF AURC로 선택한다.
+Registered seeds의 perturbation-level OOF score를 평균한 후 method를 lock한다.
+
+`MethodLock`에는 전체 search table, folds, seeds, selected parameters, OOF score와 checksum을
+저장한다.
+
+---
+
+## 9. Preregistered futility checkpoint
+
+### 9.1 Operational status
+
+Futility는 scientific verdict가 아니다.
+
+```text
+CONTINUE_CONFIRMATORY
+FUTILITY_STOPPED
+```
+
+### 9.2 Futility statistic
+
+Development OOF에서 `gbm_error`와 `residual_only`에 대해 계산한다.
+
+```text
+delta_m_dev = AURC_m_dev - AURC_gate_dev
+```
+
+Perturbation-level max-deviation bootstrap으로 simultaneous one-sided 90% **upper bounds**를
+구한다. Normalized development risk scale에서 `delta_min = 0.01`이다.
+
+- comparator 중 하나라도 upper bound `<= 0.01`이면 `FUTILITY_STOPPED`
+- 아니면 `CONTINUE_CONFIRMATORY`
+
+“within fold noise” 같은 육안·재량 판단은 금지한다.
+
+### 9.3 Futility-stopped branch
+
+- conformal artifact까지 생성 가능
+- sealed access count = 0
+- `scientific_verdict = null`
+- empirical sealed coverage 또는 `NO_DISTINCT_WIN` 주장 금지
+- 동일 run ID 영구 종료
+
+후속 confirmatory 시도는 새 사전등록 run ID가 필요하고 stopped run을 함께 보고한다.
+
+---
+
+## 10. Confirmatory inference와 verdict
+
+### 10.1 Simultaneous AURC inference
+
+Sealed perturbation ID를 replacement bootstrap한다. 모든 method는 각 replicate에서 동일한
+sampled indices를 사용한다. Comparator family 전체의 max-deviation distribution으로
+simultaneous one-sided 95% lower bounds를 만든다.
+
+모든 lower bound가 0보다 커야 primary AURC family를 통과한다.
+
+### 10.2 Secondary AUGRC
+
+Risk를 sealed cohort mean으로 고정 정규화하여 dimensionless AURC/AUGRC를 계산한다.
+
+```text
+AUGRC degradation = AUGRC_gate - AUGRC_comparator
+```
+
+모든 simultaneous upper bound가 preregistered margin `0.02` 이하이어야 한다.
+
+### 10.3 Single authoritative verdict
+
+```text
+INVALID_EVALUATION
+    provenance/leakage/integrity failure
+    OR sealed n < 200
+    OR nonfinite metric
+    OR measurement-reliability precondition failure
+
+CALIBRATION_FAILURE
+    integrity valid
+    BUT scalar error-bound coverage fails the registered acceptance band
+
+GATE_WINS
+    integrity valid
+    AND calibration valid
+    AND every simultaneous AURC lower bound > 0
+    AND every AUGRC degradation upper bound <= 0.02
+    AND full gate directly beats residual-only
+    AND selected w > 0
+
+NO_DISTINCT_WIN
+    every other valid completed confirmatory result
+```
+
+`compute_verdict()`만 scientific verdict를 생성한다. 모든 clause와 evidence를 결과에 저장한다.
+
+---
+
+## 11. Provenance, immutability, scientific-run preconditions
+
+### 11.1 필수 provenance
+
+- raw expression data URI와 SHA-256
+- protein sequence source/release와 mapping SHA-256
+- eligible/excluded IDs와 이유
+- manifest SHA-256
+- feature-bank provenance와 SHA-256
+- response-transform SHA-256
+- config, lockfile, Git commit SHA-256
+- MethodLock와 conformal artifact SHA-256
+- sealed-access audit
+- result와 report SHA-256
+
+### 11.2 Write-once run 계약
+
+Run ID는 config만이 아니라 data-card digest, raw-data hash, sequence-mapping hash와 함께
+immutable experiment identity를 형성해야 한다.
+
+- Existing run directory를 기본적으로 덮어쓰지 않는다.
+- Resume은 모든 upstream hash가 byte-identical할 때만 허용한다.
+- Stage output이 존재하면 byte-identical 재생성 외에는 거부한다.
+- Ledger entry 교체를 금지하고 append-only transition을 사용한다.
+- Terminal state 또는 sealed access 이후 upstream stage는 영구 잠근다.
+
+### 11.3 2026-06-21 implementation audit에서 확인된 scientific-run blocker
+
+다음 항목이 모두 해결되기 전에는 real K562 scientific run을 시작하지 않는다. 2026-06-21
+기준 항목 1–3은 merge되었고 4–5는 여전히 open이다.
+
+1. ESM 초기화 실패 시 mock encoder로 silent fallback하는 경로 제거 — **해결**(commit 8b47901)
+2. ESM length-bucket batching과 long-sequence policy 구현 — **해결**(commit a2f3d8f, 9f9f3aa)
+3. Feature eligibility 확정 후 manifest split 생성 — **해결**(commit 8b47901)
+4. Existing run directory와 ledger의 overwrite 차단 — **open**
+5. Sequence provenance를 raw expression URI와 분리 — **open**
+
+추가로 §4.3의 A100 real-model ESM smoke test는 아직 미실행이다(현재까지 batching/length-policy
+순수 로직만 torch 없이 검증). 따라서 real feature-bank build 전 open precondition으로 남는다.
+
+이 blocker 상태는 synthetic CI 성공과 별개다.
+
+---
+
+## 12. Reproducible execution state machine
+
+```text
+prepare
+  -> fit
+  -> develop
+  -> futility
+  -> calibrate
+  -> [FUTILITY_STOPPED: report, seal remains closed]
+  -> [CONTINUE_CONFIRMATORY: evaluate-once -> report]
+```
+
+### 12.1 Calibration-deliverable completion
+
+- Tasks 1–13 및 futility report 경로 통과
+- `FUTILITY_STOPPED`
+- frozen config/manifest/features/base/MethodLock/conformal/provenance 존재
+- sealed access 0회
+- `scientific_verdict: null`
+
+### 12.2 Confirmatory completion
+
+- Tasks 1–17 통과
+- `CONTINUE_CONFIRMATORY`
+- sealed access 정확히 1회
+- immutable scientific verdict와 audit report 공개
+- 결과가 negative/invalid여도 삭제·대체하지 않음
+
+---
+
+## 13. Registered negative와 정직한 해석
+
+### 13.1 Futility stopped
+
+> Development evidence가 최소 relevant advantage를 지지하지 않아 confirmatory evaluation을
+> 실행하지 않았다.
+
+이는 `NO_DISTINCT_WIN`이 아니며 sealed performance에 대해 말하지 않는다.
+
+### 13.2 Valid confirmatory negative
+
+`NO_DISTINCT_WIN`이면:
+
+> Scalar error calibration artifact는 유지할 수 있지만 Trust-Gate는 사전등록 comparator보다
+> distinctly better한 routing을 입증하지 못했다.
+
+### 13.3 R4가 성과를 설명
+
+Full gate가 residual-only를 이기지 못하면 “recoverability geometry” 주장을 철회하고
+error-regression 결과로 보고한다.
+
+### 13.4 Calibration failure
+
+Exchangeability, preprocessing, base misspecification을 새 protocol에서 조사한다. 기존
+run의 tolerance를 확대하거나 result를 재분류하지 않는다.
+
+### 13.5 Invalid evaluation
+
+무결성 또는 reliability failure를 정확히 기록한다. 수리 후에는 새 run ID를 사용한다.
+
+---
+
+## 14. Deferred Research Program — 현재 MVP 비규범 범위
+
+이 절은 현재 K562 MVP의 implementation requirement 또는 verdict 조건이 아니다.
+
+### 14.1 R2 operator-aware identifiability
+
+후속 deep base가 비자명한 low-rank operator `U_g V_g^T`를 학습한 경우에만 활성화한다.
+
+```text
+R2(q) = operator read-coordinate signal insufficiency
+```
+
+Activation prerequisite:
+
+- operator-vs-bias-only base kill-gate 통과
+- stable, identifiable `V_g`
+- R4 ablation 상태에서 ensemble disagreement 대비 added value
+
+Additive ridge MVP에는 R2를 소급 적용하지 않는다.
+
+### 14.2 R3 control-context OOD
+
+Single-context K562에서는 모든 query가 같은 control context를 공유하므로 R3는 정보가 없다.
+새 cell line/context protocol에서만 사용한다.
+
+### 14.3 Causal masking
+
+GATE_WINS 이후 “gate가 calibration support의 인과적 함수인가”를 검사하는 후속
+falsification이다.
+
+```text
+targeted pathway masking vs random placebo masking
+delta_target - delta_placebo의 95% CI lower > 0
+```
+
+실패하면 recoverability 명칭을 약화하거나 conformalized-UQ/error-routing으로 재명명한다.
+
+### 14.4 Distribution-valued prediction
+
+Population-distribution prediction set, ball volume, heterogeneity WIN B는 별도 spec이 필요하다.
+현재 scalar bound를 distribution-valued conformal set으로 재해석하지 않는다.
+
+필수 선행조건:
+
+- prediction-set event의 수학적 정의
+- matched-event baseline
+- outcome-independent heterogeneity stratum
+- E-distance/SW/MMD sensitivity audit
+- adequate cell and query sample size
+
+### 14.5 Cross-context RPE1
+
+K562→RPE1은 cell line, experimental batch, endpoint day가 함께 변하는 concept/conditional
+shift다. `P(Y|X)` 불변을 전제하는 weighted conformal로 distribution-free coverage를
+주장할 수 없다.
+
+RPE1는 별도 directional external-validation protocol로만 시작하며, coverage가 아니라
+applicability-domain diagnostic으로 framing한다.
+
+### 14.6 Norman과 Tahoe
+
+Combinatorial perturbation과 drug modality는 OOD negative control 후보이다. 현재 K562
+single-gene model의 scientific verdict에 포함하지 않는다.
+
+---
+
+## 15. Deferred Research Program — Active Cartography
+
+### 15.1 현재 판정
+
+**Keep passive.** 현재 MVP의 ABSTAIN score를 곧바로 acquisition policy로 부르면 EPIG,
+GO-CBED, BALD/uncertainty sampling의 재매개변수화일 가능성이 높다. Wet-lab 없는 public-oracle
+replay의 최대 정직한 주장은 fixed-oracle sample-efficiency benchmark다.
+
+### 15.2 Activation prerequisites
+
+Active Cartography protocol은 다음을 모두 만족한 뒤 별도 spec으로 시작한다.
+
+1. Trust-Gate MVP `GATE_WINS`
+2. Full gate의 residual-only 대비 added value
+3. Causal masking falsification 통과
+4. Acquisition target과 uncertainty score의 구분
+5. Adaptive/online conformal 또는 명시적 no-coverage claim
+6. 독립적인 budgeted sealed-oracle protocol
+
+### 15.3 필수 acquisition comparator
+
+- random
+- diversity/k-center
+- pathway-stratified one-shot
+- graph one-shot
+- IterPert
+- uncertainty-only
+- conformalized EPIG
+- GO-CBED-lite
+
+### 15.4 P5 misspecification ladder
+
+가설적 비환원 축:
+
+> Frozen misspecified population predictor에서 recoverability-target acquisition이
+> conformalized misspecified-EIG ranking보다 우수하고, 그 gap이 misspecification 증가에 따라
+> 단조 확대되는가?
+
+Misspecification ladder 후보:
+
+- pathway masking
+- operator-off under-parameterization
+- HVG/PCA distortion
+- K562→RPE1 concept shift
+
+Primary measurement:
+
+- selective AURC with oracle energy-distance risk
+- effect-size-stratified hit curve
+- perturbation-level simultaneous bootstrap
+
+Hit을 “base가 틀린 query”로 정의하지 않는다. Oracle effect-size threshold를 독립적으로
+사전등록한다.
+
+Fail conditions:
+
+- conformalized EPIG와 tie
+- gap이 misspecification과 무관
+- R4/error regression이 win을 전부 설명
+- adaptive feedback 아래 calibration claim이 무효
+
+하나라도 발생하면 registered negative:
+
+> Reparameterization with no distinct active-mapping gain.
+
+---
+
+## 16. 보존된 historical critique decisions
+
+다음 결정은 이전 spec에서 유지한다.
+
+1. Coverage 자체를 novelty 또는 routing win으로 광고하지 않는다.
+2. Risk 축에 conformal bound를 사용하지 않는다.
+3. R4를 identifiability로 오인하지 않는다.
+4. Cross-context concept shift에 distribution-free guarantee를 주장하지 않는다.
+5. ABSTAIN과 information gain을 동일시하지 않는다.
+6. Offline replay에서 base/calibration 갱신이 없으면 closed-loop discovery claim을 하지 않는다.
+7. Outcome-defined responder stratum으로 heterogeneity win을 만들지 않는다.
+8. 실패 조건과 reframe을 결과를 보기 전에 등록한다.
+
+---
+
+## 17. 최종 owner summary
+
+CARTOGRAPHER Trust-Gate MVP는 K562 additive perturbation predictor 위에 두 기능만 제공한다.
+
+1. **Scalar global conformal prediction-error bound** — calibration artifact, table stakes
+2. **R1+R4 PREDICT/ABSTAIN ranking** — 모든 강한 comparator를 simultaneous inference로
+   이겨야 하는 유일한 headline claim
+
+현재 MVP의 novelty는 보장 숫자가 아니라 leakage-controlled, error-aware routing의 added
+value다. Full gate가 supervised error regression과 residual-only를 이기지 못하면 정직한
+negative다. R2/R3, distribution-valued sets, RPE1, causal masking, Active Cartography는 모두
+별도 activation prerequisite를 가진 후속 연구이며 현재 결과에 소급해 주장하지 않는다.
+
+Scientific run은 §11.3의 남은 blocker — write-once run provenance(#4), sequence-provenance
+분리(#5), A100 real-model ESM smoke test — 가 해결된 뒤에만 허용한다. Mock-fallback 제거, ESM
+batching, eligibility-before-split(#1–3)은 이미 merge되었다.
