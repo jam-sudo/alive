@@ -901,5 +901,7 @@ class TestRequireEncoderMatch:
             run_id=config.run_id,
             require_encoder_match=False,
         )
-        # With the default, the result is a valid evaluation (not INVALID due to encoder).
-        assert result.verdict in set(Verdict)
+        # With the default, the encoder leg never fires: the result is NOT
+        # INVALID_EVALUATION (the mock bank matches the mock-config primary, and
+        # require_encoder_match=False would skip the check regardless).
+        assert result.verdict != Verdict.INVALID_EVALUATION
