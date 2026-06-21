@@ -33,7 +33,7 @@ FeatureBankProvenance
     Frozen dataclass recording all inputs that produced the bank.
 FeatureBank
     The feature bank itself: raw vectors, standardized vectors, metadata, I/O.
-build_feature_bank(gene_sequences, encoder, *, sequence_source, ...)
+build_feature_bank(gene_sequences, encoder, *, sequence_source, id_mapping_version, ...)
     Builder function that encodes, pools, validates, and standardizes.
 """
 
@@ -334,7 +334,11 @@ class Esm2Encoder:
 
         from alive.data.features import Esm2Encoder
         encoder = Esm2Encoder()          # no model load here
-        bank = build_feature_bank(mapping, encoder, sequence_source="uniprot-2024-01")
+        bank = build_feature_bank(
+            mapping, encoder,
+            sequence_source="uniprot-2024-01",
+            id_mapping_version="ensembl-110",
+        )
 
     Parameters
     ----------
@@ -558,7 +562,10 @@ class FeatureBankProvenance:
     model_revision : str
         Encoder revision string (e.g. ``"esm2_t33_650M_UR50D"``).
     sequence_source : str
-        Versioned mapping identifier (e.g. ``"uniprot-2024-01"``).
+        Protein-sequence database release (e.g. ``"uniprot-2024-01"``).
+        This is distinct from the expression data URI.
+    id_mapping_version : str
+        Gene-to-protein ID mapping version (e.g. ``"ensembl-110"``).
     pooling : str
         Pooling strategy used (currently always ``"mean"``).
     dim : int
@@ -575,6 +582,7 @@ class FeatureBankProvenance:
 
     model_revision: str
     sequence_source: str
+    id_mapping_version: str
     pooling: str
     dim: int
     dtype: str
@@ -587,6 +595,7 @@ class FeatureBankProvenance:
         return {
             "model_revision": self.model_revision,
             "sequence_source": self.sequence_source,
+            "id_mapping_version": self.id_mapping_version,
             "pooling": self.pooling,
             "dim": self.dim,
             "dtype": self.dtype,
@@ -601,6 +610,7 @@ class FeatureBankProvenance:
         return cls(
             model_revision=d["model_revision"],
             sequence_source=d["sequence_source"],
+            id_mapping_version=d["id_mapping_version"],
             pooling=d["pooling"],
             dim=d["dim"],
             dtype=d["dtype"],
@@ -842,6 +852,41 @@ class FeatureBank:
 
 
 # ---------------------------------------------------------------------------
+# Canonical mapping digest
+# ---------------------------------------------------------------------------
+
+
+def _canonical_mapping(gene_sequences: Mapping[str, Sequence[str]]) -> dict[str, list[str]]:
+    """Canonicalise a gene→sequences mapping for stable hashing.
+
+    Returns a dict of ``gene -> sorted list of sequences`` with genes in sorted
+    order so that the serialisation is independent of input ordering.
+    """
+    return {gene: sorted(list(seqs)) for gene, seqs in sorted(gene_sequences.items())}
+
+
+def canonical_mapping_sha256(gene_sequences: Mapping[str, Sequence[str]]) -> str:
+    """SHA-256 hex of the canonical gene→protein-sequence mapping.
+
+    This is the exact value recorded as
+    :attr:`FeatureBankProvenance.mapping_sha256` by :func:`build_feature_bank`,
+    exposed so callers (e.g. the composite ``run_id``) can compute it without
+    building the full feature bank.
+
+    Parameters
+    ----------
+    gene_sequences : Mapping[str, Sequence[str]]
+        Mapping from gene ID to a sequence of candidate protein sequences.
+
+    Returns
+    -------
+    str
+        Lowercase hex-encoded SHA-256 of the canonical mapping.
+    """
+    return sha256_json(_canonical_mapping(gene_sequences))
+
+
+# ---------------------------------------------------------------------------
 # Builder
 # ---------------------------------------------------------------------------
 
@@ -851,6 +896,7 @@ def build_feature_bank(
     encoder: SequenceEncoder,
     *,
     sequence_source: str,
+    id_mapping_version: str,
     standardize_on: Sequence[str] | None = None,
     pooling: str = "mean",
     dtype: str = "float32",
@@ -866,7 +912,11 @@ def build_feature_bank(
     encoder : SequenceEncoder
         Encoder that converts sequences to per-residue embeddings.
     sequence_source : str
-        Versioned mapping identifier recorded in provenance.
+        Protein-sequence database release recorded in provenance (e.g.
+        ``"uniprot-2024-01"``).  Distinct from the expression data URI.
+    id_mapping_version : str
+        Gene-to-protein ID mapping version recorded in provenance (e.g.
+        ``"ensembl-110"``).
     standardize_on : Sequence[str] or None, optional
         Gene IDs of the ``base_train`` split.  The per-dimension mean and
         std are fitted on these genes ONLY, then applied to all genes.
@@ -948,14 +998,15 @@ def build_feature_bank(
     # 4. Provenance
     # ------------------------------------------------------------------
     # Canonical representation of gene_sequences for hashing: sorted dict
-    # of (gene -> sorted list of sequences).
-    canonical_mapping = {gene: sorted(list(seqs)) for gene, seqs in sorted(gene_sequences.items())}
-    mapping_sha256 = sha256_json(canonical_mapping)
+    # of (gene -> sorted list of sequences).  Shared with canonical_mapping_sha256
+    # so both produce the IDENTICAL digest.
+    mapping_sha256 = canonical_mapping_sha256(gene_sequences)
     features_sha256 = sha256_bytes(raw_matrix.tobytes())
 
     provenance = FeatureBankProvenance(
         model_revision=encoder.model_revision,
         sequence_source=sequence_source,
+        id_mapping_version=id_mapping_version,
         pooling=pooling,
         dim=encoder.dim,
         dtype=str(np_dtype),

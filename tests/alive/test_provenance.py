@@ -19,10 +19,25 @@ from alive.provenance import (
     LedgerError,
     RunLedger,
     capture_environment,
+    compute_run_id,
     sha256_bytes,
     sha256_file,
     sha256_json,
 )
+
+
+def test_compute_run_id_is_deterministic_and_input_sensitive():
+    a = compute_run_id("cfg", "dc", "raw", "seq")
+    assert a == compute_run_id("cfg", "dc", "raw", "seq")  # deterministic
+    assert len(a) == 16
+    # any input change changes the id
+    assert a != compute_run_id("cfg2", "dc", "raw", "seq")
+    # data_card_digest (2nd positional) must be bound into the run_id too:
+    # staging the same config/data at a different data card yields a new run.
+    assert a != compute_run_id("cfg", "dc2", "raw", "seq")
+    assert a != compute_run_id("cfg", "dc", "raw2", "seq")
+    assert a != compute_run_id("cfg", "dc", "raw", "seq2")
+
 
 # ---------------------------------------------------------------------------
 # Helpers

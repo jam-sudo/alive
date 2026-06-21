@@ -2,7 +2,9 @@
 
 Exposes the ``alive cartographer`` subcommand group, one subcommand per staged
 function in :mod:`alive.experiment.real_runner`, each persisting/loading its
-artifact(s) from ``artifacts/cartographer/<run_id>/`` (``run_id == config.run_id``).
+artifact(s) from ``artifacts/cartographer/<run_id>/``.  The ``run_id`` is the
+composite immutable identifier (:func:`alive.provenance.compute_run_id`) binding
+the config to the data card, raw expression file, and protein-sequence mapping.
 
 Subcommands::
 
@@ -43,7 +45,12 @@ import numpy as np
 
 from alive.config import ConfigError, load_config
 from alive.conformal.error_bound import ConformalArtifact, ConformalError
-from alive.data.features import FeatureError, MockSequenceEncoder, build_feature_bank
+from alive.data.features import (
+    FeatureError,
+    MockSequenceEncoder,
+    build_feature_bank,
+    canonical_mapping_sha256,
+)
 from alive.data.manifest import ManifestError, SplitManifest, build_manifest_from_index
 from alive.data.outcome_store import ReplogleOutcomeStore, SealingError
 from alive.data.preprocess import PreprocessError, ResponseSpace
@@ -64,7 +71,15 @@ from alive.experiment.real_runner import (
     perturbation_inputs,
 )
 from alive.metrics.selective import normalize_by_mean
-from alive.provenance import LedgerError, RunLedger, capture_environment, sha256_file
+from alive.provenance import (
+    DuplicateArtifactError,
+    LedgerError,
+    RunLedger,
+    capture_environment,
+    compute_run_id,
+    sha256_file,
+    sha256_json,
+)
 from alive.types import OperationalStatus
 
 # ---------------------------------------------------------------------------
@@ -95,6 +110,7 @@ _CLEAN_ERRORS: tuple[type[BaseException], ...] = (
     ManifestError,
     PreprocessError,
     LedgerError,
+    DuplicateArtifactError,
 )
 
 
@@ -115,6 +131,70 @@ def _require_run_dir(artifacts_root: Path, run_id: str) -> Path:
 def _base_paths(run_dir: Path) -> tuple[Path, Path]:
     """Return the (response_space, base_predictor) base paths (no extension)."""
     return run_dir / "base", run_dir / "base_predictor"
+
+
+# ---------------------------------------------------------------------------
+# Upstream-stage locks (CLAUDE.md §11; spec §11.2)
+#
+# Once a run reaches a terminal state (FUTILITY_STOPPED) or its seal has opened
+# (a sealed access recorded in audit.jsonl), the early stages must permanently
+# refuse to re-run.  There are TWO distinct lock conditions, binding different
+# stages:
+#
+#   * Seal lock — a sealed access has been recorded → refuse fit, develop AND
+#     calibrate (all three are upstream of the seal).
+#   * Futility-terminal lock — the run is FUTILITY_STOPPED → refuse fit and
+#     develop ONLY.  calibrate must remain runnable: a futility-stopped run
+#     still ships its conformal error bound via calibrate (spec §9.3 / §12.1;
+#     pipeline order … → futility → calibrate → [evaluate-once]).
+# ---------------------------------------------------------------------------
+
+
+def _assert_not_sealed(run_dir: Path) -> None:
+    """Refuse any upstream re-run once the sealed cohort has been accessed.
+
+    The durable sealed-access audit is ``<run_dir>/audit.jsonl`` (written by the
+    outcome store at sealed evaluation).  A non-empty audit means the seal has
+    opened, so ``fit``/``develop``/``calibrate`` are all permanently locked for
+    this run (CLAUDE.md §11; spec §11.2).  Reading the file directly avoids
+    constructing an outcome store before the guard runs.
+
+    Raises
+    ------
+    CliError
+        If a sealed-access record exists (mapped to a clean exit 2 by ``main``).
+    """
+    audit_path = run_dir / "audit.jsonl"
+    if audit_path.exists() and audit_path.read_text(encoding="utf-8").strip():
+        raise CliError(
+            "the sealed cohort has been accessed; upstream stages are permanently "
+            "locked for this run (spec §11.2). Start a new run for any further work."
+        )
+
+
+def _assert_not_futility_terminal(run_dir: Path) -> None:
+    """Refuse ``fit``/``develop`` re-runs once the run is FUTILITY_STOPPED (terminal).
+
+    A FUTILITY_STOPPED run is terminal: its upstream model-building stages must
+    not be re-run (CLAUDE.md §11; spec §11.2).  This guard does NOT bind
+    ``calibrate`` — a futility-stopped run still ships its conformal error bound
+    via ``calibrate`` (spec §9.3 / §12.1), so ``calibrate`` only carries the seal
+    lock (:func:`_assert_not_sealed`).
+
+    Raises
+    ------
+    CliError
+        If ``futility.json`` records ``FUTILITY_STOPPED`` (clean exit 2).
+    """
+    futility_path = run_dir / "futility.json"
+    if futility_path.exists():
+        status = json.loads(futility_path.read_text(encoding="utf-8")).get("status")
+        if status == OperationalStatus.FUTILITY_STOPPED.value:
+            raise CliError(
+                "run is FUTILITY_STOPPED (terminal); upstream model-building stages "
+                "are locked (spec §11.2). Start a new run for any further confirmatory "
+                "attempt. (calibrate still runs to ship the futility conformal artifact.)"
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -251,12 +331,46 @@ def cmd_prepare(args: argparse.Namespace) -> int:
     config_path = Path(args.config)
     data_card_path = Path(args.data_card)
     config = load_config(config_path)
-    run_id = config.run_id
-
-    run_dir = _run_dir(Path(args.artifacts_root), run_id)
-    run_dir.mkdir(parents=True, exist_ok=True)
 
     data_card = json.loads(data_card_path.read_text(encoding="utf-8"))
+
+    # Require protein-sequence provenance keys (separate from expression source).
+    for required in ("sequence_source", "id_mapping_version"):
+        if required not in data_card:
+            raise CliError(
+                f"data card is missing required key {required!r} (protein-sequence "
+                "provenance must be declared separately from the expression source)."
+            )
+
+    # P1-1 FIX: load sequences FIRST so feature eligibility is determined BEFORE
+    # building the index/manifest.  This ensures excluded perturbations (missing or
+    # ambiguous sequences) never enter any split.
+    sequences = json.loads(Path(data_card["sequences"]).read_text(encoding="utf-8"))
+    gene_sequences = {g: list(seqs) for g, seqs in sequences.items()}
+    usable_gene_ids = usable_feature_genes(gene_sequences)
+
+    # #4 / P1-2: derive the COMPOSITE immutable run_id BEFORE creating the run
+    # directory.  Binding the config to the exact data, raw expression file, and
+    # protein-sequence mapping means the same config on different data yields a
+    # different run directory (spec §11.2).  ``raw_data_sha256`` is computed once
+    # here and reused for the ``raw_data`` ledger artifact (no double-hash).
+    h5ad = data_card["h5ad"]
+    config_digest = config.config_digest
+    data_card_digest = sha256_json(data_card)
+    raw_data_sha256 = _raw_data_hash(h5ad, data_card)
+    sequence_mapping_sha256 = canonical_mapping_sha256(gene_sequences)
+    run_id = compute_run_id(
+        config_digest, data_card_digest, raw_data_sha256, sequence_mapping_sha256
+    )
+
+    run_dir = _run_dir(Path(args.artifacts_root), run_id)
+    if run_dir.exists():
+        raise CliError(
+            f"run directory for run-id {run_id!r} already exists at {run_dir}. "
+            "Runs are immutable; prepare refuses to overwrite. Remove it deliberately "
+            "or change the config/data to start a new run."
+        )
+    run_dir.mkdir(parents=True, exist_ok=False)
 
     # Snapshot the config + data card under the run dir (immutable inputs).
     (run_dir / "config.snapshot.yaml").write_text(
@@ -266,20 +380,12 @@ def cmd_prepare(args: argparse.Namespace) -> int:
         json.dumps(data_card, sort_keys=True, separators=(",", ":")), encoding="utf-8"
     )
 
-    # P1-1 FIX: load sequences FIRST so feature eligibility is determined BEFORE
-    # building the index/manifest.  This ensures excluded perturbations (missing or
-    # ambiguous sequences) never enter any split.
-    sequences = json.loads(Path(data_card["sequences"]).read_text(encoding="utf-8"))
-    gene_sequences = {g: list(seqs) for g, seqs in sequences.items()}
-    usable_gene_ids = usable_feature_genes(gene_sequences)
-
     schema = DatasetSchema(
         perturbation_key=data_card["perturbation_key"],
         control_value=data_card["control_value"],
         gene_id_key=data_card.get("gene_id_key"),
         counts_layer=data_card.get("counts_layer"),
     )
-    h5ad = data_card["h5ad"]
     # Pass usable_gene_ids so build_index excludes feature-missing perturbations
     # and records them in index.exclusions with reason "no external feature".
     index = build_index(
@@ -300,7 +406,8 @@ def cmd_prepare(args: argparse.Namespace) -> int:
     feature_bank = build_feature_bank(
         gene_sequences,
         encoder,
-        sequence_source=data_card.get("raw_data_uri", "unknown"),
+        sequence_source=data_card["sequence_source"],
+        id_mapping_version=data_card["id_mapping_version"],
         standardize_on=base_train_ids,
     )
     feature_bank.write(run_dir / "feature_bank")
@@ -350,7 +457,11 @@ def cmd_prepare(args: argparse.Namespace) -> int:
     )
     ledger = RunLedger(run_id=run_id, config_sha256=config_sha256, environment=environment)
     ledger.record_artifact("config", config_sha256)
-    ledger.record_artifact("raw_data", _raw_data_hash(h5ad, data_card))
+    # Reuse the raw_data hash computed for the composite run_id (no double-hash).
+    ledger.record_artifact("raw_data", raw_data_sha256)
+    # sequence_mapping_sha256 == feature_bank.provenance.mapping_sha256 by
+    # construction (canonical_mapping_sha256 is the shared helper).
+    ledger.record_artifact("sequence_mapping", sequence_mapping_sha256)
     ledger.record_artifact("split_manifest", manifest.checksum)
     ledger.record_artifact("feature_bank", feature_bank.checksum)
     ledger.write(run_dir / "ledger.json")
@@ -374,31 +485,47 @@ def _raw_data_hash(h5ad: str, data_card: dict) -> str:
     path = Path(h5ad)
     if path.exists():
         return sha256_file(path)
-    from alive.provenance import sha256_json
-
     return sha256_json({"raw_data_uri": data_card.get("raw_data_uri", h5ad)})
 
 
 def cmd_fit(args: argparse.Namespace) -> int:
     run_dir = _require_run_dir(Path(args.artifacts_root), args.run_id)
+    # Lock upstream re-runs after a sealed access or a futility-terminal state.
+    _assert_not_sealed(run_dir)
+    _assert_not_futility_terminal(run_dir)
     index, store, manifest, feature_bank, config = _load_world(run_dir)
 
     base_artifact = fit_base(index, store, manifest, feature_bank, config)
+
+    # Append-only / byte-identical-or-refuse: a clean no-op when the artifact is
+    # byte-identical to a prior run, a clean refusal (exit 2) when it differs.
+    # The checksum is computed from the in-memory artifact BEFORE writing files,
+    # so a differing re-run is refused without overwriting the prior outputs.
+    if _refuse_nonidentical_rerun(run_dir, "base_artifact", base_artifact.checksum):
+        return 0
+
     rs_path, pred_path = _base_paths(run_dir)
     base_artifact.response_space.write(rs_path)
     base_artifact.base_predictor.write(pred_path)
 
-    _ledger_record(run_dir, "base_artifact", base_artifact.checksum)
+    _append_artifact(run_dir, "base_artifact", base_artifact.checksum)
     return 0
 
 
 def cmd_develop(args: argparse.Namespace) -> int:
     run_dir = _require_run_dir(Path(args.artifacts_root), args.run_id)
+    # Lock upstream re-runs after a sealed access or a futility-terminal state.
+    _assert_not_sealed(run_dir)
+    _assert_not_futility_terminal(run_dir)
     index, store, manifest, feature_bank, config = _load_world(run_dir)
     base_artifact = _load_base_artifact(run_dir)
     config_sha256 = _ledger_config_sha(run_dir)
 
     # Compute the method_development inputs ONCE (read_unsealed only — no seal).
+    # Seed the equal-cell sampling of the shared method_development reference bank
+    # with the COMPOSITE run_id (spec §4.5) — the SAME value evaluate-once uses —
+    # so the gate/comparator scorers refitted at sealed evaluation are byte-
+    # identical to those fitted here (NOT the config digest, which would diverge).
     dev_ids_all = [pid for pid in manifest.ids_for("method_development") if feature_bank.has(pid)]
     populations = store.read_unsealed(dev_ids_all)
     ids, features, errors, ensemble_means = perturbation_inputs(
@@ -407,7 +534,7 @@ def cmd_develop(args: argparse.Namespace) -> int:
         feature_bank,
         populations,
         response_cfg=config.response_space,
-        run_id=config.run_id,
+        run_id=args.run_id,
     )
 
     md = config.method_development
@@ -424,6 +551,11 @@ def cmd_develop(args: argparse.Namespace) -> int:
         registered_seeds=md.registered_seeds,
         config_sha256=config_sha256,
     )
+
+    # Append-only / byte-identical-or-refuse (checked BEFORE writing outputs).
+    if _refuse_nonidentical_rerun(run_dir, "method_lock", method_lock.checksum):
+        return 0
+
     method_lock.write(run_dir / "methodlock")
 
     # Persist dev (ids, errors) so `futility` decides without re-opening data.
@@ -432,7 +564,7 @@ def cmd_develop(args: argparse.Namespace) -> int:
         **{report_mod.DEV_IDS_KEY: np.asarray(ids), report_mod.DEV_ERRORS_KEY: errors},
     )
 
-    _ledger_record(run_dir, "method_lock", method_lock.checksum)
+    _append_artifact(run_dir, "method_lock", method_lock.checksum)
     return 0
 
 
@@ -461,6 +593,10 @@ def cmd_futility(args: argparse.Namespace) -> int:
 
 def cmd_calibrate(args: argparse.Namespace) -> int:
     run_dir = _require_run_dir(Path(args.artifacts_root), args.run_id)
+    # Lock calibrate re-runs after a sealed access ONLY: calibrate is upstream of
+    # the seal but DOWNSTREAM of futility, so a futility-stopped run must still be
+    # able to ship its conformal artifact here (no futility-terminal lock).
+    _assert_not_sealed(run_dir)
     index, store, manifest, feature_bank, config = _load_world(run_dir)
     base_artifact = _load_base_artifact(run_dir)
     method_lock = MethodLock.read(run_dir / "methodlock")
@@ -468,6 +604,11 @@ def cmd_calibrate(args: argparse.Namespace) -> int:
 
     # calibrate RUNS IN EITHER BRANCH (a futility-stopped run still ships its
     # conformal artifact); the futility decision is intentionally not consulted.
+    # Seed the shared method_development reference-bank sampling with the COMPOSITE
+    # run_id (spec §4.5) — the SAME value evaluate-once uses — so the gate scorer
+    # fitted here matches the one refitted at sealed evaluation (the conformal
+    # threshold and the sealed scores compared against it must come from one
+    # identically-fitted model).
     conformal = calibrate(
         index,
         store,
@@ -476,11 +617,17 @@ def cmd_calibrate(args: argparse.Namespace) -> int:
         method_lock,
         feature_bank,
         config,
+        run_id=args.run_id,
         config_sha256=config_sha256,
     )
+
+    # Append-only / byte-identical-or-refuse (checked BEFORE writing outputs).
+    if _refuse_nonidentical_rerun(run_dir, "conformal_artifact", conformal.checksum):
+        return 0
+
     conformal.write(run_dir / "conformal.json")
 
-    _ledger_record(run_dir, "conformal_artifact", conformal.checksum)
+    _append_artifact(run_dir, "conformal_artifact", conformal.checksum)
     return 0
 
 
@@ -519,7 +666,10 @@ def cmd_evaluate_once(args: argparse.Namespace) -> int:
         futility,
         feature_bank,
         config,
-        run_id=config.run_id,
+        # The actual run identity is the composite run_id (= the run directory
+        # name the user passes), NOT the config digest.  Result provenance, the
+        # sealed-access audit, and deterministic seed-keys must all carry it.
+        run_id=args.run_id,
         config_sha256=config_sha256,
         ledger=ledger,
         result_path=run_dir / "result.json",
@@ -547,20 +697,70 @@ def _ledger_config_sha(run_dir: Path) -> str:
     return ledger.to_dict()["config_sha256"]
 
 
-def _ledger_record(run_dir: Path, name: str, checksum: str) -> None:
-    """Record (or refresh) an artifact checksum in the on-disk ledger.
+def _append_artifact(run_dir: Path, name: str, checksum: str) -> None:
+    """Append an artifact to the on-disk ledger; write-once (no replacement).
 
-    Re-records idempotently: if *name* is already present with a DIFFERENT hash,
-    the entry is replaced (a stage may be re-run); the write-once ledger is
-    rebuilt from its dict to honour that without mutating in place.
+    Reads the ledger, calls :meth:`RunLedger.record_artifact` (which raises
+    :class:`~alive.provenance.DuplicateArtifactError` on any second record of the
+    same name), and writes it back.  Unlike the removed ``_ledger_record``, this
+    NEVER removes-then-reappends an entry, so a re-run can never silently replace
+    a recorded checksum (CLAUDE.md §11; spec §11.2 — ledger entries are append-only).
+
+    Parameters
+    ----------
+    run_dir : Path
+        The run directory holding ``ledger.json``.
+    name : str
+        Canonical artifact name (write-once).
+    checksum : str
+        Hex-encoded SHA-256 of the artifact.
+
+    Raises
+    ------
+    DuplicateArtifactError
+        If *name* is already recorded in the ledger.
     """
     ledger = RunLedger.read(run_dir / "ledger.json")
-    data = ledger.to_dict()
-    artifacts = [a for a in data["artifacts"] if a["name"] != name]
-    artifacts.append({"name": name, "sha256": checksum})
-    data["artifacts"] = artifacts
-    (run_dir / "ledger.json").write_text(
-        json.dumps(data, sort_keys=True, separators=(",", ":")), encoding="utf-8"
+    ledger.record_artifact(name, checksum)  # DuplicateArtifactError on second record
+    ledger.write(run_dir / "ledger.json")
+
+
+def _refuse_nonidentical_rerun(run_dir: Path, name: str, checksum: str) -> bool:
+    """Output-exists guard for a re-run stage (byte-identical-or-refuse).
+
+    Parameters
+    ----------
+    run_dir : Path
+        The run directory holding ``ledger.json``.
+    name : str
+        Canonical artifact name the stage would record.
+    checksum : str
+        The checksum the current invocation has (re)computed.
+
+    Returns
+    -------
+    bool
+        ``False`` if *name* is not yet recorded (a genuine first run — proceed).
+        ``True`` if *name* is recorded with the SAME hash (a byte-identical
+        re-run — the caller should treat the stage as a clean no-op).
+
+    Raises
+    ------
+    CliError
+        If *name* is recorded with a DIFFERENT hash: runs are immutable, so a
+        non-byte-identical re-run is refused (mapped to exit 2 by ``main``)
+        rather than silently replacing the prior output / ledger entry.
+    """
+    ledger = RunLedger.read(run_dir / "ledger.json")
+    try:
+        existing = ledger.artifact_sha(name)
+    except LedgerError:
+        return False  # not recorded yet → first run
+    if existing == checksum:
+        return True  # byte-identical re-run → no-op
+    raise CliError(
+        f"stage output {name!r} already exists with a different hash; runs are "
+        "immutable (spec §11.2). Start a new run instead of re-running this stage."
     )
 
 

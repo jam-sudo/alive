@@ -222,6 +222,7 @@ def _build_world(tmp_path: Path, *, config: Config, n_pert: int = 40, seed: int 
         gene_sequences,
         MockSequenceEncoder(dim=8),
         sequence_source="mock-2026",
+        id_mapping_version="id-map-v1",
         standardize_on=base_train_ids,
     )
 
@@ -276,7 +277,7 @@ class SpyStore:
 def _config_sha(config: Config) -> str:
     from alive.provenance import sha256_json
 
-    return sha256_json({"run_id": config.run_id, "experiment": config.experiment})
+    return sha256_json({"run_id": config.config_digest, "experiment": config.experiment})
 
 
 # ===========================================================================
@@ -339,7 +340,9 @@ class TestGateAndComparatorScores:
         config = _test_config()
         _index, store, manifest, fb = _build_world(tmp_path, config=config)
         base_art = fit_base(_index, store, manifest, fb, config)
-        method_lock, _fd = develop_methods_stage(_index, store, manifest, base_art, fb, config)
+        method_lock, _fd = develop_methods_stage(
+            _index, store, manifest, base_art, fb, config, run_id=config.config_digest
+        )
 
         # Reference = method_development; query = conformal_calibration.
         ref_ids = [i for i in manifest.ids_for("method_development") if fb.has(i)]
@@ -415,8 +418,12 @@ class TestLeakageGuard:
         spy = SpyStore(real_store)
 
         base_art = fit_base(index, spy, manifest, fb, config)
-        method_lock, fdec = develop_methods_stage(index, spy, manifest, base_art, fb, config)
-        _conf = calibrate(index, spy, manifest, base_art, method_lock, fb, config)
+        method_lock, fdec = develop_methods_stage(
+            index, spy, manifest, base_art, fb, config, run_id=config.config_digest
+        )
+        _conf = calibrate(
+            index, spy, manifest, base_art, method_lock, fb, config, run_id=config.config_digest
+        )
 
         sealed_ids = set(manifest.ids_for("sealed_evaluation"))
 
@@ -441,10 +448,14 @@ class TestScoresBeforeRisks:
         spy = SpyStore(real_store)
 
         base_art = fit_base(index, spy, manifest, fb, config)
-        method_lock, fdec = develop_methods_stage(index, spy, manifest, base_art, fb, config)
+        method_lock, fdec = develop_methods_stage(
+            index, spy, manifest, base_art, fb, config, run_id=config.config_digest
+        )
         # Force CONTINUE so the sealed branch is permitted.
         fdec = replace(fdec, status=OperationalStatus.CONTINUE_CONFIRMATORY)
-        conf = calibrate(index, spy, manifest, base_art, method_lock, fb, config)
+        conf = calibrate(
+            index, spy, manifest, base_art, method_lock, fb, config, run_id=config.config_digest
+        )
 
         result = evaluate_sealed_once(
             index,
@@ -456,7 +467,7 @@ class TestScoresBeforeRisks:
             fdec,
             fb,
             config,
-            run_id=config.run_id,
+            run_id=config.config_digest,
         )
         assert result is not None
 
@@ -480,8 +491,12 @@ class TestFutilityForbidsSeal:
         spy = SpyStore(real_store)
 
         base_art = fit_base(index, spy, manifest, fb, config)
-        method_lock, fdec = develop_methods_stage(index, spy, manifest, base_art, fb, config)
-        conf = calibrate(index, spy, manifest, base_art, method_lock, fb, config)
+        method_lock, fdec = develop_methods_stage(
+            index, spy, manifest, base_art, fb, config, run_id=config.config_digest
+        )
+        conf = calibrate(
+            index, spy, manifest, base_art, method_lock, fb, config, run_id=config.config_digest
+        )
 
         # Force FUTILITY_STOPPED.
         fdec = replace(fdec, status=OperationalStatus.FUTILITY_STOPPED)
@@ -497,7 +512,7 @@ class TestFutilityForbidsSeal:
                 fdec,
                 fb,
                 config,
-                run_id=config.run_id,
+                run_id=config.config_digest,
             )
         assert real_store.sealed_access_count == 0
         assert spy.evaluate_calls == []
@@ -520,10 +535,14 @@ class TestEndToEnd:
         index, store, manifest, fb = _build_world(tmp_path, config=config, seed=3)
 
         base_art = fit_base(index, store, manifest, fb, config)
-        method_lock, fdec = develop_methods_stage(index, store, manifest, base_art, fb, config)
+        method_lock, fdec = develop_methods_stage(
+            index, store, manifest, base_art, fb, config, run_id=config.config_digest
+        )
         # Force CONTINUE so the sealed branch runs even if dev was futile.
         fdec = replace(fdec, status=OperationalStatus.CONTINUE_CONFIRMATORY)
-        conf = calibrate(index, store, manifest, base_art, method_lock, fb, config)
+        conf = calibrate(
+            index, store, manifest, base_art, method_lock, fb, config, run_id=config.config_digest
+        )
 
         result = evaluate_sealed_once(
             index,
@@ -535,7 +554,7 @@ class TestEndToEnd:
             fdec,
             fb,
             config,
-            run_id=config.run_id,
+            run_id=config.config_digest,
         )
         # Valid set; near-random synthetic data should NOT certify a gate win.
         assert result.verdict in set(Verdict)
@@ -554,9 +573,13 @@ class TestLowNInvalid:
         index, store, manifest, fb = _build_world(tmp_path, config=config)
 
         base_art = fit_base(index, store, manifest, fb, config)
-        method_lock, fdec = develop_methods_stage(index, store, manifest, base_art, fb, config)
+        method_lock, fdec = develop_methods_stage(
+            index, store, manifest, base_art, fb, config, run_id=config.config_digest
+        )
         fdec = replace(fdec, status=OperationalStatus.CONTINUE_CONFIRMATORY)
-        conf = calibrate(index, store, manifest, base_art, method_lock, fb, config)
+        conf = calibrate(
+            index, store, manifest, base_art, method_lock, fb, config, run_id=config.config_digest
+        )
 
         out_path = tmp_path / "result.json"
         result = evaluate_sealed_once(
@@ -569,7 +592,7 @@ class TestLowNInvalid:
             fdec,
             fb,
             config,
-            run_id=config.run_id,
+            run_id=config.config_digest,
             result_path=out_path,
         )
         assert result.verdict == Verdict.INVALID_EVALUATION
@@ -588,9 +611,13 @@ class TestSingleSealedAccess:
         index, store, manifest, fb = _build_world(tmp_path, config=config)
 
         base_art = fit_base(index, store, manifest, fb, config)
-        method_lock, fdec = develop_methods_stage(index, store, manifest, base_art, fb, config)
+        method_lock, fdec = develop_methods_stage(
+            index, store, manifest, base_art, fb, config, run_id=config.config_digest
+        )
         fdec = replace(fdec, status=OperationalStatus.CONTINUE_CONFIRMATORY)
-        conf = calibrate(index, store, manifest, base_art, method_lock, fb, config)
+        conf = calibrate(
+            index, store, manifest, base_art, method_lock, fb, config, run_id=config.config_digest
+        )
 
         evaluate_sealed_once(
             index,
@@ -602,7 +629,7 @@ class TestSingleSealedAccess:
             fdec,
             fb,
             config,
-            run_id=config.run_id,
+            run_id=config.config_digest,
         )
         # A second call with the same run_id must surface the sealing error.
         with pytest.raises(Exception):
@@ -616,7 +643,7 @@ class TestSingleSealedAccess:
                 fdec,
                 fb,
                 config,
-                run_id=config.run_id,
+                run_id=config.config_digest,
             )
 
 
@@ -633,9 +660,20 @@ class TestDeterminism:
             sub.mkdir(parents=True, exist_ok=True)
             index, store, manifest, fb = _build_world(sub, config=config, seed=5)
             base_art = fit_base(index, store, manifest, fb, config)
-            method_lock, fdec = develop_methods_stage(index, store, manifest, base_art, fb, config)
+            method_lock, fdec = develop_methods_stage(
+                index, store, manifest, base_art, fb, config, run_id=config.config_digest
+            )
             fdec = replace(fdec, status=OperationalStatus.CONTINUE_CONFIRMATORY)
-            conf = calibrate(index, store, manifest, base_art, method_lock, fb, config)
+            conf = calibrate(
+                index,
+                store,
+                manifest,
+                base_art,
+                method_lock,
+                fb,
+                config,
+                run_id=config.config_digest,
+            )
             result = evaluate_sealed_once(
                 index,
                 store,
@@ -646,7 +684,7 @@ class TestDeterminism:
                 fdec,
                 fb,
                 config,
-                run_id=config.run_id,
+                run_id=config.config_digest,
             )
             return result.checksum
 
@@ -677,9 +715,13 @@ class TestProvenanceWiring:
         config = _test_config()
         index, store, manifest, fb = _build_world(tmp_path, config=config, seed=3)
         base_art = fit_base(index, store, manifest, fb, config)
-        method_lock, fdec = develop_methods_stage(index, store, manifest, base_art, fb, config)
+        method_lock, fdec = develop_methods_stage(
+            index, store, manifest, base_art, fb, config, run_id=config.config_digest
+        )
         fdec = replace(fdec, status=OperationalStatus.CONTINUE_CONFIRMATORY)
-        conf = calibrate(index, store, manifest, base_art, method_lock, fb, config)
+        conf = calibrate(
+            index, store, manifest, base_art, method_lock, fb, config, run_id=config.config_digest
+        )
         return config, index, store, manifest, fb, base_art, method_lock, fdec, conf
 
     def test_intact_ledger_provenance_ok(self, tmp_path: Path) -> None:
@@ -687,7 +729,7 @@ class TestProvenanceWiring:
             tmp_path
         )
         cfg_digest = "f" * 64
-        ledger = self._ledger(run_id=config.run_id, config_sha256=cfg_digest)
+        ledger = self._ledger(run_id=config.config_digest, config_sha256=cfg_digest)
         ledger.record_artifact("config", cfg_digest)
         ledger.record_artifact("split_manifest", manifest.checksum)
         ledger.record_artifact("feature_bank", fb.checksum)
@@ -705,7 +747,7 @@ class TestProvenanceWiring:
             fdec,
             fb,
             config,
-            run_id=config.run_id,
+            run_id=config.config_digest,
             config_sha256=cfg_digest,
             ledger=ledger,
         )
@@ -716,7 +758,7 @@ class TestProvenanceWiring:
             tmp_path
         )
         cfg_digest = "f" * 64
-        ledger = self._ledger(run_id=config.run_id, config_sha256=cfg_digest)
+        ledger = self._ledger(run_id=config.config_digest, config_sha256=cfg_digest)
         ledger.record_artifact("config", cfg_digest)
         ledger.record_artifact("split_manifest", manifest.checksum)
         ledger.record_artifact("feature_bank", fb.checksum)
@@ -735,7 +777,7 @@ class TestProvenanceWiring:
             fdec,
             fb,
             config,
-            run_id=config.run_id,
+            run_id=config.config_digest,
             config_sha256=cfg_digest,
             ledger=ledger,
         )
@@ -762,7 +804,9 @@ class TestCalibrateConfigSha256:
         config = _test_config()
         index, store, manifest, fb = _build_world(tmp_path, config=config, seed=5)
         base_art = fit_base(index, store, manifest, fb, config)
-        method_lock, _fdec = develop_methods_stage(index, store, manifest, base_art, fb, config)
+        method_lock, _fdec = develop_methods_stage(
+            index, store, manifest, base_art, fb, config, run_id=config.config_digest
+        )
 
         full_digest = "a" * 64  # a valid 64-char hex string (mock full digest)
         conf = calibrate(
@@ -773,6 +817,7 @@ class TestCalibrateConfigSha256:
             method_lock,
             fb,
             config,
+            run_id=config.config_digest,
             config_sha256=full_digest,
         )
 
@@ -785,11 +830,13 @@ class TestCalibrateConfigSha256:
     def test_conformal_artifact_config_sha256_not_run_id_when_digest_given(
         self, tmp_path: Path
     ) -> None:
-        """config_sha256 must NOT equal config.run_id when the full digest is passed."""
+        """config_sha256 must NOT equal config.config_digest when the full digest is passed."""
         config = _test_config()
         index, store, manifest, fb = _build_world(tmp_path, config=config, seed=6)
         base_art = fit_base(index, store, manifest, fb, config)
-        method_lock, _fdec = develop_methods_stage(index, store, manifest, base_art, fb, config)
+        method_lock, _fdec = develop_methods_stage(
+            index, store, manifest, base_art, fb, config, run_id=config.config_digest
+        )
 
         full_digest = "b" * 64
         conf = calibrate(
@@ -800,12 +847,13 @@ class TestCalibrateConfigSha256:
             method_lock,
             fb,
             config,
+            run_id=config.config_digest,
             config_sha256=full_digest,
         )
 
         # The run_id is 16 chars; the full digest is 64 chars — they must differ.
-        assert conf.config_sha256 != config.run_id, (
-            "ConformalArtifact.config_sha256 must be the full digest, not config.run_id"
+        assert conf.config_sha256 != config.config_digest, (
+            "ConformalArtifact.config_sha256 must be the full digest, not config.config_digest"
         )
 
     def test_conformal_artifact_falls_back_to_run_id_without_digest(self, tmp_path: Path) -> None:
@@ -813,10 +861,14 @@ class TestCalibrateConfigSha256:
         config = _test_config()
         index, store, manifest, fb = _build_world(tmp_path, config=config, seed=7)
         base_art = fit_base(index, store, manifest, fb, config)
-        method_lock, _fdec = develop_methods_stage(index, store, manifest, base_art, fb, config)
+        method_lock, _fdec = develop_methods_stage(
+            index, store, manifest, base_art, fb, config, run_id=config.config_digest
+        )
 
-        conf = calibrate(index, store, manifest, base_art, method_lock, fb, config)
-        assert conf.config_sha256 == config.run_id
+        conf = calibrate(
+            index, store, manifest, base_art, method_lock, fb, config, run_id=config.config_digest
+        )
+        assert conf.config_sha256 == config.config_digest
 
 
 # ===========================================================================
@@ -835,11 +887,15 @@ class TestRequireEncoderMatch:
         config = _test_config()
         index, store, manifest, fb = _build_world(tmp_path, config=config, seed=3)
         base_art = fit_base(index, store, manifest, fb, config)
-        method_lock, fdec = develop_methods_stage(index, store, manifest, base_art, fb, config)
+        method_lock, fdec = develop_methods_stage(
+            index, store, manifest, base_art, fb, config, run_id=config.config_digest
+        )
         from dataclasses import replace
 
         fdec = replace(fdec, status=OperationalStatus.CONTINUE_CONFIRMATORY)
-        conf = calibrate(index, store, manifest, base_art, method_lock, fb, config)
+        conf = calibrate(
+            index, store, manifest, base_art, method_lock, fb, config, run_id=config.config_digest
+        )
         return config, index, store, manifest, fb, base_art, method_lock, fdec, conf
 
     def test_encoder_mismatch_with_require_match_yields_invalid(self, tmp_path: Path) -> None:
@@ -873,7 +929,7 @@ class TestRequireEncoderMatch:
             fdec,
             fb,
             esm_config,
-            run_id=esm_config.run_id,
+            run_id=esm_config.config_digest,
             require_encoder_match=True,
         )
         # Provenance check must have failed due to encoder mismatch.
@@ -898,10 +954,179 @@ class TestRequireEncoderMatch:
             fdec,
             fb,
             config,
-            run_id=config.run_id,
+            run_id=config.config_digest,
             require_encoder_match=False,
         )
         # With the default, the encoder leg never fires: the result is NOT
         # INVALID_EVALUATION (the mock bank matches the mock-config primary, and
         # require_encoder_match=False would skip the check regardless).
         assert result.verdict != Verdict.INVALID_EVALUATION
+
+
+# ===========================================================================
+# Fix wave 1 (Task 2 review; spec §4.5): the shared method_development
+# reference-bank sampling seed must be the SAME composite run_id in calibrate
+# and in evaluate_sealed_once.  If calibrate seeds the bank with one value and
+# evaluate-once with another, the gate/comparator scorers refit at sealed
+# evaluation diverge from the ones the conformal threshold was built on, which
+# silently shifts coverage/verdict.  These tests pin the consistency.
+# ===========================================================================
+
+
+class TestReferenceBankSeedConsistency:
+    """calibrate and evaluate_sealed_once must seed the shared reference bank alike.
+
+    The equal-cell energy distance is deterministically seeded from
+    ``(run_id, perturbation_id)``.  When the reference populations exceed
+    ``cell_cap`` the subsample — and therefore ``ref_errors`` and the scorers
+    fitted from it — depend on the seed.  After Fix wave 1, the composite
+    ``run_id`` (NOT ``config.config_digest``) seeds that sampling in BOTH stages,
+    so the gate/comparator scorer the conformal threshold is built on is byte-
+    identical to the one evaluate_sealed_once refits at sealed evaluation.
+    """
+
+    @staticmethod
+    def _seed_sensitive_config() -> Config:
+        # cell_cap below the per-perturbation cell count (20-30) so the equal-cell
+        # subsample is genuinely seed-dependent; >1 repeats amplifies it.
+        return _test_config(cell_cap=12, min_cells=8, cell_sampling_repeats=4)
+
+    def test_perturbation_inputs_reference_bank_is_seed_sensitive(self, tmp_path: Path) -> None:
+        """Sanity precondition: the reference bank errors change with the seed.
+
+        Without this the consistency tests below could pass vacuously (a
+        seed-insensitive bank would agree regardless of which seed each stage
+        used, hiding the very divergence we are guarding against).
+        """
+        config = self._seed_sensitive_config()
+        index, store, manifest, fb = _build_world(tmp_path, config=config, seed=4)
+        base_art = fit_base(index, store, manifest, fb, config)
+
+        ref_ids = [pid for pid in manifest.ids_for("method_development") if fb.has(pid)]
+        ref_pops = store.read_unsealed(ref_ids)
+
+        def _ref_errors(run_id: str) -> np.ndarray:
+            _ids, _f, errs, _e = perturbation_inputs(
+                base_art.base_predictor,
+                base_art.response_space,
+                fb,
+                ref_pops,
+                response_cfg=config.response_space,
+                run_id=run_id,
+            )
+            return errs
+
+        errs_digest = _ref_errors(config.config_digest)
+        errs_composite = _ref_errors("composite-run-id-deadbeef")
+        assert not np.allclose(errs_digest, errs_composite), (
+            "reference bank is seed-insensitive in this fixture; the consistency "
+            "test would be vacuous — increase cell count / lower cell_cap"
+        )
+
+    @staticmethod
+    def _spy_reference_bank_run_id(monkeypatch) -> dict[str, list[str]]:
+        """Patch real_runner.perturbation_inputs to record every ``run_id`` seed.
+
+        Returns a dict with key ``"run_ids"`` accumulating, in call order, the
+        ``run_id`` value each stage passes to ``perturbation_inputs`` (the seed
+        source for the equal-cell sampling of the reference / query banks).  The
+        first call inside calibrate / evaluate_sealed_once is the SHARED
+        method_development reference bank — that is the value under test.
+        """
+        import alive.experiment.real_runner as rr
+
+        captured: dict[str, list[str]] = {"run_ids": []}
+        original = rr.perturbation_inputs
+
+        def _spy(*args, **kwargs):
+            captured["run_ids"].append(kwargs["run_id"])
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(rr, "perturbation_inputs", _spy)
+        return captured
+
+    def test_calibrate_seeds_reference_bank_with_threaded_composite_run_id(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """calibrate(run_id=composite) MUST seed the reference bank with that run_id.
+
+        RED before the fix: calibrate ignored the threaded run_id and seeded the
+        reference bank with config.config_digest — so the captured seed equalled
+        config.config_digest, NOT the composite run_id.
+        GREEN after: the captured seed is the composite run_id.
+        """
+        config = self._seed_sensitive_config()
+        composite_run_id = "composite-run-id-deadbeef"
+        assert config.config_digest != composite_run_id
+
+        index, store, manifest, fb = _build_world(tmp_path, config=config, seed=4)
+        base_art = fit_base(index, store, manifest, fb, config)
+        method_lock, _fd = develop_methods_stage(
+            index, store, manifest, base_art, fb, config, run_id=composite_run_id
+        )
+
+        captured = self._spy_reference_bank_run_id(monkeypatch)
+        calibrate(
+            index, store, manifest, base_art, method_lock, fb, config, run_id=composite_run_id
+        )
+
+        # Every bank calibrate samples (reference + calibration query) must be
+        # seeded with the composite run_id — never config.config_digest.
+        assert captured["run_ids"], "calibrate did not sample any bank"
+        assert all(rid == composite_run_id for rid in captured["run_ids"]), (
+            f"calibrate seeded a bank with {set(captured['run_ids'])!r}; expected only "
+            f"the composite run_id {composite_run_id!r}"
+        )
+
+    def test_calibrate_and_evaluate_seed_shared_bank_identically(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """The SHARED method_development reference bank seed must match across stages.
+
+        Captures the reference-bank ``run_id`` calibrate uses, then the one
+        evaluate_sealed_once uses, with the SAME composite run_id threaded into
+        both.  They must be equal (the conformal threshold and the sealed scores
+        compared against it come from one identically-fitted scorer).
+
+        RED before the fix: calibrate's reference-bank seed was
+        config.config_digest while evaluate_sealed_once's was the composite
+        run_id — divergent.
+        """
+        config = self._seed_sensitive_config()
+        composite_run_id = "composite-run-id-deadbeef"
+        assert config.config_digest != composite_run_id
+
+        index, store, manifest, fb = _build_world(tmp_path, config=config, seed=4)
+        base_art = fit_base(index, store, manifest, fb, config)
+        method_lock, fdec = develop_methods_stage(
+            index, store, manifest, base_art, fb, config, run_id=composite_run_id
+        )
+        fdec = replace(fdec, status=OperationalStatus.CONTINUE_CONFIRMATORY)
+
+        cal_capture = self._spy_reference_bank_run_id(monkeypatch)
+        conf = calibrate(
+            index, store, manifest, base_art, method_lock, fb, config, run_id=composite_run_id
+        )
+        calibrate_ref_seed = cal_capture["run_ids"][0]
+
+        eval_capture = self._spy_reference_bank_run_id(monkeypatch)
+        evaluate_sealed_once(
+            index,
+            store,
+            manifest,
+            base_art,
+            method_lock,
+            conf,
+            fdec,
+            fb,
+            config,
+            run_id=composite_run_id,
+        )
+        evaluate_ref_seed = eval_capture["run_ids"][0]
+
+        assert calibrate_ref_seed == evaluate_ref_seed == composite_run_id, (
+            "calibrate and evaluate_sealed_once seeded the shared method_development "
+            f"reference bank with DIFFERENT run_ids "
+            f"(calibrate={calibrate_ref_seed!r}, evaluate={evaluate_ref_seed!r}); the "
+            "conformal coverage guarantee is broken when the seeds diverge."
+        )

@@ -1,18 +1,20 @@
-"""Locked-config schema, validation, and deterministic run-ID hashing.
+"""Locked-config schema, validation, and deterministic config-digest hashing.
 
 This module provides the canonical representation of an ALIVE experiment
 configuration as nested frozen dataclasses, strict validation logic, and
-a deterministic SHA-256 run-ID computed from the validated config state.
+a deterministic SHA-256 config digest computed from the validated config state.
 
 Public API
 ----------
 load_config(path)
     Parse a YAML config file, validate it, and return a ``Config`` instance.
-Config.run_id
+Config.config_digest
     Cached property: first 16 hex characters of the SHA-256 hash of a
     canonically serialised version of the config (keys sorted recursively,
     no timestamps or environment data).  Identical configs produce identical
-    run IDs regardless of YAML key order or insignificant whitespace.
+    digests regardless of YAML key order or insignificant whitespace.  This is
+    one of the four inputs to the composite immutable ``run_id``
+    (:func:`alive.provenance.compute_run_id`).
 
 Raises
 ------
@@ -26,7 +28,7 @@ Examples
 >>> cfg = load_config(Path("configs/cartographer_trust_gate_k562_v1.yaml"))
 >>> cfg.experiment
 'cartographer_trust_gate_k562_v1'
->>> len(cfg.run_id)
+>>> len(cfg.config_digest)
 16
 """
 
@@ -438,16 +440,20 @@ class Config:
     feature_extraction: FeatureExtraction = FeatureExtraction()
 
     @cached_property
-    def run_id(self) -> str:
-        """Deterministic 16-character hex run identifier.
+    def config_digest(self) -> str:
+        """Deterministic 16-character hex digest of the config.
 
         Computed as the first 16 hex characters of the SHA-256 hash of the
         canonically serialised config (all keys sorted recursively, stable
         numeric formatting, no timestamps or environment data).
 
         Two configs that are field-identical — regardless of the YAML key order
-        in the source file — produce the same ``run_id``.  Any change to a
-        registered field produces a different ``run_id``.
+        in the source file — produce the same ``config_digest``.  Any change to a
+        registered field produces a different ``config_digest``.
+
+        This is *not* the run identifier: the immutable ``run_id`` is a composite
+        of this digest plus the data card, raw expression file, and
+        protein-sequence mapping (see :func:`alive.provenance.compute_run_id`).
 
         Returns
         -------

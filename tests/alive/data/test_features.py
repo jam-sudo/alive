@@ -16,13 +16,30 @@ import pytest
 
 from alive.data.features import (
     FeatureBank,
+    FeatureBankProvenance,
     FeatureError,
     MockSequenceEncoder,
     SequenceEncoder,
     _apply_length_policy,
     _bucket_indices,
     build_feature_bank,
+    canonical_mapping_sha256,
 )
+
+
+def test_canonical_mapping_sha_matches_built_bank() -> None:
+    """canonical_mapping_sha256 must equal the digest build_feature_bank records."""
+    mapping = {"G1": ["MAAA"], "G2": ["MBBB"]}
+    pre = canonical_mapping_sha256(mapping)
+    bank = build_feature_bank(
+        mapping,
+        MockSequenceEncoder(dim=8),
+        sequence_source="uniprot-2024-01",
+        id_mapping_version="ensembl-110",
+        standardize_on=["G1", "G2"],
+    )
+    assert pre == bank.provenance.mapping_sha256
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -47,19 +64,25 @@ def _make_mock(dim: int = 8) -> MockSequenceEncoder:
 def test_happy_path_genes_sorted() -> None:
     """genes tuple must be sorted lexicographically."""
     enc = _make_mock()
-    bank = build_feature_bank(_SIMPLE_MAPPING, enc, sequence_source="v1")
+    bank = build_feature_bank(
+        _SIMPLE_MAPPING, enc, sequence_source="v1", id_mapping_version="id-map-v1"
+    )
     assert list(bank.genes) == sorted(_SIMPLE_MAPPING.keys())
 
 
 def test_happy_path_dim() -> None:
     enc = _make_mock(dim=8)
-    bank = build_feature_bank(_SIMPLE_MAPPING, enc, sequence_source="v1")
+    bank = build_feature_bank(
+        _SIMPLE_MAPPING, enc, sequence_source="v1", id_mapping_version="id-map-v1"
+    )
     assert bank.dim == 8
 
 
 def test_happy_path_vector_shape() -> None:
     enc = _make_mock(dim=8)
-    bank = build_feature_bank(_SIMPLE_MAPPING, enc, sequence_source="v1")
+    bank = build_feature_bank(
+        _SIMPLE_MAPPING, enc, sequence_source="v1", id_mapping_version="id-map-v1"
+    )
     for g in bank.genes:
         v = bank.vector(g)
         assert v.shape == (8,), f"Gene {g!r}: expected shape (8,), got {v.shape}"
@@ -67,14 +90,18 @@ def test_happy_path_vector_shape() -> None:
 
 def test_happy_path_all_finite() -> None:
     enc = _make_mock()
-    bank = build_feature_bank(_SIMPLE_MAPPING, enc, sequence_source="v1")
+    bank = build_feature_bank(
+        _SIMPLE_MAPPING, enc, sequence_source="v1", id_mapping_version="id-map-v1"
+    )
     for g in bank.genes:
         assert np.all(np.isfinite(bank.vector(g))), f"Gene {g!r} has non-finite values"
 
 
 def test_happy_path_no_excluded() -> None:
     enc = _make_mock()
-    bank = build_feature_bank(_SIMPLE_MAPPING, enc, sequence_source="v1")
+    bank = build_feature_bank(
+        _SIMPLE_MAPPING, enc, sequence_source="v1", id_mapping_version="id-map-v1"
+    )
     assert bank.excluded == {}
 
 
@@ -88,7 +115,7 @@ def test_deterministic_pooling_matches_hand_computed() -> None:
     enc = _make_mock(dim=8)
     seq = "MKVLVI"
     mapping = {"ONLY": [seq]}
-    bank = build_feature_bank(mapping, enc, sequence_source="v1")
+    bank = build_feature_bank(mapping, enc, sequence_source="v1", id_mapping_version="id-map-v1")
 
     # hand-compute
     per_residue_list = enc.encode_residues([seq])
@@ -128,7 +155,7 @@ def test_missing_sequence_excluded() -> None:
         "GENE_MISSING": [],  # zero candidates
     }
     enc = _make_mock()
-    bank = build_feature_bank(mapping, enc, sequence_source="v1")
+    bank = build_feature_bank(mapping, enc, sequence_source="v1", id_mapping_version="id-map-v1")
     assert "GENE_MISSING" not in bank.genes
     assert bank.excluded.get("GENE_MISSING") == "missing sequence"
 
@@ -139,7 +166,7 @@ def test_ambiguous_mapping_excluded() -> None:
         "GENE_AMB": ["MKVLVI", "ACDEF"],  # two candidates
     }
     enc = _make_mock()
-    bank = build_feature_bank(mapping, enc, sequence_source="v1")
+    bank = build_feature_bank(mapping, enc, sequence_source="v1", id_mapping_version="id-map-v1")
     assert "GENE_AMB" not in bank.genes
     assert bank.excluded.get("GENE_AMB") == "ambiguous mapping"
 
@@ -151,7 +178,7 @@ def test_both_excluded_types_coexist() -> None:
         "GENE_AMB": ["MKVLVI", "ACDEF"],
     }
     enc = _make_mock()
-    bank = build_feature_bank(mapping, enc, sequence_source="v1")
+    bank = build_feature_bank(mapping, enc, sequence_source="v1", id_mapping_version="id-map-v1")
     assert list(bank.genes) == ["GENE_OK"]
     assert len(bank.excluded) == 2
     assert "GENE_MISSING" in bank.excluded
@@ -160,14 +187,18 @@ def test_both_excluded_types_coexist() -> None:
 
 def test_vector_absent_gene_raises() -> None:
     enc = _make_mock()
-    bank = build_feature_bank(_SIMPLE_MAPPING, enc, sequence_source="v1")
+    bank = build_feature_bank(
+        _SIMPLE_MAPPING, enc, sequence_source="v1", id_mapping_version="id-map-v1"
+    )
     with pytest.raises(FeatureError):
         bank.vector("NOT_IN_BANK")
 
 
 def test_has_present_and_absent() -> None:
     enc = _make_mock()
-    bank = build_feature_bank(_SIMPLE_MAPPING, enc, sequence_source="v1")
+    bank = build_feature_bank(
+        _SIMPLE_MAPPING, enc, sequence_source="v1", id_mapping_version="id-map-v1"
+    )
     assert bank.has("GENE_A")
     assert not bank.has("GHOST")
 
@@ -200,7 +231,7 @@ def test_non_finite_raises_feature_error() -> None:
     mapping = {"GENE_A": ["MKVLVI"]}
     enc = _InfEncoder()
     with pytest.raises(FeatureError, match="non-finite"):
-        build_feature_bank(mapping, enc, sequence_source="v1")  # type: ignore[arg-type]
+        build_feature_bank(mapping, enc, sequence_source="v1", id_mapping_version="id-map-v1")  # type: ignore[arg-type]
 
 
 class _WrongDimEncoder:
@@ -232,7 +263,7 @@ def test_wrong_dim_pooled_vector_raises_feature_error() -> None:
     mapping = {"GENE_A": ["MKVLVI"]}
     enc = _WrongDimEncoder()
     with pytest.raises(FeatureError, match="shape"):
-        build_feature_bank(mapping, enc, sequence_source="v1")  # type: ignore[arg-type]
+        build_feature_bank(mapping, enc, sequence_source="v1", id_mapping_version="id-map-v1")  # type: ignore[arg-type]
 
 
 # ---------------------------------------------------------------------------
@@ -246,7 +277,13 @@ def test_standardization_base_train_mean_zero_std_one() -> None:
     mapping = {f"G{i}": [f"SEQ{i}AA"] for i in range(10)}
     base_train = [f"G{i}" for i in range(6)]  # first 6
 
-    bank = build_feature_bank(mapping, enc, sequence_source="v1", standardize_on=base_train)
+    bank = build_feature_bank(
+        mapping,
+        enc,
+        sequence_source="v1",
+        id_mapping_version="id-map-v1",
+        standardize_on=base_train,
+    )
 
     std_vecs = np.stack([bank.standardized_vector(g) for g in base_train])  # (6, 4)
     np.testing.assert_allclose(std_vecs.mean(axis=0), 0.0, atol=1e-5)
@@ -260,7 +297,13 @@ def test_standardization_outside_base_train_uses_same_params() -> None:
     base_train = ["G0", "G1", "G2", "G3"]
     outside = ["G4", "G5"]
 
-    bank = build_feature_bank(mapping, enc, sequence_source="v1", standardize_on=base_train)
+    bank = build_feature_bank(
+        mapping,
+        enc,
+        sequence_source="v1",
+        id_mapping_version="id-map-v1",
+        standardize_on=base_train,
+    )
 
     # Compute base_train mean and std by hand
     bt_vecs = np.stack([bank.vector(g) for g in base_train])  # (4, dim)
@@ -280,7 +323,11 @@ def test_standardization_ignores_standardize_on_not_in_bank() -> None:
     mapping = {"G0": ["MKVLVI"], "G1": ["ACDEF"]}
     # G_GHOST is not in the bank at all
     bank = build_feature_bank(
-        mapping, enc, sequence_source="v1", standardize_on=["G0", "G1", "G_GHOST"]
+        mapping,
+        enc,
+        sequence_source="v1",
+        id_mapping_version="id-map-v1",
+        standardize_on=["G0", "G1", "G_GHOST"],
     )
     # Should succeed; G_GHOST is ignored
     assert bank.has("G0") and bank.has("G1")
@@ -290,7 +337,13 @@ def test_standardization_ignores_standardize_on_not_in_bank() -> None:
 
 def test_standardizer_not_fitted_raises() -> None:
     enc = _make_mock()
-    bank = build_feature_bank(_SIMPLE_MAPPING, enc, sequence_source="v1", standardize_on=None)
+    bank = build_feature_bank(
+        _SIMPLE_MAPPING,
+        enc,
+        sequence_source="v1",
+        id_mapping_version="id-map-v1",
+        standardize_on=None,
+    )
     with pytest.raises(FeatureError, match="standardizer not fitted"):
         bank.standardized_vector("GENE_A")
 
@@ -317,6 +370,7 @@ def test_std_zero_dim_guarded() -> None:
         mapping,
         _ConstEncoder(),
         sequence_source="v1",
+        id_mapping_version="id-map-v1",
         standardize_on=["GA", "GB", "GC"],  # type: ignore[arg-type]
     )
     # All raw vectors are identical -> std=0 -> scale=1. Standardized = raw - mean = 0.
@@ -331,8 +385,12 @@ def test_std_zero_dim_guarded() -> None:
 
 def test_checksum_stable_identical_inputs() -> None:
     enc = _make_mock()
-    bank1 = build_feature_bank(_SIMPLE_MAPPING, enc, sequence_source="v1")
-    bank2 = build_feature_bank(_SIMPLE_MAPPING, enc, sequence_source="v1")
+    bank1 = build_feature_bank(
+        _SIMPLE_MAPPING, enc, sequence_source="v1", id_mapping_version="id-map-v1"
+    )
+    bank2 = build_feature_bank(
+        _SIMPLE_MAPPING, enc, sequence_source="v1", id_mapping_version="id-map-v1"
+    )
     assert bank1.checksum == bank2.checksum
 
 
@@ -340,15 +398,31 @@ def test_checksum_changes_on_model_revision() -> None:
     mapping = {"GA": ["MKVLVI"]}
     enc1 = MockSequenceEncoder(dim=8, model_revision="rev-A")
     enc2 = MockSequenceEncoder(dim=8, model_revision="rev-B")
-    bank1 = build_feature_bank(mapping, enc1, sequence_source="v1")
-    bank2 = build_feature_bank(mapping, enc2, sequence_source="v1")
+    bank1 = build_feature_bank(mapping, enc1, sequence_source="v1", id_mapping_version="id-map-v1")
+    bank2 = build_feature_bank(mapping, enc2, sequence_source="v1", id_mapping_version="id-map-v1")
     assert bank1.checksum != bank2.checksum
 
 
 def test_checksum_changes_on_sequence_source() -> None:
     enc = _make_mock()
-    bank1 = build_feature_bank(_SIMPLE_MAPPING, enc, sequence_source="v1")
-    bank2 = build_feature_bank(_SIMPLE_MAPPING, enc, sequence_source="v2")
+    bank1 = build_feature_bank(
+        _SIMPLE_MAPPING, enc, sequence_source="v1", id_mapping_version="id-map-v1"
+    )
+    bank2 = build_feature_bank(
+        _SIMPLE_MAPPING, enc, sequence_source="v2", id_mapping_version="id-map-v1"
+    )
+    assert bank1.checksum != bank2.checksum
+
+
+def test_checksum_changes_on_id_mapping_version() -> None:
+    """Feature bank checksum must differ when id_mapping_version changes."""
+    enc = _make_mock()
+    bank1 = build_feature_bank(
+        _SIMPLE_MAPPING, enc, sequence_source="v1", id_mapping_version="ensembl-110"
+    )
+    bank2 = build_feature_bank(
+        _SIMPLE_MAPPING, enc, sequence_source="v1", id_mapping_version="ensembl-111"
+    )
     assert bank1.checksum != bank2.checksum
 
 
@@ -356,8 +430,10 @@ def test_checksum_changes_on_mapping() -> None:
     enc = _make_mock()
     mapping2 = dict(_SIMPLE_MAPPING)
     mapping2["EXTRA"] = ["EXTRA_SEQ"]
-    bank1 = build_feature_bank(_SIMPLE_MAPPING, enc, sequence_source="v1")
-    bank2 = build_feature_bank(mapping2, enc, sequence_source="v1")
+    bank1 = build_feature_bank(
+        _SIMPLE_MAPPING, enc, sequence_source="v1", id_mapping_version="id-map-v1"
+    )
+    bank2 = build_feature_bank(mapping2, enc, sequence_source="v1", id_mapping_version="id-map-v1")
     assert bank1.checksum != bank2.checksum
 
 
@@ -368,7 +444,9 @@ def test_checksum_changes_on_mapping() -> None:
 
 def test_round_trip_genes_and_vectors() -> None:
     enc = _make_mock(dim=8)
-    bank = build_feature_bank(_SIMPLE_MAPPING, enc, sequence_source="v1")
+    bank = build_feature_bank(
+        _SIMPLE_MAPPING, enc, sequence_source="v1", id_mapping_version="id-map-v1"
+    )
     with tempfile.TemporaryDirectory() as td:
         p = Path(td) / "bank"
         bank.write(p)
@@ -385,7 +463,7 @@ def test_round_trip_excluded() -> None:
         "GENE_AMB": ["MKVLVI", "ACDEF"],
     }
     enc = _make_mock()
-    bank = build_feature_bank(mapping, enc, sequence_source="v1")
+    bank = build_feature_bank(mapping, enc, sequence_source="v1", id_mapping_version="id-map-v1")
     with tempfile.TemporaryDirectory() as td:
         p = Path(td) / "bank"
         bank.write(p)
@@ -395,7 +473,9 @@ def test_round_trip_excluded() -> None:
 
 def test_round_trip_provenance() -> None:
     enc = _make_mock()
-    bank = build_feature_bank(_SIMPLE_MAPPING, enc, sequence_source="v1")
+    bank = build_feature_bank(
+        _SIMPLE_MAPPING, enc, sequence_source="v1", id_mapping_version="id-map-v1"
+    )
     with tempfile.TemporaryDirectory() as td:
         p = Path(td) / "bank"
         bank.write(p)
@@ -405,7 +485,9 @@ def test_round_trip_provenance() -> None:
 
 def test_round_trip_checksum() -> None:
     enc = _make_mock()
-    bank = build_feature_bank(_SIMPLE_MAPPING, enc, sequence_source="v1")
+    bank = build_feature_bank(
+        _SIMPLE_MAPPING, enc, sequence_source="v1", id_mapping_version="id-map-v1"
+    )
     with tempfile.TemporaryDirectory() as td:
         p = Path(td) / "bank"
         bank.write(p)
@@ -417,7 +499,13 @@ def test_round_trip_standardized_vector() -> None:
     enc = _make_mock(dim=6)
     mapping = {f"G{i}": [f"SEQ{i}A"] for i in range(5)}
     base_train = ["G0", "G1", "G2"]
-    bank = build_feature_bank(mapping, enc, sequence_source="v1", standardize_on=base_train)
+    bank = build_feature_bank(
+        mapping,
+        enc,
+        sequence_source="v1",
+        id_mapping_version="id-map-v1",
+        standardize_on=base_train,
+    )
     with tempfile.TemporaryDirectory() as td:
         p = Path(td) / "bank"
         bank.write(p)
@@ -436,7 +524,9 @@ def test_round_trip_standardized_vector() -> None:
 
 def test_matrix_default_order() -> None:
     enc = _make_mock(dim=8)
-    bank = build_feature_bank(_SIMPLE_MAPPING, enc, sequence_source="v1")
+    bank = build_feature_bank(
+        _SIMPLE_MAPPING, enc, sequence_source="v1", id_mapping_version="id-map-v1"
+    )
     mat = bank.matrix()
     assert mat.shape == (len(bank.genes), 8)
     for i, g in enumerate(bank.genes):
@@ -445,7 +535,9 @@ def test_matrix_default_order() -> None:
 
 def test_matrix_custom_order() -> None:
     enc = _make_mock(dim=8)
-    bank = build_feature_bank(_SIMPLE_MAPPING, enc, sequence_source="v1")
+    bank = build_feature_bank(
+        _SIMPLE_MAPPING, enc, sequence_source="v1", id_mapping_version="id-map-v1"
+    )
     order = ["GENE_C", "GENE_A"]
     mat = bank.matrix(order)
     assert mat.shape == (2, 8)
@@ -465,11 +557,15 @@ def test_no_expression_involvement() -> None:
     def build_in_context_a() -> FeatureBank:
         # Simulates code that has access to "expression data" but build_feature_bank doesn't use it
         _fake_expression = np.random.default_rng(0).random((100, 50))  # never passed in
-        return build_feature_bank(_SIMPLE_MAPPING, enc, sequence_source="v1")
+        return build_feature_bank(
+            _SIMPLE_MAPPING, enc, sequence_source="v1", id_mapping_version="id-map-v1"
+        )
 
     def build_in_context_b() -> FeatureBank:
         _fake_expression = np.random.default_rng(99).random((200, 80))  # never passed in
-        return build_feature_bank(_SIMPLE_MAPPING, enc, sequence_source="v1")
+        return build_feature_bank(
+            _SIMPLE_MAPPING, enc, sequence_source="v1", id_mapping_version="id-map-v1"
+        )
 
     bank_a = build_in_context_a()
     bank_b = build_in_context_b()
@@ -656,7 +752,29 @@ def test_bucket_indices_single_element() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 14. Esm2Encoder orchestration (no torch — stub _forward_bucket)
+# 14. Protein-sequence provenance separation (Task 1 / audit P2-1)
+# ---------------------------------------------------------------------------
+
+
+def test_provenance_carries_id_mapping_version() -> None:
+    """FeatureBankProvenance must carry id_mapping_version separately from sequence_source."""
+    mapping = {"GENE1": ["MAAA"], "GENE2": ["MBBB"]}
+    bank = build_feature_bank(
+        mapping,
+        MockSequenceEncoder(dim=8),
+        sequence_source="uniprot-2024-01",
+        id_mapping_version="ensembl-110",
+        standardize_on=["GENE1", "GENE2"],
+    )
+    assert bank.provenance.sequence_source == "uniprot-2024-01"
+    assert bank.provenance.id_mapping_version == "ensembl-110"
+    # round-trips through to_dict/from_dict
+    rt = FeatureBankProvenance.from_dict(bank.provenance.to_dict())
+    assert rt.id_mapping_version == "ensembl-110"
+
+
+# ---------------------------------------------------------------------------
+# 15. Esm2Encoder orchestration (no torch — stub _forward_bucket)
 # ---------------------------------------------------------------------------
 
 

@@ -178,6 +178,8 @@ def _write_world(
         "gene_id_key": None,
         "counts_layer": None,
         "raw_data_uri": "synthetic://cli-test",
+        "sequence_source": "uniprot-2024-01",
+        "id_mapping_version": "ensembl-110",
     }
     data_card_path = tmp_path / "data_card.json"
     data_card_path.write_text(json.dumps(data_card), encoding="utf-8")
@@ -193,8 +195,209 @@ def _run(argv: list[str], artifacts_root: Path) -> int:
     return cli.main([*argv, "--artifacts-root", str(artifacts_root)])
 
 
-def _run_id(config_path: Path) -> str:
-    return load_config(config_path).run_id
+def _run_id(config_path: Path, data_card_path: Path) -> str:
+    """Compute the composite immutable run_id exactly as ``cmd_prepare`` does."""
+    from alive.cli import _raw_data_hash
+    from alive.data.features import canonical_mapping_sha256
+    from alive.provenance import compute_run_id, sha256_json
+
+    config = load_config(config_path)
+    data_card = json.loads(data_card_path.read_text(encoding="utf-8"))
+    sequences = json.loads(Path(data_card["sequences"]).read_text(encoding="utf-8"))
+    gene_sequences = {g: list(seqs) for g, seqs in sequences.items()}
+    return compute_run_id(
+        config.config_digest,
+        sha256_json(data_card),
+        _raw_data_hash(data_card["h5ad"], data_card),
+        canonical_mapping_sha256(gene_sequences),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Helpers: composite run_id (data sensitivity + existing-dir refusal).
+# ---------------------------------------------------------------------------
+
+
+def _prepare_world(world_dir: Path, *, mutate_counts: bool = False) -> tuple[Path, Path]:
+    """Build a world under ``world_dir``; optionally perturb the h5ad counts.
+
+    The config is held fixed across calls (same seed) so that only the raw
+    expression file differs when ``mutate_counts=True`` — isolating the
+    data-sensitivity of the composite run_id.
+    """
+    world_dir.mkdir(parents=True, exist_ok=True)
+    config_path, data_card_path = _write_world(world_dir, seed=3)
+    if mutate_counts:
+        data_card = json.loads(data_card_path.read_text(encoding="utf-8"))
+        h5ad_path = Path(data_card["h5ad"])
+        adata = anndata.read_h5ad(h5ad_path)
+        dense = adata.X.toarray()
+        dense[0, 0] = dense[0, 0] + 1.0  # one-cell, one-gene count bump
+        adata.X = sp.csr_matrix(dense.astype(np.float32))
+        adata.write_h5ad(h5ad_path)
+    return config_path, data_card_path
+
+
+def _prepare_and_get_run_id(world_dir: Path, *, mutate_counts: bool = False, capsys=None) -> str:
+    """Build a world, run ``prepare``, and return the run_id printed by ``prepare``.
+
+    Capturing the printed value (rather than recomputing) makes the test exercise
+    the actual id that ``cmd_prepare`` names the run directory with.
+    """
+    import contextlib
+    import io
+
+    config_path, data_card_path = _prepare_world(world_dir, mutate_counts=mutate_counts)
+    root = _artifacts_root(world_dir)
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        rc = _run(
+            [
+                "cartographer",
+                "prepare",
+                "--config",
+                str(config_path),
+                "--data-card",
+                str(data_card_path),
+                "--mock-encoder",
+            ],
+            root,
+        )
+    assert rc == 0
+    printed = buf.getvalue().strip().splitlines()[-1].strip()
+    # The printed id must name an existing run directory under the artifacts root.
+    assert (root / "cartographer" / printed).is_dir()
+    return printed
+
+
+def _rerun_prepare(world_dir: Path) -> int:
+    """Re-run ``prepare`` on the SAME world (identical inputs) and return rc.
+
+    ``prepare`` recomputes the composite run id from its inputs, so the caller
+    does not (and must not) pass one in.
+    """
+    config_path = world_dir / "config.yaml"
+    data_card_path = world_dir / "data_card.json"
+    root = _artifacts_root(world_dir)
+    return _run(
+        [
+            "cartographer",
+            "prepare",
+            "--config",
+            str(config_path),
+            "--data-card",
+            str(data_card_path),
+            "--mock-encoder",
+        ],
+        root,
+    )
+
+
+def _run_dir(world_dir: Path, run_id: str) -> Path:
+    """Return the run directory for *run_id* under the world's artifacts root."""
+    return _artifacts_root(world_dir) / "cartographer" / run_id
+
+
+def _run_stage(world_dir: Path, stage: str, run_id: str) -> int:
+    """Run a single post-prepare staged subcommand and return its exit code."""
+    return _run(["cartographer", stage, "--run-id", run_id], _artifacts_root(world_dir))
+
+
+def test_prepare_run_id_changes_with_data(tmp_path: Path) -> None:
+    rid1 = _prepare_and_get_run_id(tmp_path / "a")  # default fixture data
+    rid2 = _prepare_and_get_run_id(tmp_path / "b", mutate_counts=True)  # same config, altered h5ad
+    assert rid1 != rid2  # composite id is data-sensitive
+
+
+def test_prepare_refuses_existing_run_dir(tmp_path: Path) -> None:
+    _prepare_and_get_run_id(tmp_path)
+    rc = _rerun_prepare(tmp_path)  # identical inputs → dir already exists
+    assert rc == 2  # refuses to overwrite an existing run directory
+
+
+# ---------------------------------------------------------------------------
+# Task 3 (#4 / audit P1-2 pt2): append-only ledger across stages.
+#
+# Re-running a deterministic stage must NEVER silently replace its write-once
+# ledger entry.  The legal outcomes are a clean byte-identical no-op (rc 0) or a
+# clean refusal (rc 2) — but the recorded hash must remain the original.
+# ---------------------------------------------------------------------------
+
+
+class TestAppendOnlyLedger:
+    def _ledger_sha(self, world_dir: Path, run_id: str, name: str) -> str:
+        from alive.provenance import RunLedger
+
+        return RunLedger.read(_run_dir(world_dir, run_id) / "ledger.json").artifact_sha(name)
+
+    def test_rerun_fit_refuses_silent_ledger_replacement(self, tmp_path: Path) -> None:
+        rid = _prepare_and_get_run_id(tmp_path)
+        assert _run_stage(tmp_path, "fit", rid) == 0
+        first = self._ledger_sha(tmp_path, rid, "base_artifact")
+        rc = _run_stage(tmp_path, "fit", rid)  # second fit
+        after = self._ledger_sha(tmp_path, rid, "base_artifact")
+        # deterministic fit → byte-identical → either a clean no-op (rc 0) or a
+        # clean refusal (rc 2), but NEVER a replaced/different hash.
+        assert after == first
+        assert rc in (0, 2)
+
+    def test_rerun_develop_refuses_silent_ledger_replacement(self, tmp_path: Path) -> None:
+        rid = _prepare_and_get_run_id(tmp_path)
+        assert _run_stage(tmp_path, "fit", rid) == 0
+        assert _run_stage(tmp_path, "develop", rid) == 0
+        first = self._ledger_sha(tmp_path, rid, "method_lock")
+        rc = _run_stage(tmp_path, "develop", rid)  # second develop
+        after = self._ledger_sha(tmp_path, rid, "method_lock")
+        assert after == first
+        assert rc in (0, 2)
+
+    def test_rerun_calibrate_refuses_silent_ledger_replacement(self, tmp_path: Path) -> None:
+        rid = _prepare_and_get_run_id(tmp_path)
+        assert _run_stage(tmp_path, "fit", rid) == 0
+        assert _run_stage(tmp_path, "develop", rid) == 0
+        assert _run_stage(tmp_path, "calibrate", rid) == 0
+        first = self._ledger_sha(tmp_path, rid, "conformal_artifact")
+        rc = _run_stage(tmp_path, "calibrate", rid)  # second calibrate
+        after = self._ledger_sha(tmp_path, rid, "conformal_artifact")
+        assert after == first
+        assert rc in (0, 2)
+
+    def test_append_artifact_is_write_once(self, tmp_path: Path) -> None:
+        """A second record of the same artifact name must RAISE, never replace.
+
+        This exercises the structural hole directly: the legacy ``_ledger_record``
+        does a dict-replace that BYPASSES the write-once guard, so a differing
+        second record silently overwrote the entry.  The append-only helper must
+        instead raise on any second record (write-once), so the on-disk hash is
+        never silently replaced.
+        """
+        from alive.cli import _append_artifact
+        from alive.provenance import DuplicateArtifactError
+
+        rid = _prepare_and_get_run_id(tmp_path)
+        run_dir = _run_dir(tmp_path, rid)
+        _append_artifact(run_dir, "base_artifact", "a" * 64)
+        before = self._ledger_sha(tmp_path, rid, "base_artifact")
+        # A second record with a DIFFERENT hash must raise — not silently replace.
+        with pytest.raises(DuplicateArtifactError):
+            _append_artifact(run_dir, "base_artifact", "b" * 64)
+        # On-disk hash is unchanged: the write-once entry was preserved.
+        assert self._ledger_sha(tmp_path, rid, "base_artifact") == before
+
+    def test_refuse_nonidentical_rerun_semantics(self, tmp_path: Path) -> None:
+        """The output-exists guard: first run False, no-op True, differing → CliError."""
+        from alive.cli import CliError, _append_artifact, _refuse_nonidentical_rerun
+
+        rid = _prepare_and_get_run_id(tmp_path)
+        run_dir = _run_dir(tmp_path, rid)
+        # Not recorded yet → first run.
+        assert _refuse_nonidentical_rerun(run_dir, "base_artifact", "a" * 64) is False
+        _append_artifact(run_dir, "base_artifact", "a" * 64)
+        # Recorded with the same hash → byte-identical no-op.
+        assert _refuse_nonidentical_rerun(run_dir, "base_artifact", "a" * 64) is True
+        # Recorded with a different hash → clean refusal (CliError → exit 2).
+        with pytest.raises(CliError, match="immutable"):
+            _refuse_nonidentical_rerun(run_dir, "base_artifact", "b" * 64)
 
 
 # ---------------------------------------------------------------------------
@@ -224,7 +427,7 @@ class TestEndToEndContinue:
     def test_full_pipeline_confirmatory(self, tmp_path: Path) -> None:
         config_path, data_card_path = _write_world(tmp_path, seed=3)
         root = _artifacts_root(tmp_path)
-        run_id = _run_id(config_path)
+        run_id = _run_id(config_path, data_card_path)
         run_dir = root / "cartographer" / run_id
 
         assert (
@@ -289,7 +492,7 @@ class TestEndToEndFutility:
     def test_futility_refuses_and_ships_conformal(self, tmp_path: Path) -> None:
         config_path, data_card_path = _write_world(tmp_path, seed=3)
         root = _artifacts_root(tmp_path)
-        run_id = _run_id(config_path)
+        run_id = _run_id(config_path, data_card_path)
         run_dir = root / "cartographer" / run_id
 
         assert (
@@ -333,6 +536,144 @@ class TestEndToEndFutility:
         assert report["mode"] == "futility_stopped"
         assert report["scientific_verdict"] is None
         assert report["sealed_access_count"] == 0
+
+
+# ===========================================================================
+# Task 4 (#4 / audit P1-2 pt3): lock upstream stages after terminal/sealed state
+#
+# Two distinct lock conditions (CLAUDE.md §11; spec §11.2):
+#   1. Seal lock — once a sealed access is recorded (audit.jsonl non-empty), the
+#      upstream stages fit/develop/calibrate are ALL permanently refused.
+#   2. Futility-terminal lock — once futility.json status == FUTILITY_STOPPED,
+#      fit/develop are refused, but calibrate MUST remain runnable (it is the
+#      futility-stopped run's primary deliverable; spec §9.3 / §12.1).
+# ===========================================================================
+
+
+def _drive_through_evaluate_once(tmp_path: Path) -> str:
+    """Prepare → fit → develop → futility, force CONTINUE, calibrate, evaluate-once.
+
+    Returns the composite run_id after the seal has been opened exactly once.
+    """
+    config_path, data_card_path = _write_world(tmp_path, seed=3)
+    root = _artifacts_root(tmp_path)
+    run_id = _run_id(config_path, data_card_path)
+    run_dir = root / "cartographer" / run_id
+
+    assert (
+        _run(
+            [
+                "cartographer",
+                "prepare",
+                "--config",
+                str(config_path),
+                "--data-card",
+                str(data_card_path),
+                "--mock-encoder",
+            ],
+            root,
+        )
+        == 0
+    )
+    assert _run(["cartographer", "fit", "--run-id", run_id], root) == 0
+    assert _run(["cartographer", "develop", "--run-id", run_id], root) == 0
+    assert _run(["cartographer", "futility", "--run-id", run_id], root) == 0
+    _force_status(run_dir, "CONTINUE_CONFIRMATORY")
+    assert _run(["cartographer", "calibrate", "--run-id", run_id], root) == 0
+    assert _run(["cartographer", "evaluate-once", "--run-id", run_id], root) == 0
+    # The seal has opened exactly once.
+    audit_lines = [
+        ln
+        for ln in (run_dir / "audit.jsonl").read_text(encoding="utf-8").splitlines()
+        if ln.strip()
+    ]
+    assert len(audit_lines) == 1
+    return run_id
+
+
+def _drive_to_futility_stop(tmp_path: Path) -> str:
+    """Prepare → fit → develop → futility, then force FUTILITY_STOPPED.
+
+    Returns the composite run_id of a futility-terminal run whose seal is shut.
+    """
+    config_path, data_card_path = _write_world(tmp_path, seed=3)
+    root = _artifacts_root(tmp_path)
+    run_id = _run_id(config_path, data_card_path)
+    run_dir = root / "cartographer" / run_id
+
+    assert (
+        _run(
+            [
+                "cartographer",
+                "prepare",
+                "--config",
+                str(config_path),
+                "--data-card",
+                str(data_card_path),
+                "--mock-encoder",
+            ],
+            root,
+        )
+        == 0
+    )
+    assert _run(["cartographer", "fit", "--run-id", run_id], root) == 0
+    assert _run(["cartographer", "develop", "--run-id", run_id], root) == 0
+    assert _run(["cartographer", "futility", "--run-id", run_id], root) == 0
+    _force_status(run_dir, "FUTILITY_STOPPED")
+    return run_id
+
+
+class TestUpstreamLockedAfterTerminalOrSeal:
+    def test_upstream_locked_after_seal(self, tmp_path: Path) -> None:
+        """Once the seal has opened, fit/develop/calibrate are ALL refused (exit 2)."""
+        rid = _drive_through_evaluate_once(tmp_path)
+        # All three upstream stages are upstream of the seal → permanently locked.
+        assert _run_stage(tmp_path, "calibrate", rid) == 2
+        assert _run_stage(tmp_path, "fit", rid) == 2
+        assert _run_stage(tmp_path, "develop", rid) == 2
+
+    def test_upstream_locked_after_futility_stop(self, tmp_path: Path) -> None:
+        """A FUTILITY_STOPPED (terminal) run refuses fit and develop (exit 2)."""
+        rid = _drive_to_futility_stop(tmp_path)
+        assert _run_stage(tmp_path, "fit", rid) == 2
+        assert _run_stage(tmp_path, "develop", rid) == 2
+
+    def test_calibrate_allowed_after_futility_stop(self, tmp_path: Path) -> None:
+        """Regression guard for the corrected contract: a FUTILITY_STOPPED run STILL
+        ships its conformal artifact via calibrate — calibrate must NOT be locked by
+        the futility-terminal state (README integrity behaviors; spec §9.3 / §12.1).
+        """
+        rid = _drive_to_futility_stop(tmp_path)
+        run_dir = _run_dir(tmp_path, rid)
+        # calibrate runs to completion (exit 0) and produces the conformal artifact.
+        assert _run_stage(tmp_path, "calibrate", rid) == 0
+        assert (run_dir / "conformal.json").exists()
+
+
+# ---------------------------------------------------------------------------
+# Task 5 (audit P3-1): fit writes the base predictor exactly once.
+#
+# The original duplicate base-predictor write was eliminated when Task 3
+# reworked cmd_fit (guard -> single response_space.write + single
+# base_predictor.write -> append-only ledger).  This is a regression guard
+# that locks the single-write contract in.
+# ---------------------------------------------------------------------------
+
+
+def test_fit_writes_base_predictor_once(tmp_path: Path, monkeypatch) -> None:
+    import alive.base.predictor as predmod
+
+    rid = _prepare_and_get_run_id(tmp_path)
+    calls: list[object] = []
+    orig = predmod.BasePredictor.write
+
+    def _counting_write(self, path):  # noqa: ANN001, ANN202
+        calls.append(path)
+        return orig(self, path)
+
+    monkeypatch.setattr(predmod.BasePredictor, "write", _counting_write)
+    assert _run_stage(tmp_path, "fit", rid) == 0
+    assert len(calls) == 1  # exactly one write — no duplicate (P3-1)
 
 
 # ===========================================================================
@@ -380,7 +721,7 @@ class TestReportSchemaLock:
     def test_futility_schema_is_locked(self, tmp_path: Path) -> None:
         config_path, data_card_path = _write_world(tmp_path, seed=3)
         root = _artifacts_root(tmp_path)
-        run_id = _run_id(config_path)
+        run_id = _run_id(config_path, data_card_path)
         run_dir = root / "cartographer" / run_id
 
         _run(
@@ -431,7 +772,7 @@ class TestReportSchemaLock:
     def test_confirmatory_schema_has_verdict_evidence(self, tmp_path: Path) -> None:
         config_path, data_card_path = _write_world(tmp_path, seed=3)
         root = _artifacts_root(tmp_path)
-        run_id = _run_id(config_path)
+        run_id = _run_id(config_path, data_card_path)
         run_dir = root / "cartographer" / run_id
 
         _run(
@@ -476,7 +817,7 @@ class TestReportNeverRecomputes:
     def test_report_reads_persisted_artifacts(self, tmp_path: Path) -> None:
         config_path, data_card_path = _write_world(tmp_path, seed=3)
         root = _artifacts_root(tmp_path)
-        run_id = _run_id(config_path)
+        run_id = _run_id(config_path, data_card_path)
         run_dir = root / "cartographer" / run_id
 
         _run(
@@ -524,7 +865,7 @@ class TestSecondEvaluateOnce:
     def test_second_call_exits_cleanly(self, tmp_path: Path, capsys) -> None:
         config_path, data_card_path = _write_world(tmp_path, seed=3)
         root = _artifacts_root(tmp_path)
-        run_id = _run_id(config_path)
+        run_id = _run_id(config_path, data_card_path)
         run_dir = root / "cartographer" / run_id
 
         _run(
@@ -564,7 +905,7 @@ class TestProvenanceWired:
     def test_tampered_ledger_hash_yields_invalid(self, tmp_path: Path) -> None:
         config_path, data_card_path = _write_world(tmp_path, seed=3)
         root = _artifacts_root(tmp_path)
-        run_id = _run_id(config_path)
+        run_id = _run_id(config_path, data_card_path)
         run_dir = root / "cartographer" / run_id
 
         _run(
@@ -639,11 +980,17 @@ class TestConsoleEntryPoint:
 
 class TestDeterminism:
     def test_same_inputs_same_run_id_and_report(self, tmp_path: Path) -> None:
-        def _pipeline(sub: Path) -> tuple[str, dict]:
-            sub.mkdir(parents=True, exist_ok=True)
-            config_path, data_card_path = _write_world(sub, seed=5)
-            root = _artifacts_root(sub)
-            run_id = _run_id(config_path)
+        # The composite run_id binds the data card verbatim (which embeds the
+        # input file PATHS); "same inputs" therefore means the SAME world (one
+        # config, one data card, one h5ad).  We run the identical world through
+        # two separate artifacts roots and assert the run_id and report match.
+        world = tmp_path / "world"
+        world.mkdir(parents=True, exist_ok=True)
+        config_path, data_card_path = _write_world(world, seed=5)
+        expected_run_id = _run_id(config_path, data_card_path)
+
+        def _pipeline(root: Path) -> tuple[str, dict]:
+            run_id = _run_id(config_path, data_card_path)
             run_dir = root / "cartographer" / run_id
             _run(
                 [
@@ -667,9 +1014,9 @@ class TestDeterminism:
             report = json.loads((run_dir / "report.json").read_text(encoding="utf-8"))
             return run_id, report
 
-        run_a, report_a = _pipeline(tmp_path / "a")
-        run_b, report_b = _pipeline(tmp_path / "b")
-        assert run_a == run_b
+        run_a, report_a = _pipeline(tmp_path / "root_a")
+        run_b, report_b = _pipeline(tmp_path / "root_b")
+        assert run_a == run_b == expected_run_id
         assert report_a["scientific_verdict"] == report_b["scientific_verdict"]
         # The verdict-bearing content is identical (modulo non-hashed env in provenance).
         report_a.pop("provenance", None)
@@ -707,7 +1054,7 @@ class TestCliDevelopedParity:
         world_dir.mkdir(parents=True, exist_ok=True)
         config_path, data_card_path = _write_world(world_dir, seed=77)
         root = _artifacts_root(world_dir)
-        run_id = _run_id(config_path)
+        run_id = _run_id(config_path, data_card_path)
         run_dir = root / "cartographer" / run_id
 
         # === CLI path (cmd_prepare → cmd_fit → cmd_develop → cmd_futility) ===
@@ -757,6 +1104,7 @@ class TestCliDevelopedParity:
             {g: seqs for g, seqs in sequences.items()},
             MockSequenceEncoder(dim=8),
             sequence_source="mock-2026",
+            id_mapping_version="id-map-v1",
             standardize_on=base_train_ids,
         )
         audit_path = world_dir / "parity_audit.jsonl"
@@ -771,6 +1119,10 @@ class TestCliDevelopedParity:
             base_art,
             feature_bank,
             config,
+            # Fix wave 1 (spec §4.5): the CLI seeds the shared method_development
+            # reference-bank sampling with the COMPOSITE run_id, so the staged
+            # function must be threaded the same run_id for byte-identical parity.
+            run_id=run_id,
             config_sha256=config_sha256_for_staged,
         )
 
@@ -836,6 +1188,8 @@ def _write_world_with_missing_sequences(
         "gene_id_key": None,
         "counts_layer": None,
         "raw_data_uri": "synthetic://cli-test",
+        "sequence_source": "uniprot-2024-01",
+        "id_mapping_version": "ensembl-110",
     }
     data_card_path = tmp_path / "data_card.json"
     data_card_path.write_text(json.dumps(data_card), encoding="utf-8")
@@ -863,7 +1217,7 @@ class TestFeatureEligibilityBeforeSplit:
             ambiguous_genes=ambiguous,
         )
         root = _artifacts_root(tmp_path)
-        run_id = _run_id(config_path)
+        run_id = _run_id(config_path, data_card_path)
         run_dir = root / "cartographer" / run_id
 
         rc = _run(
@@ -960,7 +1314,7 @@ class TestMockEncoderFlag:
     def test_mock_encoder_flag_sets_encoder_kind(self, tmp_path: Path) -> None:
         config_path, data_card_path = _write_world(tmp_path, seed=42)
         root = _artifacts_root(tmp_path)
-        run_id = _run_id(config_path)
+        run_id = _run_id(config_path, data_card_path)
         run_dir = root / "cartographer" / run_id
 
         rc = _run(
@@ -997,6 +1351,7 @@ class TestEncoderConfigCrossCheck:
         prov = FeatureBankProvenance(
             model_revision="mock-v1",
             sequence_source="test",
+            id_mapping_version="id-map-v1",
             pooling="mean",
             dim=8,
             dtype="float32",
@@ -1025,6 +1380,7 @@ class TestEncoderConfigCrossCheck:
         prov = FeatureBankProvenance(
             model_revision="esm2_t33_650M_UR50D",
             sequence_source="test",
+            id_mapping_version="id-map-v1",
             pooling="mean",
             dim=1280,
             dtype="float32",
@@ -1034,6 +1390,78 @@ class TestEncoderConfigCrossCheck:
         )
         derived = _expected_primary(prov)
         assert derived == config_primary
+
+
+# ===========================================================================
+# Protein-sequence provenance separation (Task 1 / audit P2-1)
+# ===========================================================================
+
+
+def _run_prepare_with_data_card(tmp_path: Path, *, drop_keys: list[str]) -> int:
+    """Run ``prepare`` with a data card missing the specified keys; return the exit code."""
+    config_path, data_card_path = _write_world(tmp_path)
+    data_card = json.loads(data_card_path.read_text(encoding="utf-8"))
+    for key in drop_keys:
+        data_card.pop(key, None)
+    data_card_path.write_text(json.dumps(data_card), encoding="utf-8")
+    return _run(
+        [
+            "cartographer",
+            "prepare",
+            "--config",
+            str(config_path),
+            "--data-card",
+            str(data_card_path),
+            "--mock-encoder",
+        ],
+        _artifacts_root(tmp_path),
+    )
+
+
+class TestProteinSequenceProvenance:
+    """Task 1 / audit P2-1: protein-sequence provenance is separate from expression source."""
+
+    def test_prepare_records_protein_sequence_provenance(self, tmp_path: Path) -> None:
+        from alive.data.features import FeatureBank
+        from alive.provenance import RunLedger
+
+        config_path, data_card_path = _write_world(tmp_path)
+        root = _artifacts_root(tmp_path)
+        run_id = _run_id(config_path, data_card_path)
+        run_dir = root / "cartographer" / run_id
+
+        rc = _run(
+            [
+                "cartographer",
+                "prepare",
+                "--config",
+                str(config_path),
+                "--data-card",
+                str(data_card_path),
+                "--mock-encoder",
+            ],
+            root,
+        )
+        assert rc == 0
+
+        bank = FeatureBank.read(run_dir / "feature_bank")
+        # sequence_source is the protein DB release, NOT the expression URI
+        assert bank.provenance.sequence_source == "uniprot-2024-01"
+        assert bank.provenance.sequence_source != "synthetic://cli-test"
+        assert bank.provenance.id_mapping_version == "ensembl-110"
+
+        ledger = RunLedger.read(run_dir / "ledger.json")
+        assert ledger.artifact_sha("sequence_mapping") == bank.provenance.mapping_sha256
+        assert ledger.artifact_sha("raw_data")  # expression hash still present & distinct
+        assert ledger.artifact_sha("raw_data") != ledger.artifact_sha("sequence_mapping")
+
+    def test_prepare_refuses_data_card_missing_sequence_source(self, tmp_path: Path) -> None:
+        rc = _run_prepare_with_data_card(tmp_path, drop_keys=["sequence_source"])
+        assert rc == 2
+
+    def test_prepare_refuses_data_card_missing_id_mapping_version(self, tmp_path: Path) -> None:
+        rc = _run_prepare_with_data_card(tmp_path, drop_keys=["id_mapping_version"])
+        assert rc == 2
 
 
 @pytest.fixture(autouse=True)

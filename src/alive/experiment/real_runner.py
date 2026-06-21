@@ -421,6 +421,7 @@ def develop_methods_stage(
     feature_bank: "FeatureBank",
     config: "Config",
     *,
+    run_id: str,
     config_sha256: str | None = None,
 ) -> tuple[MethodLock, FutilityDecision]:
     """Stage 2: OOF method development + preregistered futility decision.
@@ -444,12 +445,24 @@ def develop_methods_stage(
         Per-perturbation feature bank.
     config : Config
         Locked experiment config.
+    run_id : str
+        The COMPOSITE immutable run id (spec §4.5) used to seed the deterministic
+        equal-cell sampling of the ``method_development`` errors.  REQUIRED: it
+        MUST match the value used by :func:`calibrate` / :func:`evaluate_sealed_once`
+        for the shared reference bank, otherwise the conformal threshold silently
+        desynchronises from the sealed scores.  The CLI threads the composite
+        run_id; unit tests pass ``config.config_digest``.
 
     Returns
     -------
     tuple[MethodLock, FutilityDecision]
         The locked methods and the futility decision.
     """
+    # Sampling seed source: the required composite run_id (spec §4.5).  MUST
+    # match the value used by calibrate / evaluate_sealed_once for the shared
+    # method_development bank, or the conformal threshold desynchronises.
+    seed_run_id = run_id
+
     dev_ids = [pid for pid in manifest.ids_for("method_development") if feature_bank.has(pid)]
     populations = store.read_unsealed(dev_ids)
     ids, features, errors, ensemble_means = perturbation_inputs(
@@ -458,13 +471,13 @@ def develop_methods_stage(
         feature_bank,
         populations,
         response_cfg=config.response_space,
-        run_id=config.run_id,
+        run_id=seed_run_id,
     )
 
     md = config.method_development
     # Provenance link to the locked config: the CLI threads the FULL config
     # digest (sha256 of the config file); pure unit tests fall back to run_id.
-    config_sha = config_sha256 if config_sha256 is not None else config.run_id
+    config_sha = config_sha256 if config_sha256 is not None else config.config_digest
     method_lock = develop_methods(
         ids,
         features,
@@ -507,6 +520,7 @@ def calibrate(
     feature_bank: "FeatureBank",
     config: "Config",
     *,
+    run_id: str,
     config_sha256: str | None = None,
 ) -> ConformalArtifact:
     """Stage 3: build the split-conformal artifact on conformal_calibration.
@@ -531,10 +545,20 @@ def calibrate(
         Per-perturbation feature bank.
     config : Config
         Locked experiment config.
+    run_id : str
+        The COMPOSITE immutable run id (spec §4.5) used to seed the deterministic
+        equal-cell sampling of the shared ``method_development`` reference bank
+        (and the calibration query set).  REQUIRED: this MUST be the same value
+        :func:`evaluate_sealed_once` is called with so the gate/comparator scorers
+        fitted at calibration and at sealed evaluation are byte-identical — the
+        conformal coverage guarantee assumes one identically-fitted model, so a
+        mismatch silently desynchronises the threshold from the sealed scores.
+        The CLI always threads the composite run_id; unit tests pass
+        ``config.config_digest``.
     config_sha256 : str or None
         Full 64-char SHA-256 digest of the locked config file.  The CLI
         always passes this; pure unit tests may omit it (falls back to
-        ``config.run_id`` so existing tests remain valid).
+        ``config.config_digest`` so existing tests remain valid).
 
     Returns
     -------
@@ -544,18 +568,33 @@ def calibrate(
     base = base_artifact.base_predictor
     rs = base_artifact.response_space
 
+    # The sampling seed source: the required composite run_id (spec §4.5).
+    # MUST match the value used by evaluate_sealed_once for the shared reference
+    # bank, or the gate scorer fitted here diverges from the sealed one.
+    seed_run_id = run_id
+
     # Reference bank = method_development (never calibration/sealed).
     ref_ids = [pid for pid in manifest.ids_for("method_development") if feature_bank.has(pid)]
     ref_pops = store.read_unsealed(ref_ids)
     _ref_ids, ref_features, ref_errors, ref_ensemble_means = perturbation_inputs(
-        base, rs, feature_bank, ref_pops, response_cfg=config.response_space, run_id=config.run_id
+        base,
+        rs,
+        feature_bank,
+        ref_pops,
+        response_cfg=config.response_space,
+        run_id=seed_run_id,
     )
 
     # Calibration query set.
     cal_ids = [pid for pid in manifest.ids_for("conformal_calibration") if feature_bank.has(pid)]
     cal_pops = store.read_unsealed(cal_ids)
     _cal_ids, cal_features, cal_errors, cal_ensemble_means = perturbation_inputs(
-        base, rs, feature_bank, cal_pops, response_cfg=config.response_space, run_id=config.run_id
+        base,
+        rs,
+        feature_bank,
+        cal_pops,
+        response_cfg=config.response_space,
+        run_id=seed_run_id,
     )
 
     cal_scores = gate_and_comparator_scores(
@@ -570,8 +609,8 @@ def calibrate(
     cal_gate_scores = cal_scores["gate"]
 
     # Thread the full config digest like the other stages; fall back to
-    # config.run_id only for pure unit tests that do not pass the digest.
-    cfg_sha = config_sha256 if config_sha256 is not None else config.run_id
+    # config.config_digest only for pure unit tests that do not pass the digest.
+    cfg_sha = config_sha256 if config_sha256 is not None else config.config_digest
     return build_conformal_artifact(
         cal_errors,
         cal_gate_scores,
@@ -857,7 +896,7 @@ def evaluate_sealed_once(
     # --- Provenance (carry-forward fix a): REAL ledger hash verification. ----
     # The full config digest (fix c) is threaded from the CLI; pure unit tests
     # fall back to run_id so existing direct callers keep working.
-    cfg_digest = config_sha256 if config_sha256 is not None else config.run_id
+    cfg_digest = config_sha256 if config_sha256 is not None else config.config_digest
     expected_checksums = {
         "config": cfg_digest,
         "split_manifest": manifest.checksum,

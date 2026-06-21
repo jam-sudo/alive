@@ -23,6 +23,9 @@ sha256_bytes(data)
     SHA-256 hex digest of a bytes object.
 sha256_json(obj)
     SHA-256 hex of canonical JSON (sort_keys, compact separators).
+compute_run_id(config_digest, data_card_digest, raw_data_sha256, sequence_mapping_sha256)
+    Composite immutable run identifier binding config to the exact data
+    (config + data card + raw expression file + protein-sequence mapping).
 capture_environment(lockfile_path, registered_seeds, *, repo_dir=None)
     Capture Python version, platform, git HEAD, lockfile hash, and seeds.
 RunLedger
@@ -136,6 +139,51 @@ def sha256_json(obj: object) -> str:
     """
     canonical = json.dumps(obj, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def compute_run_id(
+    config_digest: str,
+    data_card_digest: str,
+    raw_data_sha256: str,
+    sequence_mapping_sha256: str,
+    *,
+    length: int = 16,
+) -> str:
+    """Immutable composite run identifier (spec §11.2).
+
+    Binds the config to the exact data, raw expression file, and protein-sequence
+    mapping it was prepared against, so the same config on different data yields a
+    different ``run_id``.
+
+    Parameters
+    ----------
+    config_digest : str
+        Deterministic digest of the resolved config (:attr:`Config.config_digest`).
+    data_card_digest : str
+        SHA-256 of the canonical data card JSON.
+    raw_data_sha256 : str
+        SHA-256 of the raw expression file (or its declared URI when absent).
+    sequence_mapping_sha256 : str
+        SHA-256 of the canonical gene→protein-sequence mapping.
+    length : int, optional
+        Number of leading hex characters to return.  Defaults to 16.
+
+    Returns
+    -------
+    str
+        ``length``-character lowercase hexadecimal run identifier.
+    """
+    serialised = json.dumps(
+        {
+            "config": config_digest,
+            "data_card": data_card_digest,
+            "raw_data": raw_data_sha256,
+            "sequence_mapping": sequence_mapping_sha256,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(serialised.encode("utf-8")).hexdigest()[:length]
 
 
 # ---------------------------------------------------------------------------
@@ -281,7 +329,7 @@ class RunLedger:
     Parameters
     ----------
     run_id : str
-        Deterministic run identifier from :attr:`Config.run_id`.
+        Composite immutable run identifier from :func:`compute_run_id`.
     config_sha256 : str
         SHA-256 of the serialised config (for the §3.3 provenance set).
     environment : EnvironmentInfo

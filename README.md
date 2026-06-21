@@ -52,8 +52,12 @@ The console entry point is `alive` (declared in `pyproject.toml`). Run it throug
 uv run alive cartographer <command> [options]
 ```
 
-All commands operate on a single **run**, identified by a `run_id` that is a deterministic hash of
-the committed config (`config.run_id`). Artifacts for a run live under:
+All commands operate on a single **run**, identified by a `run_id` that is a deterministic composite
+hash of the config **plus** the data card, the raw expression file, and the protein-sequence
+mapping — so the same config on different data is a different run. Because the `run_id` binds the
+declared data card (including its `h5ad` / `sequences` paths), staging the *same* data at a different
+path or mount yields a *different* `run_id` and a separate run directory. Artifacts for a run live
+under:
 
 ```
 <artifacts-root>/cartographer/<run_id>/
@@ -108,19 +112,23 @@ uv run alive cartographer report       --run-id "$RUN_ID"
   "control_value": "non-targeting",
   "gene_id_key": null,
   "counts_layer": null,
-  "raw_data_uri": "replogle2022:K562_essential"
+  "raw_data_uri": "replogle2022:K562_essential",
+  "sequence_source": "uniprot-2024-01",
+  "id_mapping_version": "ensembl-110"
 }
 ```
 
 | Key | Required | Meaning |
 |---|---|---|
 | `h5ad` | yes | Path to the Perturb-seq AnnData (`.h5ad`); read sparse, never globally densified. |
-| `sequences` | yes | Path to a JSON map `gene → [protein_sequence, ...]`. Exactly one sequence = usable; 0 = "missing"; >1 = "ambiguous" (both excluded before the split). |
+| `sequences` | yes | Path to a JSON map `gene → [protein_sequence, ...]` (the gene→protein mapping file). Exactly one sequence = usable; 0 = "missing"; >1 = "ambiguous" (both excluded before the split). |
 | `perturbation_key` | yes | `obs` column holding each cell's perturbation/target label. |
 | `control_value` | yes | The label in `perturbation_key` marking control (non-targeting) cells. |
 | `gene_id_key` | no | `var` column for gene IDs (`null` → use `var_names`). |
 | `counts_layer` | no | Layer holding counts (`null` → use `.X`). |
-| `raw_data_uri` | no | Provenance string recorded in the feature bank + ledger. |
+| `raw_data_uri` | no | Provenance string for the expression dataset recorded in the ledger. |
+| `sequence_source` | **yes** | Protein-sequence database release recorded in the feature bank provenance (e.g. `"uniprot-2024-01"`). Distinct from the expression data URI — gives the protein-sequence mapping its own provenance. |
+| `id_mapping_version` | **yes** | Gene↔protein ID mapping version recorded in the feature bank provenance (e.g. `"ensembl-110"`). Together with `sequence_source`, this is the canonical protein-sequence mapping provenance, separate from the expression source. |
 
 For the exact synthetic fixture format (a runnable end-to-end example), see
 `tests/alive/experiment/test_cli.py`, which constructs a tiny AnnData + sequence map + data card on
@@ -130,6 +138,9 @@ a temp path and drives the full command sequence.
 
 ## Integrity behaviors (enforced by the CLI)
 
+- **`prepare` refuses to overwrite an existing run directory** (clean exit `2`). Because the
+  `run_id` is the composite hash of config + data card + raw expression file + protein-sequence
+  mapping, the same inputs always map to the same directory; runs are immutable.
 - **`evaluate-once` refuses** (clean non-zero exit) unless the persisted `FutilityDecision.status`
   is `CONTINUE_CONFIRMATORY` — the sealed cohort never opens otherwise.
 - **`calibrate` runs in either branch**, so a futility-stopped run still ships its conformal error
