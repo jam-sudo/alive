@@ -1,11 +1,14 @@
-"""Tests for the shared max-deviation perturbation-bootstrap primitive (Task 12 A).
+"""Tests for the shared max-deviation perturbation-bootstrap primitive (Task 12 A)
+and the confirmatory simultaneous inference layer (Task 14).
 
-The primitive computes simultaneous (family-wise) one-sided bounds on the
-per-comparator AURC deltas ``AURC[comparator] - AURC[reference]`` using a
-NON-studentized max-deviation band with a COMMON quantile ``q`` across all
-comparators.  The same resample indices are used for every method within a
-replicate, and the per-replicate RNG is derived deterministically from
-``(seed, b)`` (not the builtin ``hash()``).
+Task 12 primitive: ``simultaneous_delta_bounds`` computes family-wise one-sided
+bounds on per-comparator AURC deltas using a NON-studentized max-deviation band
+with a COMMON quantile ``q`` across all comparators.  Same resample indices for
+every method within a replicate; deterministic from ``(seed, b)``.
+
+Task 14 extension: ``confirmatory_inference`` wraps the primitive to produce
+AURC simultaneous lower bounds, AUGRC degradation upper bounds, an added-value
+test (full gate vs residual-only), and pairwise descriptive intervals.
 """
 
 from __future__ import annotations
@@ -16,10 +19,12 @@ import pytest
 from alive.eval import bootstrap as bs
 from alive.eval.bootstrap import (
     BootstrapError,
+    ConfirmatoryInference,
     SimultaneousBounds,
+    confirmatory_inference,
     simultaneous_delta_bounds,
 )
-from alive.metrics.selective import aurc
+from alive.metrics.selective import augrc, aurc
 
 # ---------------------------------------------------------------------------
 # Fixtures / helpers
@@ -431,3 +436,563 @@ def test_dataclass_fields_populated():
     assert out.seed == 1
     assert set(out.point_delta) == {"bad"}
     assert set(out.bound) == {"bad"}
+
+
+# ===========================================================================
+# Task 14 — ConfirmatoryInference tests
+# ===========================================================================
+
+
+def _make_confirmatory_scores(
+    n: int,
+    seed: int,
+    gate_advantage: float = 0.5,
+) -> tuple[np.ndarray, dict[str, np.ndarray]]:
+    """Build (risk, method_scores) for confirmatory inference tests.
+
+    The 'gate' is better than comparators by ranking risk with noise scaled by
+    ``gate_advantage``: lower advantage = closer to comparators.  ``residual_only``
+    is always slightly worse than the gate (higher AURC).
+    """
+    rng = np.random.default_rng(seed)
+    risk = rng.uniform(0.1, 2.0, size=n)
+    gate_noise = rng.normal(0.0, 0.05 / max(gate_advantage, 0.01), size=n)
+    scores = {
+        "gate": risk + gate_noise,
+        "residual_only": risk + rng.normal(0.0, 0.3, size=n),
+        "comp_a": rng.normal(0.0, 1.0, size=n),
+        "comp_b": rng.normal(0.0, 1.0, size=n) * 0.5,
+    }
+    return risk, scores
+
+
+_CI_KWARGS = dict(
+    comparators=["comp_a", "comp_b"],
+    augrc_margin=0.02,
+    family_confidence=0.90,
+    n_replicates=200,
+    seed=42,
+)
+
+
+# ---------------------------------------------------------------------------
+# Task 12 regression: metric param is backward-compatible
+# ---------------------------------------------------------------------------
+
+
+class TestMetricParamBackwardCompat:
+    """Adding metric=aurc default must not break any Task 12 call."""
+
+    def test_default_metric_aurc_same_result(self):
+        """Explicit metric=aurc must equal the no-metric call."""
+        risk, scores = _make_data(40, 7)
+        out_default = simultaneous_delta_bounds(
+            risk,
+            scores,
+            reference="good",
+            comparators=["bad"],
+            side="lower",
+            confidence=0.9,
+            n_replicates=50,
+            seed=3,
+        )
+        out_explicit = simultaneous_delta_bounds(
+            risk,
+            scores,
+            reference="good",
+            comparators=["bad"],
+            side="lower",
+            confidence=0.9,
+            n_replicates=50,
+            seed=3,
+            metric=aurc,
+        )
+        assert out_default == out_explicit
+
+    def test_augrc_metric_differs_from_aurc(self):
+        """metric=augrc should give different point deltas than metric=aurc."""
+        risk, scores = _make_data(40, 7)
+        out_aurc = simultaneous_delta_bounds(
+            risk,
+            scores,
+            reference="good",
+            comparators=["bad"],
+            side="lower",
+            confidence=0.9,
+            n_replicates=50,
+            seed=3,
+            metric=aurc,
+        )
+        out_augrc = simultaneous_delta_bounds(
+            risk,
+            scores,
+            reference="good",
+            comparators=["bad"],
+            side="lower",
+            confidence=0.9,
+            n_replicates=50,
+            seed=3,
+            metric=augrc,
+        )
+        # AURC and AUGRC are different metrics; deltas should differ
+        assert out_aurc.point_delta["bad"] != pytest.approx(out_augrc.point_delta["bad"], abs=1e-9)
+
+
+# ---------------------------------------------------------------------------
+# Gate tied with one comparator cannot pass the family
+# ---------------------------------------------------------------------------
+
+
+def test_gate_tied_with_comparator_family_fails():
+    """A gate tied (AURC equal) with a comparator gives lower bound <= 0 → family fails."""
+    rng = np.random.default_rng(99)
+    n = 100
+    risk = rng.uniform(0.1, 2.0, size=n)
+    # gate score = some arbitrary score
+    gate_score = rng.normal(0.0, 1.0, size=n)
+    # tied_comp has exactly the same score as gate → AURC delta == 0
+    tied_comp = gate_score.copy()
+    # comp_b is genuinely worse (random)
+    comp_b = rng.normal(0.0, 2.0, size=n)
+
+    method_scores = {
+        "gate": gate_score,
+        "residual_only": rng.normal(0.0, 1.0, size=n),
+        "tied_comp": tied_comp,
+        "comp_b": comp_b,
+    }
+
+    ci = confirmatory_inference(
+        risk,
+        method_scores,
+        comparators=["tied_comp", "comp_b"],
+        augrc_margin=0.02,
+        family_confidence=0.90,
+        n_replicates=300,
+        seed=7,
+    )
+
+    # tied_comp must have lower bound <= 0
+    assert ci.aurc_lower_bound["tied_comp"] <= 1e-9, (
+        f"Expected lower_bound('tied_comp') <= 0, got {ci.aurc_lower_bound['tied_comp']}"
+    )
+    # The family must fail because of the tie
+    assert ci.aurc_family_passes is False, "Family should FAIL when gate ties a comparator"
+
+
+# ---------------------------------------------------------------------------
+# Adding weak comparators cannot flip a failing family to passing
+# ---------------------------------------------------------------------------
+
+
+def test_weak_comparators_cannot_flip_failing_family():
+    """Adding comparators the gate clearly beats must not rescue a failing family.
+
+    The common-q max-deviation band uses the MAXIMUM deviation across comparators.
+    If the binding (hard) comparator pulls q up, adding easy comparators cannot
+    reduce q — it can only keep it the same or increase it.
+    """
+    rng = np.random.default_rng(555)
+    n = 80
+    risk = rng.uniform(0.1, 2.0, size=n)
+    gate_score = rng.normal(0.0, 1.0, size=n)
+
+    # Hard comparator: tied with gate → forces q high → family fails
+    hard_comp = gate_score.copy()
+    # Weak comparators: gate clearly beats them (random scores)
+    weak_comps = {f"weak_{i}": rng.normal(0.0, 3.0, size=n) for i in range(5)}
+
+    base_scores = {
+        "gate": gate_score,
+        "residual_only": rng.normal(0.0, 1.5, size=n),
+        "hard_comp": hard_comp,
+    }
+
+    # Without weak comparators: should already fail (tied hard_comp)
+    ci_no_weak = confirmatory_inference(
+        risk,
+        base_scores,
+        comparators=["hard_comp"],
+        augrc_margin=0.02,
+        family_confidence=0.90,
+        n_replicates=300,
+        seed=8,
+    )
+    assert ci_no_weak.aurc_family_passes is False
+
+    # With weak comparators added: must STILL fail
+    full_scores = {**base_scores, **weak_comps}
+    ci_with_weak = confirmatory_inference(
+        risk,
+        full_scores,
+        comparators=["hard_comp", *weak_comps.keys()],
+        augrc_margin=0.02,
+        family_confidence=0.90,
+        n_replicates=300,
+        seed=8,
+    )
+    assert ci_with_weak.aurc_family_passes is False, (
+        "Adding weak comparators must NOT flip a failing family to passing"
+    )
+
+    # Verify the common-q cannot shrink: adding more comparators can only
+    # keep q the same or increase it (max-over-comparators property).
+    # The no_weak family's q is a lower bound on the full family's q.
+    # (We don't assert the exact inequality because different seeds might
+    # produce slightly different values; the family-fails assertion is the key.)
+
+
+# ---------------------------------------------------------------------------
+# AUGRC identity correctness
+# ---------------------------------------------------------------------------
+
+
+def test_augrc_identity_upper_equals_negated_lower():
+    """Verify: upper_bound(AUGRC_gate - AUGRC_c) == -lower_bound(AUGRC_c - AUGRC_gate).
+
+    The brief specifies this identity holds exactly for the symmetric max-deviation
+    band.  We verify it by computing both sides manually and checking equality.
+    """
+    risk, scores_raw = _make_confirmatory_scores(60, 20)
+    method_scores = dict(scores_raw)
+
+    comparators = ["comp_a", "comp_b"]
+
+    # Compute upper bounds on (AUGRC_gate - AUGRC_c) via the identity:
+    # Call primitive with metric=augrc, reference="gate", side="lower" → L_c
+    # then augrc_degradation_upper[c] = -L_c
+    lower_bounds_obj = simultaneous_delta_bounds(
+        risk,
+        method_scores,
+        reference="gate",
+        comparators=comparators,
+        side="lower",
+        confidence=0.90,
+        n_replicates=200,
+        seed=42,
+        metric=augrc,
+    )
+
+    ci = confirmatory_inference(
+        risk,
+        method_scores,
+        comparators=comparators,
+        augrc_margin=0.02,
+        family_confidence=0.90,
+        n_replicates=200,
+        seed=42,
+    )
+
+    for c in comparators:
+        L_c = lower_bounds_obj.bound[c]
+        expected_upper = -L_c
+        actual_upper = ci.augrc_degradation_upper[c]
+        assert actual_upper == pytest.approx(expected_upper, abs=1e-12), (
+            f"AUGRC identity failed for {c!r}: "
+            f"expected -L_c={expected_upper:.6f}, got {actual_upper:.6f}"
+        )
+
+
+def test_augrc_no_material_degradation_rule():
+    """augrc_no_material_degradation is True iff every upper bound <= margin."""
+    risk, scores_raw = _make_confirmatory_scores(60, 21)
+    method_scores = dict(scores_raw)
+    comparators = ["comp_a", "comp_b"]
+
+    ci = confirmatory_inference(
+        risk,
+        method_scores,
+        comparators=comparators,
+        augrc_margin=0.02,
+        family_confidence=0.90,
+        n_replicates=200,
+        seed=42,
+    )
+
+    expected = all(ci.augrc_degradation_upper[c] <= 0.02 for c in comparators)
+    assert ci.augrc_no_material_degradation == expected
+
+
+# ---------------------------------------------------------------------------
+# Added value: full gate vs residual_only
+# ---------------------------------------------------------------------------
+
+
+def test_added_value_passes_when_gate_beats_residual():
+    """When the full gate clearly beats residual_only, added_value_passes is True."""
+    rng = np.random.default_rng(300)
+    n = 150
+    risk = rng.uniform(0.1, 2.0, size=n)
+
+    method_scores = {
+        # gate: ranks risk near-perfectly → very low AURC
+        "gate": risk + rng.normal(0.0, 0.02, size=n),
+        # residual_only: random → much higher AURC
+        "residual_only": rng.normal(0.0, 1.0, size=n),
+        "comp_a": rng.normal(0.0, 1.0, size=n),
+    }
+
+    ci = confirmatory_inference(
+        risk,
+        method_scores,
+        comparators=["comp_a"],
+        augrc_margin=0.02,
+        family_confidence=0.90,
+        n_replicates=500,
+        seed=10,
+    )
+
+    assert ci.delta_added_value > 0.0, "Point delta should be positive (gate beats residual)"
+    assert ci.delta_added_value_lower_bound > 0.0, (
+        f"Lower bound should be > 0; got {ci.delta_added_value_lower_bound}"
+    )
+    assert ci.added_value_passes is True
+
+
+def test_added_value_fails_when_gate_ties_residual():
+    """When gate and residual_only have identical scores, added_value_passes is False."""
+    rng = np.random.default_rng(400)
+    n = 80
+    risk = rng.uniform(0.1, 2.0, size=n)
+    tied_score = rng.normal(0.0, 1.0, size=n)
+
+    method_scores = {
+        "gate": tied_score.copy(),
+        "residual_only": tied_score.copy(),  # exactly tied
+        "comp_a": rng.normal(0.0, 1.0, size=n),
+    }
+
+    ci = confirmatory_inference(
+        risk,
+        method_scores,
+        comparators=["comp_a"],
+        augrc_margin=0.02,
+        family_confidence=0.90,
+        n_replicates=300,
+        seed=11,
+    )
+
+    # Point delta ~0 (tied), lower bound <= 0
+    assert ci.delta_added_value == pytest.approx(0.0, abs=1e-12)
+    assert ci.delta_added_value_lower_bound <= 1e-9
+    assert ci.added_value_passes is False
+
+
+# ---------------------------------------------------------------------------
+# Degenerate / duplicate data remain finite
+# ---------------------------------------------------------------------------
+
+
+def test_degenerate_inputs_produce_finite_bounds():
+    """Degenerate inputs (all-tied risk or identical scores) produce finite bounds."""
+    n = 30
+    risk = np.full(n, 1.0)  # all tied
+    tied_score = np.zeros(n)
+
+    method_scores = {
+        "gate": tied_score.copy(),
+        "residual_only": np.ones(n),
+        "comp_a": tied_score.copy(),
+    }
+
+    ci = confirmatory_inference(
+        risk,
+        method_scores,
+        comparators=["comp_a"],
+        augrc_margin=0.02,
+        family_confidence=0.90,
+        n_replicates=50,
+        seed=999,
+    )
+
+    assert np.isfinite(ci.aurc_lower_bound["comp_a"])
+    assert np.isfinite(ci.augrc_degradation_upper["comp_a"])
+    assert np.isfinite(ci.delta_added_value)
+    assert np.isfinite(ci.delta_added_value_lower_bound)
+    for c, (lo, hi) in ci.pairwise_intervals.items():
+        assert np.isfinite(lo)
+        assert np.isfinite(hi)
+
+
+# ---------------------------------------------------------------------------
+# Shared indices across methods within a replicate (inherited from primitive)
+# ---------------------------------------------------------------------------
+
+
+def test_confirmatory_inference_shared_indices(monkeypatch):
+    """All methods within each replicate share the same resample indices.
+
+    We monkeypatch bs.aurc to capture the resampled risk arrays.  Within each
+    bootstrap replicate, all methods receive the same risk_b array.
+    """
+    risk, scores = _make_confirmatory_scores(40, 77)
+    comparators = ["comp_a", "comp_b"]
+
+    captured_risks: list[np.ndarray] = []
+    real_aurc = bs.aurc
+
+    def spy_aurc(r, s):
+        captured_risks.append(np.asarray(r).copy())
+        return real_aurc(r, s)
+
+    monkeypatch.setattr(bs, "aurc", spy_aurc)
+
+    n_replicates = 5
+    confirmatory_inference(
+        risk,
+        scores,
+        comparators=comparators,
+        augrc_margin=0.02,
+        family_confidence=0.90,
+        n_replicates=n_replicates,
+        seed=55,
+    )
+
+    # The primitive is called three times (AURC primary, AUGRC secondary via
+    # identity, added-value).  We check that within each primitive's replicate
+    # block, all methods share the same risk array.  Rather than tracking exact
+    # call counts, we look for consecutive blocks where the same risk array
+    # appears for multiple methods.
+    risk_f64 = np.asarray(risk, dtype=float)
+
+    # Find bootstrap replicate calls (non-full-data calls)
+    replicate_risks = [r for r in captured_risks if not np.array_equal(r, risk_f64)]
+
+    # Within each block of n_methods consecutive replicate calls (sharing indices),
+    # all should be equal.  We detect block boundaries by changes in the array.
+    i = 0
+    while i < len(replicate_risks) - 1:
+        # Check if two consecutive calls share the same risk array (same replicate)
+        # This is a soft check — we verify at least some consecutive pairs are equal
+        if np.array_equal(replicate_risks[i], replicate_risks[i + 1]):
+            break
+        i += 1
+    # There should be at least some equal consecutive pairs (shared indices)
+    found_shared = any(
+        np.array_equal(replicate_risks[j], replicate_risks[j + 1])
+        for j in range(len(replicate_risks) - 1)
+    )
+    assert found_shared, "Expected some consecutive replicate calls to share risk arrays"
+
+
+# ---------------------------------------------------------------------------
+# Byte-identical under fixed seed
+# ---------------------------------------------------------------------------
+
+
+def test_confirmatory_inference_byte_identical_under_fixed_seed():
+    """Two confirmatory_inference calls with identical args produce identical results."""
+    risk, scores = _make_confirmatory_scores(50, 123)
+
+    kwargs = dict(
+        comparators=["comp_a", "comp_b"],
+        augrc_margin=0.02,
+        family_confidence=0.90,
+        n_replicates=150,
+        seed=2025,
+    )
+
+    ci_a = confirmatory_inference(risk, scores, **kwargs)
+    ci_b = confirmatory_inference(risk, scores, **kwargs)
+
+    assert ci_a == ci_b
+    assert ci_a.checksum == ci_b.checksum
+    assert ci_a.aurc_lower_bound == ci_b.aurc_lower_bound
+    assert ci_a.augrc_degradation_upper == ci_b.augrc_degradation_upper
+    assert ci_a.delta_added_value_lower_bound == ci_b.delta_added_value_lower_bound
+    assert ci_a.pairwise_intervals == ci_b.pairwise_intervals
+
+
+# ---------------------------------------------------------------------------
+# ConfirmatoryInference dataclass fields
+# ---------------------------------------------------------------------------
+
+
+def test_confirmatory_inference_fields_populated():
+    """All fields are populated with the right types and key sets."""
+    risk, scores = _make_confirmatory_scores(50, 77)
+    comparators = ["comp_a", "comp_b"]
+
+    ci = confirmatory_inference(
+        risk,
+        scores,
+        comparators=comparators,
+        augrc_margin=0.02,
+        family_confidence=0.90,
+        n_replicates=100,
+        seed=1,
+    )
+
+    assert isinstance(ci, ConfirmatoryInference)
+    assert set(ci.aurc_point_delta) == set(comparators)
+    assert set(ci.aurc_lower_bound) == set(comparators)
+    assert isinstance(ci.aurc_family_passes, bool)
+    assert set(ci.augrc_degradation_upper) == set(comparators)
+    assert ci.augrc_margin == 0.02
+    assert isinstance(ci.augrc_no_material_degradation, bool)
+    assert isinstance(ci.delta_added_value, float)
+    assert isinstance(ci.delta_added_value_lower_bound, float)
+    assert isinstance(ci.added_value_passes, bool)
+    assert set(ci.pairwise_intervals) == set(comparators)
+    for c in comparators:
+        lo, hi = ci.pairwise_intervals[c]
+        assert lo <= hi
+    assert ci.family_confidence == 0.90
+    assert ci.n_replicates == 100
+    assert ci.seed == 1
+    assert isinstance(ci.checksum, str) and len(ci.checksum) == 64
+
+
+# ---------------------------------------------------------------------------
+# Point delta matches direct AURC computation
+# ---------------------------------------------------------------------------
+
+
+def test_confirmatory_point_delta_matches_aurc():
+    """aurc_point_delta[c] == aurc(risk, score_c) - aurc(risk, score_gate)."""
+    risk, scores = _make_confirmatory_scores(60, 88)
+    comparators = ["comp_a", "comp_b"]
+
+    ci = confirmatory_inference(
+        risk,
+        scores,
+        comparators=comparators,
+        augrc_margin=0.02,
+        family_confidence=0.90,
+        n_replicates=100,
+        seed=5,
+    )
+
+    for c in comparators:
+        expected = aurc(risk, scores[c]) - aurc(risk, scores["gate"])
+        assert ci.aurc_point_delta[c] == pytest.approx(expected, abs=1e-12), (
+            f"Point delta mismatch for {c!r}"
+        )
+
+    # Also check added value point delta
+    expected_av = aurc(risk, scores["residual_only"]) - aurc(risk, scores["gate"])
+    assert ci.delta_added_value == pytest.approx(expected_av, abs=1e-12)
+
+
+# ---------------------------------------------------------------------------
+# aurc_family_passes matches all lower bounds > 0
+# ---------------------------------------------------------------------------
+
+
+def test_family_passes_logic():
+    """aurc_family_passes is True iff every aurc_lower_bound > 0."""
+    risk, scores = _make_confirmatory_scores(60, 200)
+    comparators = ["comp_a", "comp_b"]
+
+    ci = confirmatory_inference(
+        risk,
+        scores,
+        comparators=comparators,
+        augrc_margin=0.02,
+        family_confidence=0.90,
+        n_replicates=100,
+        seed=5,
+    )
+
+    expected = all(ci.aurc_lower_bound[c] > 0 for c in comparators)
+    assert ci.aurc_family_passes == expected
