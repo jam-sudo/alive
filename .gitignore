@@ -1,6 +1,6 @@
 # --- ALIVE: never commit data, checkpoints, or large/derived artifacts ---
-data/
-artifacts/
+/data/
+/artifacts/
 *.h5ad
 *.h5
 *.loom
