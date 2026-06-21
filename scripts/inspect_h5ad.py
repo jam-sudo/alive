@@ -113,7 +113,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     verdict = "OK" if feas.ok else "INSUFFICIENT"
     print(
-        f"\nfour-way split feasibility (min_cells only; sequence filter applied later):\n"
+        f"\nfour-way split feasibility (min_cells only; sequence filter applied later;\n"
+        f"sealed count is a conservative floor vs the remainder-distributed split):\n"
         f"  eligible(upper-bound)={feas.n_eligible}  sealed≈{feas.sealed_count} "
         f"(need >= {feas.minimum_sealed_perturbations})  -> {verdict}\n"
         f"  minimum eligible needed for the sealed cohort: {feas.min_eligible_needed}"

@@ -7,7 +7,9 @@ data-card (same perturbation_key / control_value / provenance), writing a mini
 ``prepare -> fit -> develop -> futility -> calibrate`` with the REAL encoder and a
 mini config BEFORE the full run (CLAUDE.md §14.2).
 
-Thin CLI over :mod:`alive.data.mini`.
+Thin CLI over :mod:`alive.data.mini`.  Run this on the A100 against the full file:
+the subset is materialised in memory (``adata[mask].to_memory()``), so it expects
+A100-class memory (not the 24 GB Mac).
 
 Usage
 -----

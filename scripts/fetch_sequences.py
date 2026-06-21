@@ -8,6 +8,7 @@ apply the exactly-one rule (1 = usable, 0 = missing, >1 = ambiguous), writing:
     id_mapping_version = the query strategy).
 
 Thin urllib wrapper over :mod:`alive.data.sequences` (stdlib only — no new dep).
+Note: there is no checkpoint — an interrupted run restarts from scratch.
 
 IMPORTANT: after running, verify coverage against ``inspect_h5ad.py`` — the
 *eligible* set is (usable sequence) AND (>= min_cells), and its sealed slice must
@@ -102,16 +103,21 @@ def main(argv: list[str] | None = None) -> int:
     print(f"resolving {len(genes)} genes via UniProt ({args.id_type}, organism {args.organism_id})")
 
     per_gene: dict[str, list[dict[str, str]]] = {}
-    release_seen = "unknown"
+    releases: set[str] = set()
     for i, gene in enumerate(genes, 1):
         raw, release = _uniprot_search(
             gene, id_type=args.id_type, organism=args.organism_id, timeout=args.timeout
         )
-        release_seen = release if release != "unknown" else release_seen
+        if release != "unknown":
+            releases.add(release)
         per_gene[gene] = parse_uniprot_results(raw)
         if i % 100 == 0:
             print(f"  {i}/{len(genes)} ...")
         time.sleep(args.sleep)
+
+    if len(releases) > 1:
+        print(f"WARNING: multiple UniProt releases seen across the run: {sorted(releases)}")
+    release_seen = sorted(releases)[-1] if releases else "unknown"
 
     res = build_sequence_map(per_gene)
     args.out.parent.mkdir(parents=True, exist_ok=True)
@@ -121,6 +127,7 @@ def main(argv: list[str] | None = None) -> int:
     provenance = {
         "sequence_source": f"uniprotkb-{release_seen}",
         "id_mapping_version": id_mapping_version,
+        "uniprot_releases_seen": sorted(releases),
         "n_genes": len(genes),
         "n_usable": res.n_usable,
         "n_missing": res.n_missing,

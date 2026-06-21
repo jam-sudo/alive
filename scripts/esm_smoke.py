@@ -99,6 +99,14 @@ def main(argv: list[str] | None = None) -> int:
         max_batch_tokens=fe.max_batch_tokens,
     )
 
+    try:
+        import torch  # noqa: PLC0415
+
+        if torch.cuda.is_available():
+            torch.cuda.reset_peak_memory_stats()  # so the peak below reflects THIS forward
+    except Exception:  # noqa: BLE001
+        pass
+
     t0 = time.perf_counter()
     residues = encoder.encode_residues(seqs)
     pooled = mean_pool(residues)

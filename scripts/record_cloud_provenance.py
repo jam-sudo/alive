@@ -6,6 +6,10 @@ hash, dependencies, and input hashes.  This thin recorder adds the cloud-specifi
 metadata §14.2 asks for — instance / GPU, lockfile hash, wall time, and cost —
 to ``<run_dir>/cloud_run.json`` so the ephemeral instance is not the only record.
 
+This sidecar is intentionally OUTSIDE the immutable artifact set (it is not a
+ledger artifact and is safely re-runnable); it never mutates a sealed artifact, so
+it is legal to call after ``evaluate-once`` has opened the seal.
+
 Usage
 -----
     uv run python scripts/record_cloud_provenance.py \
