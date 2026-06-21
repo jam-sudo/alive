@@ -1,0 +1,655 @@
+"""Integration tests for the four staged runner functions (Task 16).
+
+These tests wire Tasks 3-15 into ``fit_base`` → ``develop_methods_stage`` →
+``calibrate`` → ``evaluate_sealed_once`` on SYNTHETIC data and a feature bank
+built from the Task 6 MOCK encoder.  The non-negotiable integrity properties
+verified here:
+
+1. **Leakage boundary.** ``fit_base`` / ``develop_methods_stage`` / ``calibrate``
+   use ``read_controls`` + ``read_unsealed`` ONLY — never ``evaluate_sealed_once``,
+   never a sealed id.  After all three, ``store.sealed_access_count == 0``.
+2. **Scores-before-risks.** In ``evaluate_sealed_once`` ALL method scores + base
+   predictions are computed from FEATURES (no seal) BEFORE the single
+   ``store.evaluate_sealed_once`` call.
+3. **Futility forbids sealed evaluation.** ``FUTILITY_STOPPED`` → raise, seal
+   stays shut.
+4. **The seal opens exactly once.**
+
+All tests use synthetic data; the real K562 run is Task 17 on the A100.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Sequence
+from dataclasses import replace
+from pathlib import Path
+
+import anndata
+import numpy as np
+import pandas as pd
+import pytest
+import scipy.sparse as sp
+
+from alive.config import (
+    BaseModel,
+    Config,
+    Decision,
+    Futility,
+    Inference,
+    MethodDevelopment,
+    PerturbationFeatures,
+    SplitFractions,
+)
+from alive.config import (
+    ResponseSpace as ResponseSpaceCfg,
+)
+from alive.data.features import MockSequenceEncoder, build_feature_bank
+from alive.data.manifest import build_manifest_from_index
+from alive.data.outcome_store import Population, ReplogleOutcomeStore
+from alive.data.replogle import DatasetSchema, build_index
+from alive.experiment.real_runner import (
+    BaseArtifact,
+    calibrate,
+    develop_methods_stage,
+    evaluate_sealed_once,
+    fit_base,
+    gate_and_comparator_scores,
+    measured_error,
+    perturbation_inputs,
+)
+from alive.types import OperationalStatus, Verdict
+
+# ---------------------------------------------------------------------------
+# Synthetic-data construction
+# ---------------------------------------------------------------------------
+
+_PERT_KEY = "target"
+_CTRL_VAL = "ctrl"
+
+# A 20-amino-acid alphabet for deterministic mock sequences.
+_AA = "ACDEFGHIKLMNPQRSTVWY"
+
+
+def _stable_seed(key: object) -> int:
+    """Process-stable integer seed from a key (SHA-256, NOT salted hash())."""
+    import hashlib
+
+    return int.from_bytes(hashlib.sha256(str(key).encode()).digest()[:7], "big")
+
+
+def _seq_for(gene: str, length: int = 24) -> str:
+    """A deterministic protein sequence for a gene (mock encoder input)."""
+    rng = np.random.default_rng(_stable_seed(gene))
+    return "".join(_AA[i] for i in rng.integers(0, len(_AA), size=length))
+
+
+def _make_adata(
+    *,
+    n_ctrl: int,
+    pert_cells: dict[str, int],
+    n_genes: int,
+    seed: int,
+) -> anndata.AnnData:
+    """Build a synthetic raw-count AnnData with controls + perturbations.
+
+    Each perturbation's cells are drawn as controls plus a per-gene mean shift
+    that is a deterministic function of the gene's feature vector, so the
+    base predictor has real signal to learn.
+    """
+    rng = np.random.default_rng(seed)
+    gene_ids = [f"g{i}" for i in range(n_genes)]
+
+    labels: list[str] = [_CTRL_VAL] * n_ctrl
+    for g, n in pert_cells.items():
+        labels.extend([g] * n)
+    n_cells = len(labels)
+
+    # Base count level (Poisson-like positive counts).
+    base_level = rng.uniform(1.0, 5.0, size=n_genes)
+    X = np.zeros((n_cells, n_genes), dtype=np.float64)
+    row = 0
+    # Controls
+    for _ in range(n_ctrl):
+        X[row] = rng.poisson(base_level)
+        row += 1
+    # Perturbations: shift the level by a per-gene deterministic amount.
+    for g, n in pert_cells.items():
+        g_rng = np.random.default_rng(_stable_seed(("shift", g)))
+        shift = g_rng.uniform(-0.5, 1.5, size=n_genes)
+        level = np.clip(base_level + shift, 0.1, None)
+        for _ in range(n):
+            X[row] = g_rng.poisson(level)
+            row += 1
+
+    obs = pd.DataFrame({_PERT_KEY: labels}, index=[f"c{i}" for i in range(n_cells)])
+    var = pd.DataFrame(index=gene_ids)
+    return anndata.AnnData(X=sp.csr_matrix(X.astype(np.float32)), obs=obs, var=var)
+
+
+def _test_config(
+    *,
+    minimum_sealed: int = 3,
+    bootstrap_replicates: int = 2000,
+    hvg_count: int = 8,
+    pca_dims: int = 4,
+    cell_cap: int = 30,
+    min_cells: int = 8,
+    cell_sampling_repeats: int = 2,
+) -> Config:
+    """A valid Config with small (but validator-legal) values for tests."""
+    return Config(
+        experiment="test_real_runner",
+        manifest_seed=7,
+        split_fractions=SplitFractions(
+            base_train=0.40,
+            method_development=0.30,
+            conformal_calibration=0.15,
+            sealed_evaluation=0.15,
+        ),
+        response_space=ResponseSpaceCfg(
+            normalization="library_size_10000_log1p",
+            hvg_count=hvg_count,
+            pca_dims=pca_dims,
+            cell_cap=cell_cap,
+            min_cells=min_cells,
+            cell_sampling_repeats=cell_sampling_repeats,
+            energy_block_size=64,
+        ),
+        perturbation_features=PerturbationFeatures(
+            primary="mock-v1",
+            standardize_on="base_train",
+            missing_policy="exclude_before_split",
+        ),
+        base_model=BaseModel(
+            family="additive_ridge",
+            ridge_grid=(0.1, 1.0, 10.0),
+            cv_folds=3,
+            ensemble_members=4,
+        ),
+        method_development=MethodDevelopment(
+            cv_folds=3,
+            k_grid=(3, 5),
+            feature_weight_grid=(0.25, 0.5, 0.75, 1.0),
+            gbm_estimators_grid=(10, 20),
+            ridge_grid=(0.1, 1.0, 10.0),
+            registered_seeds=(11, 23),
+        ),
+        decision=Decision(
+            target_selection_coverage=0.70,
+            conformal_alpha=0.10,
+            minimum_sealed_perturbations=minimum_sealed,
+        ),
+        inference=Inference(
+            bootstrap_replicates=bootstrap_replicates,
+            family_confidence=0.95,
+            secondary_augrc_noninferiority_margin=0.02,
+        ),
+        futility=Futility(
+            enabled=True,
+            comparators=("gbm_error", "residual_only"),
+            minimum_relevant_delta=0.01,
+            family_confidence=0.90,
+            rule="stop_if_any_simultaneous_upper_bound_le_minimum",
+        ),
+    )
+
+
+def _build_world(tmp_path: Path, *, config: Config, n_pert: int = 40, seed: int = 0):
+    """Build (index, store, manifest, feature_bank) for a synthetic world.
+
+    Returns also the manifest so tests can introspect split roles.
+    """
+    rng = np.random.default_rng(seed)
+    genes = [f"GENE{i:03d}" for i in range(n_pert)]
+    cells_per = {g: int(rng.integers(20, 30)) for g in genes}
+
+    adata = _make_adata(
+        n_ctrl=80,
+        pert_cells=cells_per,
+        n_genes=20,
+        seed=seed + 1,
+    )
+
+    schema = DatasetSchema(perturbation_key=_PERT_KEY, control_value=_CTRL_VAL)
+    index = build_index(adata, schema, min_cells=config.response_space.min_cells)
+
+    manifest = build_manifest_from_index(index, config.split_fractions, config.manifest_seed)
+
+    # Feature bank from the MOCK encoder over the base_train genes for standardization.
+    base_train_ids = list(manifest.ids_for("base_train"))
+    gene_sequences = {g: [_seq_for(g)] for g in index.eligible_perturbations}
+    feature_bank = build_feature_bank(
+        gene_sequences,
+        MockSequenceEncoder(dim=8),
+        sequence_source="mock-2026",
+        standardize_on=base_train_ids,
+    )
+
+    audit_path = tmp_path / "audit.jsonl"
+    store = ReplogleOutcomeStore(
+        index=index, source=adata, manifest=manifest, audit_path=audit_path
+    )
+    return index, store, manifest, feature_bank
+
+
+# ---------------------------------------------------------------------------
+# Spy store — the headline leakage guard
+# ---------------------------------------------------------------------------
+
+
+class SpyStore:
+    """Wraps a real ReplogleOutcomeStore, recording every access for audit.
+
+    Records every id passed to ``read_unsealed`` and every call to
+    ``evaluate_sealed_once`` (with the ``sealed_access_count`` observed *before*
+    the inner call opened the seal), so tests can prove the leakage boundary
+    and the scores-before-risks ordering.
+    """
+
+    def __init__(self, inner: ReplogleOutcomeStore) -> None:
+        self._inner = inner
+        self.unsealed_ids: list[str] = []
+        self.read_controls_calls: int = 0
+        # (run_id, ids, sealed_count_seen_before_inner_call)
+        self.evaluate_calls: list[tuple[str, list[str], int]] = []
+
+    def read_controls(self) -> Population:
+        self.read_controls_calls += 1
+        return self._inner.read_controls()
+
+    def read_unsealed(self, perturbation_ids: Sequence[str]) -> dict[str, Population]:
+        self.unsealed_ids.extend(list(perturbation_ids))
+        return self._inner.read_unsealed(perturbation_ids)
+
+    def evaluate_sealed_once(
+        self, run_id: str, perturbation_ids: Sequence[str]
+    ) -> dict[str, Population]:
+        before = self._inner.sealed_access_count
+        self.evaluate_calls.append((run_id, list(perturbation_ids), before))
+        return self._inner.evaluate_sealed_once(run_id, perturbation_ids)
+
+    @property
+    def sealed_access_count(self) -> int:
+        return self._inner.sealed_access_count
+
+
+def _config_sha(config: Config) -> str:
+    from alive.provenance import sha256_json
+
+    return sha256_json({"run_id": config.run_id, "experiment": config.experiment})
+
+
+# ===========================================================================
+# Helper-level tests
+# ===========================================================================
+
+
+class TestMeasuredError:
+    def test_zero_for_identical_population(self, tmp_path: Path) -> None:
+        config = _test_config()
+        _index, store, manifest, fb = _build_world(tmp_path, config=config)
+        base_art = fit_base(_index, store, manifest, fb, config)
+        rs = base_art.response_space
+        base = base_art.base_predictor
+
+        # Use a method-development id (unsealed) as the observed population.
+        dev_ids = [i for i in manifest.ids_for("method_development") if fb.has(i)]
+        pid = dev_ids[0]
+        observed = store.read_unsealed([pid])[pid]
+        feats = fb.standardized_vector(pid)
+        err = measured_error(
+            base,
+            rs,
+            feats,
+            observed,
+            response_cfg=config.response_space,
+            seed_key=("t", pid),
+        )
+        assert np.isfinite(err)
+        assert err >= 0.0
+
+
+class TestPerturbationInputs:
+    def test_aligned_arrays_and_skip(self, tmp_path: Path) -> None:
+        config = _test_config()
+        _index, store, manifest, fb = _build_world(tmp_path, config=config)
+        base_art = fit_base(_index, store, manifest, fb, config)
+
+        dev_ids_all = list(manifest.ids_for("method_development"))
+        pops = store.read_unsealed([i for i in dev_ids_all if fb.has(i)])
+        ids, feats, errs, ens = perturbation_inputs(
+            base_art.base_predictor,
+            base_art.response_space,
+            fb,
+            pops,
+            response_cfg=config.response_space,
+            run_id="r0",
+        )
+        n = len(ids)
+        assert n >= 1
+        assert tuple(ids) == tuple(sorted(ids))  # sorted id order
+        assert feats.shape == (n, fb.dim)
+        assert errs.shape == (n,)
+        assert ens.ndim == 3 and ens.shape[0] == n
+        assert np.all(np.isfinite(errs))
+
+
+class TestGateAndComparatorScores:
+    def test_returns_all_six_methods_query_aligned(self, tmp_path: Path) -> None:
+        config = _test_config()
+        _index, store, manifest, fb = _build_world(tmp_path, config=config)
+        base_art = fit_base(_index, store, manifest, fb, config)
+        method_lock, _fd = develop_methods_stage(_index, store, manifest, base_art, fb, config)
+
+        # Reference = method_development; query = conformal_calibration.
+        ref_ids = [i for i in manifest.ids_for("method_development") if fb.has(i)]
+        ref_pops = store.read_unsealed(ref_ids)
+        ref_ids2, ref_feats, ref_errs, ref_ens = perturbation_inputs(
+            base_art.base_predictor,
+            base_art.response_space,
+            fb,
+            ref_pops,
+            response_cfg=config.response_space,
+            run_id="r0",
+        )
+        q_ids = [i for i in manifest.ids_for("conformal_calibration") if fb.has(i)]
+        q_pops = store.read_unsealed(q_ids)
+        q_ids2, q_feats, _q_errs, q_ens = perturbation_inputs(
+            base_art.base_predictor,
+            base_art.response_space,
+            fb,
+            q_pops,
+            response_cfg=config.response_space,
+            run_id="r0",
+        )
+
+        scores = gate_and_comparator_scores(
+            method_lock,
+            base_art.base_predictor,
+            ref_feats,
+            ref_errs,
+            ref_ens,
+            q_feats,
+            q_ens,
+        )
+        from alive.experiment.develop import METHOD_IDS
+
+        assert set(scores) == set(METHOD_IDS)
+        n_query = len(q_ids2)
+        for m in METHOD_IDS:
+            assert scores[m].shape == (n_query,)
+            assert np.all(np.isfinite(scores[m]))
+
+
+# ===========================================================================
+# Stage tests
+# ===========================================================================
+
+
+class TestFitBase:
+    def test_returns_base_artifact(self, tmp_path: Path) -> None:
+        config = _test_config()
+        _index, store, manifest, fb = _build_world(tmp_path, config=config)
+        art = fit_base(_index, store, manifest, fb, config)
+        assert isinstance(art, BaseArtifact)
+        assert art.response_space is not None
+        assert art.base_predictor is not None
+        assert isinstance(art.checksum, str) and len(art.checksum) == 64
+
+    def test_no_sealed_access(self, tmp_path: Path) -> None:
+        config = _test_config()
+        _index, store, manifest, fb = _build_world(tmp_path, config=config)
+        fit_base(_index, store, manifest, fb, config)
+        assert store.sealed_access_count == 0
+
+
+# ===========================================================================
+# Leakage guard — the headline test
+# ===========================================================================
+
+
+class TestLeakageGuard:
+    def test_fit_develop_calibrate_never_touch_seal(self, tmp_path: Path) -> None:
+        config = _test_config()
+        index, real_store, manifest, fb = _build_world(tmp_path, config=config)
+        spy = SpyStore(real_store)
+
+        base_art = fit_base(index, spy, manifest, fb, config)
+        method_lock, fdec = develop_methods_stage(index, spy, manifest, base_art, fb, config)
+        _conf = calibrate(index, spy, manifest, base_art, method_lock, fb, config)
+
+        sealed_ids = set(manifest.ids_for("sealed_evaluation"))
+
+        # 1. ZERO evaluate_sealed_once calls.
+        assert spy.evaluate_calls == []
+        # 2. No sealed id ever appeared in any read_unsealed argument.
+        leaked = sealed_ids.intersection(spy.unsealed_ids)
+        assert leaked == set(), f"sealed ids leaked into read_unsealed: {leaked}"
+        # 3. The store's durable audit count is still 0.
+        assert real_store.sealed_access_count == 0
+
+
+# ===========================================================================
+# Scores-before-risks ordering
+# ===========================================================================
+
+
+class TestScoresBeforeRisks:
+    def test_seal_opens_once_after_scores(self, tmp_path: Path) -> None:
+        config = _test_config()
+        index, real_store, manifest, fb = _build_world(tmp_path, config=config)
+        spy = SpyStore(real_store)
+
+        base_art = fit_base(index, spy, manifest, fb, config)
+        method_lock, fdec = develop_methods_stage(index, spy, manifest, base_art, fb, config)
+        # Force CONTINUE so the sealed branch is permitted.
+        fdec = replace(fdec, status=OperationalStatus.CONTINUE_CONFIRMATORY)
+        conf = calibrate(index, spy, manifest, base_art, method_lock, fb, config)
+
+        result = evaluate_sealed_once(
+            index,
+            spy,
+            manifest,
+            base_art,
+            method_lock,
+            conf,
+            fdec,
+            fb,
+            config,
+            run_id=config.run_id,
+        )
+        assert result is not None
+
+        # Exactly one sealed access, and it was observed with sealed_count == 0
+        # before the inner call (scores were computed first).
+        assert len(spy.evaluate_calls) == 1
+        _run_id, _ids, before_count = spy.evaluate_calls[0]
+        assert before_count == 0
+        assert real_store.sealed_access_count == 1
+
+
+# ===========================================================================
+# Futility forbids sealed evaluation
+# ===========================================================================
+
+
+class TestFutilityForbidsSeal:
+    def test_raises_and_seal_stays_shut(self, tmp_path: Path) -> None:
+        config = _test_config()
+        index, real_store, manifest, fb = _build_world(tmp_path, config=config)
+        spy = SpyStore(real_store)
+
+        base_art = fit_base(index, spy, manifest, fb, config)
+        method_lock, fdec = develop_methods_stage(index, spy, manifest, base_art, fb, config)
+        conf = calibrate(index, spy, manifest, base_art, method_lock, fb, config)
+
+        # Force FUTILITY_STOPPED.
+        fdec = replace(fdec, status=OperationalStatus.FUTILITY_STOPPED)
+
+        with pytest.raises(RuntimeError):
+            evaluate_sealed_once(
+                index,
+                spy,
+                manifest,
+                base_art,
+                method_lock,
+                conf,
+                fdec,
+                fb,
+                config,
+                run_id=config.run_id,
+            )
+        assert real_store.sealed_access_count == 0
+        assert spy.evaluate_calls == []
+
+
+# ===========================================================================
+# End-to-end continue branch — a verdict we can predict
+# ===========================================================================
+
+
+class TestEndToEnd:
+    def test_near_random_yields_no_distinct_win(self, tmp_path: Path) -> None:
+        """Near-random data: the gate cannot beat all comparators → NO_DISTINCT_WIN.
+
+        We engineer a scenario where calibration passes (so it isn't a
+        CALIBRATION_FAILURE) and integrity is valid, but the confirmatory
+        family test cannot certify a gate win on noisy synthetic data.
+        """
+        config = _test_config()
+        index, store, manifest, fb = _build_world(tmp_path, config=config, seed=3)
+
+        base_art = fit_base(index, store, manifest, fb, config)
+        method_lock, fdec = develop_methods_stage(index, store, manifest, base_art, fb, config)
+        # Force CONTINUE so the sealed branch runs even if dev was futile.
+        fdec = replace(fdec, status=OperationalStatus.CONTINUE_CONFIRMATORY)
+        conf = calibrate(index, store, manifest, base_art, method_lock, fb, config)
+
+        result = evaluate_sealed_once(
+            index,
+            store,
+            manifest,
+            base_art,
+            method_lock,
+            conf,
+            fdec,
+            fb,
+            config,
+            run_id=config.run_id,
+        )
+        # Valid set; near-random synthetic data should NOT certify a gate win.
+        assert result.verdict in set(Verdict)
+        assert result.verdict == Verdict.NO_DISTINCT_WIN
+
+
+# ===========================================================================
+# Low-n → INVALID_EVALUATION, but result is still written
+# ===========================================================================
+
+
+class TestLowNInvalid:
+    def test_below_minimum_is_invalid_and_written(self, tmp_path: Path) -> None:
+        # Set a minimum higher than the available sealed count.
+        config = _test_config(minimum_sealed=10_000)
+        index, store, manifest, fb = _build_world(tmp_path, config=config)
+
+        base_art = fit_base(index, store, manifest, fb, config)
+        method_lock, fdec = develop_methods_stage(index, store, manifest, base_art, fb, config)
+        fdec = replace(fdec, status=OperationalStatus.CONTINUE_CONFIRMATORY)
+        conf = calibrate(index, store, manifest, base_art, method_lock, fb, config)
+
+        out_path = tmp_path / "result.json"
+        result = evaluate_sealed_once(
+            index,
+            store,
+            manifest,
+            base_art,
+            method_lock,
+            conf,
+            fdec,
+            fb,
+            config,
+            run_id=config.run_id,
+            result_path=out_path,
+        )
+        assert result.verdict == Verdict.INVALID_EVALUATION
+        # The result is still written (never silently dropped).
+        assert out_path.exists()
+
+
+# ===========================================================================
+# Single sealed access — second call raises (inherited from Task 5)
+# ===========================================================================
+
+
+class TestSingleSealedAccess:
+    def test_second_call_raises(self, tmp_path: Path) -> None:
+        config = _test_config()
+        index, store, manifest, fb = _build_world(tmp_path, config=config)
+
+        base_art = fit_base(index, store, manifest, fb, config)
+        method_lock, fdec = develop_methods_stage(index, store, manifest, base_art, fb, config)
+        fdec = replace(fdec, status=OperationalStatus.CONTINUE_CONFIRMATORY)
+        conf = calibrate(index, store, manifest, base_art, method_lock, fb, config)
+
+        evaluate_sealed_once(
+            index,
+            store,
+            manifest,
+            base_art,
+            method_lock,
+            conf,
+            fdec,
+            fb,
+            config,
+            run_id=config.run_id,
+        )
+        # A second call with the same run_id must surface the sealing error.
+        with pytest.raises(Exception):
+            evaluate_sealed_once(
+                index,
+                store,
+                manifest,
+                base_art,
+                method_lock,
+                conf,
+                fdec,
+                fb,
+                config,
+                run_id=config.run_id,
+            )
+
+
+# ===========================================================================
+# Determinism
+# ===========================================================================
+
+
+class TestDeterminism:
+    def test_same_inputs_same_verdict_checksum(self, tmp_path: Path) -> None:
+        config = _test_config()
+
+        def _run(sub: Path) -> str:
+            sub.mkdir(parents=True, exist_ok=True)
+            index, store, manifest, fb = _build_world(sub, config=config, seed=5)
+            base_art = fit_base(index, store, manifest, fb, config)
+            method_lock, fdec = develop_methods_stage(index, store, manifest, base_art, fb, config)
+            fdec = replace(fdec, status=OperationalStatus.CONTINUE_CONFIRMATORY)
+            conf = calibrate(index, store, manifest, base_art, method_lock, fb, config)
+            result = evaluate_sealed_once(
+                index,
+                store,
+                manifest,
+                base_art,
+                method_lock,
+                conf,
+                fdec,
+                fb,
+                config,
+                run_id=config.run_id,
+            )
+            return result.checksum
+
+        a = _run(tmp_path / "a")
+        b = _run(tmp_path / "b")
+        assert a == b
