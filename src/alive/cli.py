@@ -258,6 +258,14 @@ def cmd_prepare(args: argparse.Namespace) -> int:
 
     data_card = json.loads(data_card_path.read_text(encoding="utf-8"))
 
+    # Require protein-sequence provenance keys (separate from expression source).
+    for required in ("sequence_source", "id_mapping_version"):
+        if required not in data_card:
+            raise CliError(
+                f"data card is missing required key {required!r} (protein-sequence "
+                "provenance must be declared separately from the expression source)."
+            )
+
     # Snapshot the config + data card under the run dir (immutable inputs).
     (run_dir / "config.snapshot.yaml").write_text(
         config_path.read_text(encoding="utf-8"), encoding="utf-8"
@@ -300,7 +308,8 @@ def cmd_prepare(args: argparse.Namespace) -> int:
     feature_bank = build_feature_bank(
         gene_sequences,
         encoder,
-        sequence_source=data_card.get("raw_data_uri", "unknown"),
+        sequence_source=data_card["sequence_source"],
+        id_mapping_version=data_card["id_mapping_version"],
         standardize_on=base_train_ids,
     )
     feature_bank.write(run_dir / "feature_bank")
@@ -351,6 +360,7 @@ def cmd_prepare(args: argparse.Namespace) -> int:
     ledger = RunLedger(run_id=run_id, config_sha256=config_sha256, environment=environment)
     ledger.record_artifact("config", config_sha256)
     ledger.record_artifact("raw_data", _raw_data_hash(h5ad, data_card))
+    ledger.record_artifact("sequence_mapping", feature_bank.provenance.mapping_sha256)
     ledger.record_artifact("split_manifest", manifest.checksum)
     ledger.record_artifact("feature_bank", feature_bank.checksum)
     ledger.write(run_dir / "ledger.json")

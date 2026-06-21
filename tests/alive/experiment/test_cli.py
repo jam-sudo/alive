@@ -178,6 +178,8 @@ def _write_world(
         "gene_id_key": None,
         "counts_layer": None,
         "raw_data_uri": "synthetic://cli-test",
+        "sequence_source": "uniprot-2024-01",
+        "id_mapping_version": "ensembl-110",
     }
     data_card_path = tmp_path / "data_card.json"
     data_card_path.write_text(json.dumps(data_card), encoding="utf-8")
@@ -757,6 +759,7 @@ class TestCliDevelopedParity:
             {g: seqs for g, seqs in sequences.items()},
             MockSequenceEncoder(dim=8),
             sequence_source="mock-2026",
+            id_mapping_version="id-map-v1",
             standardize_on=base_train_ids,
         )
         audit_path = world_dir / "parity_audit.jsonl"
@@ -836,6 +839,8 @@ def _write_world_with_missing_sequences(
         "gene_id_key": None,
         "counts_layer": None,
         "raw_data_uri": "synthetic://cli-test",
+        "sequence_source": "uniprot-2024-01",
+        "id_mapping_version": "ensembl-110",
     }
     data_card_path = tmp_path / "data_card.json"
     data_card_path.write_text(json.dumps(data_card), encoding="utf-8")
@@ -997,6 +1002,7 @@ class TestEncoderConfigCrossCheck:
         prov = FeatureBankProvenance(
             model_revision="mock-v1",
             sequence_source="test",
+            id_mapping_version="id-map-v1",
             pooling="mean",
             dim=8,
             dtype="float32",
@@ -1025,6 +1031,7 @@ class TestEncoderConfigCrossCheck:
         prov = FeatureBankProvenance(
             model_revision="esm2_t33_650M_UR50D",
             sequence_source="test",
+            id_mapping_version="id-map-v1",
             pooling="mean",
             dim=1280,
             dtype="float32",
@@ -1034,6 +1041,77 @@ class TestEncoderConfigCrossCheck:
         )
         derived = _expected_primary(prov)
         assert derived == config_primary
+
+
+# ===========================================================================
+# Protein-sequence provenance separation (Task 1 / audit P2-1)
+# ===========================================================================
+
+
+def _run_prepare_with_data_card(tmp_path: Path, *, drop_keys: list[str]) -> int:
+    """Run ``prepare`` with a data card missing the specified keys; return the exit code."""
+    config_path, data_card_path = _write_world(tmp_path)
+    data_card = json.loads(data_card_path.read_text(encoding="utf-8"))
+    for key in drop_keys:
+        data_card.pop(key, None)
+    data_card_path.write_text(json.dumps(data_card), encoding="utf-8")
+    return _run(
+        [
+            "cartographer",
+            "prepare",
+            "--config",
+            str(config_path),
+            "--data-card",
+            str(data_card_path),
+            "--mock-encoder",
+        ],
+        _artifacts_root(tmp_path),
+    )
+
+
+class TestProteinSequenceProvenance:
+    """Task 1 / audit P2-1: protein-sequence provenance is separate from expression source."""
+
+    def test_prepare_records_protein_sequence_provenance(self, tmp_path: Path) -> None:
+        from alive.data.features import FeatureBank
+        from alive.provenance import RunLedger
+
+        config_path, data_card_path = _write_world(tmp_path)
+        root = _artifacts_root(tmp_path)
+        run_id = _run_id(config_path)
+        run_dir = root / "cartographer" / run_id
+
+        rc = _run(
+            [
+                "cartographer",
+                "prepare",
+                "--config",
+                str(config_path),
+                "--data-card",
+                str(data_card_path),
+                "--mock-encoder",
+            ],
+            root,
+        )
+        assert rc == 0
+
+        bank = FeatureBank.read(run_dir / "feature_bank")
+        # sequence_source is the protein DB release, NOT the expression URI
+        assert bank.provenance.sequence_source == "uniprot-2024-01"
+        assert bank.provenance.sequence_source != "synthetic://cli-test"
+        assert bank.provenance.id_mapping_version == "ensembl-110"
+
+        ledger = RunLedger.read(run_dir / "ledger.json")
+        assert ledger.artifact_sha("sequence_mapping") == bank.provenance.mapping_sha256
+        assert ledger.artifact_sha("raw_data")  # expression hash still present & distinct
+
+    def test_prepare_refuses_data_card_missing_sequence_source(self, tmp_path: Path) -> None:
+        rc = _run_prepare_with_data_card(tmp_path, drop_keys=["sequence_source"])
+        assert rc == 2
+
+    def test_prepare_refuses_data_card_missing_id_mapping_version(self, tmp_path: Path) -> None:
+        rc = _run_prepare_with_data_card(tmp_path, drop_keys=["id_mapping_version"])
+        assert rc == 2
 
 
 @pytest.fixture(autouse=True)

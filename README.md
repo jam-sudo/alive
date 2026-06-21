@@ -108,19 +108,23 @@ uv run alive cartographer report       --run-id "$RUN_ID"
   "control_value": "non-targeting",
   "gene_id_key": null,
   "counts_layer": null,
-  "raw_data_uri": "replogle2022:K562_essential"
+  "raw_data_uri": "replogle2022:K562_essential",
+  "sequence_source": "uniprot-2024-01",
+  "id_mapping_version": "ensembl-110"
 }
 ```
 
 | Key | Required | Meaning |
 |---|---|---|
 | `h5ad` | yes | Path to the Perturb-seq AnnData (`.h5ad`); read sparse, never globally densified. |
-| `sequences` | yes | Path to a JSON map `gene → [protein_sequence, ...]`. Exactly one sequence = usable; 0 = "missing"; >1 = "ambiguous" (both excluded before the split). |
+| `sequences` | yes | Path to a JSON map `gene → [protein_sequence, ...]` (the gene→protein mapping file). Exactly one sequence = usable; 0 = "missing"; >1 = "ambiguous" (both excluded before the split). |
 | `perturbation_key` | yes | `obs` column holding each cell's perturbation/target label. |
 | `control_value` | yes | The label in `perturbation_key` marking control (non-targeting) cells. |
 | `gene_id_key` | no | `var` column for gene IDs (`null` → use `var_names`). |
 | `counts_layer` | no | Layer holding counts (`null` → use `.X`). |
-| `raw_data_uri` | no | Provenance string recorded in the feature bank + ledger. |
+| `raw_data_uri` | no | Provenance string for the expression dataset recorded in the ledger. |
+| `sequence_source` | **yes** | Protein-sequence database release recorded in the feature bank provenance (e.g. `"uniprot-2024-01"`). Distinct from the expression data URI — gives the protein-sequence mapping its own provenance. |
+| `id_mapping_version` | **yes** | Gene↔protein ID mapping version recorded in the feature bank provenance (e.g. `"ensembl-110"`). Together with `sequence_source`, this is the canonical protein-sequence mapping provenance, separate from the expression source. |
 
 For the exact synthetic fixture format (a runnable end-to-end example), see
 `tests/alive/experiment/test_cli.py`, which constructs a tiny AnnData + sequence map + data card on

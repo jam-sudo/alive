@@ -222,6 +222,7 @@ def _build_world(tmp_path: Path, *, config: Config, n_pert: int = 40, seed: int 
         gene_sequences,
         MockSequenceEncoder(dim=8),
         sequence_source="mock-2026",
+        id_mapping_version="id-map-v1",
         standardize_on=base_train_ids,
     )
 
