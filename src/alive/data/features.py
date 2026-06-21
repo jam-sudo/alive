@@ -179,20 +179,161 @@ class MockSequenceEncoder:
         return results
 
 
+# ---------------------------------------------------------------------------
+# ESM-2 architecture constants (not configurable: intrinsic to model design)
+# ---------------------------------------------------------------------------
+
+#: Embedding dimension for each known ESM-2 model variant.
+#: Source: ESM-2 architecture — ``embed_dim`` attribute of the loaded model.
+_ESM2_DIM_MAP: dict[str, int] = {
+    "esm2_t33_650M_UR50D": 1280,
+}
+
+
+# ---------------------------------------------------------------------------
+# Pure helper functions for length policy and length-bucketed batching
+# ---------------------------------------------------------------------------
+
+
+def _apply_length_policy(
+    sequences: Sequence[str],
+    max_residues: int,
+    policy: str,
+) -> list[str]:
+    """Apply a length policy to each sequence, returning a (possibly truncated) list.
+
+    For each sequence whose length exceeds *max_residues*, the policy is applied:
+
+    - ``"error"``: raise :class:`FeatureError` naming the sequence index and length.
+    - ``"truncate"``: silently truncate to the first *max_residues* residues.
+
+    Sequences within the limit are returned unchanged.  Order is preserved.
+
+    Parameters
+    ----------
+    sequences : Sequence[str]
+        Input protein sequences.
+    max_residues : int
+        Maximum allowed residue count per sequence.
+    policy : str
+        One of ``"error"`` or ``"truncate"``.
+
+    Returns
+    -------
+    list[str]
+        Processed sequences in the same order as *sequences*.
+
+    Raises
+    ------
+    FeatureError
+        If *policy* is ``"error"`` and any sequence exceeds *max_residues*.
+    """
+    out: list[str] = []
+    for idx, seq in enumerate(sequences):
+        if len(seq) > max_residues:
+            if policy == "error":
+                raise FeatureError(
+                    f"Sequence at index {idx} has {len(seq)} residues, which exceeds "
+                    f"max_residues={max_residues}. Set long_sequence_policy='truncate' "
+                    "to truncate instead."
+                )
+            # policy == "truncate"
+            out.append(seq[:max_residues])
+        else:
+            out.append(seq)
+    return out
+
+
+def _bucket_indices(
+    lengths: Sequence[int],
+    max_batch_tokens: int,
+    *,
+    per_seq_overhead: int = 2,
+) -> list[list[int]]:
+    """Partition sequence indices into padding-aware length-bucketed mini-batches.
+
+    Sequences are sorted by length descending (stable) so that the first sequence
+    added to a batch determines the padded length of the whole batch.  Greedy
+    packing: a new sequence is added to the current batch iff the padded cost
+    after adding it stays within *max_batch_tokens*::
+
+        padded_cost = (count + 1) * (batch_max_len + per_seq_overhead)
+
+    When the budget would be exceeded, the current batch is closed and a new
+    batch is started with the current sequence.
+
+    Parameters
+    ----------
+    lengths : Sequence[int]
+        Residue lengths of the sequences (0-indexed, matching the input order).
+    max_batch_tokens : int
+        Maximum padded token budget per batch.  The config validation guarantees
+        ``max_batch_tokens >= max_residues + per_seq_overhead``, ensuring that a
+        single maximum-length sequence always fits in one batch.
+    per_seq_overhead : int, optional
+        Extra tokens per sequence (BOS + EOS for ESM-2).  Default is 2.
+
+    Returns
+    -------
+    list[list[int]]
+        A list of buckets, each bucket being a list of ORIGINAL sequence indices
+        (0-indexed, matching *lengths*).  Together, all buckets cover every index
+        exactly once.  Bucket order is determined by the greedy descending-sort
+        packing; within each bucket the indices appear in the order they were
+        packed (longest first).
+    """
+    # Sort indices by length DESCENDING (stable: equal-length seqs keep insertion order).
+    sorted_indices = sorted(range(len(lengths)), key=lambda i: lengths[i], reverse=True)
+
+    buckets: list[list[int]] = []
+    current_bucket: list[int] = []
+    current_max_len: int = 0
+
+    for idx in sorted_indices:
+        seq_len = lengths[idx]
+        candidate_max = max(current_max_len, seq_len)
+        candidate_cost = (len(current_bucket) + 1) * (candidate_max + per_seq_overhead)
+
+        if current_bucket and candidate_cost > max_batch_tokens:
+            # Close current batch and start a new one.
+            buckets.append(current_bucket)
+            current_bucket = [idx]
+            current_max_len = seq_len
+        else:
+            current_bucket.append(idx)
+            current_max_len = candidate_max
+
+    if current_bucket:
+        buckets.append(current_bucket)
+
+    return buckets
+
+
+# ---------------------------------------------------------------------------
+# Esm2Encoder
+# ---------------------------------------------------------------------------
+
+
 class Esm2Encoder:
     """ESM-2 protein language model encoder for use on the A100.
 
-    Lazy-imports ``torch`` and ``esm`` **inside** :meth:`__init__` so that
-    importing this module never triggers a GPU/library load.  This class
-    must NOT be used in CI (torch and fair-esm are in the optional
+    Lazy-imports ``torch`` and ``esm`` only on the first call to
+    :meth:`_forward_bucket` (not in ``__init__``), so that importing this
+    module — or constructing the encoder — never triggers a GPU/library load.
+    This class must NOT be used in CI (torch and fair-esm are in the optional
     ``features`` dependency group and are not installed in the CI environment).
+
+    The :meth:`dim` and :meth:`model_revision` properties are available
+    **without torch** for the pinned default model (``esm2_t33_650M_UR50D``)
+    via a built-in dimension map.  For unknown model names, ``dim`` raises
+    :class:`FeatureError` until the model is loaded.
 
     Usage (A100 only)
     -----------------
     ::
 
         from alive.data.features import Esm2Encoder
-        encoder = Esm2Encoder()          # loads model weights (~1.3 GB)
+        encoder = Esm2Encoder()          # no model load here
         bank = build_feature_bank(mapping, encoder, sequence_source="uniprot-2024-01")
 
     Parameters
@@ -200,6 +341,16 @@ class Esm2Encoder:
     model_name : str, optional
         ESM-2 model identifier.  Defaults to ``"esm2_t33_650M_UR50D"``
         (650 M parameters, 1280-dimensional embeddings).
+    max_residues : int, optional
+        Maximum residues per sequence.  Sequences exceeding this limit are
+        handled per *long_sequence_policy*.  Default is 1022 (ESM-2 t33
+        context of 1024 tokens minus BOS and EOS).
+    long_sequence_policy : str, optional
+        Action when a sequence exceeds *max_residues*: ``"error"`` (raise
+        :class:`FeatureError`) or ``"truncate"`` (truncate silently).
+        Default is ``"error"``.
+    max_batch_tokens : int, optional
+        Padded token budget per mini-batch.  A100-tunable.  Default is 16384.
 
     Notes
     -----
@@ -207,61 +358,106 @@ class Esm2Encoder:
     The full ``t33_650M_UR50D`` model has 33 transformer layers and produces
     1280-dimensional residue embeddings (layer 33 representations, with BOS
     and EOS tokens stripped).
+
+    The ``esm2_t33_650M_UR50D`` embedding dimension (1280) is documented as
+    an architecture constant in :data:`_ESM2_DIM_MAP`; it is NOT a
+    configurable parameter.
     """
 
-    def __init__(self, model_name: str = "esm2_t33_650M_UR50D") -> None:
-        # Lazy imports — never executed at module import time
-        import esm  # type: ignore[import]  # noqa: PLC0415
-        import torch  # type: ignore[import]  # noqa: PLC0415
-
+    def __init__(
+        self,
+        model_name: str = "esm2_t33_650M_UR50D",
+        *,
+        max_residues: int = 1022,
+        long_sequence_policy: str = "error",
+        max_batch_tokens: int = 16384,
+    ) -> None:
+        # Store config ONLY — no torch import, no model load.
         self._model_name = model_name
-        self._torch = torch
+        self._max_residues = max_residues
+        self._long_sequence_policy = long_sequence_policy
+        self._max_batch_tokens = max_batch_tokens
 
-        model, alphabet = esm.pretrained.load_model_and_alphabet(model_name)
-        model.eval()
-        if torch.cuda.is_available():
-            model = model.cuda()
-        self._model = model
-        self._alphabet = alphabet
-        self._batch_converter = alphabet.get_batch_converter()
+        # Dimension from the built-in map; None if unknown (deferred to model load).
+        self._dim: int | None = _ESM2_DIM_MAP.get(model_name)
 
-        # dimension: last layer representation size
-        self._dim: int = model.embed_dim  # 1280 for t33_650M
+        # Lazy model state — populated on first call to _ensure_model().
+        self._model = None
+        self._alphabet = None
+        self._batch_converter = None
+
+    # ------------------------------------------------------------------
+    # Properties (work WITHOUT torch for pinned model names)
+    # ------------------------------------------------------------------
 
     @property
     def dim(self) -> int:
-        """Embedding dimension (1280 for ``t33_650M_UR50D``)."""
+        """Embedding dimension.
+
+        Returns 1280 for ``esm2_t33_650M_UR50D`` without requiring torch.
+        For unknown model names, raises :class:`FeatureError` until the model
+        has been loaded by a call to :meth:`encode_residues`.
+        """
+        if self._dim is None:
+            raise FeatureError(
+                f"Embedding dimension for model {self._model_name!r} is not known at "
+                "construction time. Call encode_residues() to load the model and resolve dim."
+            )
         return self._dim
 
     @property
     def model_revision(self) -> str:
-        """Pinned ESM-2 model identifier."""
+        """Pinned ESM-2 model identifier (no torch required)."""
         return self._model_name
 
-    def encode_residues(self, sequences: Sequence[str]) -> list[np.ndarray]:
-        """Encode protein sequences into per-residue ESM-2 embeddings.
+    # ------------------------------------------------------------------
+    # Torch-only leaf: model loading + forward pass
+    # ------------------------------------------------------------------
 
-        Strips BOS and EOS tokens so the returned arrays have exactly
-        ``len(sequence)`` rows each.
+    def _ensure_model(self) -> None:
+        """Load the ESM-2 model lazily on the first call (torch-only)."""
+        if self._model is not None:
+            return
+
+        import esm  # type: ignore[import]  # noqa: PLC0415
+        import torch  # type: ignore[import]  # noqa: PLC0415
+
+        model, alphabet = esm.pretrained.load_model_and_alphabet(self._model_name)
+        model.eval()
+        if torch.cuda.is_available():
+            model = model.cuda()
+
+        self._model = model
+        self._alphabet = alphabet
+        self._batch_converter = alphabet.get_batch_converter()
+
+        # Resolve dim from the loaded model if it was unknown at init.
+        if self._dim is None:
+            self._dim = model.embed_dim
+
+    def _forward_bucket(self, sequences: Sequence[str]) -> list[np.ndarray]:
+        """Run one mini-batch forward pass through the ESM-2 model.
+
+        This is the TORCH-ONLY leaf.  It is never called in CI (torch absent).
+        GPU memory is freed after each call.
 
         Parameters
         ----------
         sequences : Sequence[str]
-            Protein sequences (single-letter amino acid codes).
+            A mini-batch of protein sequences (after length policy has been
+            applied).  All sequences fit within the token budget for this batch.
 
         Returns
         -------
         list[np.ndarray]
-            One ``(L_i, 1280)`` float32 array per input sequence.
-
-        Notes
-        -----
-        Runs on GPU if available.  Large batches may require chunking to
-        fit within A100 VRAM.
+            One ``(L_i, dim)`` float32 array per input sequence, in the same
+            order as *sequences*.
         """
-        import torch  # noqa: PLC0415
+        import torch  # type: ignore[import]  # noqa: PLC0415
 
-        data = [("seq_{i}", seq) for i, seq in enumerate(sequences)]
+        self._ensure_model()
+
+        data = [(f"seq_{i}", seq) for i, seq in enumerate(sequences)]
         _, _, tokens = self._batch_converter(data)
         if torch.cuda.is_available():
             tokens = tokens.cuda()
@@ -271,12 +467,67 @@ class Esm2Encoder:
             results = self._model(tokens, repr_layers=[n_layers], return_contacts=False)
 
         token_reps = results["representations"][n_layers]  # (B, L+2, dim)
-        # Strip BOS (index 0) and EOS (index -1) tokens
+        # Strip BOS (index 0) and EOS (index -1) tokens.
         output: list[np.ndarray] = []
         for i, seq in enumerate(sequences):
-            rep = token_reps[i, 1 : len(seq) + 1, :]  # (L, dim)
+            rep = token_reps[i, 1 : len(seq) + 1, :]  # (L_i, dim)
             output.append(rep.cpu().numpy().astype(np.float32))
+
+        # Free GPU memory eagerly after each bucket.
+        del tokens, results, token_reps
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
         return output
+
+    # ------------------------------------------------------------------
+    # Public orchestration method
+    # ------------------------------------------------------------------
+
+    def encode_residues(self, sequences: Sequence[str]) -> list[np.ndarray]:
+        """Encode protein sequences into per-residue ESM-2 embeddings.
+
+        Applies the length policy, partitions sequences into padding-aware
+        mini-batches, runs each batch through the model, and reassembles
+        the results in INPUT ORDER.
+
+        Parameters
+        ----------
+        sequences : Sequence[str]
+            Protein sequences (single-letter amino acid codes).
+
+        Returns
+        -------
+        list[np.ndarray]
+            One ``(L_i, dim)`` float32 array per input sequence, where
+            ``L_i`` is the number of residues in the (potentially truncated)
+            sequence *i*.  Output is in the same order as the input.
+
+        Raises
+        ------
+        FeatureError
+            If *long_sequence_policy* is ``"error"`` and any sequence
+            exceeds *max_residues*.
+        """
+        # 1. Apply length policy (pure; no torch).
+        prepared = _apply_length_policy(sequences, self._max_residues, self._long_sequence_policy)
+
+        # 2. Compute length-bucketed mini-batch indices (pure; no torch).
+        lengths = [len(s) for s in prepared]
+        buckets = _bucket_indices(lengths, self._max_batch_tokens)
+
+        # 3. Allocate result list in original-input order.
+        results_by_index: list[np.ndarray | None] = [None] * len(prepared)
+
+        # 4. Run each bucket through the torch-only forward leaf.
+        for bucket in buckets:
+            bucket_seqs = [prepared[i] for i in bucket]
+            bucket_results = self._forward_bucket(bucket_seqs)
+            for original_idx, arr in zip(bucket, bucket_results):
+                results_by_index[original_idx] = arr
+
+        # 5. Return in INPUT order (None slots are a programming error).
+        return [r for r in results_by_index if r is not None]
 
 
 # ---------------------------------------------------------------------------

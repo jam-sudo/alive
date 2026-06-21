@@ -262,12 +262,64 @@ class Futility:
     rule: str
 
 
+@dataclass(frozen=True)
+class FeatureExtraction:
+    """Parameters for ESM-2 sequence feature extraction.
+
+    This section is OPTIONAL in the YAML config; if absent, the defaults below
+    are applied automatically so existing configs remain valid.
+
+    Parameters
+    ----------
+    max_residues : int
+        Maximum number of residues per sequence fed to the model.  ESM-2 t33
+        has a context window of 1024 tokens including BOS and EOS, so the
+        default 1022 is the maximum safe residue count.  Must be >= 1.
+    long_sequence_policy : str
+        Action when a sequence exceeds *max_residues*.  Allowed values:
+        ``"error"`` (raise :class:`~alive.data.features.FeatureError`) or
+        ``"truncate"`` (silently truncate to *max_residues* residues).
+    max_batch_tokens : int
+        Padded token budget per mini-batch sent to the model, counting
+        ``per_seq_overhead`` (2 for BOS+EOS) per sequence.  A100-tunable.
+        Must satisfy ``max_batch_tokens >= max_residues + 2`` so that a single
+        maximum-length sequence always fits in one batch.
+
+    Notes
+    -----
+    The registered length policy is captured automatically in run provenance
+    via the config digest recorded in the ledger — no separate
+    ``FeatureBankProvenance`` change is required.
+    """
+
+    max_residues: int = 1022
+    long_sequence_policy: str = "error"
+    max_batch_tokens: int = 16384
+
+
 # ---------------------------------------------------------------------------
 # Top-level Config
 # ---------------------------------------------------------------------------
 
 # Expected top-level keys in the YAML (used for unknown-key detection)
 _TOP_LEVEL_KEYS: frozenset[str] = frozenset(
+    {
+        "experiment",
+        "manifest_seed",
+        "split_fractions",
+        "response_space",
+        "perturbation_features",
+        "base_model",
+        "method_development",
+        "decision",
+        "inference",
+        "futility",
+        "feature_extraction",  # OPTIONAL — absent → defaults applied
+    }
+)
+
+# Required top-level keys (feature_extraction is absent from this set — it is optional)
+_REQUIRED_TOP_LEVEL_KEYS: frozenset[str] = frozenset(
     {
         "experiment",
         "manifest_seed",
@@ -329,6 +381,13 @@ _SECTION_KEYS: dict[str, frozenset[str]] = {
             "rule",
         }
     ),
+    "feature_extraction": frozenset(
+        {
+            "max_residues",
+            "long_sequence_policy",
+            "max_batch_tokens",
+        }
+    ),
 }
 
 
@@ -361,6 +420,9 @@ class Config:
         Bootstrap inference parameters.
     futility : Futility
         Futility monitoring parameters.
+    feature_extraction : FeatureExtraction
+        ESM-2 feature extraction parameters (optional in YAML; defaults applied
+        when the section is absent so existing configs remain valid).
     """
 
     experiment: str
@@ -373,6 +435,7 @@ class Config:
     decision: Decision
     inference: Inference
     futility: Futility
+    feature_extraction: FeatureExtraction = FeatureExtraction()
 
     @cached_property
     def run_id(self) -> str:
@@ -571,8 +634,9 @@ def load_config(path: str | Path) -> Config:
 
     # -----------------------------------------------------------------------
     # 3. Required top-level sections must be present
+    #    feature_extraction is OPTIONAL — do not require it here.
     # -----------------------------------------------------------------------
-    for _required_section in _TOP_LEVEL_KEYS:
+    for _required_section in _REQUIRED_TOP_LEVEL_KEYS:
         _require_section(raw, _required_section)
 
     # -----------------------------------------------------------------------
@@ -714,6 +778,44 @@ def load_config(path: str | Path) -> Config:
         rule=_require_key("futility", fut_raw, "rule"),
     )
 
+    # -----------------------------------------------------------------------
+    # feature_extraction: OPTIONAL section — use defaults if absent.
+    # -----------------------------------------------------------------------
+    _fe_defaults = FeatureExtraction()
+    if "feature_extraction" in raw:
+        fe_raw: dict = raw["feature_extraction"]
+        _check_unknown_keys("feature_extraction", fe_raw, _SECTION_KEYS["feature_extraction"])
+        fe_max_residues: int = fe_raw.get("max_residues", _fe_defaults.max_residues)
+        fe_policy: str = fe_raw.get("long_sequence_policy", _fe_defaults.long_sequence_policy)
+        fe_max_batch: int = fe_raw.get("max_batch_tokens", _fe_defaults.max_batch_tokens)
+    else:
+        fe_max_residues = _fe_defaults.max_residues
+        fe_policy = _fe_defaults.long_sequence_policy
+        fe_max_batch = _fe_defaults.max_batch_tokens
+
+    # Validate feature_extraction fields (always, whether from YAML or defaults).
+    if fe_max_residues < 1:
+        raise ConfigError(f"feature_extraction.max_residues must be >= 1; got {fe_max_residues!r}.")
+    _valid_policies = {"error", "truncate"}
+    if fe_policy not in _valid_policies:
+        raise ConfigError(
+            f"feature_extraction.long_sequence_policy must be one of {sorted(_valid_policies)}; "
+            f"got {fe_policy!r}."
+        )
+    # A single max-length sequence (max_residues + 2 for BOS/EOS) must fit alone.
+    if fe_max_batch < fe_max_residues + 2:
+        raise ConfigError(
+            f"feature_extraction.max_batch_tokens ({fe_max_batch}) must be >= "
+            f"max_residues + 2 ({fe_max_residues + 2}) so that a single maximum-length "
+            "sequence always fits in one batch."
+        )
+
+    fe = FeatureExtraction(
+        max_residues=fe_max_residues,
+        long_sequence_policy=fe_policy,
+        max_batch_tokens=fe_max_batch,
+    )
+
     return Config(
         experiment=_require_key("(top level)", raw, "experiment"),
         manifest_seed=_require_key("(top level)", raw, "manifest_seed"),
@@ -725,4 +827,5 @@ def load_config(path: str | Path) -> Config:
         decision=d,
         inference=inf,
         futility=fut,
+        feature_extraction=fe,
     )

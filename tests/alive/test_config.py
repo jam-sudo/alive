@@ -434,3 +434,120 @@ def test_run_id_stable_across_processes():
     )
     cross_process_id = result.stdout.strip()
     assert cross_process_id == in_process_id
+
+
+# ---------------------------------------------------------------------------
+# feature_extraction: round-trip from canonical YAML
+# ---------------------------------------------------------------------------
+
+
+def test_feature_extraction_canonical_round_trip():
+    """Canonical YAML feature_extraction section loads to the correct values."""
+    cfg = load_config(CANON_CONFIG)
+    fe = cfg.feature_extraction
+    assert fe.max_residues == 1022
+    assert fe.long_sequence_policy == "error"
+    assert fe.max_batch_tokens == 16384
+
+
+# ---------------------------------------------------------------------------
+# feature_extraction: absent section → defaults
+# ---------------------------------------------------------------------------
+
+
+def test_feature_extraction_absent_defaults(tmp_path):
+    """A YAML without feature_extraction loads with the default FeatureExtraction values."""
+    d = _base_dict()
+    # _base_dict() does NOT include feature_extraction → should be defaulted
+    assert "feature_extraction" not in d
+    p = _write_yaml(tmp_path, d)
+    cfg = load_config(p)
+    fe = cfg.feature_extraction
+    assert fe.max_residues == 1022
+    assert fe.long_sequence_policy == "error"
+    assert fe.max_batch_tokens == 16384
+
+
+# ---------------------------------------------------------------------------
+# feature_extraction: validation rules
+# ---------------------------------------------------------------------------
+
+
+def test_feature_extraction_bad_policy_string(tmp_path):
+    """long_sequence_policy must be 'error' or 'truncate'; other values raise ConfigError."""
+    d = _base_dict()
+    d["feature_extraction"] = {
+        "max_residues": 1022,
+        "long_sequence_policy": "ignore",
+        "max_batch_tokens": 16384,
+    }
+    p = _write_yaml(tmp_path, d)
+    with pytest.raises(ConfigError, match="long_sequence_policy"):
+        load_config(p)
+
+
+def test_feature_extraction_max_batch_too_small(tmp_path):
+    """max_batch_tokens must be >= max_residues + 2; violation raises ConfigError."""
+    d = _base_dict()
+    d["feature_extraction"] = {
+        "max_residues": 1022,
+        "long_sequence_policy": "error",
+        "max_batch_tokens": 1023,  # < 1022 + 2 = 1024
+    }
+    p = _write_yaml(tmp_path, d)
+    with pytest.raises(ConfigError, match="max_batch_tokens"):
+        load_config(p)
+
+
+def test_feature_extraction_max_residues_lt_one(tmp_path):
+    """max_residues must be >= 1; 0 raises ConfigError."""
+    d = _base_dict()
+    d["feature_extraction"] = {
+        "max_residues": 0,
+        "long_sequence_policy": "error",
+        "max_batch_tokens": 16384,
+    }
+    p = _write_yaml(tmp_path, d)
+    with pytest.raises(ConfigError, match="max_residues"):
+        load_config(p)
+
+
+def test_feature_extraction_unknown_key_rejected(tmp_path):
+    """Unknown keys inside feature_extraction raise ConfigError."""
+    d = _base_dict()
+    d["feature_extraction"] = {
+        "max_residues": 1022,
+        "long_sequence_policy": "error",
+        "max_batch_tokens": 16384,
+        "unknown_param": 99,
+    }
+    p = _write_yaml(tmp_path, d)
+    with pytest.raises(ConfigError, match="[Uu]nknown"):
+        load_config(p)
+
+
+def test_feature_extraction_truncate_policy_valid(tmp_path):
+    """'truncate' is a valid long_sequence_policy value."""
+    d = _base_dict()
+    d["feature_extraction"] = {
+        "max_residues": 512,
+        "long_sequence_policy": "truncate",
+        "max_batch_tokens": 8192,
+    }
+    p = _write_yaml(tmp_path, d)
+    cfg = load_config(p)
+    assert cfg.feature_extraction.long_sequence_policy == "truncate"
+    assert cfg.feature_extraction.max_residues == 512
+
+
+def test_feature_extraction_max_batch_exactly_minimum_valid(tmp_path):
+    """max_batch_tokens == max_residues + 2 is the boundary — must be accepted."""
+    d = _base_dict()
+    d["feature_extraction"] = {
+        "max_residues": 100,
+        "long_sequence_policy": "error",
+        "max_batch_tokens": 102,  # exactly 100 + 2
+    }
+    p = _write_yaml(tmp_path, d)
+    cfg = load_config(p)
+    assert cfg.feature_extraction.max_batch_tokens == 102

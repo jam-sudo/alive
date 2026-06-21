@@ -140,7 +140,7 @@ def _expected_primary(provenance: "object") -> str:
     return f"{provenance.model_revision}_{provenance.pooling}_pool"
 
 
-def _select_encoder(*, use_mock: bool, config_primary: str = ""):
+def _select_encoder(*, use_mock: bool, config_primary: str = "", config=None):
     """Return the encoder to use.
 
     Parameters
@@ -153,6 +153,10 @@ def _select_encoder(*, use_mock: bool, config_primary: str = ""):
     config_primary : str, optional
         The ``config.perturbation_features.primary`` string; included in the error
         message when ESM is unavailable.
+    config : Config or None, optional
+        Full experiment config.  When provided, ``config.feature_extraction``
+        fields are forwarded to the scientific :class:`~alive.data.features.Esm2Encoder`.
+        When ``None``, encoder defaults are used.
     """
     if use_mock:
         return MockSequenceEncoder(dim=8)
@@ -163,6 +167,13 @@ def _select_encoder(*, use_mock: bool, config_primary: str = ""):
 
         from alive.data.features import Esm2Encoder
 
+        if config is not None:
+            fe = config.feature_extraction
+            return Esm2Encoder(
+                max_residues=fe.max_residues,
+                long_sequence_policy=fe.long_sequence_policy,
+                max_batch_tokens=fe.max_batch_tokens,
+            )
         return Esm2Encoder()
     except Exception as exc:  # noqa: BLE001
         raise CliError(
@@ -284,6 +295,7 @@ def cmd_prepare(args: argparse.Namespace) -> int:
     encoder = _select_encoder(
         use_mock=args.mock_encoder,
         config_primary=config.perturbation_features.primary,
+        config=config,
     )
     feature_bank = build_feature_bank(
         gene_sequences,

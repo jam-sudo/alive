@@ -19,6 +19,8 @@ from alive.data.features import (
     FeatureError,
     MockSequenceEncoder,
     SequenceEncoder,
+    _apply_length_policy,
+    _bucket_indices,
     build_feature_bank,
 )
 
@@ -522,3 +524,263 @@ def test_mock_encoder_implements_protocol() -> None:
     result = enc.encode_residues(["ACE"])
     assert len(result) == 1
     assert result[0].shape == (3, 4)
+
+
+# ---------------------------------------------------------------------------
+# 12. _apply_length_policy (pure; no torch)
+# ---------------------------------------------------------------------------
+
+
+def test_apply_length_policy_error_raises_for_overlong() -> None:
+    """policy='error' must raise FeatureError for any sequence exceeding max_residues."""
+    seqs = ["AAAA", "BBBBBBB"]  # second is 7 chars, max=5
+    with pytest.raises(FeatureError, match="index 1"):
+        _apply_length_policy(seqs, max_residues=5, policy="error")
+
+
+def test_apply_length_policy_error_error_message_includes_length() -> None:
+    """FeatureError message must mention the offending sequence's length."""
+    seqs = ["ABCDEFGH"]  # 8 chars
+    with pytest.raises(FeatureError, match="8"):
+        _apply_length_policy(seqs, max_residues=5, policy="error")
+
+
+def test_apply_length_policy_truncate_truncates_overlong() -> None:
+    """policy='truncate' must truncate sequences exceeding max_residues."""
+    seqs = ["ABCDEFGH", "XY"]  # 8 chars and 2 chars, max=5
+    result = _apply_length_policy(seqs, max_residues=5, policy="truncate")
+    assert result == ["ABCDE", "XY"]
+
+
+def test_apply_length_policy_within_limit_unchanged() -> None:
+    """Sequences at or below max_residues must pass through unchanged."""
+    seqs = ["AAAA", "BBBBB"]  # 4 and 5 chars, max=5
+    result = _apply_length_policy(seqs, max_residues=5, policy="error")
+    assert result == ["AAAA", "BBBBB"]
+
+
+def test_apply_length_policy_exactly_at_limit_unchanged() -> None:
+    """A sequence of exactly max_residues must not be truncated or errored."""
+    seqs = ["AAAAA"]  # exactly 5
+    result = _apply_length_policy(seqs, max_residues=5, policy="error")
+    assert result == ["AAAAA"]
+
+
+def test_apply_length_policy_empty_input() -> None:
+    """Empty input list must return empty list."""
+    assert _apply_length_policy([], max_residues=5, policy="error") == []
+
+
+def test_apply_length_policy_preserves_order() -> None:
+    """Output must be in the same order as input."""
+    seqs = ["C", "BBB", "AA"]
+    result = _apply_length_policy(seqs, max_residues=10, policy="error")
+    assert result == seqs
+
+
+# ---------------------------------------------------------------------------
+# 13. _bucket_indices (pure; no torch)
+# ---------------------------------------------------------------------------
+
+
+def test_bucket_indices_every_index_covered_exactly_once() -> None:
+    """All input indices must appear in exactly one bucket."""
+    lengths = [100, 50, 200, 75, 10, 300, 1]
+    budget = 1024
+    buckets = _bucket_indices(lengths, budget)
+    all_indices = [i for bucket in buckets for i in bucket]
+    assert sorted(all_indices) == list(range(len(lengths)))
+
+
+def test_bucket_indices_padded_cost_within_budget() -> None:
+    """Each bucket's padded cost (count * (max_len + 2)) must not exceed budget."""
+    lengths = [100, 50, 200, 75, 10, 300, 1]
+    budget = 1024
+    buckets = _bucket_indices(lengths, budget)
+    for bucket in buckets:
+        max_len = max(lengths[i] for i in bucket)
+        padded_cost = len(bucket) * (max_len + 2)
+        assert padded_cost <= budget, (
+            f"Bucket {bucket} padded_cost={padded_cost} exceeds budget={budget}"
+        )
+
+
+def test_bucket_indices_single_near_max_length_alone() -> None:
+    """A sequence whose length is max_budget - 2 should land in its own bucket."""
+    budget = 1024
+    # One long sequence that fills the entire budget, one short.
+    lengths = [1022, 5]  # 1022 + 2 = 1024 == budget
+    buckets = _bucket_indices(lengths, budget)
+    # The long sequence (index 0) must be alone in its bucket.
+    idx_0_bucket = next(b for b in buckets if 0 in b)
+    assert idx_0_bucket == [0], f"Expected long seq alone, got bucket {idx_0_bucket}"
+
+
+def test_bucket_indices_deterministic() -> None:
+    """Same input → same output on repeated calls."""
+    lengths = [100, 50, 200, 75, 10, 300, 1]
+    budget = 1024
+    assert _bucket_indices(lengths, budget) == _bucket_indices(lengths, budget)
+
+
+def test_bucket_indices_equal_length_pack_by_count() -> None:
+    """Equal-length sequences must pack together up to the budget limit."""
+    # 10 sequences of length 10: cost per pack of n = n * 12.
+    # Budget 120 → n=10 fits (10*12=120), so all in one bucket.
+    lengths = [10] * 10
+    budget = 120
+    buckets = _bucket_indices(lengths, budget)
+    assert len(buckets) == 1
+    assert sorted(buckets[0]) == list(range(10))
+
+
+def test_bucket_indices_equal_length_split_when_over_budget() -> None:
+    """Equal-length sequences must spill into a second bucket when over budget."""
+    # 10 sequences of length 10: cost per pack of n = n * 12.
+    # Budget 60 → max 5 fit (5*12=60), next would be 6*12=72 > 60.
+    lengths = [10] * 10
+    budget = 60
+    buckets = _bucket_indices(lengths, budget)
+    assert len(buckets) == 2
+    assert all(len(b) == 5 for b in buckets)
+
+
+def test_bucket_indices_empty_input() -> None:
+    """Empty lengths list must return empty list of buckets."""
+    assert _bucket_indices([], max_batch_tokens=1024) == []
+
+
+def test_bucket_indices_single_element() -> None:
+    """A single sequence must produce exactly one bucket with that index."""
+    assert _bucket_indices([42], max_batch_tokens=1024) == [[0]]
+
+
+# ---------------------------------------------------------------------------
+# 14. Esm2Encoder orchestration (no torch — stub _forward_bucket)
+# ---------------------------------------------------------------------------
+
+
+def test_esm2encoder_dim_without_torch() -> None:
+    """Esm2Encoder.dim must return 1280 for the default model without torch."""
+    from alive.data.features import Esm2Encoder
+
+    enc = Esm2Encoder()
+    assert enc.dim == 1280
+
+
+def test_esm2encoder_model_revision_without_torch() -> None:
+    """Esm2Encoder.model_revision must return the model name without torch."""
+    from alive.data.features import Esm2Encoder
+
+    enc = Esm2Encoder(model_name="esm2_t33_650M_UR50D")
+    assert enc.model_revision == "esm2_t33_650M_UR50D"
+
+
+def test_esm2encoder_encode_residues_output_length_matches_input() -> None:
+    """encode_residues must return one array per input sequence."""
+    from alive.data.features import Esm2Encoder
+
+    dim = 1280
+    enc = Esm2Encoder(max_residues=50)
+
+    def _stub(seqs: Sequence[str]) -> list[np.ndarray]:
+        return [np.ones((len(s), dim), dtype=np.float32) for s in seqs]
+
+    enc._forward_bucket = _stub  # type: ignore[method-assign]
+
+    seqs = ["ACDE", "MKV", "AAAAAABBBBBB"]  # lengths 4, 3, 12
+    result = enc.encode_residues(seqs)
+    assert len(result) == 3
+
+
+def test_esm2encoder_encode_residues_reassembly_in_input_order() -> None:
+    """encode_residues must return arrays in INPUT order, not bucket order.
+
+    The stub encodes the first character of each sequence into the first column
+    so we can verify which original sequence each result corresponds to.
+    """
+    from alive.data.features import Esm2Encoder
+
+    dim = 4
+
+    def _stub(seqs: Sequence[str]) -> list[np.ndarray]:
+        """Return arrays whose first element encodes the first char of each seq."""
+        results = []
+        for seq in seqs:
+            arr = np.zeros((len(seq), dim), dtype=np.float32)
+            arr[:, 0] = float(ord(seq[0]))  # identity marker
+            results.append(arr)
+        return results
+
+    # Use varied lengths so the bucketing sorts them non-trivially.
+    # Budget=12 means 1*(10+2)=12 fits, 2*(10+2)=24 > 12 for 10-len seqs.
+    seqs = ["A" * 10, "B" * 3, "C" * 10, "D" * 1]
+    # Sorted desc by length: idx 0 (len 10), idx 2 (len 10), idx 1 (len 3), idx 3 (len 1)
+    # With budget=12: idx 0 alone, idx 2 alone, idx 1+3 together.
+    enc = Esm2Encoder(max_residues=20, max_batch_tokens=12)
+    enc._forward_bucket = _stub  # type: ignore[method-assign]
+
+    result = enc.encode_residues(seqs)
+    assert len(result) == 4
+    # result[0] must come from "A"*10: first-col = ord('A')
+    assert result[0][0, 0] == pytest.approx(float(ord("A")))
+    # result[1] must come from "B"*3
+    assert result[1][0, 0] == pytest.approx(float(ord("B")))
+    # result[2] must come from "C"*10
+    assert result[2][0, 0] == pytest.approx(float(ord("C")))
+    # result[3] must come from "D"*1
+    assert result[3][0, 0] == pytest.approx(float(ord("D")))
+
+
+def test_esm2encoder_encode_residues_truncation_reflected_in_row_count() -> None:
+    """With policy='truncate', output arrays have truncated row counts."""
+    from alive.data.features import Esm2Encoder
+
+    dim = 4
+    max_residues = 5
+
+    def _stub(seqs: Sequence[str]) -> list[np.ndarray]:
+        return [np.zeros((len(s), dim), dtype=np.float32) for s in seqs]
+
+    enc = Esm2Encoder(max_residues=max_residues, long_sequence_policy="truncate")
+    enc._forward_bucket = _stub  # type: ignore[method-assign]
+
+    seqs = ["ABCDEFGH", "XY"]  # 8 and 2 chars; first must be truncated to 5
+    result = enc.encode_residues(seqs)
+    assert result[0].shape[0] == max_residues, (
+        f"Expected truncated length {max_residues}, got {result[0].shape[0]}"
+    )
+    assert result[1].shape[0] == 2
+
+
+def test_esm2encoder_encode_residues_error_policy_raises() -> None:
+    """With policy='error', sequences exceeding max_residues raise FeatureError."""
+    from alive.data.features import Esm2Encoder
+
+    enc = Esm2Encoder(max_residues=5, long_sequence_policy="error")
+    # _forward_bucket should never be called — error happens before batching.
+    seqs = ["ABCDEFGH"]
+    with pytest.raises(FeatureError):
+        enc.encode_residues(seqs)
+
+
+def test_esm2encoder_encode_residues_multi_bucket_all_indices_covered() -> None:
+    """encode_residues must cover all indices with multi-bucket inputs."""
+    from alive.data.features import Esm2Encoder
+
+    dim = 2
+    call_log: list[list[str]] = []
+
+    def _stub(seqs: Sequence[str]) -> list[np.ndarray]:
+        call_log.append(list(seqs))
+        return [np.zeros((len(s), dim), dtype=np.float32) for s in seqs]
+
+    # Small budget forces multiple buckets.
+    enc = Esm2Encoder(max_residues=20, max_batch_tokens=22)  # fits 1 seq of len 20
+    enc._forward_bucket = _stub  # type: ignore[method-assign]
+
+    seqs = ["A" * 20, "B" * 20, "C" * 20]
+    result = enc.encode_residues(seqs)
+    assert len(result) == 3
+    # Each bucket must have been called separately (3 buckets of 1).
+    assert len(call_log) == 3

@@ -43,3 +43,7 @@ futility:
   minimum_relevant_delta: 0.01
   family_confidence: 0.90
   rule: stop_if_any_simultaneous_upper_bound_le_minimum
+feature_extraction:
+  max_residues: 1022          # ESM-2 t33 context 1024 incl BOS+EOS -> 1022 residues
+  long_sequence_policy: error # one of: error | truncate
+  max_batch_tokens: 16384     # padded token budget per mini-batch (A100-tunable)
