@@ -289,6 +289,16 @@ def _rerun_prepare(world_dir: Path, *, run_id: str) -> int:
     )
 
 
+def _run_dir(world_dir: Path, run_id: str) -> Path:
+    """Return the run directory for *run_id* under the world's artifacts root."""
+    return _artifacts_root(world_dir) / "cartographer" / run_id
+
+
+def _run_stage(world_dir: Path, stage: str, run_id: str) -> int:
+    """Run a single post-prepare staged subcommand and return its exit code."""
+    return _run(["cartographer", stage, "--run-id", run_id], _artifacts_root(world_dir))
+
+
 def test_prepare_run_id_changes_with_data(tmp_path: Path) -> None:
     rid1 = _prepare_and_get_run_id(tmp_path / "a")  # default fixture data
     rid2 = _prepare_and_get_run_id(tmp_path / "b", mutate_counts=True)  # same config, altered h5ad
@@ -299,6 +309,91 @@ def test_prepare_refuses_existing_run_dir(tmp_path: Path) -> None:
     rid = _prepare_and_get_run_id(tmp_path)
     rc = _rerun_prepare(tmp_path, run_id=rid)  # identical inputs → dir already exists
     assert rc == 2  # refuses to overwrite an existing run directory
+
+
+# ---------------------------------------------------------------------------
+# Task 3 (#4 / audit P1-2 pt2): append-only ledger across stages.
+#
+# Re-running a deterministic stage must NEVER silently replace its write-once
+# ledger entry.  The legal outcomes are a clean byte-identical no-op (rc 0) or a
+# clean refusal (rc 2) — but the recorded hash must remain the original.
+# ---------------------------------------------------------------------------
+
+
+class TestAppendOnlyLedger:
+    def _ledger_sha(self, world_dir: Path, run_id: str, name: str) -> str:
+        from alive.provenance import RunLedger
+
+        return RunLedger.read(_run_dir(world_dir, run_id) / "ledger.json").artifact_sha(name)
+
+    def test_rerun_fit_refuses_silent_ledger_replacement(self, tmp_path: Path) -> None:
+        rid = _prepare_and_get_run_id(tmp_path)
+        assert _run_stage(tmp_path, "fit", rid) == 0
+        first = self._ledger_sha(tmp_path, rid, "base_artifact")
+        rc = _run_stage(tmp_path, "fit", rid)  # second fit
+        after = self._ledger_sha(tmp_path, rid, "base_artifact")
+        # deterministic fit → byte-identical → either a clean no-op (rc 0) or a
+        # clean refusal (rc 2), but NEVER a replaced/different hash.
+        assert after == first
+        assert rc in (0, 2)
+
+    def test_rerun_develop_refuses_silent_ledger_replacement(self, tmp_path: Path) -> None:
+        rid = _prepare_and_get_run_id(tmp_path)
+        assert _run_stage(tmp_path, "fit", rid) == 0
+        assert _run_stage(tmp_path, "develop", rid) == 0
+        first = self._ledger_sha(tmp_path, rid, "method_lock")
+        rc = _run_stage(tmp_path, "develop", rid)  # second develop
+        after = self._ledger_sha(tmp_path, rid, "method_lock")
+        assert after == first
+        assert rc in (0, 2)
+
+    def test_rerun_calibrate_refuses_silent_ledger_replacement(self, tmp_path: Path) -> None:
+        rid = _prepare_and_get_run_id(tmp_path)
+        assert _run_stage(tmp_path, "fit", rid) == 0
+        assert _run_stage(tmp_path, "develop", rid) == 0
+        assert _run_stage(tmp_path, "calibrate", rid) == 0
+        first = self._ledger_sha(tmp_path, rid, "conformal_artifact")
+        rc = _run_stage(tmp_path, "calibrate", rid)  # second calibrate
+        after = self._ledger_sha(tmp_path, rid, "conformal_artifact")
+        assert after == first
+        assert rc in (0, 2)
+
+    def test_append_artifact_is_write_once(self, tmp_path: Path) -> None:
+        """A second record of the same artifact name must RAISE, never replace.
+
+        This exercises the structural hole directly: the legacy ``_ledger_record``
+        does a dict-replace that BYPASSES the write-once guard, so a differing
+        second record silently overwrote the entry.  The append-only helper must
+        instead raise on any second record (write-once), so the on-disk hash is
+        never silently replaced.
+        """
+        from alive.cli import _append_artifact
+        from alive.provenance import DuplicateArtifactError
+
+        rid = _prepare_and_get_run_id(tmp_path)
+        run_dir = _run_dir(tmp_path, rid)
+        _append_artifact(run_dir, "base_artifact", "a" * 64)
+        before = self._ledger_sha(tmp_path, rid, "base_artifact")
+        # A second record with a DIFFERENT hash must raise — not silently replace.
+        with pytest.raises(DuplicateArtifactError):
+            _append_artifact(run_dir, "base_artifact", "b" * 64)
+        # On-disk hash is unchanged: the write-once entry was preserved.
+        assert self._ledger_sha(tmp_path, rid, "base_artifact") == before
+
+    def test_refuse_nonidentical_rerun_semantics(self, tmp_path: Path) -> None:
+        """The output-exists guard: first run False, no-op True, differing → CliError."""
+        from alive.cli import CliError, _append_artifact, _refuse_nonidentical_rerun
+
+        rid = _prepare_and_get_run_id(tmp_path)
+        run_dir = _run_dir(tmp_path, rid)
+        # Not recorded yet → first run.
+        assert _refuse_nonidentical_rerun(run_dir, "base_artifact", "a" * 64) is False
+        _append_artifact(run_dir, "base_artifact", "a" * 64)
+        # Recorded with the same hash → byte-identical no-op.
+        assert _refuse_nonidentical_rerun(run_dir, "base_artifact", "a" * 64) is True
+        # Recorded with a different hash → clean refusal (CliError → exit 2).
+        with pytest.raises(CliError, match="immutable"):
+            _refuse_nonidentical_rerun(run_dir, "base_artifact", "b" * 64)
 
 
 # ---------------------------------------------------------------------------

@@ -72,6 +72,7 @@ from alive.experiment.real_runner import (
 )
 from alive.metrics.selective import normalize_by_mean
 from alive.provenance import (
+    DuplicateArtifactError,
     LedgerError,
     RunLedger,
     capture_environment,
@@ -109,6 +110,7 @@ _CLEAN_ERRORS: tuple[type[BaseException], ...] = (
     ManifestError,
     PreprocessError,
     LedgerError,
+    DuplicateArtifactError,
 )
 
 
@@ -427,11 +429,19 @@ def cmd_fit(args: argparse.Namespace) -> int:
     index, store, manifest, feature_bank, config = _load_world(run_dir)
 
     base_artifact = fit_base(index, store, manifest, feature_bank, config)
+
+    # Append-only / byte-identical-or-refuse: a clean no-op when the artifact is
+    # byte-identical to a prior run, a clean refusal (exit 2) when it differs.
+    # The checksum is computed from the in-memory artifact BEFORE writing files,
+    # so a differing re-run is refused without overwriting the prior outputs.
+    if _refuse_nonidentical_rerun(run_dir, "base_artifact", base_artifact.checksum):
+        return 0
+
     rs_path, pred_path = _base_paths(run_dir)
     base_artifact.response_space.write(rs_path)
     base_artifact.base_predictor.write(pred_path)
 
-    _ledger_record(run_dir, "base_artifact", base_artifact.checksum)
+    _append_artifact(run_dir, "base_artifact", base_artifact.checksum)
     return 0
 
 
@@ -471,6 +481,11 @@ def cmd_develop(args: argparse.Namespace) -> int:
         registered_seeds=md.registered_seeds,
         config_sha256=config_sha256,
     )
+
+    # Append-only / byte-identical-or-refuse (checked BEFORE writing outputs).
+    if _refuse_nonidentical_rerun(run_dir, "method_lock", method_lock.checksum):
+        return 0
+
     method_lock.write(run_dir / "methodlock")
 
     # Persist dev (ids, errors) so `futility` decides without re-opening data.
@@ -479,7 +494,7 @@ def cmd_develop(args: argparse.Namespace) -> int:
         **{report_mod.DEV_IDS_KEY: np.asarray(ids), report_mod.DEV_ERRORS_KEY: errors},
     )
 
-    _ledger_record(run_dir, "method_lock", method_lock.checksum)
+    _append_artifact(run_dir, "method_lock", method_lock.checksum)
     return 0
 
 
@@ -531,9 +546,14 @@ def cmd_calibrate(args: argparse.Namespace) -> int:
         run_id=args.run_id,
         config_sha256=config_sha256,
     )
+
+    # Append-only / byte-identical-or-refuse (checked BEFORE writing outputs).
+    if _refuse_nonidentical_rerun(run_dir, "conformal_artifact", conformal.checksum):
+        return 0
+
     conformal.write(run_dir / "conformal.json")
 
-    _ledger_record(run_dir, "conformal_artifact", conformal.checksum)
+    _append_artifact(run_dir, "conformal_artifact", conformal.checksum)
     return 0
 
 
@@ -603,20 +623,70 @@ def _ledger_config_sha(run_dir: Path) -> str:
     return ledger.to_dict()["config_sha256"]
 
 
-def _ledger_record(run_dir: Path, name: str, checksum: str) -> None:
-    """Record (or refresh) an artifact checksum in the on-disk ledger.
+def _append_artifact(run_dir: Path, name: str, checksum: str) -> None:
+    """Append an artifact to the on-disk ledger; write-once (no replacement).
 
-    Re-records idempotently: if *name* is already present with a DIFFERENT hash,
-    the entry is replaced (a stage may be re-run); the write-once ledger is
-    rebuilt from its dict to honour that without mutating in place.
+    Reads the ledger, calls :meth:`RunLedger.record_artifact` (which raises
+    :class:`~alive.provenance.DuplicateArtifactError` on any second record of the
+    same name), and writes it back.  Unlike the removed ``_ledger_record``, this
+    NEVER removes-then-reappends an entry, so a re-run can never silently replace
+    a recorded checksum (CLAUDE.md §11; spec §11.2 — ledger entries are append-only).
+
+    Parameters
+    ----------
+    run_dir : Path
+        The run directory holding ``ledger.json``.
+    name : str
+        Canonical artifact name (write-once).
+    checksum : str
+        Hex-encoded SHA-256 of the artifact.
+
+    Raises
+    ------
+    DuplicateArtifactError
+        If *name* is already recorded in the ledger.
     """
     ledger = RunLedger.read(run_dir / "ledger.json")
-    data = ledger.to_dict()
-    artifacts = [a for a in data["artifacts"] if a["name"] != name]
-    artifacts.append({"name": name, "sha256": checksum})
-    data["artifacts"] = artifacts
-    (run_dir / "ledger.json").write_text(
-        json.dumps(data, sort_keys=True, separators=(",", ":")), encoding="utf-8"
+    ledger.record_artifact(name, checksum)  # DuplicateArtifactError on second record
+    ledger.write(run_dir / "ledger.json")
+
+
+def _refuse_nonidentical_rerun(run_dir: Path, name: str, checksum: str) -> bool:
+    """Output-exists guard for a re-run stage (byte-identical-or-refuse).
+
+    Parameters
+    ----------
+    run_dir : Path
+        The run directory holding ``ledger.json``.
+    name : str
+        Canonical artifact name the stage would record.
+    checksum : str
+        The checksum the current invocation has (re)computed.
+
+    Returns
+    -------
+    bool
+        ``False`` if *name* is not yet recorded (a genuine first run — proceed).
+        ``True`` if *name* is recorded with the SAME hash (a byte-identical
+        re-run — the caller should treat the stage as a clean no-op).
+
+    Raises
+    ------
+    CliError
+        If *name* is recorded with a DIFFERENT hash: runs are immutable, so a
+        non-byte-identical re-run is refused (mapped to exit 2 by ``main``)
+        rather than silently replacing the prior output / ledger entry.
+    """
+    ledger = RunLedger.read(run_dir / "ledger.json")
+    try:
+        existing = ledger.artifact_sha(name)
+    except LedgerError:
+        return False  # not recorded yet → first run
+    if existing == checksum:
+        return True  # byte-identical re-run → no-op
+    raise CliError(
+        f"stage output {name!r} already exists with a different hash; runs are "
+        "immutable (spec §11.2). Start a new run instead of re-running this stage."
     )
 
 
