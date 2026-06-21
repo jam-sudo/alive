@@ -450,7 +450,7 @@ class RunLedger:
         path : str or Path
             Destination file path.  Parent directory must exist.
         """
-        text = json.dumps(self.to_dict(), sort_keys=True, separators=(",", ":"), indent=2)
+        text = json.dumps(self.to_dict(), sort_keys=True, separators=(",", ":"))
         Path(path).write_text(text, encoding="utf-8")
 
     @classmethod

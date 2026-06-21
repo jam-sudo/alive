@@ -32,7 +32,7 @@ _LOCKFILE = Path(__file__).parents[2] / "uv.lock"
 _REPO_DIR = Path(__file__).parents[2]  # ALIVE/ root (has .git)
 
 
-def _make_ledger(tmp_path: Path) -> RunLedger:
+def _make_ledger() -> RunLedger:
     """Return a minimal RunLedger with a real lockfile hash."""
     env = capture_environment(
         lockfile_path=_LOCKFILE,
@@ -211,30 +211,30 @@ class TestCaptureEnvironment:
 
 class TestRunLedgerArtifacts:
     def test_record_and_retrieve(self, tmp_path: Path) -> None:
-        ledger = _make_ledger(tmp_path)
+        ledger = _make_ledger()
         ledger.record_artifact("raw_data", "abc123")
         assert ledger.artifact_sha("raw_data") == "abc123"
 
     def test_duplicate_artifact_name_raises(self, tmp_path: Path) -> None:
-        ledger = _make_ledger(tmp_path)
+        ledger = _make_ledger()
         ledger.record_artifact("raw_data", "abc123")
         with pytest.raises(DuplicateArtifactError):
             ledger.record_artifact("raw_data", "def456")
 
     def test_duplicate_same_hash_raises(self, tmp_path: Path) -> None:
         """Names are write-once even if the hash is the same."""
-        ledger = _make_ledger(tmp_path)
+        ledger = _make_ledger()
         ledger.record_artifact("raw_data", "abc123")
         with pytest.raises(DuplicateArtifactError):
             ledger.record_artifact("raw_data", "abc123")
 
     def test_artifact_sha_missing_raises_ledger_error(self, tmp_path: Path) -> None:
-        ledger = _make_ledger(tmp_path)
+        ledger = _make_ledger()
         with pytest.raises(LedgerError):
             ledger.artifact_sha("nonexistent")
 
     def test_record_file_returns_hash(self, tmp_path: Path) -> None:
-        ledger = _make_ledger(tmp_path)
+        ledger = _make_ledger()
         f = tmp_path / "data.bin"
         f.write_bytes(b"hello")
         h = ledger.record_file("raw_data", f)
@@ -242,7 +242,7 @@ class TestRunLedgerArtifacts:
         assert ledger.artifact_sha("raw_data") == h
 
     def test_record_file_duplicate_raises(self, tmp_path: Path) -> None:
-        ledger = _make_ledger(tmp_path)
+        ledger = _make_ledger()
         f = tmp_path / "data.bin"
         f.write_bytes(b"hello")
         ledger.record_file("raw_data", f)
@@ -261,14 +261,14 @@ class TestRunLedgerArtifacts:
 )
 class TestVerifyFile:
     def test_unchanged_file_returns_true(self, tmp_path: Path, artifact_name: str) -> None:
-        ledger = _make_ledger(tmp_path)
+        ledger = _make_ledger()
         f = tmp_path / "artifact.bin"
         f.write_bytes(b"original content 12345")
         ledger.record_file(artifact_name, f)
         assert ledger.verify_file(artifact_name, f) is True
 
     def test_modified_file_returns_false(self, tmp_path: Path, artifact_name: str) -> None:
-        ledger = _make_ledger(tmp_path)
+        ledger = _make_ledger()
         f = tmp_path / "artifact.bin"
         f.write_bytes(b"original content 12345")
         ledger.record_file(artifact_name, f)
@@ -278,7 +278,7 @@ class TestVerifyFile:
 
 class TestVerifyFileErrors:
     def test_unrecorded_name_raises_ledger_error(self, tmp_path: Path) -> None:
-        ledger = _make_ledger(tmp_path)
+        ledger = _make_ledger()
         f = tmp_path / "x.bin"
         f.write_bytes(b"x")
         with pytest.raises(LedgerError):
@@ -303,19 +303,28 @@ class TestRunLedgerSerialisation:
         return ledger
 
     def test_byte_identical_for_same_inputs(self, tmp_path: Path) -> None:
-        """Two ledgers built from the same inputs must serialise byte-identically."""
+        """Two ledgers built from two independent env captures must serialise byte-identically.
+
+        This proves that capture_environment() itself is timestamp-free, not merely
+        that serialisation is deterministic when given the same env object.
+        """
         data_file = tmp_path / "data.bin"
         data_file.write_bytes(b"stable content")
 
-        env = capture_environment(
+        env_a = capture_environment(
             lockfile_path=_LOCKFILE,
             registered_seeds=(42, 7),
             repo_dir=_REPO_DIR,
         )
-        ledger_a = RunLedger(run_id="testrun001", config_sha256="ff" * 32, environment=env)
+        ledger_a = RunLedger(run_id="testrun001", config_sha256="ff" * 32, environment=env_a)
         ledger_a.record_file("raw_data", data_file)
 
-        ledger_b = RunLedger(run_id="testrun001", config_sha256="ff" * 32, environment=env)
+        env_b = capture_environment(
+            lockfile_path=_LOCKFILE,
+            registered_seeds=(42, 7),
+            repo_dir=_REPO_DIR,
+        )
+        ledger_b = RunLedger(run_id="testrun001", config_sha256="ff" * 32, environment=env_b)
         ledger_b.record_file("raw_data", data_file)
 
         out_a = tmp_path / "a.json"
@@ -353,6 +362,20 @@ class TestRunLedgerSerialisation:
         ledger.write(out)
         loaded = RunLedger.read(out)
         assert loaded.to_dict() == ledger.to_dict()
+        assert loaded == ledger  # exercise __eq__ directly
+
+    def test_file_hash_equals_canonical_json_hash(self, tmp_path: Path) -> None:
+        """sha256_file(written_ledger) must equal sha256_json(ledger.to_dict()).
+
+        This is the audit-critical invariant: the on-disk file hash equals the
+        canonical hash of its content, so the ledger can self-authenticate.
+        """
+        data_file = tmp_path / "data.bin"
+        data_file.write_bytes(b"audit invariant test")
+        ledger = self._build_matching_ledger(tmp_path, data_file)
+        out = tmp_path / "ledger.json"
+        ledger.write(out)
+        assert sha256_file(out) == sha256_json(ledger.to_dict())
 
     def test_to_dict_is_json_serialisable(self, tmp_path: Path) -> None:
         data_file = tmp_path / "data.bin"
