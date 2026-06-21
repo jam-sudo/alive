@@ -504,14 +504,18 @@ immutable experiment identity를 형성해야 한다.
 
 ### 11.3 2026-06-21 implementation audit에서 확인된 scientific-run blocker
 
-다음 항목이 모두 해결되기 전에는 real K562 scientific run을 시작하지 않는다. 2026-06-21
-기준 항목 1–3은 merge되었고 4–5는 여전히 open이다.
+다음 항목이 모두 해결되기 전에는 real K562 scientific run을 시작하지 않는다. 항목 1–5는
+모두 merge되었고(아래 commit 참조), 남은 open precondition은 §4.3의 A100 real-model ESM
+smoke test 하나다.
 
 1. ESM 초기화 실패 시 mock encoder로 silent fallback하는 경로 제거 — **해결**(commit 8b47901)
 2. ESM length-bucket batching과 long-sequence policy 구현 — **해결**(commit a2f3d8f, 9f9f3aa)
 3. Feature eligibility 확정 후 manifest split 생성 — **해결**(commit 8b47901)
-4. Existing run directory와 ledger의 overwrite 차단 — **open**
-5. Sequence provenance를 raw expression URI와 분리 — **open**
+4. Existing run directory와 ledger의 overwrite 차단 — **해결**(branch
+   `cartographer-realrun-hardening`: composite run_id + prepare 재사용 거부 a040665,
+   reference-bank sampling seed를 composite run_id로 통일 e50f7c8, append-only ledger +
+   byte-identical-or-refuse 2146dac, terminal/seal 후 upstream stage lock 90e7f06)
+5. Sequence provenance를 raw expression URI와 분리 — **해결**(commit 2dd3f65)
 
 추가로 §4.3의 A100 real-model ESM smoke test는 아직 미실행이다(현재까지 batching/length-policy
 순수 로직만 torch 없이 검증). 따라서 real feature-bank build 전 open precondition으로 남는다.
@@ -743,6 +747,6 @@ value다. Full gate가 supervised error regression과 residual-only를 이기지
 negative다. R2/R3, distribution-valued sets, RPE1, causal masking, Active Cartography는 모두
 별도 activation prerequisite를 가진 후속 연구이며 현재 결과에 소급해 주장하지 않는다.
 
-Scientific run은 §11.3의 남은 blocker — write-once run provenance(#4), sequence-provenance
-분리(#5), A100 real-model ESM smoke test — 가 해결된 뒤에만 허용한다. Mock-fallback 제거, ESM
-batching, eligibility-before-split(#1–3)은 이미 merge되었다.
+Scientific run은 §11.3의 남은 open precondition — §4.3 A100 real-model ESM smoke test — 가
+해결된 뒤에만 허용한다. Write-once run provenance(#4), sequence-provenance 분리(#5),
+mock-fallback 제거, ESM batching, eligibility-before-split(#1–5)은 모두 merge되었다.
