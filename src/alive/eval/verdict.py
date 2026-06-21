@@ -256,20 +256,6 @@ class VerdictResult:
 # compute_verdict — Section-7 truth table
 # ---------------------------------------------------------------------------
 
-_CLAUSE_KEYS = (
-    "provenance_ok",
-    "leakage_ok",
-    "sealed_n_ok",
-    "metrics_finite",
-    "reliability_ok",
-    "integrity_valid",
-    "conformal_passes",
-    "aurc_family_passes",
-    "augrc_no_material_degradation",
-    "added_value_passes",
-    "feature_weight_positive",
-)
-
 
 def compute_verdict(
     integrity: IntegrityReport,

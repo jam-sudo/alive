@@ -274,8 +274,8 @@ class TestGateClausesSingleFailure:
         "clause",
         ["aurc_family_passes", "augrc_no_material_degradation", "added_value_passes"],
     )
-    def test_single_gate_clause_failure_never_yields_gate_wins(self, clause: str):
-        """Prove no single failed gate clause can produce GATE_WINS."""
+    def test_single_gate_clause_failure_yields_no_distinct_win(self, clause: str):
+        """Prove any single failed gate clause (with all else passing) yields NO_DISTINCT_WIN."""
         kwargs: dict = dict(
             aurc_point_delta={"c1": 0.05},
             aurc_lower_bound={"c1": 0.01},
@@ -299,7 +299,7 @@ class TestGateClausesSingleFailure:
             confirmatory=conf,
             selected_feature_weight=0.5,
         )
-        assert result.verdict != Verdict.GATE_WINS
+        assert result.verdict == Verdict.NO_DISTINCT_WIN
 
 
 # ---------------------------------------------------------------------------
@@ -419,6 +419,47 @@ class TestInvalidEvaluation:
         assert result.verdict == Verdict.INVALID_EVALUATION
         assert result.clauses["sealed_n_ok"] is False
 
+    def test_sealed_n_at_minimum_is_valid(self):
+        """sealed_n == minimum_sealed is the boundary: is_valid True (>=), not INVALID."""
+        integrity = IntegrityReport(
+            provenance_ok=True,
+            leakage_ok=True,
+            sealed_n=50,
+            minimum_sealed=50,
+            all_metrics_finite=True,
+            reliability_ok=True,
+            evidence={"source": "unit-test"},
+        )
+        result = compute_verdict(
+            integrity=integrity,
+            conformal_passes=True,
+            confirmatory=_passing_confirmatory(),
+            selected_feature_weight=0.5,
+        )
+        # sealed_n_ok must be True at the boundary (>= not >)
+        assert result.clauses["sealed_n_ok"] is True
+        assert result.verdict == Verdict.GATE_WINS
+
+    def test_sealed_n_one_below_minimum_is_invalid(self):
+        """sealed_n == minimum_sealed - 1 → INVALID_EVALUATION and sealed_n_ok=False."""
+        integrity = IntegrityReport(
+            provenance_ok=True,
+            leakage_ok=True,
+            sealed_n=49,
+            minimum_sealed=50,
+            all_metrics_finite=True,
+            reliability_ok=True,
+            evidence={"source": "unit-test"},
+        )
+        result = compute_verdict(
+            integrity=integrity,
+            conformal_passes=True,
+            confirmatory=_passing_confirmatory(),
+            selected_feature_weight=0.5,
+        )
+        assert result.clauses["sealed_n_ok"] is False
+        assert result.verdict == Verdict.INVALID_EVALUATION
+
     def test_integrity_beats_conformal_precedence(self):
         """INVALID_EVALUATION fires even when conformal_passes=False."""
         bad = IntegrityReport(
@@ -462,8 +503,8 @@ class TestInvalidEvaluation:
         "field",
         ["provenance_ok", "leakage_ok", "all_metrics_finite", "reliability_ok"],
     )
-    def test_single_integrity_failure_never_yields_gate_wins(self, field: str):
-        """Prove integrity failure never produces GATE_WINS."""
+    def test_single_integrity_failure_yields_invalid_evaluation(self, field: str):
+        """Prove any single integrity failure (with all else passing) yields INVALID_EVALUATION."""
         kwargs: dict = dict(
             provenance_ok=True,
             leakage_ok=True,
@@ -481,7 +522,7 @@ class TestInvalidEvaluation:
             confirmatory=_passing_confirmatory(),
             selected_feature_weight=0.5,
         )
-        assert result.verdict != Verdict.GATE_WINS
+        assert result.verdict == Verdict.INVALID_EVALUATION
 
 
 # ---------------------------------------------------------------------------
