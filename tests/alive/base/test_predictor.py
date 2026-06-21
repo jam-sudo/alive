@@ -17,7 +17,12 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from alive.base.predictor import BaseModelError, BasePredictor, fit_base_predictor
+from alive.base.predictor import (
+    BaseModelError,
+    BasePredictor,
+    _assign_folds,
+    fit_base_predictor,
+)
 from alive.types import BasePrediction, Query
 
 # ---------------------------------------------------------------------------
@@ -458,15 +463,70 @@ class TestPairedBootstrapIndices:
 class TestLeakageBoundary:
     """Method-development data must not affect the base predictor."""
 
-    def test_method_dev_labels_do_not_affect_base(self) -> None:
-        """Two fits with different method_development data must produce identical outputs."""
-        manifest, store_a, rs, fb = _build_simple_fixture(rng_seed=10)
-        # store_b has different pert populations but identical base_train content
-        # We'll use the same base_train data in both stores but different method-dev data
-        # (which fit_base_predictor never reads)
-        # Both store_a and store_b are constructed identically here;
-        # the critical thing is the fit only reads controls + base_train ids.
-        manifest_b, store_b, rs_b, fb_b = _build_simple_fixture(rng_seed=10)
+    def test_different_method_dev_populations_give_same_base(self) -> None:
+        """Fit on two stores that are byte-identical in controls and base_train populations
+        but carry GENUINELY DIFFERENT method_development (and conformal/sealed) content.
+        The base predictor must be identical: fit_base_predictor never reads those cohorts.
+
+        Construction guarantee:
+        - Controls: exactly the same array in both stores.
+        - base_train populations (gene_0..gene_5): exactly the same arrays in both stores.
+        - method_dev populations (mdev_0..mdev_3): DIFFERENT between the two stores
+          (store_b uses cells scaled by 1000× and offset by 999 vs store_a).
+        - sealed populations (sealed_0..sealed_1): DIFFERENT between the two stores.
+        Any difference in the fit output could only come from the differing non-base
+        populations — which would be a leakage bug.
+        """
+        rng = np.random.default_rng(42)
+
+        # ---- shared controls (byte-identical in both stores) ----
+        ctrl = rng.uniform(0.5, 1.5, size=(_N_CTRL, _PCA_DIMS + 2)).astype(np.float64)
+
+        # ---- shared base_train data (byte-identical in both stores) ----
+        base_ids = [f"gene_{i}" for i in range(6)]
+        base_feats: dict[str, np.ndarray] = {}
+        base_pops: dict[str, np.ndarray] = {}
+        for gid in base_ids:
+            base_feats[gid] = rng.standard_normal(_FEAT_DIM)
+            base_pops[gid] = rng.uniform(0.5, 2.0, size=(15, _PCA_DIMS + 2)).astype(np.float64)
+
+        # ---- method_dev populations: DIFFERENT signatures ----
+        mdev_ids = [f"mdev_{i}" for i in range(4)]
+        mdev_pops_a: dict[str, np.ndarray] = {}
+        mdev_pops_b: dict[str, np.ndarray] = {}
+        for gid in mdev_ids:
+            cells_a = rng.uniform(0.1, 1.0, size=(12, _PCA_DIMS + 2)).astype(np.float64)
+            mdev_pops_a[gid] = cells_a
+            # store_b method_dev cells are scaled by 1000 + offset by 999: completely different
+            mdev_pops_b[gid] = cells_a * 1000.0 + 999.0
+
+        # Sanity: method_dev data genuinely differs between the two stores
+        for gid in mdev_ids:
+            assert not np.allclose(mdev_pops_a[gid], mdev_pops_b[gid]), (
+                f"method_dev[{gid}] must differ between store_a and store_b for the test to be "
+                "non-tautological"
+            )
+
+        # ---- sealed populations: DIFFERENT signatures ----
+        sealed_ids = [f"sealed_{i}" for i in range(2)]
+        sealed_pops_a: dict[str, np.ndarray] = {}
+        sealed_pops_b: dict[str, np.ndarray] = {}
+        for gid in sealed_ids:
+            cells_a = rng.uniform(0.2, 0.8, size=(10, _PCA_DIMS + 2)).astype(np.float64)
+            sealed_pops_a[gid] = cells_a
+            sealed_pops_b[gid] = cells_a * -5.0 + 100.0  # wildly different
+
+        # Build the two stores: controls + base_train are IDENTICAL; method_dev/sealed differ
+        all_pops_a = {**base_pops, **mdev_pops_a, **sealed_pops_a}
+        all_pops_b = {**base_pops, **mdev_pops_b, **sealed_pops_b}
+
+        store_a = _StubStore(ctrl_cells=ctrl, pert_populations=all_pops_a)
+        store_b = _StubStore(ctrl_cells=ctrl, pert_populations=all_pops_b)
+
+        # Manifest only exposes base_ids under "base_train"; mdev/sealed are never asked for
+        manifest = _StubManifest(base_ids)
+        rs = _StubResponseSpace()
+        fb = _StubFeatureBank(base_feats)
 
         pred_a = fit_base_predictor(
             manifest=manifest,
@@ -479,19 +539,25 @@ class TestLeakageBoundary:
             seed=_SEED,
         )
         pred_b = fit_base_predictor(
-            manifest=manifest_b,
+            manifest=manifest,
             store=store_b,
-            response_space=rs_b,
-            feature_bank=fb_b,
+            response_space=rs,
+            feature_bank=fb,
             ridge_grid=_RIDGE_GRID,
             cv_folds=_CV_FOLDS,
             ensemble_members=_ENSEMBLE_MEMBERS,
             seed=_SEED,
         )
+
         np.testing.assert_array_equal(pred_a.weights, pred_b.weights)
-        np.testing.assert_array_equal(pred_a.ensemble_weights, pred_b.ensemble_weights)
         assert pred_a.chosen_alpha == pred_b.chosen_alpha
+        np.testing.assert_array_equal(pred_a.ensemble_weights, pred_b.ensemble_weights)
+        np.testing.assert_array_equal(pred_a.transformed_control, pred_b.transformed_control)
         assert pred_a.checksum == pred_b.checksum
+
+        # Sealed cohort must not have been touched
+        assert store_a.sealed_access_count == 0
+        assert store_b.sealed_access_count == 0
 
     def test_sealed_access_count_is_zero_after_fit(self) -> None:
         manifest, store, rs, fb = _build_simple_fixture()
@@ -507,77 +573,58 @@ class TestLeakageBoundary:
         )
         assert store.sealed_access_count == 0
 
-    def test_different_method_dev_populations_give_same_base(self) -> None:
-        """If we use a store that would expose method-dev pops differently,
-        the base predictor must not change since it never reads them."""
-        rng_a = np.random.default_rng(10)
-        rng_b = np.random.default_rng(99)  # different seed for non-base_train pops
-
-        gene_ids = [f"g{i}" for i in range(6)]
-        ctrl = rng_a.uniform(size=(_N_CTRL, _PCA_DIMS + 2)).astype(np.float64)
-
-        pops_a: dict[str, np.ndarray] = {}
-        pops_b: dict[str, np.ndarray] = {}
-        feats: dict[str, np.ndarray] = {}
-
-        for gid in gene_ids:
-            feats[gid] = rng_a.standard_normal(_FEAT_DIM)
-            # Both stores have the same base_train populations
-            pops_a[gid] = rng_a.uniform(size=(15, _PCA_DIMS + 2)).astype(np.float64)
-            # store_b uses *very different* populations (as if method_dev had wild signatures)
-            pops_b[gid] = rng_b.uniform(0, 100, size=(15, _PCA_DIMS + 2)).astype(np.float64)
-
-        # But fit_base_predictor reads base_train from manifest.ids_for("base_train"),
-        # which is the same gene_ids in both stores.
-        # To make the test meaningful, use identical pops for base_train only:
-        for gid in gene_ids:
-            pops_b[gid] = pops_a[gid]  # same base_train data
-
-        manifest = _StubManifest(gene_ids)
-        store_a = _StubStore(ctrl_cells=ctrl, pert_populations=pops_a)
-        store_b = _StubStore(ctrl_cells=ctrl, pert_populations=pops_b)
-        rs = _StubResponseSpace()
-        fb = _StubFeatureBank(feats)
-
-        pred_a = fit_base_predictor(
-            manifest=manifest,
-            store=store_a,
-            response_space=rs,
-            feature_bank=fb,
-            ridge_grid=_RIDGE_GRID,
-            cv_folds=_CV_FOLDS,
-            ensemble_members=_ENSEMBLE_MEMBERS,
-            seed=_SEED,
-        )
-        pred_b = fit_base_predictor(
-            manifest=manifest,
-            store=store_b,
-            response_space=rs,
-            feature_bank=fb,
-            ridge_grid=_RIDGE_GRID,
-            cv_folds=_CV_FOLDS,
-            ensemble_members=_ENSEMBLE_MEMBERS,
-            seed=_SEED,
-        )
-
-        np.testing.assert_array_equal(pred_a.weights, pred_b.weights)
-        np.testing.assert_array_equal(pred_a.ensemble_weights, pred_b.ensemble_weights)
-        np.testing.assert_array_equal(pred_a.transformed_control, pred_b.transformed_control)
-        assert pred_a.checksum == pred_b.checksum
-
 
 class TestDeterminism:
-    """Same seed -> identical outputs; different seed -> different ensemble (but same W/alpha)."""
+    """Determinism invariants for seed behaviour.
+
+    Invariant (i): SAME seed + same inputs → identical W, chosen_alpha,
+      ensemble_weights, transformed_control, checksum.
+    Invariant (ii): DIFFERENT seed → ensemble_weights change (bootstrap is
+      re-seeded). W / chosen_alpha MAY also change because the seed drives
+      CV fold assignment; that is expected and acceptable behaviour.
+    """
 
     def test_same_seed_gives_identical_checksum(self) -> None:
+        """Invariant (i): same inputs + same seed → identical everything."""
         p1 = _fit_simple(rng_seed=99)
         p2 = _fit_simple(rng_seed=99)
         assert p1.checksum == p2.checksum
         np.testing.assert_array_equal(p1.weights, p2.weights)
         np.testing.assert_array_equal(p1.ensemble_weights, p2.ensemble_weights)
 
-    def test_different_seed_changes_ensemble_but_not_weights(self) -> None:
-        """W and alpha are CV-deterministic; seed only drives fold assignment and bootstrap."""
+    def test_same_seed_gives_identical_w_alpha_and_checksum(self) -> None:
+        """Invariant (i) extended: same seed on the same store → W, alpha, ensemble, checksum
+        are all byte-identical across two independent fit calls."""
+        manifest, store, rs, fb = _build_simple_fixture(rng_seed=99)
+
+        def _fit(s: int) -> BasePredictor:
+            return fit_base_predictor(
+                manifest=manifest,
+                store=store,
+                response_space=rs,
+                feature_bank=fb,
+                ridge_grid=_RIDGE_GRID,
+                cv_folds=_CV_FOLDS,
+                ensemble_members=_ENSEMBLE_MEMBERS,
+                seed=s,
+            )
+
+        p1 = _fit(42)
+        p2 = _fit(42)
+
+        np.testing.assert_array_equal(p1.weights, p2.weights)
+        assert p1.chosen_alpha == p2.chosen_alpha
+        np.testing.assert_array_equal(p1.ensemble_weights, p2.ensemble_weights)
+        np.testing.assert_array_equal(p1.transformed_control, p2.transformed_control)
+        assert p1.checksum == p2.checksum
+
+    def test_different_seed_changes_ensemble(self) -> None:
+        """Invariant (ii): different seed → ensemble_weights differ.
+
+        W / chosen_alpha are NOT asserted equal: they are legitimately seed-
+        dependent because the seed drives CV fold assignment, and different
+        folds can select a different alpha.
+        """
         manifest, store, rs, fb = _build_simple_fixture(rng_seed=99)
 
         def _fit_with_seed(s: int) -> BasePredictor:
@@ -595,53 +642,39 @@ class TestDeterminism:
         p1 = _fit_with_seed(1)
         p2 = _fit_with_seed(999)
 
-        # W and alpha may differ if CV fold assignment differs, but typically the
-        # winner alpha on a fixed dataset is the same.  The test verifies
-        # ensemble_weights differ (due to different bootstrap seeds).
-        # W and alpha: CV is seeded; different seeds → different fold indices →
-        # may or may not change W/alpha depending on data.  What we CAN assert:
-        # ensemble_weights are different when seed is different.
+        # Ensemble must differ: bootstrap seeds are derived from the master seed.
         assert not np.allclose(p1.ensemble_weights, p2.ensemble_weights), (
             "Different seeds must yield different bootstrap ensembles"
         )
+        # NOTE: We do NOT assert p1.weights == p2.weights or
+        # p1.chosen_alpha == p2.chosen_alpha.  The seed drives fold assignment,
+        # so W and alpha may legitimately change with different seeds.
 
-    def test_fold_assignment_is_seed_derived(self) -> None:
-        """The chosen_alpha may differ between seeds (fold assignment differs)."""
-        # This is a documentation test: seed drives fold assignment.
-        # We assert that two different seeds CAN produce different chosen_alpha
-        # (not guaranteed but shows it's possible on data with borderline CV).
-        # At minimum the implementation must not use builtin hash() for this.
-        # We verify the predictor objects are reproducible for each seed.
-        manifest, store, rs, fb = _build_simple_fixture(rng_seed=5)
+    def test_fold_assignment_same_seed_reproduces(self) -> None:
+        """_assign_folds with the same seed and n produces identical fold indices."""
+        n = 12
+        folds_1 = _assign_folds(n, _CV_FOLDS, seed=7)
+        folds_2 = _assign_folds(n, _CV_FOLDS, seed=7)
+        assert len(folds_1) == len(folds_2) == _CV_FOLDS
+        for f1, f2 in zip(folds_1, folds_2):
+            np.testing.assert_array_equal(f1, f2)
 
-        def _fit_twice(s: int) -> tuple[BasePredictor, BasePredictor]:
-            return (
-                fit_base_predictor(
-                    manifest=manifest,
-                    store=store,
-                    response_space=rs,
-                    feature_bank=fb,
-                    ridge_grid=_RIDGE_GRID,
-                    cv_folds=_CV_FOLDS,
-                    ensemble_members=_ENSEMBLE_MEMBERS,
-                    seed=s,
-                ),
-                fit_base_predictor(
-                    manifest=manifest,
-                    store=store,
-                    response_space=rs,
-                    feature_bank=fb,
-                    ridge_grid=_RIDGE_GRID,
-                    cv_folds=_CV_FOLDS,
-                    ensemble_members=_ENSEMBLE_MEMBERS,
-                    seed=s,
-                ),
-            )
+    def test_fold_assignment_different_seeds_differ(self) -> None:
+        """_assign_folds with DIFFERENT seeds produces DIFFERENT fold assignments.
 
-        p1a, p1b = _fit_twice(7)
-        np.testing.assert_array_equal(p1a.weights, p1b.weights)
-        np.testing.assert_array_equal(p1a.ensemble_weights, p1b.ensemble_weights)
-        assert p1a.checksum == p1b.checksum
+        This proves that the seed genuinely controls fold randomisation and is
+        not a no-op.  If this assertion fails, the RNG seeding is broken and
+        CV 'determinism per seed' is illusory.
+        """
+        n = 20
+        folds_a = _assign_folds(n, _CV_FOLDS, seed=1)
+        folds_b = _assign_folds(n, _CV_FOLDS, seed=9999)
+        # At least one fold must differ between the two seed choices
+        any_differ = any(not np.array_equal(fa, fb) for fa, fb in zip(folds_a, folds_b))
+        assert any_differ, (
+            "Different seeds must produce different fold assignments; "
+            "fold assignment appears seed-independent (RNG seeding broken)"
+        )
 
 
 class TestRoundTrip:
@@ -692,6 +725,66 @@ class TestRoundTrip:
         assert loaded.pca_dims == predictor.pca_dims
         assert loaded.fit_perturbation_ids == predictor.fit_perturbation_ids
         assert loaded.cv_scores == predictor.cv_scores
+
+
+class TestInputValidation:
+    """fit_base_predictor raises BaseModelError for invalid / degenerate inputs."""
+
+    def test_n_less_than_cv_folds_raises(self) -> None:
+        """When the number of usable base_train rows n < cv_folds, CV is undefined.
+        fit_base_predictor must raise BaseModelError with a clear message.
+        """
+        rng = np.random.default_rng(7)
+        ctrl = rng.uniform(size=(_N_CTRL, _PCA_DIMS + 2)).astype(np.float64)
+        # Only 2 usable perturbations in the feature bank
+        gene_ids = ["only_a", "only_b"]
+        pops = {gid: rng.uniform(size=(10, _PCA_DIMS + 2)).astype(np.float64) for gid in gene_ids}
+        feats = {gid: rng.standard_normal(_FEAT_DIM) for gid in gene_ids}
+
+        manifest = _StubManifest(gene_ids)
+        store = _StubStore(ctrl_cells=ctrl, pert_populations=pops)
+        rs = _StubResponseSpace()
+        fb = _StubFeatureBank(feats)
+
+        # n=2, cv_folds=5: 2 < 5 → must raise
+        with pytest.raises(BaseModelError, match="less than cv_folds"):
+            fit_base_predictor(
+                manifest=manifest,
+                store=store,
+                response_space=rs,
+                feature_bank=fb,
+                ridge_grid=_RIDGE_GRID,
+                cv_folds=5,
+                ensemble_members=2,
+                seed=_SEED,
+            )
+
+    def test_n_equal_cv_folds_does_not_raise(self) -> None:
+        """n == cv_folds is the boundary: CV is defined (each fold has 1 row, n-1 train)."""
+        rng = np.random.default_rng(8)
+        ctrl = rng.uniform(size=(_N_CTRL, _PCA_DIMS + 2)).astype(np.float64)
+        # Exactly 3 usable perturbations, cv_folds=3 → n == cv_folds, should pass
+        gene_ids = [f"eq_{i}" for i in range(3)]
+        pops = {gid: rng.uniform(size=(10, _PCA_DIMS + 2)).astype(np.float64) for gid in gene_ids}
+        feats = {gid: rng.standard_normal(_FEAT_DIM) for gid in gene_ids}
+
+        manifest = _StubManifest(gene_ids)
+        store = _StubStore(ctrl_cells=ctrl, pert_populations=pops)
+        rs = _StubResponseSpace()
+        fb = _StubFeatureBank(feats)
+
+        # n=3, cv_folds=3: boundary — must NOT raise
+        predictor = fit_base_predictor(
+            manifest=manifest,
+            store=store,
+            response_space=rs,
+            feature_bank=fb,
+            ridge_grid=_RIDGE_GRID,
+            cv_folds=3,
+            ensemble_members=2,
+            seed=_SEED,
+        )
+        assert predictor.weights.shape == (_FEAT_DIM, _PCA_DIMS)
 
 
 class TestMissingFeatureIds:

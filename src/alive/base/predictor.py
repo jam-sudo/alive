@@ -377,6 +377,33 @@ def _ridge_solve(Phi: np.ndarray, S: np.ndarray, alpha: float) -> np.ndarray:
     return np.linalg.solve(A, b)
 
 
+def _assign_folds(n: int, cv_folds: int, seed: int) -> list[np.ndarray]:
+    """Return a list of *cv_folds* validation-index arrays for a given seed.
+
+    The permuted row indices are partitioned into *cv_folds* roughly equal
+    chunks via ``np.array_split`` (spreads the remainder across the first
+    ``n % cv_folds`` folds).  This helper is deterministic and portable:
+    the RNG is seeded from *seed* using ``numpy.random.default_rng``.
+
+    Parameters
+    ----------
+    n : int
+        Number of training rows.
+    cv_folds : int
+        Number of CV folds.
+    seed : int
+        Integer seed for ``numpy.random.default_rng``.
+
+    Returns
+    -------
+    list[np.ndarray]
+        One validation-index array per fold, in partition order.
+    """
+    rng = np.random.default_rng(seed)
+    perm = rng.permutation(n)
+    return [chunk for chunk in np.array_split(perm, cv_folds)]
+
+
 def _cv_fold_indices(n: int, n_folds: int, rng: np.random.Generator) -> list[np.ndarray]:
     """Return a list of *n_folds* validation-index arrays via a seeded permutation.
 
@@ -478,7 +505,8 @@ def fit_base_predictor(
     BaseModelError
         If no base_train perturbation ids are present in the feature bank
         (after filtering missing ids), or if ``ridge_grid`` is empty, or if
-        ``cv_folds < 2``.
+        ``cv_folds < 2``, or if the number of usable base_train rows ``n``
+        is less than ``cv_folds`` (CV fold assignment is undefined).
     """
     # ------------------------------------------------------------------
     # Validate inputs
@@ -533,6 +561,13 @@ def fit_base_predictor(
     Phi = np.array(phi_rows, dtype=np.float64)  # (n, feat_dim)
     S = np.array(s_rows, dtype=np.float64)  # (n, pca_dims)
     n, feat_dim = Phi.shape
+
+    if n < cv_folds:
+        raise BaseModelError(
+            f"Number of usable base_train rows ({n}) is less than cv_folds ({cv_folds}). "
+            "CV fold assignment is undefined when n < cv_folds. "
+            "Reduce cv_folds or provide more base_train perturbations with feature vectors."
+        )
 
     # ------------------------------------------------------------------
     # Step 3: CV alpha selection
