@@ -741,3 +741,79 @@ class TestProvenanceWiring:
         )
         assert result.clauses["provenance_ok"] is False
         assert result.verdict == Verdict.INVALID_EVALUATION
+
+
+# ===========================================================================
+# Fix 1: ConformalArtifact.config_sha256 must be the full 64-char digest
+# ===========================================================================
+
+
+class TestCalibrateConfigSha256:
+    """calibrate() must stamp ConformalArtifact with the full 64-char config digest.
+
+    The ConformalArtifact is the primary shippable deliverable of a
+    futility-stopped run.  Its config_sha256 field must be the full 64-char
+    SHA-256 hex digest of the config file — the same value that is threaded
+    into the MethodLock and FutilityDecision by develop_methods_stage().
+    """
+
+    def test_conformal_artifact_config_sha256_is_full_digest(self, tmp_path: Path) -> None:
+        """When a full 64-char digest is passed, ConformalArtifact carries it."""
+        config = _test_config()
+        index, store, manifest, fb = _build_world(tmp_path, config=config, seed=5)
+        base_art = fit_base(index, store, manifest, fb, config)
+        method_lock, _fdec = develop_methods_stage(index, store, manifest, base_art, fb, config)
+
+        full_digest = "a" * 64  # a valid 64-char hex string (mock full digest)
+        conf = calibrate(
+            index,
+            store,
+            manifest,
+            base_art,
+            method_lock,
+            fb,
+            config,
+            config_sha256=full_digest,
+        )
+
+        assert conf.config_sha256 == full_digest, (
+            f"ConformalArtifact.config_sha256 should be the full 64-char digest "
+            f"passed in, got {conf.config_sha256!r}"
+        )
+        assert len(conf.config_sha256) == 64
+
+    def test_conformal_artifact_config_sha256_not_run_id_when_digest_given(
+        self, tmp_path: Path
+    ) -> None:
+        """config_sha256 must NOT equal config.run_id when the full digest is passed."""
+        config = _test_config()
+        index, store, manifest, fb = _build_world(tmp_path, config=config, seed=6)
+        base_art = fit_base(index, store, manifest, fb, config)
+        method_lock, _fdec = develop_methods_stage(index, store, manifest, base_art, fb, config)
+
+        full_digest = "b" * 64
+        conf = calibrate(
+            index,
+            store,
+            manifest,
+            base_art,
+            method_lock,
+            fb,
+            config,
+            config_sha256=full_digest,
+        )
+
+        # The run_id is 16 chars; the full digest is 64 chars — they must differ.
+        assert conf.config_sha256 != config.run_id, (
+            "ConformalArtifact.config_sha256 must be the full digest, not config.run_id"
+        )
+
+    def test_conformal_artifact_falls_back_to_run_id_without_digest(self, tmp_path: Path) -> None:
+        """Without a config_sha256 argument (unit-test mode), falls back to run_id."""
+        config = _test_config()
+        index, store, manifest, fb = _build_world(tmp_path, config=config, seed=7)
+        base_art = fit_base(index, store, manifest, fb, config)
+        method_lock, _fdec = develop_methods_stage(index, store, manifest, base_art, fb, config)
+
+        conf = calibrate(index, store, manifest, base_art, method_lock, fb, config)
+        assert conf.config_sha256 == config.run_id

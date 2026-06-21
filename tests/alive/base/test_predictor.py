@@ -20,10 +20,20 @@ import pytest
 from alive.base.predictor import (
     BaseModelError,
     BasePredictor,
-    _assign_folds,
+    _cv_fold_indices,
     fit_base_predictor,
 )
 from alive.types import BasePrediction, Query
+
+
+def _assign_folds(n: int, cv_folds: int, seed: int) -> list[np.ndarray]:
+    """Thin wrapper around the production _cv_fold_indices for determinism tests.
+
+    Creates a seeded RNG and delegates to the production fold-assignment
+    function so the tests exercise exactly the same code path as the fitter.
+    """
+    return _cv_fold_indices(n, cv_folds, np.random.default_rng(seed))
+
 
 # ---------------------------------------------------------------------------
 # Constants

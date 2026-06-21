@@ -377,33 +377,6 @@ def _ridge_solve(Phi: np.ndarray, S: np.ndarray, alpha: float) -> np.ndarray:
     return np.linalg.solve(A, b)
 
 
-def _assign_folds(n: int, cv_folds: int, seed: int) -> list[np.ndarray]:
-    """Return a list of *cv_folds* validation-index arrays for a given seed.
-
-    The permuted row indices are partitioned into *cv_folds* roughly equal
-    chunks via ``np.array_split`` (spreads the remainder across the first
-    ``n % cv_folds`` folds).  This helper is deterministic and portable:
-    the RNG is seeded from *seed* using ``numpy.random.default_rng``.
-
-    Parameters
-    ----------
-    n : int
-        Number of training rows.
-    cv_folds : int
-        Number of CV folds.
-    seed : int
-        Integer seed for ``numpy.random.default_rng``.
-
-    Returns
-    -------
-    list[np.ndarray]
-        One validation-index array per fold, in partition order.
-    """
-    rng = np.random.default_rng(seed)
-    perm = rng.permutation(n)
-    return [chunk for chunk in np.array_split(perm, cv_folds)]
-
-
 def _cv_fold_indices(n: int, n_folds: int, rng: np.random.Generator) -> list[np.ndarray]:
     """Return a list of *n_folds* validation-index arrays via a seeded permutation.
 

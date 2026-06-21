@@ -669,6 +669,115 @@ class TestDeterminism:
         assert report_a == report_b
 
 
+# ===========================================================================
+# Fix 4: CLI/staged parity test
+# ===========================================================================
+# develop+futility via CMD must produce byte-identical MethodLock and
+# FutilityDecision checksums as develop_methods_stage() on the same data.
+# This closes the divergence risk identified in review item I-2.
+
+
+class TestCliDevelopedParity:
+    """CLI develop+futility path must produce identical checksums to develop_methods_stage().
+
+    This test runs both execution paths on an identical synthetic world and
+    asserts that the resulting MethodLock and FutilityDecision checksums are
+    byte-identical.  If the CLI re-implementation drifts from the tested staged
+    function, this test catches the divergence.
+    """
+
+    def test_cli_develop_futility_matches_staged_function(self, tmp_path: Path) -> None:
+        from alive.data.features import MockSequenceEncoder, build_feature_bank
+        from alive.data.manifest import build_manifest_from_index
+        from alive.data.outcome_store import ReplogleOutcomeStore
+        from alive.data.replogle import DatasetSchema, build_index
+        from alive.experiment.develop import FutilityDecision, MethodLock
+        from alive.experiment.real_runner import develop_methods_stage, fit_base
+
+        # Build the synthetic world in a subdirectory so sequences.json path is clean.
+        world_dir = tmp_path / "world"
+        world_dir.mkdir(parents=True, exist_ok=True)
+        config_path, data_card_path = _write_world(world_dir, seed=77)
+        root = _artifacts_root(world_dir)
+        run_id = _run_id(config_path)
+        run_dir = root / "cartographer" / run_id
+
+        # === CLI path (cmd_prepare → cmd_fit → cmd_develop → cmd_futility) ===
+        _run(
+            [
+                "cartographer",
+                "prepare",
+                "--config",
+                str(config_path),
+                "--data-card",
+                str(data_card_path),
+            ],
+            root,
+        )
+        _run(["cartographer", "fit", "--run-id", run_id], root)
+        _run(["cartographer", "develop", "--run-id", run_id], root)
+        _run(["cartographer", "futility", "--run-id", run_id], root)
+
+        cli_method_lock = MethodLock.read(run_dir / "methodlock")
+        cli_futility = FutilityDecision.read(run_dir / "futility.json")
+
+        # === Staged-function path on the SAME persisted data ===
+        # Load the world the CLI already prepared so we use identical splits/features.
+        import json as _json
+
+        from alive.provenance import RunLedger as _RunLedger
+
+        data_card = _json.loads((run_dir / "data_card.json").read_text(encoding="utf-8"))
+        import anndata as _ad
+
+        adata = _ad.read_h5ad(data_card["h5ad"])
+        sequences = _json.loads((world_dir / "sequences.json").read_text(encoding="utf-8"))
+        config = load_config(config_path)
+        # Read the full config digest the CLI recorded in the ledger so both
+        # paths get the same config_sha256 value.
+        ledger_data = _RunLedger.read(run_dir / "ledger.json").to_dict()
+        config_sha256_for_staged = ledger_data["config_sha256"]
+        schema = DatasetSchema(
+            perturbation_key=data_card["perturbation_key"],
+            control_value=data_card["control_value"],
+        )
+        index = build_index(adata, schema, min_cells=config.response_space.min_cells)
+        manifest = build_manifest_from_index(index, config.split_fractions, config.manifest_seed)
+        base_train_ids = list(manifest.ids_for("base_train"))
+        feature_bank = build_feature_bank(
+            {g: seqs for g, seqs in sequences.items()},
+            MockSequenceEncoder(dim=8),
+            sequence_source="mock-2026",
+            standardize_on=base_train_ids,
+        )
+        audit_path = world_dir / "parity_audit.jsonl"
+        store = ReplogleOutcomeStore(
+            index=index, source=adata, manifest=manifest, audit_path=audit_path
+        )
+        base_art = fit_base(index, store, manifest, feature_bank, config)
+        staged_method_lock, staged_futility = develop_methods_stage(
+            index,
+            store,
+            manifest,
+            base_art,
+            feature_bank,
+            config,
+            config_sha256=config_sha256_for_staged,
+        )
+
+        # The checksums must be byte-identical: same inputs → same computation.
+        assert cli_method_lock.checksum == staged_method_lock.checksum, (
+            f"CLI MethodLock checksum {cli_method_lock.checksum!r} != "
+            f"staged {staged_method_lock.checksum!r}. "
+            "CLI develop/futility path has diverged from develop_methods_stage()."
+        )
+        assert cli_futility.checksum == staged_futility.checksum, (
+            f"CLI FutilityDecision checksum {cli_futility.checksum!r} != "
+            f"staged {staged_futility.checksum!r}. "
+            "CLI develop/futility path has diverged from develop_methods_stage()."
+        )
+
+
 @pytest.fixture(autouse=True)
 def _no_cwd_artifacts(monkeypatch, tmp_path):
     """Guard: never write to a repo-level artifacts/ during tests."""

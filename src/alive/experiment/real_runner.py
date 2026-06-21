@@ -506,6 +506,8 @@ def calibrate(
     method_lock: MethodLock,
     feature_bank: "FeatureBank",
     config: "Config",
+    *,
+    config_sha256: str | None = None,
 ) -> ConformalArtifact:
     """Stage 3: build the split-conformal artifact on conformal_calibration.
 
@@ -529,6 +531,10 @@ def calibrate(
         Per-perturbation feature bank.
     config : Config
         Locked experiment config.
+    config_sha256 : str or None
+        Full 64-char SHA-256 digest of the locked config file.  The CLI
+        always passes this; pure unit tests may omit it (falls back to
+        ``config.run_id`` so existing tests remain valid).
 
     Returns
     -------
@@ -563,12 +569,15 @@ def calibrate(
     )
     cal_gate_scores = cal_scores["gate"]
 
+    # Thread the full config digest like the other stages; fall back to
+    # config.run_id only for pure unit tests that do not pass the digest.
+    cfg_sha = config_sha256 if config_sha256 is not None else config.run_id
     return build_conformal_artifact(
         cal_errors,
         cal_gate_scores,
         alpha=config.decision.conformal_alpha,
         target_selection_coverage=config.decision.target_selection_coverage,
-        config_sha256=config.run_id,
+        config_sha256=cfg_sha,
     )
 
 

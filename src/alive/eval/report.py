@@ -295,7 +295,10 @@ def _build_futility(run_dir: Path) -> dict:
         "scientific_verdict": None,
     }
     # Enforce the LOCKED key set (defence in depth).
-    assert set(report.keys()) == FUTILITY_KEYS, "futility schema key drift"
+    if set(report.keys()) != FUTILITY_KEYS:
+        raise ReportError(
+            f"futility schema key drift: got {set(report.keys())!r}, expected {FUTILITY_KEYS!r}"
+        )
     return report
 
 
@@ -351,7 +354,11 @@ def _build_confirmatory(run_dir: Path) -> dict:
         "sealed_access_count": int(audit.get("sealed_access_count", 1)),
         "scientific_verdict": verdict.get("verdict"),
     }
-    assert set(report.keys()) == CONFIRMATORY_KEYS, "confirmatory schema key drift"
+    if set(report.keys()) != CONFIRMATORY_KEYS:
+        raise ReportError(
+            f"confirmatory schema key drift: got {set(report.keys())!r}, "
+            f"expected {CONFIRMATORY_KEYS!r}"
+        )
     return report
 
 

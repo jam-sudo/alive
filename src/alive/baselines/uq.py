@@ -112,7 +112,8 @@ class NearestFeatureDistance:
             Shape ``(n_queries,)``.  Per-query distance to nearest reference.
             Higher = ABSTAIN.
         """
-        assert self._ref_features is not None, "Call fit() before score()."
+        if self._ref_features is None:
+            raise RuntimeError("Call fit() before score().")
         return feature_knn_mean_distance(
             np.asarray(query_features, dtype=np.float64),
             self._ref_features,
@@ -193,7 +194,7 @@ class EnsembleDisagreement:
 
         Raises
         ------
-        AssertionError
+        RuntimeError
             If ``fit()`` has not been called before ``score()``.
 
         Notes
@@ -202,7 +203,8 @@ class EnsembleDisagreement:
         signature differs from the other comparators because disagreement is
         measured in output space.
         """
-        assert self._fitted, "Call fit() before score()."
+        if not self._fitted:
+            raise RuntimeError("Call fit() before score().")
         means = np.asarray(ensemble_member_means, dtype=np.float64)
         n_queries, n_members, _ = means.shape
 
@@ -299,7 +301,8 @@ class RidgeErrorRegressor:
         by AURC, which is rank-based within each method.  Absolute score scales
         are not mixed across methods; only the within-method ranking matters.
         """
-        assert self._model is not None, "Call fit() before score()."
+        if self._model is None:
+            raise RuntimeError("Call fit() before score().")
         return self._model.predict(np.asarray(query_features, dtype=np.float64))
 
 
@@ -384,7 +387,8 @@ class GbmErrorRegressor:
         np.ndarray
             Shape ``(n_queries,)``.  Predicted error.  Higher = ABSTAIN.
         """
-        assert self._model is not None, "Call fit() before score()."
+        if self._model is None:
+            raise RuntimeError("Call fit() before score().")
         return self._model.predict(np.asarray(query_features, dtype=np.float64))
 
 
@@ -471,7 +475,8 @@ class ResidualOnly:
             Shape ``(n_queries,)``.  ECDF-normalized R4 score in ``[0, 1]``.
             Higher = ABSTAIN.
         """
-        assert self._ref_features is not None, "Call fit() before score()."
+        if self._ref_features is None:
+            raise RuntimeError("Call fit() before score().")
         r4 = local_residual(
             np.asarray(query_features, dtype=np.float64),
             self._ref_features,

@@ -355,10 +355,20 @@ def cmd_calibrate(args: argparse.Namespace) -> int:
     index, store, manifest, feature_bank, config = _load_world(run_dir)
     base_artifact = _load_base_artifact(run_dir)
     method_lock = MethodLock.read(run_dir / "methodlock")
+    config_sha256 = _ledger_config_sha(run_dir)
 
     # calibrate RUNS IN EITHER BRANCH (a futility-stopped run still ships its
     # conformal artifact); the futility decision is intentionally not consulted.
-    conformal = calibrate(index, store, manifest, base_artifact, method_lock, feature_bank, config)
+    conformal = calibrate(
+        index,
+        store,
+        manifest,
+        base_artifact,
+        method_lock,
+        feature_bank,
+        config,
+        config_sha256=config_sha256,
+    )
     conformal.write(run_dir / "conformal.json")
 
     _ledger_record(run_dir, "conformal_artifact", conformal.checksum)

@@ -182,10 +182,10 @@ class TestEnsembleDisagreement:
         assert scores.shape == (3,)
 
     def test_score_before_fit_raises(self) -> None:
-        """Calling score() before fit() must raise an error (fitted state guard)."""
+        """Calling score() before fit() must raise RuntimeError (explicit guard)."""
         ed = EnsembleDisagreement()
         means = np.zeros((3, 2, 4))
-        with pytest.raises((RuntimeError, AssertionError), match="fit"):
+        with pytest.raises(RuntimeError, match="fit"):
             ed.score(means)
 
 
