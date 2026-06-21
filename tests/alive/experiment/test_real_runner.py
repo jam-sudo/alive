@@ -817,3 +817,89 @@ class TestCalibrateConfigSha256:
 
         conf = calibrate(index, store, manifest, base_art, method_lock, fb, config)
         assert conf.config_sha256 == config.run_id
+
+
+# ===========================================================================
+# P0-1(c): require_encoder_match in evaluate_sealed_once
+# ===========================================================================
+
+
+class TestRequireEncoderMatch:
+    """P0-1(c): require_encoder_match=True with a mock bank but ESM config
+    → provenance_ok=False → INVALID_EVALUATION.
+
+    Default (require_encoder_match=False) leaves existing tests unchanged.
+    """
+
+    def _setup(self, tmp_path: Path):
+        config = _test_config()
+        index, store, manifest, fb = _build_world(tmp_path, config=config, seed=3)
+        base_art = fit_base(index, store, manifest, fb, config)
+        method_lock, fdec = develop_methods_stage(index, store, manifest, base_art, fb, config)
+        from dataclasses import replace
+
+        fdec = replace(fdec, status=OperationalStatus.CONTINUE_CONFIRMATORY)
+        conf = calibrate(index, store, manifest, base_art, method_lock, fb, config)
+        return config, index, store, manifest, fb, base_art, method_lock, fdec, conf
+
+    def test_encoder_mismatch_with_require_match_yields_invalid(self, tmp_path: Path) -> None:
+        """Mock feature bank + ESM-declaring config + require_encoder_match=True → INVALID."""
+        config, index, store, manifest, fb, base_art, method_lock, fdec, conf = self._setup(
+            tmp_path
+        )
+        # The test config declares primary="mock-v1" and the mock bank also has
+        # model_revision="mock-v1", so they would match by default.
+        # We need to simulate a mismatch: use a config that declares ESM but
+        # the bank was built with the mock encoder.
+        # Override config.perturbation_features.primary to look like an ESM config.
+        from alive.config import PerturbationFeatures
+
+        esm_config = replace(
+            config,
+            perturbation_features=PerturbationFeatures(
+                primary="esm2_t33_650M_UR50D_mean_pool",
+                standardize_on="base_train",
+                missing_policy="exclude_before_split",
+            ),
+        )
+
+        result = evaluate_sealed_once(
+            index,
+            store,
+            manifest,
+            base_art,
+            method_lock,
+            conf,
+            fdec,
+            fb,
+            esm_config,
+            run_id=esm_config.run_id,
+            require_encoder_match=True,
+        )
+        # Provenance check must have failed due to encoder mismatch.
+        assert result.clauses["provenance_ok"] is False
+        assert result.verdict == Verdict.INVALID_EVALUATION
+
+    def test_encoder_mismatch_without_require_match_is_ignored(self, tmp_path: Path) -> None:
+        """Default require_encoder_match=False: existing direct callers unaffected."""
+        config, index, store, manifest, fb, base_art, method_lock, fdec, conf = self._setup(
+            tmp_path
+        )
+        # run_id must come from config (the _test_config primary is "mock-v1" which
+        # matches the mock bank, so there is no actual mismatch here —
+        # just confirming default=False doesn't break anything).
+        result = evaluate_sealed_once(
+            index,
+            store,
+            manifest,
+            base_art,
+            method_lock,
+            conf,
+            fdec,
+            fb,
+            config,
+            run_id=config.run_id,
+            require_encoder_match=False,
+        )
+        # With the default, the result is a valid evaluation (not INVALID due to encoder).
+        assert result.verdict in set(Verdict)

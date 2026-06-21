@@ -683,6 +683,7 @@ def evaluate_sealed_once(
     config_sha256: str | None = None,
     ledger: "RunLedger | None" = None,
     result_path: "str | Path | None" = None,
+    require_encoder_match: bool = False,
 ) -> VerdictResult:
     """Stage 4: the single audited sealed evaluation → :class:`VerdictResult`.
 
@@ -867,6 +868,30 @@ def evaluate_sealed_once(
     }
     provenance_ok = verify_provenance(ledger, expected_checksums, store=store, run_id=run_id)
 
+    # --- P0-1(c): optional config↔feature-bank encoder cross-check. ----------
+    # When require_encoder_match=True (set by the CLI for scientific runs),
+    # derive the expected primary string from the feature bank's provenance and
+    # compare it to config.perturbation_features.primary.  A mismatch means the
+    # feature bank was built with the wrong encoder and the evaluation is invalid.
+    # Canonical mapping: f"{prov.model_revision}_{prov.pooling}_pool"
+    encoder_matches: bool | None = None
+    if require_encoder_match:
+        prov = feature_bank.provenance
+        derived = f"{prov.model_revision}_{prov.pooling}_pool"
+        encoder_matches = derived == config.perturbation_features.primary
+        if not encoder_matches:
+            provenance_ok = False
+
+    evidence: dict = {
+        "sealed_ids": list(sealed_ids),
+        "missing_ids": list(missing_ids),
+        "completeness_ok": completeness_ok,
+        "reliability_floors_finite_positive": reliability_ok,
+        "sealed_access_count": int(store.sealed_access_count),
+    }
+    if encoder_matches is not None:
+        evidence["encoder_matches_config"] = encoder_matches
+
     integrity = IntegrityReport(
         provenance_ok=bool(provenance_ok),
         leakage_ok=bool(leakage_ok),
@@ -874,13 +899,7 @@ def evaluate_sealed_once(
         minimum_sealed=minimum_sealed,
         all_metrics_finite=all_metrics_finite and completeness_ok,
         reliability_ok=reliability_precondition,
-        evidence={
-            "sealed_ids": list(sealed_ids),
-            "missing_ids": list(missing_ids),
-            "completeness_ok": completeness_ok,
-            "reliability_floors_finite_positive": reliability_ok,
-            "sealed_access_count": int(store.sealed_access_count),
-        },
+        evidence=evidence,
     )
 
     # --- 6, 7, 8. Build verdict (handling the degenerate / invalid branch). --

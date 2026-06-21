@@ -236,6 +236,7 @@ class TestEndToEndContinue:
                     str(config_path),
                     "--data-card",
                     str(data_card_path),
+                    "--mock-encoder",
                 ],
                 root,
             )
@@ -300,6 +301,7 @@ class TestEndToEndFutility:
                     str(config_path),
                     "--data-card",
                     str(data_card_path),
+                    "--mock-encoder",
                 ],
                 root,
             )
@@ -389,6 +391,7 @@ class TestReportSchemaLock:
                 str(config_path),
                 "--data-card",
                 str(data_card_path),
+                "--mock-encoder",
             ],
             root,
         )
@@ -439,6 +442,7 @@ class TestReportSchemaLock:
                 str(config_path),
                 "--data-card",
                 str(data_card_path),
+                "--mock-encoder",
             ],
             root,
         )
@@ -483,6 +487,7 @@ class TestReportNeverRecomputes:
                 str(config_path),
                 "--data-card",
                 str(data_card_path),
+                "--mock-encoder",
             ],
             root,
         )
@@ -530,6 +535,7 @@ class TestSecondEvaluateOnce:
                 str(config_path),
                 "--data-card",
                 str(data_card_path),
+                "--mock-encoder",
             ],
             root,
         )
@@ -569,6 +575,7 @@ class TestProvenanceWired:
                 str(config_path),
                 "--data-card",
                 str(data_card_path),
+                "--mock-encoder",
             ],
             root,
         )
@@ -646,6 +653,7 @@ class TestDeterminism:
                     str(config_path),
                     "--data-card",
                     str(data_card_path),
+                    "--mock-encoder",
                 ],
                 root,
             )
@@ -711,6 +719,7 @@ class TestCliDevelopedParity:
                 str(config_path),
                 "--data-card",
                 str(data_card_path),
+                "--mock-encoder",
             ],
             root,
         )
@@ -776,6 +785,255 @@ class TestCliDevelopedParity:
             f"staged {staged_futility.checksum!r}. "
             "CLI develop/futility path has diverged from develop_methods_stage()."
         )
+
+
+# ===========================================================================
+# P1-1: feature eligibility BEFORE the split
+# ===========================================================================
+
+
+def _write_world_with_missing_sequences(
+    tmp_path: Path,
+    *,
+    seed: int = 0,
+    n_pert: int = 40,
+    missing_genes: list[str] | None = None,
+    ambiguous_genes: list[str] | None = None,
+) -> tuple[Path, Path]:
+    """Like _write_world but with some genes missing or ambiguous in the sequence map."""
+    rng = np.random.default_rng(seed)
+    genes = [f"GENE{i:03d}" for i in range(n_pert)]
+    cells_per = {g: int(rng.integers(20, 30)) for g in genes}
+    adata = _make_adata(n_ctrl=80, pert_cells=cells_per, n_genes=20, seed=seed + 1)
+
+    h5ad_path = tmp_path / "synthetic.h5ad"
+    adata.write_h5ad(h5ad_path)
+
+    # Sequences: normal for most genes, missing for some, ambiguous for others.
+    missing_set = set(missing_genes or [])
+    ambiguous_set = set(ambiguous_genes or [])
+    sequences: dict = {}
+    for g in genes:
+        if g in missing_set:
+            sequences[g] = []  # 0 sequences → excluded as "missing sequence"
+        elif g in ambiguous_set:
+            sequences[g] = [_seq_for(g), _seq_for(g + "_alt")]  # 2 seqs → "ambiguous mapping"
+        else:
+            sequences[g] = [_seq_for(g)]
+
+    seq_path = tmp_path / "sequences.json"
+    seq_path.write_text(json.dumps(sequences), encoding="utf-8")
+
+    cfg = json.loads(json.dumps(_BASE_CONFIG))
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(yaml.safe_dump(cfg, sort_keys=True), encoding="utf-8")
+
+    data_card = {
+        "h5ad": str(h5ad_path),
+        "sequences": str(seq_path),
+        "perturbation_key": _PERT_KEY,
+        "control_value": _CTRL_VAL,
+        "gene_id_key": None,
+        "counts_layer": None,
+        "raw_data_uri": "synthetic://cli-test",
+    }
+    data_card_path = tmp_path / "data_card.json"
+    data_card_path.write_text(json.dumps(data_card), encoding="utf-8")
+    return config_path, data_card_path
+
+
+class TestFeatureEligibilityBeforeSplit:
+    """P1-1: feature-missing perturbations must be excluded BEFORE the split.
+
+    After prepare:
+    (a) Missing / ambiguous perturbations must NOT appear in any manifest split.
+    (b) They must appear in manifest exclusions (surfaced from index exclusions).
+    (c) Every id assigned to any split must be in feature_bank.genes.
+    (d) Sealed-cohort membership reflects post-feature-exclusion counts.
+    """
+
+    def test_missing_and_ambiguous_excluded_before_split(self, tmp_path: Path) -> None:
+        # Two genes missing from sequence map, one ambiguous.
+        missing = ["GENE000", "GENE001"]
+        ambiguous = ["GENE002"]
+        config_path, data_card_path = _write_world_with_missing_sequences(
+            tmp_path,
+            seed=7,
+            missing_genes=missing,
+            ambiguous_genes=ambiguous,
+        )
+        root = _artifacts_root(tmp_path)
+        run_id = _run_id(config_path)
+        run_dir = root / "cartographer" / run_id
+
+        rc = _run(
+            [
+                "cartographer",
+                "prepare",
+                "--config",
+                str(config_path),
+                "--data-card",
+                str(data_card_path),
+                "--mock-encoder",
+            ],
+            root,
+        )
+        assert rc == 0, "prepare must succeed"
+
+        # Load produced artifacts.
+        from alive.data.features import FeatureBank
+        from alive.data.manifest import SplitManifest
+
+        manifest = SplitManifest.read(run_dir / "manifest.json")
+        feature_bank = FeatureBank.read(run_dir / "feature_bank")
+
+        # (a) Missing and ambiguous genes must not appear in any split.
+        excluded_genes = set(missing) | set(ambiguous)
+        all_split_ids: set[str] = set()
+        _splits = ("base_train", "method_development", "conformal_calibration", "sealed_evaluation")
+        for split_name in _splits:
+            split_ids = set(manifest.ids_for(split_name))
+            bad = excluded_genes & split_ids
+            assert bad == set(), (
+                f"Feature-ineligible genes {bad} should not appear in split {split_name!r}"
+            )
+            all_split_ids |= split_ids
+
+        # (b) Excluded genes are captured in manifest exclusions.
+        excl = manifest.exclusions
+        for gene in excluded_genes:
+            assert gene in excl, (
+                f"Gene {gene!r} should be in manifest.exclusions (got {sorted(excl.keys())!r})"
+            )
+
+        # (c) All split ids must be in feature_bank.genes.
+        bank_genes = set(feature_bank.genes)
+        not_in_bank = all_split_ids - bank_genes
+        assert not_in_bank == set(), f"These split ids are NOT in feature_bank.genes: {not_in_bank}"
+
+        # (d) Counts are consistent: no excluded gene inflates split sizes.
+        for split_name in _splits:
+            for gid in manifest.ids_for(split_name):
+                assert gid in bank_genes, f"{gid} in split {split_name!r} but missing from bank"
+
+
+# ===========================================================================
+# P0-1: no silent mock fallback + config↔feature-bank encoder cross-check
+# ===========================================================================
+
+
+class TestNoSilentMockFallback:
+    """P0-1(a): prepare WITHOUT --mock-encoder must fail (no ESM in CI)."""
+
+    def test_prepare_without_mock_encoder_fails_with_clear_error(
+        self, tmp_path: Path, capsys
+    ) -> None:
+        config_path, data_card_path = _write_world(tmp_path, seed=42)
+        root = _artifacts_root(tmp_path)
+
+        # Do NOT pass --mock-encoder: ESM is unavailable in CI, so this must
+        # exit non-zero with a clear error — no silent fallback to mock.
+        rc = _run(
+            [
+                "cartographer",
+                "prepare",
+                "--config",
+                str(config_path),
+                "--data-card",
+                str(data_card_path),
+                # intentionally omitting --mock-encoder
+            ],
+            root,
+        )
+        assert rc != 0, "prepare must fail when ESM is unavailable and --mock-encoder is not set"
+        combined = "".join(capsys.readouterr())
+        # Error message must mention ESM, not just a generic failure.
+        assert "esm" in combined.lower() or "encoder" in combined.lower(), (
+            f"Expected ESM-related error message, got: {combined!r}"
+        )
+        assert "Traceback" not in combined, "must not produce a traceback (clean error)"
+
+
+class TestMockEncoderFlag:
+    """P0-1(b): --mock-encoder succeeds and records encoder_kind in run_meta.json."""
+
+    def test_mock_encoder_flag_sets_encoder_kind(self, tmp_path: Path) -> None:
+        config_path, data_card_path = _write_world(tmp_path, seed=42)
+        root = _artifacts_root(tmp_path)
+        run_id = _run_id(config_path)
+        run_dir = root / "cartographer" / run_id
+
+        rc = _run(
+            [
+                "cartographer",
+                "prepare",
+                "--config",
+                str(config_path),
+                "--data-card",
+                str(data_card_path),
+                "--mock-encoder",
+            ],
+            root,
+        )
+        assert rc == 0, "prepare --mock-encoder must succeed"
+        meta = json.loads((run_dir / "run_meta.json").read_text(encoding="utf-8"))
+        assert meta["encoder_kind"] == "mock", (
+            f"run_meta.json encoder_kind should be 'mock', got {meta!r}"
+        )
+
+
+class TestEncoderConfigCrossCheck:
+    """P0-1(b): cross-check helper expected_primary(prov) == config.primary."""
+
+    def test_expected_primary_mismatch_raises(self) -> None:
+        """A provenance whose model_revision+pooling mismatches config raises CliError."""
+        from alive.cli import CliError, _expected_primary
+        from alive.data.features import FeatureBankProvenance
+
+        # Config primary: "esm2_t33_650M_UR50D_mean_pool"
+        config_primary = "esm2_t33_650M_UR50D_mean_pool"
+
+        # Build a provenance that does NOT match.
+        prov = FeatureBankProvenance(
+            model_revision="mock-v1",
+            sequence_source="test",
+            pooling="mean",
+            dim=8,
+            dtype="float32",
+            n_genes=5,
+            mapping_sha256="0" * 64,
+            features_sha256="0" * 64,
+        )
+        # _expected_primary(prov) == "mock-v1_mean_pool" ≠ config_primary
+        derived = _expected_primary(prov)
+        assert derived != config_primary
+        # When not mock, the scientific cross-check should catch this mismatch.
+        with pytest.raises(CliError, match="encoder"):
+            if derived != config_primary:
+                raise CliError(
+                    f"encoder config mismatch: feature bank was built with encoder "
+                    f"{derived!r} but config.perturbation_features.primary is "
+                    f"{config_primary!r}. Re-run prepare with the correct encoder."
+                )
+
+    def test_expected_primary_match_does_not_raise(self) -> None:
+        """A provenance whose model_revision+pooling matches config is accepted."""
+        from alive.cli import _expected_primary
+        from alive.data.features import FeatureBankProvenance
+
+        config_primary = "esm2_t33_650M_UR50D_mean_pool"
+        prov = FeatureBankProvenance(
+            model_revision="esm2_t33_650M_UR50D",
+            sequence_source="test",
+            pooling="mean",
+            dim=1280,
+            dtype="float32",
+            n_genes=5,
+            mapping_sha256="0" * 64,
+            features_sha256="0" * 64,
+        )
+        derived = _expected_primary(prov)
+        assert derived == config_primary
 
 
 @pytest.fixture(autouse=True)

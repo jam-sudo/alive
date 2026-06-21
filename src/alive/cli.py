@@ -122,12 +122,41 @@ def _base_paths(run_dir: Path) -> tuple[Path, Path]:
 # ---------------------------------------------------------------------------
 
 
-def _select_encoder(primary: str):
-    """Return the encoder to use: real ESM-2 if importable, else the mock.
+def _expected_primary(provenance: "object") -> str:
+    """Derive the expected config ``perturbation_features.primary`` string from provenance.
 
-    The CLI selects the encoder so source carries no hardcoded choice; tests use
-    the mock because the ``features`` deps are absent in CI.
+    The canonical mapping is: ``f"{prov.model_revision}_{prov.pooling}_pool"``.
+
+    Parameters
+    ----------
+    provenance : FeatureBankProvenance
+        The provenance record of a built :class:`~alive.data.features.FeatureBank`.
+
+    Returns
+    -------
+    str
+        The expected ``primary`` config string.
     """
+    return f"{provenance.model_revision}_{provenance.pooling}_pool"
+
+
+def _select_encoder(*, use_mock: bool, config_primary: str = ""):
+    """Return the encoder to use.
+
+    Parameters
+    ----------
+    use_mock : bool
+        If ``True``, return the :class:`~alive.data.features.MockSequenceEncoder`
+        (numpy-only, safe for CI).  If ``False``, attempt to import ESM-2; on
+        ANY failure raise :class:`CliError` with a clear message — **no silent
+        fallback**.
+    config_primary : str, optional
+        The ``config.perturbation_features.primary`` string; included in the error
+        message when ESM is unavailable.
+    """
+    if use_mock:
+        return MockSequenceEncoder(dim=8)
+
     try:
         import esm  # noqa: F401, PLC0415
         import torch  # noqa: F401, PLC0415
@@ -135,8 +164,11 @@ def _select_encoder(primary: str):
         from alive.data.features import Esm2Encoder
 
         return Esm2Encoder()
-    except Exception:  # noqa: BLE001 — features deps are optional; fall back to mock.
-        return MockSequenceEncoder(dim=8)
+    except Exception as exc:  # noqa: BLE001
+        raise CliError(
+            f"ESM encoder is required (config primary {config_primary!r}) but is unavailable: "
+            f"{exc}. Pass --mock-encoder only for synthetic/CI runs."
+        ) from exc
 
 
 # ---------------------------------------------------------------------------
@@ -186,6 +218,24 @@ def _config_digest(config_source: Path) -> str:
 # ---------------------------------------------------------------------------
 
 
+def usable_feature_genes(gene_sequences: dict) -> set:
+    """Return the set of gene IDs with exactly one sequence (usable by the feature bank).
+
+    Parameters
+    ----------
+    gene_sequences : dict
+        Mapping from gene ID to a list of candidate protein sequences.
+        Genes with zero sequences are missing; genes with >1 are ambiguous.
+        Both are ineligible and excluded from the returned set.
+
+    Returns
+    -------
+    set[str]
+        Gene IDs that have exactly one candidate sequence.
+    """
+    return {g for g, seqs in gene_sequences.items() if len(seqs) == 1}
+
+
 def cmd_prepare(args: argparse.Namespace) -> int:
     config_path = Path(args.config)
     data_card_path = Path(args.data_card)
@@ -205,6 +255,13 @@ def cmd_prepare(args: argparse.Namespace) -> int:
         json.dumps(data_card, sort_keys=True, separators=(",", ":")), encoding="utf-8"
     )
 
+    # P1-1 FIX: load sequences FIRST so feature eligibility is determined BEFORE
+    # building the index/manifest.  This ensures excluded perturbations (missing or
+    # ambiguous sequences) never enter any split.
+    sequences = json.loads(Path(data_card["sequences"]).read_text(encoding="utf-8"))
+    gene_sequences = {g: list(seqs) for g, seqs in sequences.items()}
+    usable_gene_ids = usable_feature_genes(gene_sequences)
+
     schema = DatasetSchema(
         perturbation_key=data_card["perturbation_key"],
         control_value=data_card["control_value"],
@@ -212,14 +269,22 @@ def cmd_prepare(args: argparse.Namespace) -> int:
         counts_layer=data_card.get("counts_layer"),
     )
     h5ad = data_card["h5ad"]
-    index = build_index(h5ad, schema, min_cells=config.response_space.min_cells)
+    # Pass usable_gene_ids so build_index excludes feature-missing perturbations
+    # and records them in index.exclusions with reason "no external feature".
+    index = build_index(
+        h5ad,
+        schema,
+        min_cells=config.response_space.min_cells,
+        available_feature_ids=usable_gene_ids,
+    )
     manifest = build_manifest_from_index(index, config.split_fractions, config.manifest_seed)
     manifest.write(run_dir / "manifest.json")
 
     base_train_ids = list(manifest.ids_for("base_train"))
-    sequences = json.loads(Path(data_card["sequences"]).read_text(encoding="utf-8"))
-    gene_sequences = {g: list(seqs) for g, seqs in sequences.items()}
-    encoder = _select_encoder(config.perturbation_features.primary)
+    encoder = _select_encoder(
+        use_mock=args.mock_encoder,
+        config_primary=config.perturbation_features.primary,
+    )
     feature_bank = build_feature_bank(
         gene_sequences,
         encoder,
@@ -228,9 +293,41 @@ def cmd_prepare(args: argparse.Namespace) -> int:
     )
     feature_bank.write(run_dir / "feature_bank")
 
+    # P1-1 HARD ASSERTION: every perturbation in any manifest split must be in
+    # feature_bank.genes.  A violation indicates a logic error in the ordering.
+    bank_genes: set[str] = set(feature_bank.genes)
+    offending: list[str] = []
+    _all_splits = ("base_train", "method_development", "conformal_calibration", "sealed_evaluation")
+    for split_name in _all_splits:
+        for pid in manifest.ids_for(split_name):
+            if pid not in bank_genes:
+                offending.append(pid)
+    if offending:
+        raise CliError(
+            f"Manifest/feature-bank agreement violation: {len(offending)} perturbation(s) "
+            f"assigned to a split are not in the feature bank — this is a logic error. "
+            f"Offending IDs: {sorted(offending)[:10]}{'...' if len(offending) > 10 else ''}"
+        )
+
+    # P0-1: record encoder kind and (if scientific) cross-check config ↔ feature bank.
+    encoder_kind = "mock" if args.mock_encoder else "scientific"
+    if not args.mock_encoder:
+        derived = _expected_primary(feature_bank.provenance)
+        if derived != config.perturbation_features.primary:
+            raise CliError(
+                f"encoder config mismatch: feature bank was built with encoder "
+                f"{derived!r} but config.perturbation_features.primary is "
+                f"{config.perturbation_features.primary!r}. "
+                "Re-run prepare with the correct encoder."
+            )
+
     # Record the run_id alongside artifacts (config snapshot has no run_id).
+    # encoder_kind is recorded so evaluate-once can pass require_encoder_match.
     (run_dir / "run_meta.json").write_text(
-        json.dumps({"run_id": run_id, "experiment": config.experiment}), encoding="utf-8"
+        json.dumps(
+            {"run_id": run_id, "experiment": config.experiment, "encoder_kind": encoder_kind}
+        ),
+        encoding="utf-8",
     )
 
     # Initialise the durable RunLedger with the FULL config digest (fix c) and
@@ -395,6 +492,11 @@ def cmd_evaluate_once(args: argparse.Namespace) -> int:
     ledger = RunLedger.read(run_dir / "ledger.json")
     config_sha256 = _ledger_config_sha(run_dir)
 
+    # Determine encoder_kind from run_meta.json (written by prepare).
+    # Older runs without the field default to "mock" for backward compatibility.
+    run_meta = json.loads((run_dir / "run_meta.json").read_text(encoding="utf-8"))
+    encoder_kind = run_meta.get("encoder_kind", "mock")
+
     result = evaluate_sealed_once(
         index,
         store,
@@ -409,6 +511,7 @@ def cmd_evaluate_once(args: argparse.Namespace) -> int:
         config_sha256=config_sha256,
         ledger=ledger,
         result_path=run_dir / "result.json",
+        require_encoder_match=(encoder_kind == "scientific"),
     )
     ledger.write(run_dir / "ledger.json")
     print(result.verdict.value)
@@ -469,6 +572,15 @@ def _build_parser() -> argparse.ArgumentParser:
     p_prepare = cart_sub.add_parser("prepare", help="Build manifest + feature bank + ledger.")
     p_prepare.add_argument("--config", required=True)
     p_prepare.add_argument("--data-card", required=True)
+    p_prepare.add_argument(
+        "--mock-encoder",
+        action="store_true",
+        default=False,
+        help=(
+            "Use the numpy-only MockSequenceEncoder instead of ESM-2. "
+            "ONLY for synthetic/CI runs — the real A100 run must use the scientific encoder."
+        ),
+    )
     p_prepare.set_defaults(func=cmd_prepare)
 
     for name, func, helptext in (
