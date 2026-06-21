@@ -270,8 +270,12 @@ def _prepare_and_get_run_id(world_dir: Path, *, mutate_counts: bool = False, cap
     return printed
 
 
-def _rerun_prepare(world_dir: Path, *, run_id: str) -> int:
-    """Re-run ``prepare`` on the SAME world (identical inputs) and return rc."""
+def _rerun_prepare(world_dir: Path) -> int:
+    """Re-run ``prepare`` on the SAME world (identical inputs) and return rc.
+
+    ``prepare`` recomputes the composite run id from its inputs, so the caller
+    does not (and must not) pass one in.
+    """
     config_path = world_dir / "config.yaml"
     data_card_path = world_dir / "data_card.json"
     root = _artifacts_root(world_dir)
@@ -306,8 +310,8 @@ def test_prepare_run_id_changes_with_data(tmp_path: Path) -> None:
 
 
 def test_prepare_refuses_existing_run_dir(tmp_path: Path) -> None:
-    rid = _prepare_and_get_run_id(tmp_path)
-    rc = _rerun_prepare(tmp_path, run_id=rid)  # identical inputs → dir already exists
+    _prepare_and_get_run_id(tmp_path)
+    rc = _rerun_prepare(tmp_path)  # identical inputs → dir already exists
     assert rc == 2  # refuses to overwrite an existing run directory
 
 

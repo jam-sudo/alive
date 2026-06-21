@@ -340,7 +340,9 @@ class TestGateAndComparatorScores:
         config = _test_config()
         _index, store, manifest, fb = _build_world(tmp_path, config=config)
         base_art = fit_base(_index, store, manifest, fb, config)
-        method_lock, _fd = develop_methods_stage(_index, store, manifest, base_art, fb, config)
+        method_lock, _fd = develop_methods_stage(
+            _index, store, manifest, base_art, fb, config, run_id=config.config_digest
+        )
 
         # Reference = method_development; query = conformal_calibration.
         ref_ids = [i for i in manifest.ids_for("method_development") if fb.has(i)]
@@ -416,8 +418,12 @@ class TestLeakageGuard:
         spy = SpyStore(real_store)
 
         base_art = fit_base(index, spy, manifest, fb, config)
-        method_lock, fdec = develop_methods_stage(index, spy, manifest, base_art, fb, config)
-        _conf = calibrate(index, spy, manifest, base_art, method_lock, fb, config)
+        method_lock, fdec = develop_methods_stage(
+            index, spy, manifest, base_art, fb, config, run_id=config.config_digest
+        )
+        _conf = calibrate(
+            index, spy, manifest, base_art, method_lock, fb, config, run_id=config.config_digest
+        )
 
         sealed_ids = set(manifest.ids_for("sealed_evaluation"))
 
@@ -442,10 +448,14 @@ class TestScoresBeforeRisks:
         spy = SpyStore(real_store)
 
         base_art = fit_base(index, spy, manifest, fb, config)
-        method_lock, fdec = develop_methods_stage(index, spy, manifest, base_art, fb, config)
+        method_lock, fdec = develop_methods_stage(
+            index, spy, manifest, base_art, fb, config, run_id=config.config_digest
+        )
         # Force CONTINUE so the sealed branch is permitted.
         fdec = replace(fdec, status=OperationalStatus.CONTINUE_CONFIRMATORY)
-        conf = calibrate(index, spy, manifest, base_art, method_lock, fb, config)
+        conf = calibrate(
+            index, spy, manifest, base_art, method_lock, fb, config, run_id=config.config_digest
+        )
 
         result = evaluate_sealed_once(
             index,
@@ -481,8 +491,12 @@ class TestFutilityForbidsSeal:
         spy = SpyStore(real_store)
 
         base_art = fit_base(index, spy, manifest, fb, config)
-        method_lock, fdec = develop_methods_stage(index, spy, manifest, base_art, fb, config)
-        conf = calibrate(index, spy, manifest, base_art, method_lock, fb, config)
+        method_lock, fdec = develop_methods_stage(
+            index, spy, manifest, base_art, fb, config, run_id=config.config_digest
+        )
+        conf = calibrate(
+            index, spy, manifest, base_art, method_lock, fb, config, run_id=config.config_digest
+        )
 
         # Force FUTILITY_STOPPED.
         fdec = replace(fdec, status=OperationalStatus.FUTILITY_STOPPED)
@@ -521,10 +535,14 @@ class TestEndToEnd:
         index, store, manifest, fb = _build_world(tmp_path, config=config, seed=3)
 
         base_art = fit_base(index, store, manifest, fb, config)
-        method_lock, fdec = develop_methods_stage(index, store, manifest, base_art, fb, config)
+        method_lock, fdec = develop_methods_stage(
+            index, store, manifest, base_art, fb, config, run_id=config.config_digest
+        )
         # Force CONTINUE so the sealed branch runs even if dev was futile.
         fdec = replace(fdec, status=OperationalStatus.CONTINUE_CONFIRMATORY)
-        conf = calibrate(index, store, manifest, base_art, method_lock, fb, config)
+        conf = calibrate(
+            index, store, manifest, base_art, method_lock, fb, config, run_id=config.config_digest
+        )
 
         result = evaluate_sealed_once(
             index,
@@ -555,9 +573,13 @@ class TestLowNInvalid:
         index, store, manifest, fb = _build_world(tmp_path, config=config)
 
         base_art = fit_base(index, store, manifest, fb, config)
-        method_lock, fdec = develop_methods_stage(index, store, manifest, base_art, fb, config)
+        method_lock, fdec = develop_methods_stage(
+            index, store, manifest, base_art, fb, config, run_id=config.config_digest
+        )
         fdec = replace(fdec, status=OperationalStatus.CONTINUE_CONFIRMATORY)
-        conf = calibrate(index, store, manifest, base_art, method_lock, fb, config)
+        conf = calibrate(
+            index, store, manifest, base_art, method_lock, fb, config, run_id=config.config_digest
+        )
 
         out_path = tmp_path / "result.json"
         result = evaluate_sealed_once(
@@ -589,9 +611,13 @@ class TestSingleSealedAccess:
         index, store, manifest, fb = _build_world(tmp_path, config=config)
 
         base_art = fit_base(index, store, manifest, fb, config)
-        method_lock, fdec = develop_methods_stage(index, store, manifest, base_art, fb, config)
+        method_lock, fdec = develop_methods_stage(
+            index, store, manifest, base_art, fb, config, run_id=config.config_digest
+        )
         fdec = replace(fdec, status=OperationalStatus.CONTINUE_CONFIRMATORY)
-        conf = calibrate(index, store, manifest, base_art, method_lock, fb, config)
+        conf = calibrate(
+            index, store, manifest, base_art, method_lock, fb, config, run_id=config.config_digest
+        )
 
         evaluate_sealed_once(
             index,
@@ -634,9 +660,20 @@ class TestDeterminism:
             sub.mkdir(parents=True, exist_ok=True)
             index, store, manifest, fb = _build_world(sub, config=config, seed=5)
             base_art = fit_base(index, store, manifest, fb, config)
-            method_lock, fdec = develop_methods_stage(index, store, manifest, base_art, fb, config)
+            method_lock, fdec = develop_methods_stage(
+                index, store, manifest, base_art, fb, config, run_id=config.config_digest
+            )
             fdec = replace(fdec, status=OperationalStatus.CONTINUE_CONFIRMATORY)
-            conf = calibrate(index, store, manifest, base_art, method_lock, fb, config)
+            conf = calibrate(
+                index,
+                store,
+                manifest,
+                base_art,
+                method_lock,
+                fb,
+                config,
+                run_id=config.config_digest,
+            )
             result = evaluate_sealed_once(
                 index,
                 store,
@@ -678,9 +715,13 @@ class TestProvenanceWiring:
         config = _test_config()
         index, store, manifest, fb = _build_world(tmp_path, config=config, seed=3)
         base_art = fit_base(index, store, manifest, fb, config)
-        method_lock, fdec = develop_methods_stage(index, store, manifest, base_art, fb, config)
+        method_lock, fdec = develop_methods_stage(
+            index, store, manifest, base_art, fb, config, run_id=config.config_digest
+        )
         fdec = replace(fdec, status=OperationalStatus.CONTINUE_CONFIRMATORY)
-        conf = calibrate(index, store, manifest, base_art, method_lock, fb, config)
+        conf = calibrate(
+            index, store, manifest, base_art, method_lock, fb, config, run_id=config.config_digest
+        )
         return config, index, store, manifest, fb, base_art, method_lock, fdec, conf
 
     def test_intact_ledger_provenance_ok(self, tmp_path: Path) -> None:
@@ -763,7 +804,9 @@ class TestCalibrateConfigSha256:
         config = _test_config()
         index, store, manifest, fb = _build_world(tmp_path, config=config, seed=5)
         base_art = fit_base(index, store, manifest, fb, config)
-        method_lock, _fdec = develop_methods_stage(index, store, manifest, base_art, fb, config)
+        method_lock, _fdec = develop_methods_stage(
+            index, store, manifest, base_art, fb, config, run_id=config.config_digest
+        )
 
         full_digest = "a" * 64  # a valid 64-char hex string (mock full digest)
         conf = calibrate(
@@ -774,6 +817,7 @@ class TestCalibrateConfigSha256:
             method_lock,
             fb,
             config,
+            run_id=config.config_digest,
             config_sha256=full_digest,
         )
 
@@ -790,7 +834,9 @@ class TestCalibrateConfigSha256:
         config = _test_config()
         index, store, manifest, fb = _build_world(tmp_path, config=config, seed=6)
         base_art = fit_base(index, store, manifest, fb, config)
-        method_lock, _fdec = develop_methods_stage(index, store, manifest, base_art, fb, config)
+        method_lock, _fdec = develop_methods_stage(
+            index, store, manifest, base_art, fb, config, run_id=config.config_digest
+        )
 
         full_digest = "b" * 64
         conf = calibrate(
@@ -801,6 +847,7 @@ class TestCalibrateConfigSha256:
             method_lock,
             fb,
             config,
+            run_id=config.config_digest,
             config_sha256=full_digest,
         )
 
@@ -814,9 +861,13 @@ class TestCalibrateConfigSha256:
         config = _test_config()
         index, store, manifest, fb = _build_world(tmp_path, config=config, seed=7)
         base_art = fit_base(index, store, manifest, fb, config)
-        method_lock, _fdec = develop_methods_stage(index, store, manifest, base_art, fb, config)
+        method_lock, _fdec = develop_methods_stage(
+            index, store, manifest, base_art, fb, config, run_id=config.config_digest
+        )
 
-        conf = calibrate(index, store, manifest, base_art, method_lock, fb, config)
+        conf = calibrate(
+            index, store, manifest, base_art, method_lock, fb, config, run_id=config.config_digest
+        )
         assert conf.config_sha256 == config.config_digest
 
 
@@ -836,11 +887,15 @@ class TestRequireEncoderMatch:
         config = _test_config()
         index, store, manifest, fb = _build_world(tmp_path, config=config, seed=3)
         base_art = fit_base(index, store, manifest, fb, config)
-        method_lock, fdec = develop_methods_stage(index, store, manifest, base_art, fb, config)
+        method_lock, fdec = develop_methods_stage(
+            index, store, manifest, base_art, fb, config, run_id=config.config_digest
+        )
         from dataclasses import replace
 
         fdec = replace(fdec, status=OperationalStatus.CONTINUE_CONFIRMATORY)
-        conf = calibrate(index, store, manifest, base_art, method_lock, fb, config)
+        conf = calibrate(
+            index, store, manifest, base_art, method_lock, fb, config, run_id=config.config_digest
+        )
         return config, index, store, manifest, fb, base_art, method_lock, fdec, conf
 
     def test_encoder_mismatch_with_require_match_yields_invalid(self, tmp_path: Path) -> None:
