@@ -646,6 +646,32 @@ class TestUpstreamLockedAfterTerminalOrSeal:
         assert (run_dir / "conformal.json").exists()
 
 
+# ---------------------------------------------------------------------------
+# Task 5 (audit P3-1): fit writes the base predictor exactly once.
+#
+# The original duplicate base-predictor write was eliminated when Task 3
+# reworked cmd_fit (guard -> single response_space.write + single
+# base_predictor.write -> append-only ledger).  This is a regression guard
+# that locks the single-write contract in.
+# ---------------------------------------------------------------------------
+
+
+def test_fit_writes_base_predictor_once(tmp_path: Path, monkeypatch) -> None:
+    import alive.base.predictor as predmod
+
+    rid = _prepare_and_get_run_id(tmp_path)
+    calls: list[object] = []
+    orig = predmod.BasePredictor.write
+
+    def _counting_write(self, path):  # noqa: ANN001, ANN202
+        calls.append(path)
+        return orig(self, path)
+
+    monkeypatch.setattr(predmod.BasePredictor, "write", _counting_write)
+    assert _run_stage(tmp_path, "fit", rid) == 0
+    assert len(calls) == 1  # exactly one write — no duplicate (P3-1)
+
+
 # ===========================================================================
 # Report schema lock (headline)
 # ===========================================================================
