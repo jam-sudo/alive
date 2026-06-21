@@ -653,3 +653,91 @@ class TestDeterminism:
         a = _run(tmp_path / "a")
         b = _run(tmp_path / "b")
         assert a == b
+
+
+# ===========================================================================
+# Provenance wiring (carry-forward fix a)
+# ===========================================================================
+
+
+class TestProvenanceWiring:
+    def _ledger(self, *, run_id: str, config_sha256: str):
+        from alive.provenance import EnvironmentInfo, RunLedger
+
+        env = EnvironmentInfo(
+            python_version="3.12.0",
+            platform="test",
+            git_commit="UNKNOWN",
+            lockfile_sha256="0" * 64,
+            registered_seeds=(11, 23),
+        )
+        return RunLedger(run_id=run_id, config_sha256=config_sha256, environment=env)
+
+    def _setup(self, tmp_path: Path):
+        config = _test_config()
+        index, store, manifest, fb = _build_world(tmp_path, config=config, seed=3)
+        base_art = fit_base(index, store, manifest, fb, config)
+        method_lock, fdec = develop_methods_stage(index, store, manifest, base_art, fb, config)
+        fdec = replace(fdec, status=OperationalStatus.CONTINUE_CONFIRMATORY)
+        conf = calibrate(index, store, manifest, base_art, method_lock, fb, config)
+        return config, index, store, manifest, fb, base_art, method_lock, fdec, conf
+
+    def test_intact_ledger_provenance_ok(self, tmp_path: Path) -> None:
+        config, index, store, manifest, fb, base_art, method_lock, fdec, conf = self._setup(
+            tmp_path
+        )
+        cfg_digest = "f" * 64
+        ledger = self._ledger(run_id=config.run_id, config_sha256=cfg_digest)
+        ledger.record_artifact("config", cfg_digest)
+        ledger.record_artifact("split_manifest", manifest.checksum)
+        ledger.record_artifact("feature_bank", fb.checksum)
+        ledger.record_artifact("base_artifact", base_art.checksum)
+        ledger.record_artifact("method_lock", method_lock.checksum)
+        ledger.record_artifact("conformal_artifact", conf.checksum)
+
+        result = evaluate_sealed_once(
+            index,
+            store,
+            manifest,
+            base_art,
+            method_lock,
+            conf,
+            fdec,
+            fb,
+            config,
+            run_id=config.run_id,
+            config_sha256=cfg_digest,
+            ledger=ledger,
+        )
+        assert result.clauses["provenance_ok"] is True
+
+    def test_tampered_ledger_hash_invalid(self, tmp_path: Path) -> None:
+        config, index, store, manifest, fb, base_art, method_lock, fdec, conf = self._setup(
+            tmp_path
+        )
+        cfg_digest = "f" * 64
+        ledger = self._ledger(run_id=config.run_id, config_sha256=cfg_digest)
+        ledger.record_artifact("config", cfg_digest)
+        ledger.record_artifact("split_manifest", manifest.checksum)
+        ledger.record_artifact("feature_bank", fb.checksum)
+        # Tamper the base_artifact hash.
+        ledger.record_artifact("base_artifact", "0" * 64)
+        ledger.record_artifact("method_lock", method_lock.checksum)
+        ledger.record_artifact("conformal_artifact", conf.checksum)
+
+        result = evaluate_sealed_once(
+            index,
+            store,
+            manifest,
+            base_art,
+            method_lock,
+            conf,
+            fdec,
+            fb,
+            config,
+            run_id=config.run_id,
+            config_sha256=cfg_digest,
+            ledger=ledger,
+        )
+        assert result.clauses["provenance_ok"] is False
+        assert result.verdict == Verdict.INVALID_EVALUATION

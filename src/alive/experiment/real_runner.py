@@ -44,6 +44,7 @@ evaluate_sealed_once(...)
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from functools import cached_property
 from pathlib import Path
@@ -77,7 +78,7 @@ from alive.experiment.develop import (
 )
 from alive.gate.recoverability import TrustGate
 from alive.metrics.distance import repeated_energy_distance, self_distance_floor
-from alive.metrics.selective import normalize_by_mean
+from alive.metrics.selective import normalize_by_mean, risk_coverage_curve
 from alive.provenance import sha256_json
 from alive.types import OperationalStatus, Query
 
@@ -88,6 +89,7 @@ if TYPE_CHECKING:
     from alive.data.manifest import SplitManifest
     from alive.data.outcome_store import Population
     from alive.data.replogle import ReplogleIndex
+    from alive.eval.bootstrap import ConfirmatoryInference
     from alive.provenance import RunLedger
 
 
@@ -418,6 +420,8 @@ def develop_methods_stage(
     base_artifact: BaseArtifact,
     feature_bank: "FeatureBank",
     config: "Config",
+    *,
+    config_sha256: str | None = None,
 ) -> tuple[MethodLock, FutilityDecision]:
     """Stage 2: OOF method development + preregistered futility decision.
 
@@ -458,7 +462,9 @@ def develop_methods_stage(
     )
 
     md = config.method_development
-    config_sha = config.run_id  # provenance link to the locked config
+    # Provenance link to the locked config: the CLI threads the FULL config
+    # digest (sha256 of the config file); pure unit tests fall back to run_id.
+    config_sha = config_sha256 if config_sha256 is not None else config.run_id
     method_lock = develop_methods(
         ids,
         features,
@@ -567,6 +573,88 @@ def calibrate(
 
 
 # ---------------------------------------------------------------------------
+# Provenance verification (carry-forward fix a)
+# ---------------------------------------------------------------------------
+
+#: Artifact names whose recorded ledger hash must match the in-memory checksum
+#: for ``provenance_ok`` to hold.  Each is recorded by an earlier CLI stage.
+_PROVENANCE_ARTIFACTS: tuple[str, ...] = (
+    "config",
+    "split_manifest",
+    "feature_bank",
+    "base_artifact",
+    "method_lock",
+    "conformal_artifact",
+)
+
+
+def verify_provenance(
+    ledger: "RunLedger | None",
+    expected_checksums: dict[str, str],
+    *,
+    store: object,
+    run_id: str,
+) -> bool:
+    """Verify the run's provenance chain against the recorded :class:`RunLedger`.
+
+    ``provenance_ok`` is ``True`` iff the ledger exists AND every recorded
+    artifact hash in :data:`_PROVENANCE_ARTIFACTS` that is present in the ledger
+    verifies against the in-memory artifact's checksum (config, split manifest,
+    feature bank, base/preprocessing, MethodLock, conformal) AND the
+    sealed-access audit is consistent (exactly one recorded access carrying this
+    ``run_id``).
+
+    Parameters
+    ----------
+    ledger : RunLedger or None
+        The run ledger built by the CLI.  ``None`` is a documented fallback for
+        pure unit tests that do not exercise the provenance leg — in that case
+        the check returns ``True`` (the CLI ALWAYS passes a real ledger so the
+        provenance leg of the integrity gate genuinely fires).
+    expected_checksums : dict[str, str]
+        Map of artifact name → the checksum recomputed from the in-memory
+        artifact this stage holds.  Only names present in BOTH the ledger and
+        this map are compared; a tampered recorded hash → mismatch → ``False``.
+    store : OutcomeStore-like
+        The outcome store; its durable sealed-access audit is checked.
+    run_id : str
+        The deterministic run id; the audit must carry exactly this id once.
+
+    Returns
+    -------
+    bool
+        Whether the provenance chain is intact.
+    """
+    if ledger is None:
+        # Documented fallback: pure unit tests that do not build a ledger.
+        return True
+
+    from alive.provenance import LedgerError
+
+    for name in _PROVENANCE_ARTIFACTS:
+        if name not in expected_checksums:
+            continue
+        try:
+            recorded = ledger.artifact_sha(name)
+        except LedgerError:
+            # An expected artifact was never recorded → broken chain.
+            return False
+        if recorded != expected_checksums[name]:
+            return False
+
+    # Sealed-access audit consistency: exactly one access, carrying this run_id.
+    try:
+        records = store._read_audit_records()  # noqa: SLF001 — internal audit
+    except Exception:  # noqa: BLE001
+        return False
+    if len(records) != 1:
+        return False
+    if records[0].get("run_id") != run_id:
+        return False
+    return True
+
+
+# ---------------------------------------------------------------------------
 # Stage 4 — evaluate_sealed_once (the integrity crux)
 # ---------------------------------------------------------------------------
 
@@ -583,6 +671,7 @@ def evaluate_sealed_once(
     config: "Config",
     *,
     run_id: str,
+    config_sha256: str | None = None,
     ledger: "RunLedger | None" = None,
     result_path: "str | Path | None" = None,
 ) -> VerdictResult:
@@ -755,8 +844,22 @@ def evaluate_sealed_once(
     # The seal opened exactly once (this stage owns the single call).
     leakage_ok = store.sealed_access_count == 1
 
+    # --- Provenance (carry-forward fix a): REAL ledger hash verification. ----
+    # The full config digest (fix c) is threaded from the CLI; pure unit tests
+    # fall back to run_id so existing direct callers keep working.
+    cfg_digest = config_sha256 if config_sha256 is not None else config.run_id
+    expected_checksums = {
+        "config": cfg_digest,
+        "split_manifest": manifest.checksum,
+        "feature_bank": feature_bank.checksum,
+        "base_artifact": base_artifact.checksum,
+        "method_lock": method_lock.checksum,
+        "conformal_artifact": conformal_artifact.checksum,
+    }
+    provenance_ok = verify_provenance(ledger, expected_checksums, store=store, run_id=run_id)
+
     integrity = IntegrityReport(
-        provenance_ok=True,
+        provenance_ok=bool(provenance_ok),
         leakage_ok=bool(leakage_ok),
         sealed_n=sealed_n,
         minimum_sealed=minimum_sealed,
@@ -776,6 +879,8 @@ def evaluate_sealed_once(
     # metrics) we may not be able to run confirmatory/conformal safely.  In that
     # case we synthesise a failed confirmatory result and let compute_verdict
     # return INVALID_EVALUATION — never silently dropped.
+    confirmatory_payload: dict | None = None
+    rc_curve: dict | None = None
     if integrity.is_valid:
         norm = normalize_by_mean(risk)
         confirmatory = confirmatory_inference(
@@ -800,6 +905,13 @@ def evaluate_sealed_once(
             error_bound=conformal_artifact.error_bound,
             threshold=conformal_artifact.predict_threshold,
         )
+        # Persist the data the CONFIRMATORY report renders (no recompute later).
+        coverage_arr, selective_risk_arr = risk_coverage_curve(norm, sealed_gate_scores)
+        rc_curve = {
+            "coverage": [float(x) for x in coverage_arr],
+            "selective_risk": [float(x) for x in selective_risk_arr],
+        }
+        confirmatory_payload = _confirmatory_to_jsonable(confirmatory)
     else:
         confirmatory = _FailedConfirmatory()
         conformal_passes = False
@@ -816,11 +928,22 @@ def evaluate_sealed_once(
     if result_path is not None:
         result_path = Path(result_path)
         verdict.write(result_path)
-        # Co-locate the audit sidecar: coverage report + sealed-access audit.
+        # Co-locate the audit sidecar: everything the report renders without
+        # recomputing the verdict (coverage report, confirmatory bounds,
+        # risk-coverage curve arrays, reliability floors, sealed-access audit).
         sidecar = {
             "verdict": verdict.verdict.value,
             "verdict_checksum": verdict.checksum,
+            "provenance_ok": bool(provenance_ok),
+            "integrity_valid": bool(integrity.is_valid),
+            "conformal_passes": bool(conformal_passes),
             "coverage_report": _jsonable(cov_report),
+            "confirmatory": _jsonable(confirmatory_payload),
+            "risk_coverage_curve": _jsonable(rc_curve),
+            "reliability_floors": [_jsonable(f) for f in reliability_floors],
+            "self_distance_floor_min": (
+                _jsonable(float(min(reliability_floors))) if reliability_floors else None
+            ),
             "conformal_artifact_checksum": conformal_artifact.checksum,
             "method_lock_checksum": method_lock.checksum,
             "base_artifact_checksum": base_artifact.checksum,
@@ -828,17 +951,21 @@ def evaluate_sealed_once(
             "sealed_ids": list(sealed_ids),
             "run_id": run_id,
         }
-        import json
-
         result_path.with_suffix(".audit.json").write_text(
             json.dumps(sidecar, sort_keys=True, separators=(",", ":")),
             encoding="utf-8",
         )
     if ledger is not None:
-        ledger.record_artifact("result", verdict.checksum)
-        ledger.record_artifact("conformal_artifact", conformal_artifact.checksum)
-        ledger.record_artifact("method_lock", method_lock.checksum)
-        ledger.record_artifact("base_artifact", base_artifact.checksum)
+        # Earlier CLI stages may already have recorded the artifact checksums for
+        # provenance verification; record each only if not already present.
+        for name, checksum in (
+            ("result", verdict.checksum),
+            ("conformal_artifact", conformal_artifact.checksum),
+            ("method_lock", method_lock.checksum),
+            ("base_artifact", base_artifact.checksum),
+        ):
+            if not _ledger_has(ledger, name):
+                ledger.record_artifact(name, checksum)
 
     return verdict
 
@@ -846,6 +973,40 @@ def evaluate_sealed_once(
 # ---------------------------------------------------------------------------
 # Minimal stand-in confirmatory result for the integrity-invalid branch.
 # ---------------------------------------------------------------------------
+
+
+def _ledger_has(ledger: "RunLedger", name: str) -> bool:
+    """Return True if *name* is already recorded in *ledger* (no exception)."""
+    from alive.provenance import LedgerError
+
+    try:
+        ledger.artifact_sha(name)
+        return True
+    except LedgerError:
+        return False
+
+
+def _confirmatory_to_jsonable(confirmatory: "ConfirmatoryInference") -> dict:
+    """Serialise a :class:`ConfirmatoryInference` to a JSON-safe dict for the report.
+
+    Captures the simultaneous AURC lower bounds, AUGRC degradation upper bounds,
+    the added-value delta + bound, and the family/pass-fail flags so the
+    confirmatory report can render them WITHOUT recomputing inference.
+    """
+    return {
+        "aurc_point_delta": _jsonable(dict(confirmatory.aurc_point_delta)),
+        "aurc_lower_bound": _jsonable(dict(confirmatory.aurc_lower_bound)),
+        "aurc_family_passes": bool(confirmatory.aurc_family_passes),
+        "augrc_degradation_upper": _jsonable(dict(confirmatory.augrc_degradation_upper)),
+        "augrc_margin": _jsonable(float(confirmatory.augrc_margin)),
+        "augrc_no_material_degradation": bool(confirmatory.augrc_no_material_degradation),
+        "delta_added_value": _jsonable(float(confirmatory.delta_added_value)),
+        "delta_added_value_lower_bound": _jsonable(
+            float(confirmatory.delta_added_value_lower_bound)
+        ),
+        "added_value_passes": bool(confirmatory.added_value_passes),
+        "family_confidence": _jsonable(float(confirmatory.family_confidence)),
+    }
 
 
 def _jsonable(obj: object) -> object:
