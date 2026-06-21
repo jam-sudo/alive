@@ -220,13 +220,15 @@ def test_seed_aggregation_is_mean_over_seeds():
     np.testing.assert_allclose(lock.oof_scores["ensemble_disagreement"], direct)
 
 
-def test_seed_aggregation_mean_two_seeds_explicit(monkeypatch):
-    """Explicitly check the seed-mean: run with one seed vs the mean of two
-    single-seed runs for a fit-free method (nearest_feature is seed-invariant
-    here because folds depend on the seed).  We instead check a controllable
-    method: build a tiny case and confirm that doubling identical seeds leaves
-    the aggregated score unchanged (mean of identical = identical)."""
-    dev_ids, X, e, ens = _make_dev(n=18)
+def test_seed_aggregation_mean_two_seeds_explicit():
+    """Verify aggregated OOF scores equal the exact mean over two DISTINCT seeds.
+
+    ``nearest_feature`` has a single hyperparameter combo and its OOF scores
+    depend on fold assignments (which differ by seed), so the two per-seed OOF
+    vectors are genuinely different.  The two-seed run must produce scores equal
+    to ``0.5 * (s11 + s23)``, not the first-seed-only or a median.
+    """
+    dev_ids, X, e, ens = _make_dev(n=20)
     common = dict(
         cv_folds=CV_FOLDS,
         k_grid=K_GRID,
@@ -235,11 +237,24 @@ def test_seed_aggregation_mean_two_seeds_explicit(monkeypatch):
         gbm_estimators_grid=GBM_ESTIMATORS_GRID,
         config_sha256="cfg_abc",
     )
-    one = develop_methods(dev_ids, X, e, ens, registered_seeds=(11,), **common)
-    dup = develop_methods(dev_ids, X, e, ens, registered_seeds=(11, 11), **common)
-    # mean over identical seeds == single seed result, for every method
-    for m in ALL_METHOD_IDS:
-        np.testing.assert_allclose(one.oof_scores[m], dup.oof_scores[m])
+    lock11 = develop_methods(dev_ids, X, e, ens, registered_seeds=(11,), **common)
+    lock23 = develop_methods(dev_ids, X, e, ens, registered_seeds=(23,), **common)
+    lock_both = develop_methods(dev_ids, X, e, ens, registered_seeds=(11, 23), **common)
+
+    # nearest_feature has a single combo whose OOF depends on fold assignment
+    # (seed-dependent permutation), so the two per-seed vectors must differ.
+    m = "nearest_feature"
+    s11 = lock11.oof_scores[m]
+    s23 = lock23.oof_scores[m]
+    assert not np.allclose(s11, s23), (
+        "per-seed OOF vectors are unexpectedly identical; the test cannot "
+        "distinguish mean-over-seeds from first-seed-only"
+    )
+
+    # The two-seed lock must equal the exact arithmetic mean of the two
+    # single-seed OOF vectors — not first-seed-only, not median.
+    expected = (s11 + s23) / 2.0
+    np.testing.assert_allclose(lock_both.oof_scores[m], expected, rtol=1e-12)
 
 
 # ---------------------------------------------------------------------------

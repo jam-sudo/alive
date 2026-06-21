@@ -210,8 +210,11 @@ def test_identical_sampled_indices_across_methods(monkeypatch):
         first = block[0]
         for arr in block[1:]:
             np.testing.assert_array_equal(arr, first)
-        # And the resample must be an actual resample of the original multiset
-        assert sorted(first.tolist()) != sorted(risk.tolist()) or True  # finite, no error
+        # The resample must have the same length and all values must be drawn
+        # from the original risk array (bootstrap with replacement draws risk[idx]).
+        assert len(first) == len(risk)
+        risk_set = set(np.asarray(risk, dtype=float).tolist())
+        assert all(v in risk_set for v in first.tolist())
 
 
 # ---------------------------------------------------------------------------
