@@ -117,10 +117,13 @@ class MockSequenceEncoder:
     """Deterministic, numpy-only sequence encoder for CI.
 
     Produces per-residue embeddings from a pure arithmetic function of each
-    residue's character code and its position index, seeded via
-    ``numpy.random.default_rng``.  Identical sequences produce identical
-    arrays on every call, across processes, and across Python versions
-    (numpy PCG64 is stable).
+    residue's character code and its position index.  For residue at position
+    *p* with character *char* in dimension *d*, the value is::
+
+        sin(ord(char) * (p + 1) * (d + 1)) * cos(p + d + 2)
+
+    No RNG state is used.  Identical sequences produce identical arrays on
+    every call, across processes, and across Python versions.
 
     Parameters
     ----------

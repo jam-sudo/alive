@@ -201,6 +201,38 @@ def test_non_finite_raises_feature_error() -> None:
         build_feature_bank(mapping, enc, sequence_source="v1")  # type: ignore[arg-type]
 
 
+class _WrongDimEncoder:
+    """Stub encoder whose encode_residues returns arrays with the WRONG number of columns.
+
+    ``dim`` reports 4 but each per-residue array has 7 columns, so the
+    mean-pooled vector will have length 7 != 4, triggering the dim check.
+    """
+
+    @property
+    def dim(self) -> int:
+        return 4
+
+    @property
+    def model_revision(self) -> str:
+        return "wrong-dim-stub"
+
+    def encode_residues(self, sequences: Sequence[str]) -> list[np.ndarray]:
+        results = []
+        for seq in sequences:
+            # Return 7 columns instead of the declared 4
+            arr = np.ones((len(seq), 7), dtype=np.float64)
+            results.append(arr)
+        return results
+
+
+def test_wrong_dim_pooled_vector_raises_feature_error() -> None:
+    """build_feature_bank must raise FeatureError when pooled vector length != encoder.dim."""
+    mapping = {"GENE_A": ["MKVLVI"]}
+    enc = _WrongDimEncoder()
+    with pytest.raises(FeatureError, match="shape"):
+        build_feature_bank(mapping, enc, sequence_source="v1")  # type: ignore[arg-type]
+
+
 # ---------------------------------------------------------------------------
 # 5. Base-train-only standardization
 # ---------------------------------------------------------------------------
