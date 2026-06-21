@@ -421,6 +421,7 @@ def develop_methods_stage(
     feature_bank: "FeatureBank",
     config: "Config",
     *,
+    run_id: str | None = None,
     config_sha256: str | None = None,
 ) -> tuple[MethodLock, FutilityDecision]:
     """Stage 2: OOF method development + preregistered futility decision.
@@ -444,12 +445,23 @@ def develop_methods_stage(
         Per-perturbation feature bank.
     config : Config
         Locked experiment config.
+    run_id : str or None
+        The COMPOSITE immutable run id (spec §4.5) used to seed the deterministic
+        equal-cell sampling of the ``method_development`` errors.  MUST match the
+        value used by :func:`calibrate` / :func:`evaluate_sealed_once` for the
+        shared reference bank.  The CLI threads the composite run_id; pure unit
+        tests may omit it (falls back to ``config.config_digest``).
 
     Returns
     -------
     tuple[MethodLock, FutilityDecision]
         The locked methods and the futility decision.
     """
+    # Sampling seed source: the composite run_id when threaded (spec §4.5), else
+    # config.config_digest for pure unit tests.  MUST match the value used by
+    # calibrate / evaluate_sealed_once for the shared method_development bank.
+    seed_run_id = run_id if run_id is not None else config.config_digest
+
     dev_ids = [pid for pid in manifest.ids_for("method_development") if feature_bank.has(pid)]
     populations = store.read_unsealed(dev_ids)
     ids, features, errors, ensemble_means = perturbation_inputs(
@@ -458,7 +470,7 @@ def develop_methods_stage(
         feature_bank,
         populations,
         response_cfg=config.response_space,
-        run_id=config.config_digest,
+        run_id=seed_run_id,
     )
 
     md = config.method_development
@@ -507,6 +519,7 @@ def calibrate(
     feature_bank: "FeatureBank",
     config: "Config",
     *,
+    run_id: str | None = None,
     config_sha256: str | None = None,
 ) -> ConformalArtifact:
     """Stage 3: build the split-conformal artifact on conformal_calibration.
@@ -531,6 +544,15 @@ def calibrate(
         Per-perturbation feature bank.
     config : Config
         Locked experiment config.
+    run_id : str or None
+        The COMPOSITE immutable run id (spec §4.5) used to seed the deterministic
+        equal-cell sampling of the shared ``method_development`` reference bank
+        (and the calibration query set).  This MUST be the same value
+        :func:`evaluate_sealed_once` is called with so the gate/comparator scorers
+        fitted at calibration and at sealed evaluation are byte-identical — the
+        conformal coverage guarantee assumes one identically-fitted model.  The
+        CLI always threads the composite run_id; pure unit tests may omit it
+        (falls back to ``config.config_digest`` so existing tests remain valid).
     config_sha256 : str or None
         Full 64-char SHA-256 digest of the locked config file.  The CLI
         always passes this; pure unit tests may omit it (falls back to
@@ -544,6 +566,11 @@ def calibrate(
     base = base_artifact.base_predictor
     rs = base_artifact.response_space
 
+    # The sampling seed source: the composite run_id when threaded (spec §4.5),
+    # else config.config_digest for pure unit tests.  MUST match the value used
+    # by evaluate_sealed_once for the shared reference bank.
+    seed_run_id = run_id if run_id is not None else config.config_digest
+
     # Reference bank = method_development (never calibration/sealed).
     ref_ids = [pid for pid in manifest.ids_for("method_development") if feature_bank.has(pid)]
     ref_pops = store.read_unsealed(ref_ids)
@@ -553,7 +580,7 @@ def calibrate(
         feature_bank,
         ref_pops,
         response_cfg=config.response_space,
-        run_id=config.config_digest,
+        run_id=seed_run_id,
     )
 
     # Calibration query set.
@@ -565,7 +592,7 @@ def calibrate(
         feature_bank,
         cal_pops,
         response_cfg=config.response_space,
-        run_id=config.config_digest,
+        run_id=seed_run_id,
     )
 
     cal_scores = gate_and_comparator_scores(

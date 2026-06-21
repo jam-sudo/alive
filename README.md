@@ -54,7 +54,10 @@ uv run alive cartographer <command> [options]
 
 All commands operate on a single **run**, identified by a `run_id` that is a deterministic composite
 hash of the config **plus** the data card, the raw expression file, and the protein-sequence
-mapping — so the same config on different data is a different run. Artifacts for a run live under:
+mapping — so the same config on different data is a different run. Because the `run_id` binds the
+declared data card (including its `h5ad` / `sequences` paths), staging the *same* data at a different
+path or mount yields a *different* `run_id` and a separate run directory. Artifacts for a run live
+under:
 
 ```
 <artifacts-root>/cartographer/<run_id>/

@@ -906,3 +906,172 @@ class TestRequireEncoderMatch:
         # INVALID_EVALUATION (the mock bank matches the mock-config primary, and
         # require_encoder_match=False would skip the check regardless).
         assert result.verdict != Verdict.INVALID_EVALUATION
+
+
+# ===========================================================================
+# Fix wave 1 (Task 2 review; spec §4.5): the shared method_development
+# reference-bank sampling seed must be the SAME composite run_id in calibrate
+# and in evaluate_sealed_once.  If calibrate seeds the bank with one value and
+# evaluate-once with another, the gate/comparator scorers refit at sealed
+# evaluation diverge from the ones the conformal threshold was built on, which
+# silently shifts coverage/verdict.  These tests pin the consistency.
+# ===========================================================================
+
+
+class TestReferenceBankSeedConsistency:
+    """calibrate and evaluate_sealed_once must seed the shared reference bank alike.
+
+    The equal-cell energy distance is deterministically seeded from
+    ``(run_id, perturbation_id)``.  When the reference populations exceed
+    ``cell_cap`` the subsample — and therefore ``ref_errors`` and the scorers
+    fitted from it — depend on the seed.  After Fix wave 1, the composite
+    ``run_id`` (NOT ``config.config_digest``) seeds that sampling in BOTH stages,
+    so the gate/comparator scorer the conformal threshold is built on is byte-
+    identical to the one evaluate_sealed_once refits at sealed evaluation.
+    """
+
+    @staticmethod
+    def _seed_sensitive_config() -> Config:
+        # cell_cap below the per-perturbation cell count (20-30) so the equal-cell
+        # subsample is genuinely seed-dependent; >1 repeats amplifies it.
+        return _test_config(cell_cap=12, min_cells=8, cell_sampling_repeats=4)
+
+    def test_perturbation_inputs_reference_bank_is_seed_sensitive(self, tmp_path: Path) -> None:
+        """Sanity precondition: the reference bank errors change with the seed.
+
+        Without this the consistency tests below could pass vacuously (a
+        seed-insensitive bank would agree regardless of which seed each stage
+        used, hiding the very divergence we are guarding against).
+        """
+        config = self._seed_sensitive_config()
+        index, store, manifest, fb = _build_world(tmp_path, config=config, seed=4)
+        base_art = fit_base(index, store, manifest, fb, config)
+
+        ref_ids = [pid for pid in manifest.ids_for("method_development") if fb.has(pid)]
+        ref_pops = store.read_unsealed(ref_ids)
+
+        def _ref_errors(run_id: str) -> np.ndarray:
+            _ids, _f, errs, _e = perturbation_inputs(
+                base_art.base_predictor,
+                base_art.response_space,
+                fb,
+                ref_pops,
+                response_cfg=config.response_space,
+                run_id=run_id,
+            )
+            return errs
+
+        errs_digest = _ref_errors(config.config_digest)
+        errs_composite = _ref_errors("composite-run-id-deadbeef")
+        assert not np.allclose(errs_digest, errs_composite), (
+            "reference bank is seed-insensitive in this fixture; the consistency "
+            "test would be vacuous — increase cell count / lower cell_cap"
+        )
+
+    @staticmethod
+    def _spy_reference_bank_run_id(monkeypatch) -> dict[str, list[str]]:
+        """Patch real_runner.perturbation_inputs to record every ``run_id`` seed.
+
+        Returns a dict with key ``"run_ids"`` accumulating, in call order, the
+        ``run_id`` value each stage passes to ``perturbation_inputs`` (the seed
+        source for the equal-cell sampling of the reference / query banks).  The
+        first call inside calibrate / evaluate_sealed_once is the SHARED
+        method_development reference bank — that is the value under test.
+        """
+        import alive.experiment.real_runner as rr
+
+        captured: dict[str, list[str]] = {"run_ids": []}
+        original = rr.perturbation_inputs
+
+        def _spy(*args, **kwargs):
+            captured["run_ids"].append(kwargs["run_id"])
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(rr, "perturbation_inputs", _spy)
+        return captured
+
+    def test_calibrate_seeds_reference_bank_with_threaded_composite_run_id(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """calibrate(run_id=composite) MUST seed the reference bank with that run_id.
+
+        RED before the fix: calibrate ignored the threaded run_id and seeded the
+        reference bank with config.config_digest — so the captured seed equalled
+        config.config_digest, NOT the composite run_id.
+        GREEN after: the captured seed is the composite run_id.
+        """
+        config = self._seed_sensitive_config()
+        composite_run_id = "composite-run-id-deadbeef"
+        assert config.config_digest != composite_run_id
+
+        index, store, manifest, fb = _build_world(tmp_path, config=config, seed=4)
+        base_art = fit_base(index, store, manifest, fb, config)
+        method_lock, _fd = develop_methods_stage(
+            index, store, manifest, base_art, fb, config, run_id=composite_run_id
+        )
+
+        captured = self._spy_reference_bank_run_id(monkeypatch)
+        calibrate(
+            index, store, manifest, base_art, method_lock, fb, config, run_id=composite_run_id
+        )
+
+        # Every bank calibrate samples (reference + calibration query) must be
+        # seeded with the composite run_id — never config.config_digest.
+        assert captured["run_ids"], "calibrate did not sample any bank"
+        assert all(rid == composite_run_id for rid in captured["run_ids"]), (
+            f"calibrate seeded a bank with {set(captured['run_ids'])!r}; expected only "
+            f"the composite run_id {composite_run_id!r}"
+        )
+
+    def test_calibrate_and_evaluate_seed_shared_bank_identically(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """The SHARED method_development reference bank seed must match across stages.
+
+        Captures the reference-bank ``run_id`` calibrate uses, then the one
+        evaluate_sealed_once uses, with the SAME composite run_id threaded into
+        both.  They must be equal (the conformal threshold and the sealed scores
+        compared against it come from one identically-fitted scorer).
+
+        RED before the fix: calibrate's reference-bank seed was
+        config.config_digest while evaluate_sealed_once's was the composite
+        run_id — divergent.
+        """
+        config = self._seed_sensitive_config()
+        composite_run_id = "composite-run-id-deadbeef"
+        assert config.config_digest != composite_run_id
+
+        index, store, manifest, fb = _build_world(tmp_path, config=config, seed=4)
+        base_art = fit_base(index, store, manifest, fb, config)
+        method_lock, fdec = develop_methods_stage(
+            index, store, manifest, base_art, fb, config, run_id=composite_run_id
+        )
+        fdec = replace(fdec, status=OperationalStatus.CONTINUE_CONFIRMATORY)
+
+        cal_capture = self._spy_reference_bank_run_id(monkeypatch)
+        conf = calibrate(
+            index, store, manifest, base_art, method_lock, fb, config, run_id=composite_run_id
+        )
+        calibrate_ref_seed = cal_capture["run_ids"][0]
+
+        eval_capture = self._spy_reference_bank_run_id(monkeypatch)
+        evaluate_sealed_once(
+            index,
+            store,
+            manifest,
+            base_art,
+            method_lock,
+            conf,
+            fdec,
+            fb,
+            config,
+            run_id=composite_run_id,
+        )
+        evaluate_ref_seed = eval_capture["run_ids"][0]
+
+        assert calibrate_ref_seed == evaluate_ref_seed == composite_run_id, (
+            "calibrate and evaluate_sealed_once seeded the shared method_development "
+            f"reference bank with DIFFERENT run_ids "
+            f"(calibrate={calibrate_ref_seed!r}, evaluate={evaluate_ref_seed!r}); the "
+            "conformal coverage guarantee is broken when the seeds diverge."
+        )

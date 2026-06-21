@@ -882,6 +882,10 @@ class TestCliDevelopedParity:
             base_art,
             feature_bank,
             config,
+            # Fix wave 1 (spec §4.5): the CLI seeds the shared method_development
+            # reference-bank sampling with the COMPOSITE run_id, so the staged
+            # function must be threaded the same run_id for byte-identical parity.
+            run_id=run_id,
             config_sha256=config_sha256_for_staged,
         )
 

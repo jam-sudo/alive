@@ -442,6 +442,10 @@ def cmd_develop(args: argparse.Namespace) -> int:
     config_sha256 = _ledger_config_sha(run_dir)
 
     # Compute the method_development inputs ONCE (read_unsealed only — no seal).
+    # Seed the equal-cell sampling of the shared method_development reference bank
+    # with the COMPOSITE run_id (spec §4.5) — the SAME value evaluate-once uses —
+    # so the gate/comparator scorers refitted at sealed evaluation are byte-
+    # identical to those fitted here (NOT the config digest, which would diverge).
     dev_ids_all = [pid for pid in manifest.ids_for("method_development") if feature_bank.has(pid)]
     populations = store.read_unsealed(dev_ids_all)
     ids, features, errors, ensemble_means = perturbation_inputs(
@@ -450,7 +454,7 @@ def cmd_develop(args: argparse.Namespace) -> int:
         feature_bank,
         populations,
         response_cfg=config.response_space,
-        run_id=config.config_digest,
+        run_id=args.run_id,
     )
 
     md = config.method_development
@@ -511,6 +515,11 @@ def cmd_calibrate(args: argparse.Namespace) -> int:
 
     # calibrate RUNS IN EITHER BRANCH (a futility-stopped run still ships its
     # conformal artifact); the futility decision is intentionally not consulted.
+    # Seed the shared method_development reference-bank sampling with the COMPOSITE
+    # run_id (spec §4.5) — the SAME value evaluate-once uses — so the gate scorer
+    # fitted here matches the one refitted at sealed evaluation (the conformal
+    # threshold and the sealed scores compared against it must come from one
+    # identically-fitted model).
     conformal = calibrate(
         index,
         store,
@@ -519,6 +528,7 @@ def cmd_calibrate(args: argparse.Namespace) -> int:
         method_lock,
         feature_bank,
         config,
+        run_id=args.run_id,
         config_sha256=config_sha256,
     )
     conformal.write(run_dir / "conformal.json")
