@@ -134,6 +134,70 @@ def _base_paths(run_dir: Path) -> tuple[Path, Path]:
 
 
 # ---------------------------------------------------------------------------
+# Upstream-stage locks (CLAUDE.md §11; spec §11.2)
+#
+# Once a run reaches a terminal state (FUTILITY_STOPPED) or its seal has opened
+# (a sealed access recorded in audit.jsonl), the early stages must permanently
+# refuse to re-run.  There are TWO distinct lock conditions, binding different
+# stages:
+#
+#   * Seal lock — a sealed access has been recorded → refuse fit, develop AND
+#     calibrate (all three are upstream of the seal).
+#   * Futility-terminal lock — the run is FUTILITY_STOPPED → refuse fit and
+#     develop ONLY.  calibrate must remain runnable: a futility-stopped run
+#     still ships its conformal error bound via calibrate (spec §9.3 / §12.1;
+#     pipeline order … → futility → calibrate → [evaluate-once]).
+# ---------------------------------------------------------------------------
+
+
+def _assert_not_sealed(run_dir: Path) -> None:
+    """Refuse any upstream re-run once the sealed cohort has been accessed.
+
+    The durable sealed-access audit is ``<run_dir>/audit.jsonl`` (written by the
+    outcome store at sealed evaluation).  A non-empty audit means the seal has
+    opened, so ``fit``/``develop``/``calibrate`` are all permanently locked for
+    this run (CLAUDE.md §11; spec §11.2).  Reading the file directly avoids
+    constructing an outcome store before the guard runs.
+
+    Raises
+    ------
+    CliError
+        If a sealed-access record exists (mapped to a clean exit 2 by ``main``).
+    """
+    audit_path = run_dir / "audit.jsonl"
+    if audit_path.exists() and audit_path.read_text(encoding="utf-8").strip():
+        raise CliError(
+            "the sealed cohort has been accessed; upstream stages are permanently "
+            "locked for this run (spec §11.2). Start a new run for any further work."
+        )
+
+
+def _assert_not_futility_terminal(run_dir: Path) -> None:
+    """Refuse ``fit``/``develop`` re-runs once the run is FUTILITY_STOPPED (terminal).
+
+    A FUTILITY_STOPPED run is terminal: its upstream model-building stages must
+    not be re-run (CLAUDE.md §11; spec §11.2).  This guard does NOT bind
+    ``calibrate`` — a futility-stopped run still ships its conformal error bound
+    via ``calibrate`` (spec §9.3 / §12.1), so ``calibrate`` only carries the seal
+    lock (:func:`_assert_not_sealed`).
+
+    Raises
+    ------
+    CliError
+        If ``futility.json`` records ``FUTILITY_STOPPED`` (clean exit 2).
+    """
+    futility_path = run_dir / "futility.json"
+    if futility_path.exists():
+        status = json.loads(futility_path.read_text(encoding="utf-8")).get("status")
+        if status == OperationalStatus.FUTILITY_STOPPED.value:
+            raise CliError(
+                "run is FUTILITY_STOPPED (terminal); upstream model-building stages "
+                "are locked (spec §11.2). Start a new run for any further confirmatory "
+                "attempt. (calibrate still runs to ship the futility conformal artifact.)"
+            )
+
+
+# ---------------------------------------------------------------------------
 # Encoder selection
 # ---------------------------------------------------------------------------
 
@@ -426,6 +490,9 @@ def _raw_data_hash(h5ad: str, data_card: dict) -> str:
 
 def cmd_fit(args: argparse.Namespace) -> int:
     run_dir = _require_run_dir(Path(args.artifacts_root), args.run_id)
+    # Lock upstream re-runs after a sealed access or a futility-terminal state.
+    _assert_not_sealed(run_dir)
+    _assert_not_futility_terminal(run_dir)
     index, store, manifest, feature_bank, config = _load_world(run_dir)
 
     base_artifact = fit_base(index, store, manifest, feature_bank, config)
@@ -447,6 +514,9 @@ def cmd_fit(args: argparse.Namespace) -> int:
 
 def cmd_develop(args: argparse.Namespace) -> int:
     run_dir = _require_run_dir(Path(args.artifacts_root), args.run_id)
+    # Lock upstream re-runs after a sealed access or a futility-terminal state.
+    _assert_not_sealed(run_dir)
+    _assert_not_futility_terminal(run_dir)
     index, store, manifest, feature_bank, config = _load_world(run_dir)
     base_artifact = _load_base_artifact(run_dir)
     config_sha256 = _ledger_config_sha(run_dir)
@@ -523,6 +593,10 @@ def cmd_futility(args: argparse.Namespace) -> int:
 
 def cmd_calibrate(args: argparse.Namespace) -> int:
     run_dir = _require_run_dir(Path(args.artifacts_root), args.run_id)
+    # Lock calibrate re-runs after a sealed access ONLY: calibrate is upstream of
+    # the seal but DOWNSTREAM of futility, so a futility-stopped run must still be
+    # able to ship its conformal artifact here (no futility-terminal lock).
+    _assert_not_sealed(run_dir)
     index, store, manifest, feature_bank, config = _load_world(run_dir)
     base_artifact = _load_base_artifact(run_dir)
     method_lock = MethodLock.read(run_dir / "methodlock")

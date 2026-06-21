@@ -535,6 +535,118 @@ class TestEndToEndFutility:
 
 
 # ===========================================================================
+# Task 4 (#4 / audit P1-2 pt3): lock upstream stages after terminal/sealed state
+#
+# Two distinct lock conditions (CLAUDE.md §11; spec §11.2):
+#   1. Seal lock — once a sealed access is recorded (audit.jsonl non-empty), the
+#      upstream stages fit/develop/calibrate are ALL permanently refused.
+#   2. Futility-terminal lock — once futility.json status == FUTILITY_STOPPED,
+#      fit/develop are refused, but calibrate MUST remain runnable (it is the
+#      futility-stopped run's primary deliverable; spec §9.3 / §12.1).
+# ===========================================================================
+
+
+def _drive_through_evaluate_once(tmp_path: Path) -> str:
+    """Prepare → fit → develop → futility, force CONTINUE, calibrate, evaluate-once.
+
+    Returns the composite run_id after the seal has been opened exactly once.
+    """
+    config_path, data_card_path = _write_world(tmp_path, seed=3)
+    root = _artifacts_root(tmp_path)
+    run_id = _run_id(config_path, data_card_path)
+    run_dir = root / "cartographer" / run_id
+
+    assert (
+        _run(
+            [
+                "cartographer",
+                "prepare",
+                "--config",
+                str(config_path),
+                "--data-card",
+                str(data_card_path),
+                "--mock-encoder",
+            ],
+            root,
+        )
+        == 0
+    )
+    assert _run(["cartographer", "fit", "--run-id", run_id], root) == 0
+    assert _run(["cartographer", "develop", "--run-id", run_id], root) == 0
+    assert _run(["cartographer", "futility", "--run-id", run_id], root) == 0
+    _force_status(run_dir, "CONTINUE_CONFIRMATORY")
+    assert _run(["cartographer", "calibrate", "--run-id", run_id], root) == 0
+    assert _run(["cartographer", "evaluate-once", "--run-id", run_id], root) == 0
+    # The seal has opened exactly once.
+    audit_lines = [
+        ln
+        for ln in (run_dir / "audit.jsonl").read_text(encoding="utf-8").splitlines()
+        if ln.strip()
+    ]
+    assert len(audit_lines) == 1
+    return run_id
+
+
+def _drive_to_futility_stop(tmp_path: Path) -> str:
+    """Prepare → fit → develop → futility, then force FUTILITY_STOPPED.
+
+    Returns the composite run_id of a futility-terminal run whose seal is shut.
+    """
+    config_path, data_card_path = _write_world(tmp_path, seed=3)
+    root = _artifacts_root(tmp_path)
+    run_id = _run_id(config_path, data_card_path)
+    run_dir = root / "cartographer" / run_id
+
+    assert (
+        _run(
+            [
+                "cartographer",
+                "prepare",
+                "--config",
+                str(config_path),
+                "--data-card",
+                str(data_card_path),
+                "--mock-encoder",
+            ],
+            root,
+        )
+        == 0
+    )
+    assert _run(["cartographer", "fit", "--run-id", run_id], root) == 0
+    assert _run(["cartographer", "develop", "--run-id", run_id], root) == 0
+    assert _run(["cartographer", "futility", "--run-id", run_id], root) == 0
+    _force_status(run_dir, "FUTILITY_STOPPED")
+    return run_id
+
+
+class TestUpstreamLockedAfterTerminalOrSeal:
+    def test_upstream_locked_after_seal(self, tmp_path: Path) -> None:
+        """Once the seal has opened, fit/develop/calibrate are ALL refused (exit 2)."""
+        rid = _drive_through_evaluate_once(tmp_path)
+        # All three upstream stages are upstream of the seal → permanently locked.
+        assert _run_stage(tmp_path, "calibrate", rid) == 2
+        assert _run_stage(tmp_path, "fit", rid) == 2
+        assert _run_stage(tmp_path, "develop", rid) == 2
+
+    def test_upstream_locked_after_futility_stop(self, tmp_path: Path) -> None:
+        """A FUTILITY_STOPPED (terminal) run refuses fit and develop (exit 2)."""
+        rid = _drive_to_futility_stop(tmp_path)
+        assert _run_stage(tmp_path, "fit", rid) == 2
+        assert _run_stage(tmp_path, "develop", rid) == 2
+
+    def test_calibrate_allowed_after_futility_stop(self, tmp_path: Path) -> None:
+        """Regression guard for the corrected contract: a FUTILITY_STOPPED run STILL
+        ships its conformal artifact via calibrate — calibrate must NOT be locked by
+        the futility-terminal state (README integrity behaviors; spec §9.3 / §12.1).
+        """
+        rid = _drive_to_futility_stop(tmp_path)
+        run_dir = _run_dir(tmp_path, rid)
+        # calibrate runs to completion (exit 0) and produces the conformal artifact.
+        assert _run_stage(tmp_path, "calibrate", rid) == 0
+        assert (run_dir / "conformal.json").exists()
+
+
+# ===========================================================================
 # Report schema lock (headline)
 # ===========================================================================
 
