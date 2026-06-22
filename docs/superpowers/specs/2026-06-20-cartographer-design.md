@@ -505,8 +505,8 @@ immutable experiment identity를 형성해야 한다.
 ### 11.3 2026-06-21 implementation audit에서 확인된 scientific-run blocker
 
 다음 항목이 모두 해결되기 전에는 real K562 scientific run을 시작하지 않는다. 항목 1–5는
-모두 merge되었고(아래 commit 참조), 남은 open precondition은 §4.3의 A100 real-model ESM
-smoke test 하나다.
+모두 merge되었고(아래 commit 참조), 마지막 precondition인 §4.3 A100 real-model ESM smoke
+test도 2026-06-22 실하드웨어에서 통과했다. TG-K562-v1 confirmatory run은 완료되었다(§11.4).
 
 1. ESM 초기화 실패 시 mock encoder로 silent fallback하는 경로 제거 — **해결**(commit 8b47901)
 2. ESM length-bucket batching과 long-sequence policy 구현 — **해결**(commit a2f3d8f, 9f9f3aa)
@@ -517,10 +517,24 @@ smoke test 하나다.
    byte-identical-or-refuse 2146dac, terminal/seal 후 upstream stage lock 90e7f06)
 5. Sequence provenance를 raw expression URI와 분리 — **해결**(commit 2dd3f65)
 
-추가로 §4.3의 A100 real-model ESM smoke test는 아직 미실행이다(현재까지 batching/length-policy
-순수 로직만 torch 없이 검증). 따라서 real feature-bank build 전 open precondition으로 남는다.
+§4.3 A100 real-model ESM smoke test는 2026-06-22 RunPod A100 80GB에서 통과했다(실 ESM-2
+650M forward, dim 1280, all-finite, GPU peak 2.71GB). 이로써 모든 real-run precondition이 충족됐다.
 
-이 blocker 상태는 synthetic CI 성공과 별개다.
+### 11.4 TG-K562-v1 confirmatory run 결과 (2026-06-22)
+
+run_id `d18c601b6855b3b1` (config digest `edbeaaf0…`; data `K562_essential_raw_singlecell_01.h5ad`
+figshare 20029387/files/35773219, SHA 검증; `long_sequence_policy=truncate`; eligible 1645,
+split 740/411/247/247; ESM-2 t33_650M_UR50D on A100, torch 2.6.0+cu124). Mini end-to-end
+validation(360 perts)와 pod leakage/provenance 100 passed 통과 후 실행. Seal 정확히 1회 개방.
+
+**Verdict: `NO_DISTINCT_WIN`.** 모든 integrity/leakage/provenance/reliability clause 통과,
+`conformal_passes=true`(scalar error bound가 sealed K562에서 유효 coverage 달성), 그러나
+`aurc_family_passes=false`, `added_value_passes=false`(full gate가 residual-only를 못 이김),
+`augrc_no_material_degradation=false`. Development OOF AURC에서도 gate(0.899)가
+ensemble_disagreement(0.839)·nearest_feature(0.886)에 뒤졌다. 즉 Trust-Gate의 routing-superiority
+headline은 실 K562에서 falsify되었고 R1은 R4 위에 added value가 없다 — spec §2.4/§13이
+사전등록한 registered negative다. Calibrated conformal error bound는 유효하므로 보존한다.
+결과·provenance는 immutable run dir + off-instance 사본으로 보존한다.
 
 ---
 
@@ -747,6 +761,8 @@ value다. Full gate가 supervised error regression과 residual-only를 이기지
 negative다. R2/R3, distribution-valued sets, RPE1, causal masking, Active Cartography는 모두
 별도 activation prerequisite를 가진 후속 연구이며 현재 결과에 소급해 주장하지 않는다.
 
-Scientific run은 §11.3의 남은 open precondition — §4.3 A100 real-model ESM smoke test — 가
-해결된 뒤에만 허용한다. Write-once run provenance(#4), sequence-provenance 분리(#5),
-mock-fallback 제거, ESM batching, eligibility-before-split(#1–5)은 모두 merge되었다.
+모든 real-run precondition(#1–5 + §4.3 A100 ESM smoke)이 충족되어 TG-K562-v1 confirmatory
+run이 2026-06-22 완료되었다(§11.4). 등록된 verdict는 `NO_DISTINCT_WIN`: conformal error
+bound는 유효하나 Trust-Gate는 사전등록 comparator family를 비환원적으로 이기지 못했다
+(R1이 R4 residual 위에 added value 없음) — 정직한 registered negative. 후속 연구는 이 결과
+위에서 새 mechanism을 설계하며 현재 결과에 소급해 주장하지 않는다.
