@@ -57,5 +57,5 @@ futility:
   rule: stop_if_any_simultaneous_upper_bound_le_minimum
 feature_extraction:       # identical to full (real ESM batching)
   max_residues: 1022
-  long_sequence_policy: error
+  long_sequence_policy: truncate  # matches full config (long K562-essential proteins)
   max_batch_tokens: 16384
