@@ -527,49 +527,65 @@ figshare 20029387/files/35773219, SHA 검증; `long_sequence_policy=truncate`; e
 split 740/411/247/247; ESM-2 t33_650M_UR50D on A100, torch 2.6.0+cu124). Mini end-to-end
 validation(360 perts)와 pod leakage/provenance 100 passed 통과 후 실행. Seal 정확히 1회 개방.
 
-**Verdict: `NO_DISTINCT_WIN`.** 모든 integrity/leakage/provenance/reliability clause 통과,
-`conformal_passes=true`(scalar error bound가 sealed K562에서 유효 coverage 달성), 그러나
-`aurc_family_passes=false`, `added_value_passes=false`(full gate가 residual-only를 못 이김),
+**Verdict: `NO_DISTINCT_WIN`.** 등록된 verdict clause 중 `conformal_passes=true`(scalar error
+bound가 sealed K562에서 유효 coverage 달성), 그러나 `aurc_family_passes=false`,
+`added_value_passes=false`(full gate가 동시추론 기준에서 residual-only를 인증가능하게 못 이김),
 `augrc_no_material_degradation=false`. Development OOF AURC에서도 gate(0.899)가
 ensemble_disagreement(0.839)·nearest_feature(0.886)에 뒤졌다. 즉 Trust-Gate의 routing-superiority
-headline은 실 K562에서 falsify되었다 — spec §2.4/§13이 사전등록한 registered negative다.
-(`added_value_passes=false`는 동시추론 기준의 **인증 실패**이며, "R1이 R4 위에 신호가 없다"는
-신호 수준 해석은 틀렸다 — §11.5 post-hoc 진단으로 정정한다.) Calibrated conformal error bound는
-유효하므로 보존한다. 결과·provenance는 immutable run dir + off-instance 사본으로 보존한다.
+headline은 실 K562에서 falsify되었다 — spec §2.4/§13이 사전등록한 registered negative다. Calibrated
+conformal error bound는 유효하므로 보존한다.
 
-### 11.5 Post-hoc OOF 진단 (2026-06-22, development surface only)
+**Provenance/무결성 검증의 한계 (overclaim 금지).** verdict가 보고하는
+`integrity_valid`/`leakage_ok`/`provenance_ok`/`reliability_ok` clause는 **run 내부의 구조적
+자기검증**이며 독립 audit이 아니다. '모든 무결성 검증 완료'로 표현하지 않는다 — '등록된 구조적
+clause는 통과했으나 아래 한계가 있다'로 기술한다. 알려진 한계: (a) `evaluate_sealed_once`는
+calibrate가 적합한 scorer artifact를 로드하지 않고 `ref_errors`에서 재적합한다 — 결정성은 통합
+seed(§4.5)에 의존하며 artifact-load 검증으로 보장되지 않는다; (b) conformal scorer 결합이
+암묵적이다; (c) composite run_id가 data-card의 절대경로를 그대로 bind한다(다른 mount = 다른
+run_id); (d) 단일 run·단일 seed family로 독립 환경 재현이 없다; (e) off-instance 사본은 요약
+artifact만 보유하며 전체 lineage는 pod `/workspace`에 있다. 결과·provenance는 immutable run dir +
+off-instance 사본으로 보존한다.
 
-§11.4의 verdict는 불변이다. 다음 milestone 설계를 위한 **개발(method_development) OOF 표면만의
-read-only 진단**이며 sealed cohort는 재개방하지 않는다(§6.1). 도구: `src/alive/eval/diagnostics.py`
-+ `scripts/diagnose_dev_oof.py` (branch `diagnostics-oof-postmortem`). 입력: `methodlock.json`의
+### 11.5 Post-hoc OOF 진단 — 탐색적 가설 (2026-06-22, development surface only)
+
+§11.4의 verdict는 불변이다. **아래는 다음 milestone 설계를 위한 탐색적(exploratory) 분석이며,
+확정된 인과·결론이 아니다.** 개발(method_development) OOF 표면만의 read-only 진단이고 sealed
+cohort는 재개방하지 않는다(§6.1). 도구: `src/alive/eval/diagnostics.py` +
+`scripts/diagnose_dev_oof.py` (branch `diagnostics-oof-postmortem`). 입력: `methodlock.json`의
 per-perturbation `oof_scores` + `dev_errors.npz`의 realised error (n=411). 재계산 AURC는 등록된
-dev OOF AURC를 정확히 재현했다(파이프라인 검증).
+dev OOF AURC를 정확히 재현했다(파이프라인 sanity).
 
-- **Spearman(score, error)**: ensemble_disagreement **+0.297** > nearest_feature(R1) **+0.213** >
-  gate(R1⊕R4) **+0.171** > residual_only(R4) **+0.134** > gbm_error +0.123 > ridge_error +0.049.
-- **부분 rank 상관**: `partial(feature, error | residual)` **+0.193** > `partial(residual, error |
-  feature)` **+0.097**; `corr(feature, residual)` +0.192 (두 축의 중복은 작다).
+**왜 가설인가 — 검증의 한계.** 단일 post-hoc run·단일 seed family다. 상관·부분상관에
+신뢰구간/유의성 검정을 부여하지 않았다(점추정만). `nearest_feature` comparator는 gate 내부 R1
+component와 동일하지 않아 R1 proxy로서 불완전하다. 부분상관은 rank-선형 통제 가정에 의존한다.
+dev 표면 결과라 sealed 일반화를 보장하지 않는다. 따라서 아래 수치는 방향 설정용 신호이지 입증이
+아니다.
 
-해석 (세 가지):
+점추정 (CI 없음):
+- **Spearman(score, error)**: ensemble_disagreement +0.297 > nearest_feature(R1) +0.213 >
+  gate(R1⊕R4) +0.171 > residual_only(R4) +0.134 > gbm_error +0.123 > ridge_error +0.049.
+- **부분 rank 상관**: `partial(feature, error | residual)` +0.193, `partial(residual, error |
+  feature)` +0.097; `corr(feature, residual)` +0.192.
 
-1. **Feature/서열 축(R1)은 무의미하지 않다 — 두 component 중 더 강한 독립 신호다.** nearest_feature
-   단독이 residual 단독보다, 그리고 feature|residual 부분상관이 residual|feature보다 크다. 따라서
-   `added_value_passes=false`는 *인증* 실패(n=411·동시추론에서 robust margin 부족)이지 R1 무가치가
-   아니다.
-2. **결함은 gate의 융합 방식이다.** 결합 gate(0.171)가 nearest_feature 단독(0.213)보다 못하다 —
-   R1⊕R4 ECDF 평균이 더 강한 축을 희석한다(combiner 문제, feature 문제 아님).
-3. **천장은 ensemble_disagreement(0.297)다.** base bootstrap disagreement라는 무학습·공짜 신호가
-   R1·R4·gate·supervised regressor 전부를 능가한다. → bolt-on trust layer가 base 자체의 epistemic
-   신호에 지배된다. 이것이 NO_DISTINCT_WIN의 binding cause다.
+탐색적 가설 (세 가지, 미확정 — 다음 milestone에서 사전등록 검정으로 확인/반증 필요):
 
-Gate의 최대 과신 perturbation(high realised error, low/trusted score): HSPA9(6.94), PHB2(5.58),
-INTS7, GSPT1, NLE1, ZNF236, KIF20A, CENPK, PRPF40A — mito chaperone/ribosome-biogenesis/cell-cycle
-계열 큰-효과 essential gene으로, additive base가 underpredict하는 영역이다. 산출물:
+1. **Feature/서열 축(R1)이 무의미하지 않을 가능성.** nearest_feature 단독이 residual 단독보다,
+   feature|residual 부분상관이 residual|feature보다 (점추정상) 크다. 이는 `added_value_passes=false`가
+   'R1 무신호'가 아니라 *인증* 한계를 반영할 수 있음을 **시사**한다(확정 아님).
+2. **gate의 융합이 신호를 희석할 가능성.** 결합 gate(0.171)가 nearest_feature 단독(0.213)보다
+   (점추정상) 낮다 — combiner 가설.
+3. **base의 ensemble disagreement가 가장 강한 신호일 가능성.** 점추정상 R1·R4·gate·supervised
+   regressor를 상회 → bolt-on trust layer가 base 자체 신호에 지배될 수 있다는 가설.
+
+탐색적 관찰: gate가 high realised error에 low/trusted score를 준 perturbation으로 HSPA9(6.94),
+PHB2(5.58), INTS7, GSPT1, NLE1, ZNF236, KIF20A, CENPK, PRPF40A 등이 보였다(mito
+chaperone/ribosome-biogenesis/cell-cycle 계열의 큰-효과 essential gene). 산출물:
 `oof_diagnostics.json` (off-instance 사본).
 
-**다음 모델 함의:** (i) 서열/ESM feature를 폐기하지 않는다(독립 신호 최대). (ii) 불확실성을 모델
-*내부*(deep ensemble/posterior)에 둔다 — frozen point-estimate base에 trust layer를 덧대는 설계는
-base ensembling보다 못하다. (iii) trust layer를 둔다면 ECDF 평균이 아니라 학습된 융합으로.
+**잠정 함의 (위 가설에 기반, 미확정):** (i) 서열/ESM feature를 성급히 폐기하지 않는다(가설 1).
+(ii) 불확실성을 모델 *내부*(deep ensemble/posterior)에 두는 방향을 우선 검토한다(가설 3). (iii)
+trust layer를 둔다면 ECDF 평균이 아니라 학습된 융합을 검토한다(가설 2). 이들은 다음 milestone의
+사전등록 검정으로 확정/반증한다.
 
 ---
 
@@ -798,6 +814,8 @@ negative다. R2/R3, distribution-valued sets, RPE1, causal masking, Active Carto
 
 모든 real-run precondition(#1–5 + §4.3 A100 ESM smoke)이 충족되어 TG-K562-v1 confirmatory
 run이 2026-06-22 완료되었다(§11.4). 등록된 verdict는 `NO_DISTINCT_WIN`: conformal error
-bound는 유효하나 Trust-Gate는 사전등록 comparator family를 비환원적으로 이기지 못했다
-(R1이 R4 residual 위에 added value 없음) — 정직한 registered negative. 후속 연구는 이 결과
-위에서 새 mechanism을 설계하며 현재 결과에 소급해 주장하지 않는다.
+bound는 유효하나 Trust-Gate는 사전등록 comparator family를 동시추론 기준에서 인증가능하게
+이기지 못했다 — 정직한 registered negative. (`added_value_passes=false`는 동시추론 인증 실패이며
+'R1이 R4 위에 신호가 없다'를 뜻하지 않는다 — §11.5의 탐색적 진단은 오히려 그 반대 가설을
+제기하나 미확정이다. 무결성 clause는 run 내부 구조적 자기검증으로 독립 audit이 아니다 — §11.4.)
+후속 연구는 이 결과 위에서 새 mechanism을 설계하며 현재 결과에 소급해 주장하지 않는다.

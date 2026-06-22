@@ -446,7 +446,9 @@ def test_feature_extraction_canonical_round_trip():
     cfg = load_config(CANON_CONFIG)
     fe = cfg.feature_extraction
     assert fe.max_residues == 1022
-    assert fe.long_sequence_policy == "error"
+    # Canonical config registers truncate (commit a087d7d) — 204/1645 eligible
+    # K562 targets exceed max_residues; the dataclass DEFAULT remains "error".
+    assert fe.long_sequence_policy == "truncate"
     assert fe.max_batch_tokens == 16384
 
 
