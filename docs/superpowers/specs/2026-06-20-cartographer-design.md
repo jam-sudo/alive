@@ -532,9 +532,44 @@ validation(360 perts)와 pod leakage/provenance 100 passed 통과 후 실행. Se
 `aurc_family_passes=false`, `added_value_passes=false`(full gate가 residual-only를 못 이김),
 `augrc_no_material_degradation=false`. Development OOF AURC에서도 gate(0.899)가
 ensemble_disagreement(0.839)·nearest_feature(0.886)에 뒤졌다. 즉 Trust-Gate의 routing-superiority
-headline은 실 K562에서 falsify되었고 R1은 R4 위에 added value가 없다 — spec §2.4/§13이
-사전등록한 registered negative다. Calibrated conformal error bound는 유효하므로 보존한다.
-결과·provenance는 immutable run dir + off-instance 사본으로 보존한다.
+headline은 실 K562에서 falsify되었다 — spec §2.4/§13이 사전등록한 registered negative다.
+(`added_value_passes=false`는 동시추론 기준의 **인증 실패**이며, "R1이 R4 위에 신호가 없다"는
+신호 수준 해석은 틀렸다 — §11.5 post-hoc 진단으로 정정한다.) Calibrated conformal error bound는
+유효하므로 보존한다. 결과·provenance는 immutable run dir + off-instance 사본으로 보존한다.
+
+### 11.5 Post-hoc OOF 진단 (2026-06-22, development surface only)
+
+§11.4의 verdict는 불변이다. 다음 milestone 설계를 위한 **개발(method_development) OOF 표면만의
+read-only 진단**이며 sealed cohort는 재개방하지 않는다(§6.1). 도구: `src/alive/eval/diagnostics.py`
++ `scripts/diagnose_dev_oof.py` (branch `diagnostics-oof-postmortem`). 입력: `methodlock.json`의
+per-perturbation `oof_scores` + `dev_errors.npz`의 realised error (n=411). 재계산 AURC는 등록된
+dev OOF AURC를 정확히 재현했다(파이프라인 검증).
+
+- **Spearman(score, error)**: ensemble_disagreement **+0.297** > nearest_feature(R1) **+0.213** >
+  gate(R1⊕R4) **+0.171** > residual_only(R4) **+0.134** > gbm_error +0.123 > ridge_error +0.049.
+- **부분 rank 상관**: `partial(feature, error | residual)` **+0.193** > `partial(residual, error |
+  feature)` **+0.097**; `corr(feature, residual)` +0.192 (두 축의 중복은 작다).
+
+해석 (세 가지):
+
+1. **Feature/서열 축(R1)은 무의미하지 않다 — 두 component 중 더 강한 독립 신호다.** nearest_feature
+   단독이 residual 단독보다, 그리고 feature|residual 부분상관이 residual|feature보다 크다. 따라서
+   `added_value_passes=false`는 *인증* 실패(n=411·동시추론에서 robust margin 부족)이지 R1 무가치가
+   아니다.
+2. **결함은 gate의 융합 방식이다.** 결합 gate(0.171)가 nearest_feature 단독(0.213)보다 못하다 —
+   R1⊕R4 ECDF 평균이 더 강한 축을 희석한다(combiner 문제, feature 문제 아님).
+3. **천장은 ensemble_disagreement(0.297)다.** base bootstrap disagreement라는 무학습·공짜 신호가
+   R1·R4·gate·supervised regressor 전부를 능가한다. → bolt-on trust layer가 base 자체의 epistemic
+   신호에 지배된다. 이것이 NO_DISTINCT_WIN의 binding cause다.
+
+Gate의 최대 과신 perturbation(high realised error, low/trusted score): HSPA9(6.94), PHB2(5.58),
+INTS7, GSPT1, NLE1, ZNF236, KIF20A, CENPK, PRPF40A — mito chaperone/ribosome-biogenesis/cell-cycle
+계열 큰-효과 essential gene으로, additive base가 underpredict하는 영역이다. 산출물:
+`oof_diagnostics.json` (off-instance 사본).
+
+**다음 모델 함의:** (i) 서열/ESM feature를 폐기하지 않는다(독립 신호 최대). (ii) 불확실성을 모델
+*내부*(deep ensemble/posterior)에 둔다 — frozen point-estimate base에 trust layer를 덧대는 설계는
+base ensembling보다 못하다. (iii) trust layer를 둔다면 ECDF 평균이 아니라 학습된 융합으로.
 
 ---
 
