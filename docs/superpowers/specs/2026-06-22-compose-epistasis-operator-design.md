@@ -55,22 +55,25 @@ K562 CRISPRa GI Perturb-seq (§2.1에서 추가 combo 데이터 survey).
 ### 1.3 과학 질문 (falsifiable)
 
 명시한 가정 하에서, pairwise interaction operator가 *singles + doubles의 calibration subset*으로
-부터 식별되어 — **(i)** double-unseen 쌍의 held-out 비가산 효과를 additive null(및 published combo
-SOTA)보다 잘 예측하고, **(ii)** 합성 데이터에서 알려진 interaction 구조를 복원하는가?
+부터 식별/추정되어 — **(i)** combo-unseen(double-unseen; 두 유전자의 single perturbation은 관측됨)
+쌍의 held-out 비가산 효과를 additive null(및 published combo SOTA)보다 잘 예측하고, **(ii)** 합성
+데이터에서 알려진 interaction 구조를 복원하는가?
 
 1차 target = **평균(pseudobulk) 비가산 성분** $\varepsilon_{gh}$. 분포-값은 후속.
 
 ### 1.4 Claims (입증 대상)
 
-- **claim 1 (식별가능성, 방법 기여).** *모델 class가 참일 때* operator 파라미터가 [저랭크 + 대칭 +
-  calibration 쌍의 span] 가정 하에 식별됨 — **합성 parameter-recovery(known-answer)로 입증**.
+- **claim 1 (식별가능성/recovery, 방법 기여).** *모델 class가 참일 때* 무잡음 full-rank 설계에서는
+  대칭 bilinear operator의 식별가능 부분공간이 rank 조건으로 결정된다. 잡음·정규화가 있는 실제
+  추정에서는 이를 **합성 parameter-recovery(known-answer)** 로 별도 입증한다.
 - **claim 2 (일반화, real 베팅).** bilinear 모델이 real K562에서 근사 참이고 $z_g$가 GI-관련 성질을
   담을 때, double-unseen $\varepsilon$을 additive 대비 쌍-level bootstrap 95% CI 하한 > 사전등록
   margin으로 예측한다.
 - **claim 3 (구조, 2차).** held-out 쌍의 알려진 GI 부호/class를 chance 이상으로 복원한다.
 
-> **C3 — 식별가능성 ≠ 일반화 (category error 금지).** claim 1은 *모델 class 가정 하의* 수학적
-> 사실이며, claim 2(real 예측)를 함의하지 않는다. bilinear가 실제로 근사 참인지·$z_g$(단일
+> **C3 — 식별가능성/recovery ≠ 일반화 (category error 금지).** claim 1의 대수적 식별가능성은
+> *모델 class 가정 하의* 수학적 사실이고, 잡음하 recovery는 synthetic known-answer 검증이며,
+> 둘 다 claim 2(real 예측)를 함의하지 않는다. bilinear가 실제로 근사 참인지·$z_g$(단일
 > signature)가 GI를 담는지는 별개의 생물학적 베팅이다. GEARS가 GO 그래프를 도입한 사실 자체가
 > "single signature만으론 unseen combo가 약하다"는 방증이므로 claim 2의 사전확률은 낮은 편으로
 > 본다. 두 claim을 결코 한 문장으로 합치지 않는다.
@@ -100,7 +103,9 @@ feature 생성. CRISPRa라 Replogle와 별개의 data-card·manifest·governance
 > **데이터 survey gate (활성화 전 필수).** Norman의 combo는 ~131개의 *설계된 sparse* 쌍이라,
 > double-unseen 격리 후 테스트 쌍이 한 자릿수로 줄 수 있다(power 부족). 활성화 전 **다른 공개
 > combo Perturb-seq(2023–2025 대형 CRISPR combo set 등) 존재 여부를 조사**하고, 확보 가능하면
-> 병합하여 double-unseen power를 보강한다. 없으면 §2.4 power gate가 headline을 강등한다.
+> 병합하여 double-unseen power를 보강한다. 단, cell line·CRISPR modality·lab/batch가 다르면
+> 이를 같은 K562-CRISPRa claim으로 섞지 않고 dataset-stratified 또는 cross-dataset regime으로
+> 별도 사전등록한다. 없으면 §2.4 power gate가 headline을 강등한다.
 
 ### 2.2 Eligibility (outcome-independent, split 전 확정; §5/§7)
 
@@ -114,7 +119,9 @@ disjoint roles:
 
 - `singles_train` — 모든 $\delta_g$ ( → $z_g$ 식별, Stage 1).
 - `combo_calibration` — $B$ 식별용 doubles subset (**rank/span 조건 충족 필수**, Stage 2).
-- `sealed_double_unseen` — 두 유전자 모두 training combo에 없는 쌍 (**headline**, power 충족 시).
+- `sealed_double_unseen` — 두 유전자 모두 training combo에 없는 쌍(**headline**, power 충족 시).
+  단, 두 유전자의 single perturbation은 `singles_train`에서 관측되므로 이는 gene-zero-shot이 아니라
+  combo/pair-zero-shot이다.
 - `secondary_sealed` — single-unseen, both-seen (보고용).
 
 그래프 제약: GI 그래프를 분할해 test-쌍 유전자를 training combo에서 격리한다. 이 격리가 power를
@@ -126,8 +133,10 @@ disjoint roles:
   effect. 미달 시 **headline을 가장 잘-powered된 regime(예: single-unseen)으로 강등**하고
   double-unseen은 exploratory로 보고한다(§14.2 sample-size 분석).
 - **Measurability / noise-ceiling gate.** split-half(또는 replicate) 추정기로 $\varepsilon$의
-  noise floor와 추정가능 분산(천장)을 산출·보고한다. 신호 ≈ noise면 **FUTILITY_STOPPED**(§4),
-  합성 결과를 deliverable로, seal은 닫힌 채 종료.
+  noise floor와 추정가능 분산(천장)을 산출·보고한다. 이 gate는 `combo_calibration`/unsealed
+  development pairs 또는 outcome-independent cell-count metadata만 사용한다. `sealed_double_unseen`
+  및 `secondary_sealed`의 expression/outcome을 사용해 noise ceiling을 추정하지 않는다. 신호 ≈
+  noise면 **FUTILITY_STOPPED**(§4), 합성 결과를 deliverable로, seal은 닫힌 채 종료.
 - **Rank gate.** calibration 설계행렬 $\Phi$(§3.2)의 rank를 보고; 미달이면 식별 부분공간을
   명시하고 그 밖의 double-unseen 예측은 주장하지 않는다.
 
@@ -155,7 +164,7 @@ ESM는 bolt-on이 아니라 **고정 입력 factor**로 재도입한다([[cartog
 탐색적 가설 1: 서열 축이 신호를 가질 수 있음을, 이번엔 식별가능 구조 안에서 검증). $z_g$를 먼저
 고정해야 Stage 2가 선형이 된다(end-to-end는 rotation ambiguity로 식별성을 잃음 → ablation L3).
 
-### 3.2 Stage 2 (식별가능 bilinear operator $B$ = headline A)
+### 3.2 Stage 2 (대수적으로 식별가능한 bilinear operator $B$ = headline A)
 
 $$\varepsilon_{gh}[m]=z_g^\top B_m\,z_h,\quad B_m=B_m^\top\ (k\times k),\quad m=1..p;\qquad
 \hat\delta_{gh}=\delta_g+\delta_h+\hat\varepsilon_{gh}.$$
@@ -164,14 +173,15 @@ $$\varepsilon_{gh}[m]=z_g^\top B_m\,z_h,\quad B_m=B_m^\top\ (k\times k),\quad m=
 $\min_{\{B_m\}}\sum_{(g,h)\in\text{Cal}}\|\varepsilon^{obs}_{gh}-B(z_g,z_h)\|^2+\lambda\mathcal R(B)$
 ($\mathcal R$ = ridge / nuclear-norm 저랭크).
 
-**식별가능성 = rank 조건.** 각 출력차원 $m$에 대해
+**대수적 식별가능성 = rank 조건.** 각 출력차원 $m$에 대해
 $\varepsilon_{gh}[m]=\langle\mathrm{vecsym}(z_gz_h^\top),\mathrm{vecsym}(B_m)\rangle$ 는 $B_m$에
 선형이다. $\Phi=[\mathrm{vecsym}(z_gz_h^\top)]_{(g,h)\in\text{Cal}}$의 rank가
-$\dim(\text{sym }k\times k)=k(k+1)/2$ 이상이면 $B$ 완전식별 → span 안의 모든 double-unseen 쌍
-결정. 미달이면 식별 부분공간 내에서만(rank gate, §2.4). 이것이 실데이터에서 *계산해 확인 가능한*
-식별 조건이다.
+$\dim(\text{sym }k\times k)=k(k+1)/2$ 이상이면 **무잡음·비정규화 선형계에서** $B$의 해당 부분공간이
+완전식별된다. 미달이면 식별 부분공간 내에서만(rank gate, §2.4). 잡음·ridge·nuclear-norm이 들어간
+실제 추정에서는 rank만으로 충분하지 않으므로 condition number, regularization path, synthetic
+known-answer recovery(§3.4)를 함께 보고한다.
 
-> **I6 — $k$는 |Cal|에 강하게 묶임.** 완전식별엔 $|\text{Cal}|\ge k(k+1)/2$가 필요한데
+> **I6 — $k$는 |Cal|에 강하게 묶임.** 무잡음 완전식별엔 $|\text{Cal}|\ge k(k+1)/2$가 필요한데
 > Norman에선 $|\text{Cal}|\sim 60$–$90$ → 작은 $k$ 또는 저랭크가 필수이고, 이는 표현력을 제한해
 > claim 2의 위험이 된다. 합성 연구(§3.4)는 **$k$ vs $|\text{Cal}|$ 식별/표현 frontier를 sweep**한다.
 
@@ -179,20 +189,23 @@ $\dim(\text{sym }k\times k)=k(k+1)/2$ 이상이면 $B$ 완전식별 → span 안
 
 - **L0** additive null ($\varepsilon=0$).
 - **L1 = A (headline)** 2단계 bilinear 식별 operator.
-- **L2 = C** + 단조 saturation 비선형 $\varepsilon=\sigma(\text{bilinear})$ — 최소 비선형성이
-  식별가능 이득을 주는지(semi-parametric, 단조 link 유지).
+- **L2 = C** + 사전등록된 단조 saturation 비선형 $\varepsilon=\sigma(\text{bilinear})$ — 최소 비선형성이
+  이득을 주는지 보는 constrained extension. Claim 1의 대수적 식별가능성 주장은 L1에 한정한다.
 - **L3 = B** hypernetwork로 $z$·operator end-to-end 학습 — capacity 최대, **식별가능성 정리 없음**.
 
-답하는 질문: **식별가능한 *구조*(L1/L2)가 additive(L0)와 무제약 capacity(L3)를 둘 다 이기는가?**
+답하는 질문: **식별가능한 핵심 구조(L1; L2는 제약 확장)가 additive(L0)와 무제약 capacity(L3)를
+둘 다 이기는가?**
 
 ### 3.4 합성 recovery 프로토콜 (claim 1 입증, real과 독립)
 
-랜덤 $z_g$·랜덤 저랭크 대칭 $B^\ast$ → $\varepsilon^\ast_{gh}$ 생성 → **Norman 쌍당 cell 수를
-모사한 noise** 주입 → double-unseen 격리 → 추정 $\hat B$. Known-answer 검증:
-(a) 식별 부분공간에서 $\|\hat B-B^\ast\|$ 작음, (b) double-unseen $\varepsilon$ 정확 예측,
-(c) rank 조건 위반 시 graceful 저하 + flag, (d) **$\varepsilon^\ast=0$이면 $\hat\varepsilon\approx0$
-(거짓 GI 안 만듦)**, (e) noise–쌍당cell 대비 recovery 곡선($k$/|Cal| frontier 포함; 실데이터
-기대치 보정).
+랜덤 $z_g$·랜덤 저랭크 대칭 $B^\ast$ → $\varepsilon^\ast_{gh}$ 생성 → 무잡음 rank-condition 확인 →
+**Norman 쌍당 cell 수를 모사한 noise** 주입 → double-unseen 격리 → 추정 $\hat B$.
+Known-answer 검증:
+(a) 무잡음 full-rank 조건에서 대수적 복원 확인, (b) 잡음하 식별 부분공간에서
+$\|\hat B-B^\ast\|$ 및 double-unseen $\varepsilon$ 예측오차가 사전등록 허용치 이내,
+(c) rank/conditioning 악화 시 graceful 저하 + flag, (d) **$\varepsilon^\ast=0$이면
+$\hat\varepsilon\approx0$(거짓 GI 안 만듦)**, (e) noise–쌍당cell 대비 recovery 곡선($k$/|Cal|
+frontier 포함; 실데이터 기대치 보정).
 
 ### 3.5 Leakage 규율 (§4 universal invariant)
 
@@ -273,7 +286,7 @@ bilinear/tensor factorization 문헌(DeepSynergy 계열 등), (ii) 고전 유전
 
 1. scalar synergy가 아닌 **transcriptome-valued(벡터) GI** 예측.
 2. **unseen-pair 식별가능성 rank 조건**(대부분 synergy 논문은 식별성을 진술하지 않음).
-3. single-perturbation signature로부터 **zero-shot double-unseen** 일반화 + 2단계 식별.
+3. single-perturbation signature로부터 **combo/pair-zero-shot double-unseen** 일반화 + 2단계 식별.
 
 check 결과 선점이 확인되면 novelty scope를 그에 맞게 축소하거나 milestone을 재설계한다.
 
