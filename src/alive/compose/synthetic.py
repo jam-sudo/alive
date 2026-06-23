@@ -71,13 +71,77 @@ def _rel_err(a: np.ndarray, b: np.ndarray) -> float:
     return float(np.linalg.norm(a - b) / denom) if denom > 1e-12 else float(np.linalg.norm(a))
 
 
+def _held_out_pair(pairs: list[tuple[int, int]], n_genes: int) -> tuple[int, int]:
+    """First ``(g, h)`` with ``g < h`` that is **not** among the calibration pairs.
+
+    Guarantees the held-out pair is disjoint from ``pairs`` by construction (M1),
+    so the held-out generalization metric is never silently in-sample.
+
+    Raises
+    ------
+    ValueError
+        If every distinct pair over ``n_genes`` genes is already a calibration
+        pair (no held-out pair exists).
+    """
+    seen = {(min(a, b), max(a, b)) for a, b in pairs}
+    for g in range(n_genes):
+        for h in range(g + 1, n_genes):
+            if (g, h) not in seen:
+                return g, h
+    raise ValueError("no held-out pair available: all distinct pairs are in calibration")
+
+
+def _max_recovered_gi(coef: np.ndarray, Z: np.ndarray, pairs: list[tuple[int, int]]) -> float:
+    """Largest recovered-GI norm ``max_p ||coef @ pair_feature(z_a, z_b)||`` over pairs."""
+    return float(
+        np.max([np.linalg.norm(bilinear_predict(coef, Z[a], Z[b])) for a, b in pairs])
+    )
+
+
 @dataclass(frozen=True)
 class RecoveryReport:
-    """Outcome of a synthetic recovery run (claim-1 evidence)."""
+    """Outcome of a synthetic recovery run (claim-1 evidence, §3.4).
+
+    Attributes
+    ----------
+    noiseless_rel_err
+        Algebraic coefficient recovery error from the noiseless ``lam=0`` fit
+        (§3.4 (a); ~0 by construction when full rank).
+    noisy_rel_err
+        Coefficient recovery error from the noisy ridge fit (§3.4 (b)).
+    held_out_pred_rel_err
+        Genuine combo zero-shot generalization error (§3.4 (b), double-unseen):
+        the *noisy* fit predicting a held-out pair that is **disjoint** from the
+        calibration pairs, scored against the ground-truth bilinear response.
+        Noise-dependent; looser than the coefficient tolerance.
+    false_gi_norm_noiseless
+        False-GI algebraic check (§3.4 (d)): with no true GI (rank 0) the
+        noiseless ``lam=0`` fit recovers ``eps_hat ~ 0`` (< 1e-8). Pinned to ~0
+        by construction; kept only as the algebraic sanity leg.
+    false_gi_norm_noisy
+        Spurious recovered-GI magnitude from the **noisy** rank-0 fit. This is
+        the noise-robust false-GI guard: it must stay far below
+        ``genuine_gi_norm`` (the estimator does not invent interactions of
+        real-GI magnitude). ``nan`` when the run is not a rank-0 run.
+    genuine_gi_norm
+        Recovered-GI magnitude from a noisy rank>0 fit at the **same noise and
+        config**, used as the reference scale for ``false_gi_norm_noisy``.
+        ``nan`` when not computed (only computed on rank-0 runs).
+    false_gi_norm
+        Backward-compatible alias for the operative noise-aware guard,
+        ``false_gi_norm_noisy`` (or ``false_gi_norm_noiseless`` when noiseless).
+    is_full_rank
+        Whether the calibration design matrix is full rank (§3.4 (c)).
+    frontier
+        Optional ``frontier_sweep`` rows; empty for a single run.
+    """
 
     noiseless_rel_err: float
     noisy_rel_err: float
     held_out_pred_rel_err: float
+    false_gi_norm_noiseless: float
+    false_gi_norm_noisy: float
+    genuine_gi_norm: float
     false_gi_norm: float
     is_full_rank: bool
     frontier: tuple[dict, ...]
@@ -110,24 +174,44 @@ def run_recovery(
     coef_noisy = identify_operator(d.Z, d.pairs, d.eps_obs, lam=1e-3)
     noisy_rel = _rel_err(coef_noisy, d.coef_true)
 
-    # Held-out (combo-unseen) pair prediction from the clean fit.
-    g, h = 0, n_genes - 1
+    # Held-out combo zero-shot generalization (§3.4 (b)): the NOISY fit predicts a
+    # held-out pair that is disjoint-by-construction from the calibration pairs (M1),
+    # scored against the ground-truth bilinear response. Genuinely noise-dependent.
+    g, h = _held_out_pair(d.pairs, n_genes)
     held = _rel_err(
-        bilinear_predict(coef_clean, clean.Z[g], clean.Z[h]),
-        bilinear_predict(clean.coef_true, clean.Z[g], clean.Z[h]),
+        bilinear_predict(coef_noisy, d.Z[g], d.Z[h]),
+        bilinear_predict(d.coef_true, d.Z[g], d.Z[h]),
     )
 
-    # False-GI guard: when eps* == 0, recovered eps must be ~0.
-    false_gi = float(
-        np.max([np.linalg.norm(bilinear_predict(coef_clean, clean.Z[a], clean.Z[b]))
-                for a, b in clean.pairs])
-    ) if rank == 0 else 0.0
+    # False-GI guard (§3.4 (d)). Two legs:
+    #   (1) noiseless algebraic: rank-0 + lam=0 fit on eps_true (all zeros) -> eps_hat ~ 0.
+    #   (2) noise-robust: spurious recovered-GI from the NOISY rank-0 fit must be far
+    #       below GENUINE recovered-GI from a noisy rank>0 fit at the same noise/config
+    #       (the estimator does not invent interactions of real-GI magnitude).
+    # Both legs use a well-determined config (n_pairs >> sym_dim) for a stable ridge.
+    if rank == 0:
+        false_gi_noiseless = _max_recovered_gi(coef_clean, clean.Z, clean.pairs)
+        false_gi_noisy = _max_recovered_gi(coef_noisy, d.Z, d.pairs)
+        genuine = make_synthetic(
+            n_genes=n_genes, k=k, p=p, rank=1, n_pairs=n_pairs, noise_sd=noise_sd, seed=seed
+        )
+        coef_genuine = identify_operator(genuine.Z, genuine.pairs, genuine.eps_obs, lam=1e-3)
+        genuine_gi_norm = _max_recovered_gi(coef_genuine, genuine.Z, genuine.pairs)
+        false_gi_alias = false_gi_noisy
+    else:
+        false_gi_noiseless = float("nan")
+        false_gi_noisy = float("nan")
+        genuine_gi_norm = float("nan")
+        false_gi_alias = 0.0
 
     return RecoveryReport(
         noiseless_rel_err=noiseless_rel,
         noisy_rel_err=noisy_rel,
         held_out_pred_rel_err=held,
-        false_gi_norm=false_gi,
+        false_gi_norm_noiseless=false_gi_noiseless,
+        false_gi_norm_noisy=false_gi_noisy,
+        genuine_gi_norm=genuine_gi_norm,
+        false_gi_norm=false_gi_alias,
         is_full_rank=rep_rank.is_full_rank,
         frontier=(),
     )
