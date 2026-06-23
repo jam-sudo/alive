@@ -290,6 +290,26 @@ bilinear/tensor factorization 문헌(DeepSynergy 계열 등), (ii) 고전 유전
 
 check 결과 선점이 확인되면 novelty scope를 그에 맞게 축소하거나 milestone을 재설계한다.
 
+### 6.1 Gate 실행 결과 (2026-06-23): `NOVELTY_NARROWED`
+
+Audit: `docs/superpowers/audits/2026-06-23-compose-prior-art.md`. 단일 선행이 세 leg를 함께
+수행하지 않으므로 `PRECEDED` 아님(재설계 불필요). 가장 가까운 단일 위협 = **RECOVER**(Bertin et
+al. 2023, bilinear combination operator)이나 출력이 **scalar Bliss synergy**이고 식별성 진술이
+없어 leg 1·2를 비킴. **GEARS**는 벡터 double-unseen을 하나 GO-graph GNN이며 대수적 식별성이 없고,
+오히려 "singles만으론 unseen combo가 약하다"는 반대 증거(claim 2 사전확률↓). 활성화 시 강제되는
+**축소 scope**:
+
+1. 벡터 출력 자체를 novelty로 주장 금지(GEARS/CPA/Norman 선점) — novelty는 "벡터 *GI 성분의
+   식별가능 격리*"에 한정.
+2. bilinear 조합 모듈 자체를 novelty로 주장 금지(RECOVER 선점) — "그 operator의 명시적
+   unseen-pair rank 식별성 + transcriptome-valued GI 적용"에 한정.
+3. 식별성 수학을 신규 정리로 주장 금지(bilinear-inverse-problem 문헌 선점, arXiv 1402.2637) —
+   기여는 "그 조건을 GI/perturbation 예측에 최초 명시·적용 + Norman 설계행렬 rank 보고"(방법-적용
+   novelty).
+4. RECOVER·GEARS·CPA·Norman을 prior-art로 명시 인용하고 claim마다 차별점 대비.
+5. real win(`GI_LEARNABLE_WIN`)은 simultaneous inference로 GEARS/CPA/L3를 함께 이길 때만 주장;
+   못 이기면 정직한 `NO_DISTINCT_WIN`(합성 `METHOD_VALIDATED`는 별도 유지).
+
 ---
 
 ## 7. Run-identity, provenance, governance mapping
