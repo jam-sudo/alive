@@ -14,7 +14,13 @@ import numpy as np
 import pytest
 
 from alive.compose.config import load_compose_config
-from alive.compose.phase1 import Phase1Report, run_phase1, write_phase1
+from alive.compose.phase1 import (
+    Phase1Report,
+    run_phase1,
+    write_phase1,
+    write_phase1_provenance,
+)
+from alive.provenance import sha256_file
 
 _CONFIG = "configs/compose_k562_v1_phase1.yaml"
 
@@ -61,3 +67,30 @@ def test_write_is_write_once(tmp_path):
     assert data["go_no_go"] == "GO"
     with pytest.raises(FileExistsError):
         write_phase1(rep, tmp_path)  # write-once
+
+
+def test_provenance_record(tmp_path):
+    cfg = load_compose_config(_CONFIG)
+    rep = run_phase1(cfg, gate_inputs=_gate_inputs())
+    write_phase1(rep, tmp_path)
+    write_phase1_provenance(rep, tmp_path, config_path=_CONFIG)
+
+    prov_path = tmp_path / "phase1_provenance.json"
+    assert prov_path.exists()
+    prov = json.loads(prov_path.read_text())
+
+    # config_digest is a 64-hex string equal to sha256_file(config).
+    assert prov["config_digest"] == sha256_file(_CONFIG)
+    assert len(prov["config_digest"]) == 64
+    assert all(c in "0123456789abcdef" for c in prov["config_digest"])
+
+    # report_sha256 matches the written report on disk.
+    assert prov["report_sha256"] == sha256_file(tmp_path / "phase1_report.json")
+
+    # registered seeds present and match the config.
+    assert prov["registered_seeds"] == list(cfg.registered_seeds)
+    assert prov["phase"] == "compose_k562_v1_phase1"
+
+    # write-once.
+    with pytest.raises(FileExistsError):
+        write_phase1_provenance(rep, tmp_path, config_path=_CONFIG)

@@ -14,7 +14,7 @@ from pathlib import Path
 import numpy as np
 
 from alive.compose.config import load_compose_config
-from alive.compose.phase1 import run_phase1, write_phase1
+from alive.compose.phase1 import run_phase1, write_phase1, write_phase1_provenance
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -36,6 +36,7 @@ def main(argv: list[str] | None = None) -> int:
     }
     rep = run_phase1(cfg, gate_inputs=gate_inputs)
     write_phase1(rep, args.out_dir)
+    write_phase1_provenance(rep, args.out_dir, config_path=args.config)
     print(
         f"method_axis={rep.method_axis} headline={rep.headline_regime} "
         f"go_no_go={rep.go_no_go}"

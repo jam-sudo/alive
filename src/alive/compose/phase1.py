@@ -44,10 +44,14 @@ import math
 from dataclasses import dataclass
 from pathlib import Path
 
-from alive.compose.config import ComposePhase1Config
+from alive.compose.config import ComposePhase1Config, load_compose_config
 from alive.compose.gates import GateResult, measurability_gate, power_gate, rank_gate
 from alive.compose.identify import RankReport
 from alive.compose.synthetic import RecoveryReport, frontier_sweep, run_recovery
+from alive.provenance import capture_environment, sha256_file
+
+#: Phase tag recorded in the Phase-1 provenance record.
+_PHASE_TAG = "compose_k562_v1_phase1"
 
 #: Scale-relative false-GI margin (Task-5 registered): spurious recovered-GI
 #: must be < 10% of genuine recovered-GI at the same noise/config.
@@ -261,3 +265,82 @@ def write_phase1(report: Phase1Report, out_dir: str | Path) -> None:
         "recovery": _recovery_payload(report.recovery),
     }
     out.write_text(json.dumps(payload, indent=2, sort_keys=True))
+
+
+def write_phase1_provenance(
+    report: Phase1Report,
+    out_dir: str | Path,
+    *,
+    config_path: str | Path,
+    lockfile_path: str | Path = "uv.lock",
+    repo_dir: str | Path | None = None,
+) -> Path:
+    """Write a proportionate Phase-1 provenance record (write-once).
+
+    Phase 1 opens no seal and has no raw-data / feature-bank inputs, so the full
+    composite ``run_id`` + :class:`~alive.provenance.RunLedger` state machine
+    (which binds raw expression files and sequence mappings) is not required. A
+    lightweight, honest record suffices to satisfy the §11 provenance invariant:
+    it pins the config digest, the registered seeds, the git SHA, and the
+    checksum of the exact report that was written.
+
+    Must be called *after* :func:`write_phase1` so the report JSON exists; this
+    function hashes that file (not an in-memory re-serialisation) so the recorded
+    digest is the checksum of the artifact on disk.
+
+    Parameters
+    ----------
+    report
+        The Phase-1 report whose summary verdict fields are echoed into the
+        record for at-a-glance provenance (the authoritative copy is the hashed
+        ``phase1_report.json``).
+    out_dir
+        Directory containing the already-written ``phase1_report.json``; the
+        provenance record is written next to it as ``phase1_provenance.json``.
+    config_path
+        Path to the resolved Phase-1 config; hashed via
+        :func:`alive.provenance.sha256_file` for ``config_digest`` and loaded for
+        the registered seeds.
+    lockfile_path
+        Path to the dependency lockfile; passed to
+        :func:`alive.provenance.capture_environment`. Defaults to ``"uv.lock"``.
+    repo_dir
+        Working directory for the git-HEAD lookup. ``None`` uses the current
+        working directory. If git is unavailable the captured commit is the
+        ``"UNKNOWN"`` sentinel and this function does not crash.
+
+    Returns
+    -------
+    Path
+        The path of the written ``phase1_provenance.json``.
+
+    Raises
+    ------
+    FileExistsError
+        If ``phase1_provenance.json`` already exists in ``out_dir``
+        (write-once immutability, mirroring :func:`write_phase1`).
+    """
+    out_dir = Path(out_dir)
+    prov_path = out_dir / "phase1_provenance.json"
+    if prov_path.exists():
+        raise FileExistsError(f"refusing to overwrite existing provenance: {prov_path}")
+    report_path = out_dir / "phase1_report.json"
+
+    cfg = load_compose_config(config_path)
+    env = capture_environment(lockfile_path, cfg.registered_seeds, repo_dir=repo_dir)
+
+    payload = {
+        "phase": _PHASE_TAG,
+        "config_digest": sha256_file(config_path),
+        "git_sha": env.git_commit,
+        "registered_seeds": list(cfg.registered_seeds),
+        "report_sha256": sha256_file(report_path),
+        "lockfile_sha256": env.lockfile_sha256,
+        "python_version": env.python_version,
+        "platform": env.platform,
+        "method_axis": report.method_axis,
+        "go_no_go": report.go_no_go,
+    }
+    prov_path.parent.mkdir(parents=True, exist_ok=True)
+    prov_path.write_text(json.dumps(payload, indent=2, sort_keys=True))
+    return prov_path
