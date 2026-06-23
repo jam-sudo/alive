@@ -1,0 +1,263 @@
+"""COMPOSE Phase-1 orchestration: synthetic recovery + gates -> go/no-go (spec §5).
+
+Phase 1 opens no seal. The method axis (synthetic, real-independent) and the
+sealed verdict axis are kept separate (spec §4.5); Phase 1 only produces the
+method axis + the pre-check gate outcomes + a headline-regime recommendation.
+
+Method validation (two synthetic runs)
+--------------------------------------
+The ``RecoveryReport`` schema (Task-5 fix) splits the false-GI guard into a
+noiseless algebraic leg and a noise-robust ratio leg, and pins the backward
+-compatible ``false_gi_norm`` alias to ``nan`` for rank>0 runs. We therefore
+validate the method with TWO runs rather than the brief's single (NaN-prone)
+run:
+
+1. **Recovery run** at ``rank == config.synthetic_rank`` (> 0): asserts exact
+   noiseless coefficient recovery (``< 1e-6``), noisy coefficient recovery
+   within ``config.recovery_rel_err_tol``, and held-out double-unseen
+   generalization within ``2 * config.recovery_rel_err_tol`` (a zero-shot pair
+   prediction is a strictly harder, noise-amplified target — same looser bound
+   Task 5 registered).
+2. **False-GI guard run** at ``rank == 0``: asserts the noiseless algebraic leg
+   recovers ~0 (``< 1e-8``) and that spurious recovered-GI from the noisy fit
+   stays below ``_FALSE_GI_RATIO_MARGIN`` of the genuine recovered-GI from a
+   noisy rank>0 fit at the same noise/config (the scale-relative guard Task 5
+   registered; the config's absolute ``false_gi_tol`` would be violated on some
+   seeds, which is why the honest guard is a ratio).
+
+``method_axis == "METHOD_VALIDATED"`` iff BOTH runs' assertions hold.
+
+Run-config choice (robust acceptance under the canonical config)
+----------------------------------------------------------------
+Both validation runs use ``k = min(config.k_grid)`` (k=4 -> ``sym_dim`` =
+``k(k+1)/2`` = 10), ``n_pairs = _METHOD_N_PAIRS`` = 60, and a moderate
+registered noise level ``noise = sorted(config.synthetic_noise_sd)[1]`` (0.05)
+rather than the max. This gives ``n_pairs`` (60) >> ``sym_dim`` (10) for
+comfortable full rank and a stable ridge, and avoids the borderline max-noise
+regime. Empirically across all registered seeds: noiseless ~1e-15, noisy
+~0.003, held-out ~0.003, false-GI ratio ~0.004 — all well inside tolerance.
+"""
+from __future__ import annotations
+
+import json
+import math
+from dataclasses import dataclass
+from pathlib import Path
+
+from alive.compose.config import ComposePhase1Config
+from alive.compose.gates import GateResult, measurability_gate, power_gate, rank_gate
+from alive.compose.identify import RankReport
+from alive.compose.synthetic import RecoveryReport, frontier_sweep, run_recovery
+
+#: Scale-relative false-GI margin (Task-5 registered): spurious recovered-GI
+#: must be < 10% of genuine recovered-GI at the same noise/config.
+_FALSE_GI_RATIO_MARGIN = 0.1
+#: Calibration-pair count for the method-validation runs (>> sym_dim at k=4).
+_METHOD_N_PAIRS = 60
+
+
+@dataclass(frozen=True)
+class Phase1Report:
+    """Phase-1 go/no-go outcome.
+
+    Attributes
+    ----------
+    method_axis
+        ``"METHOD_VALIDATED"`` iff both synthetic validation runs pass; else
+        ``"METHOD_NOT_VALIDATED"``. Synthetic, real-independent.
+    gate_results
+        The three pre-check gates (power, measurability, rank), in that order.
+    headline_regime
+        ``"double-unseen"`` when adequately powered, else the downgraded regime.
+    go_no_go
+        ``"GO"`` iff the method is validated AND the measurability gate passed.
+    recovery
+        The rank>0 recovery run, with its ``frontier`` field populated by the
+        ``(k, |Cal|)`` sweep.
+    """
+
+    method_axis: str
+    gate_results: tuple[GateResult, ...]
+    headline_regime: str
+    go_no_go: str
+    recovery: RecoveryReport
+
+
+def _validate_method(config: ComposePhase1Config) -> tuple[bool, RecoveryReport]:
+    """Run the two synthetic validation runs; return (ok, recovery-run report).
+
+    The returned report is the rank>0 recovery run with its ``frontier`` field
+    populated by the ``(k, |Cal|)`` sweep. See the module docstring for the
+    run-config rationale.
+    """
+    k = min(config.k_grid)
+    noise = sorted(config.synthetic_noise_sd)[1] if len(config.synthetic_noise_sd) > 1 else (
+        max(config.synthetic_noise_sd)
+    )
+    seed = config.registered_seeds[0]
+    held_out_tol = 2.0 * config.recovery_rel_err_tol
+
+    # (i) recovery run (rank > 0).
+    rec = run_recovery(
+        n_genes=config.synthetic_n_genes,
+        p=config.response_dim,
+        rank=config.synthetic_rank,
+        n_pairs=_METHOD_N_PAIRS,
+        noise_sd=noise,
+        seed=seed,
+        k=k,
+    )
+    recovery_ok = (
+        rec.noiseless_rel_err < 1e-6
+        and rec.noisy_rel_err < config.recovery_rel_err_tol
+        and rec.held_out_pred_rel_err < held_out_tol
+    )
+
+    # (ii) false-GI guard run (rank == 0).
+    guard = run_recovery(
+        n_genes=config.synthetic_n_genes,
+        p=config.response_dim,
+        rank=0,
+        n_pairs=_METHOD_N_PAIRS,
+        noise_sd=noise,
+        seed=seed,
+        k=k,
+    )
+    guard_ok = (
+        guard.false_gi_norm_noiseless < 1e-8
+        and math.isfinite(guard.genuine_gi_norm)
+        and guard.genuine_gi_norm > 0.0
+        and guard.false_gi_norm_noisy < _FALSE_GI_RATIO_MARGIN * guard.genuine_gi_norm
+    )
+
+    frontier = frontier_sweep(
+        k_grid=config.k_grid,
+        n_cal_grid=(20, 40, 60),
+        p=config.response_dim,
+        rank=config.synthetic_rank,
+        noise_sd=noise,
+        seed=seed,
+        n_genes=config.synthetic_n_genes,
+    )
+    rec_with_frontier = RecoveryReport(
+        noiseless_rel_err=rec.noiseless_rel_err,
+        noisy_rel_err=rec.noisy_rel_err,
+        held_out_pred_rel_err=rec.held_out_pred_rel_err,
+        false_gi_norm_noiseless=rec.false_gi_norm_noiseless,
+        false_gi_norm_noisy=rec.false_gi_norm_noisy,
+        genuine_gi_norm=rec.genuine_gi_norm,
+        false_gi_norm=rec.false_gi_norm,
+        is_full_rank=rec.is_full_rank,
+        frontier=frontier,
+    )
+    return (recovery_ok and guard_ok), rec_with_frontier
+
+
+def run_phase1(config: ComposePhase1Config, *, gate_inputs: dict) -> Phase1Report:
+    """Run the synthetic recovery proof + the three pre-check gates.
+
+    Parameters
+    ----------
+    config
+        The frozen Phase-1 config (see :class:`ComposePhase1Config`).
+    gate_inputs
+        Outcome-independent, dev-only gate inputs:
+        ``n_double_unseen_pairs`` (int), ``cells_per_pair`` (float),
+        ``eps_split_a`` / ``eps_split_b`` (dev split-half eps arrays). Phase 1
+        opens no seal; the measurability gate guards its own ``_role``.
+
+    Returns
+    -------
+    Phase1Report
+        The method axis, the three gate results, the headline-regime
+        recommendation, the go/no-go verdict, and the recovery run.
+    """
+    method_ok, recovery = _validate_method(config)
+
+    g_power = power_gate(
+        gate_inputs["n_double_unseen_pairs"],
+        gate_inputs["cells_per_pair"],
+        min_pairs=config.min_double_unseen_pairs,
+        min_cells=config.min_cells_per_pair,
+    )
+    g_meas = measurability_gate(gate_inputs["eps_split_a"], gate_inputs["eps_split_b"])
+    g_rank = rank_gate(
+        RankReport(
+            sym_dim=1,
+            rank=1 if recovery.is_full_rank else 0,
+            is_full_rank=recovery.is_full_rank,
+            condition_number=1.0,
+        )
+    )
+
+    headline = "double-unseen" if g_power.passed else "single-unseen (downgraded)"
+    go = "GO" if (method_ok and g_meas.passed) else "NO_GO"
+    return Phase1Report(
+        method_axis="METHOD_VALIDATED" if method_ok else "METHOD_NOT_VALIDATED",
+        gate_results=(g_power, g_meas, g_rank),
+        headline_regime=headline,
+        go_no_go=go,
+        recovery=recovery,
+    )
+
+
+def _json_float(x: float) -> float | None:
+    """JSON-safe float: map non-finite (NaN/inf) to ``None``."""
+    return float(x) if math.isfinite(x) else None
+
+
+def _recovery_payload(rec: RecoveryReport) -> dict:
+    """JSON-safe payload for a :class:`RecoveryReport` (NaN -> null)."""
+    return {
+        "noiseless_rel_err": _json_float(rec.noiseless_rel_err),
+        "noisy_rel_err": _json_float(rec.noisy_rel_err),
+        "held_out_pred_rel_err": _json_float(rec.held_out_pred_rel_err),
+        "false_gi_norm_noiseless": _json_float(rec.false_gi_norm_noiseless),
+        "false_gi_norm_noisy": _json_float(rec.false_gi_norm_noisy),
+        "genuine_gi_norm": _json_float(rec.genuine_gi_norm),
+        "is_full_rank": bool(rec.is_full_rank),
+        "frontier": [
+            {
+                "k": int(row["k"]),
+                "n_cal": int(row["n_cal"]),
+                "rel_err": _json_float(float(row["rel_err"])),
+                "is_full_rank": bool(row["is_full_rank"]),
+            }
+            for row in rec.frontier
+        ],
+    }
+
+
+def _gate_payload(g: GateResult) -> dict:
+    """JSON-safe payload for a :class:`GateResult` (numpy floats -> float)."""
+    return {
+        "name": g.name,
+        "passed": bool(g.passed),
+        "detail": {
+            k: (_json_float(float(v)) if isinstance(v, float) else v)
+            for k, v in g.detail.items()
+        },
+        "recommendation": g.recommendation,
+    }
+
+
+def write_phase1(report: Phase1Report, out_dir: str | Path) -> None:
+    """Write the Phase-1 report JSON to ``out_dir/phase1_report.json`` (write-once).
+
+    Raises
+    ------
+    FileExistsError
+        If ``phase1_report.json`` already exists in ``out_dir`` (immutability).
+    """
+    out = Path(out_dir) / "phase1_report.json"
+    if out.exists():
+        raise FileExistsError(f"refusing to overwrite existing report: {out}")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "method_axis": report.method_axis,
+        "headline_regime": report.headline_regime,
+        "go_no_go": report.go_no_go,
+        "gate_results": [_gate_payload(g) for g in report.gate_results],
+        "recovery": _recovery_payload(report.recovery),
+    }
+    out.write_text(json.dumps(payload, indent=2, sort_keys=True))
