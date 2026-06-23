@@ -44,6 +44,7 @@ def test_measurability_gate_signal_vs_noise():
 def test_measurability_gate_refuses_sealed_array():
     rng = np.random.default_rng(1)
     sealed = rng.normal(size=(10, 5))
-    sealed_tagged = np.ma.array(sealed)  # any caller-marked sealed payload
+    # The guard is an honest-caller `_role` contract: it fires on the `_role` STRING
+    # alone (not on any array property), refusing data the caller marks as sealed.
     with pytest.raises(LeakageError):
-        measurability_gate(sealed_tagged, sealed_tagged, _role="sealed_double_unseen")
+        measurability_gate(sealed, sealed, _role="sealed_double_unseen")

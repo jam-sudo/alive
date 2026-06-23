@@ -15,15 +15,16 @@ run:
 1. **Recovery run** at ``rank == config.synthetic_rank`` (> 0): asserts exact
    noiseless coefficient recovery (``< 1e-6``), noisy coefficient recovery
    within ``config.recovery_rel_err_tol``, and held-out double-unseen
-   generalization within ``2 * config.recovery_rel_err_tol`` (a zero-shot pair
-   prediction is a strictly harder, noise-amplified target — same looser bound
-   Task 5 registered).
+   generalization within ``2 * config.recovery_rel_err_tol``. The held-out pair
+   is gene-disjoint (BOTH genes absent from every calibration pair), so this is a
+   genuine combo-zero-shot target — strictly harder and noise-amplified, hence
+   the same looser bound Task 5 registered.
 2. **False-GI guard run** at ``rank == 0``: asserts the noiseless algebraic leg
    recovers ~0 (``< 1e-8``) and that spurious recovered-GI from the noisy fit
    stays below ``_FALSE_GI_RATIO_MARGIN`` of the genuine recovered-GI from a
    noisy rank>0 fit at the same noise/config (the scale-relative guard Task 5
-   registered; the config's absolute ``false_gi_tol`` would be violated on some
-   seeds, which is why the honest guard is a ratio).
+   registered; an absolute false-GI tolerance would be violated on some seeds,
+   which is why the honest guard is a ratio — Phase 2 owns any absolute tol).
 
 ``method_axis == "METHOD_VALIDATED"`` iff BOTH runs' assertions hold.
 
@@ -185,6 +186,11 @@ def run_phase1(config: ComposePhase1Config, *, gate_inputs: dict) -> Phase1Repor
         min_cells=config.min_cells_per_pair,
     )
     g_meas = measurability_gate(gate_inputs["eps_split_a"], gate_inputs["eps_split_b"])
+    # The rank gate's RankReport is a SYNTHETIC PROXY, not a real Norman Phi rank:
+    # Phase 1 has no Norman calibration design, so we forward only the boolean
+    # full-rank flag from the synthetic recovery run. We flag this explicitly in the
+    # emitted detail so the JSON is unmistakably not a real Norman rank. The rank
+    # gate does not gate go/no-go (kept as a pre-check signal only).
     g_rank = rank_gate(
         RankReport(
             sym_dim=1,
@@ -192,6 +198,12 @@ def run_phase1(config: ComposePhase1Config, *, gate_inputs: dict) -> Phase1Repor
             is_full_rank=recovery.is_full_rank,
             condition_number=1.0,
         )
+    )
+    g_rank = GateResult(
+        name=g_rank.name,
+        passed=g_rank.passed,
+        detail={**g_rank.detail, "synthetic_proxy": True},
+        recommendation=g_rank.recommendation,
     )
 
     headline = "double-unseen" if g_power.passed else "single-unseen (downgraded)"

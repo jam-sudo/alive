@@ -34,7 +34,13 @@ def rank_diagnostics(Z: np.ndarray, pairs: list[tuple[int, int]]) -> RankReport:
     tol = max(phi.shape) * np.finfo(np.float64).eps * (svals[0] if svals.size else 0.0)
     rank = int(np.sum(svals > tol))
     pos = svals[svals > tol]
-    cond = float(pos[0] / pos[-1]) if pos.size else float("inf")
+    # A rank-deficient design has a zero singular value, so it is effectively
+    # infinitely conditioned. Reporting the ratio over only the positive singular
+    # values would misleadingly read "well-conditioned"; report inf instead.
+    if rank < sym_dim or pos.size == 0:
+        cond = float("inf")
+    else:
+        cond = float(pos[0] / pos[-1])
     return RankReport(
         sym_dim=sym_dim,
         rank=rank,

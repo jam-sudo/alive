@@ -72,23 +72,29 @@ def _rel_err(a: np.ndarray, b: np.ndarray) -> float:
 
 
 def _held_out_pair(pairs: list[tuple[int, int]], n_genes: int) -> tuple[int, int]:
-    """First ``(g, h)`` with ``g < h`` that is **not** among the calibration pairs.
+    """First gene-disjoint ``(g, h)``, ``g < h``, whose BOTH genes are unseen.
 
-    Guarantees the held-out pair is disjoint from ``pairs`` by construction (M1),
-    so the held-out generalization metric is never silently in-sample.
+    Returns the first pair such that NEITHER ``g`` nor ``h`` appears in ANY pair
+    in ``pairs``. This is a genuine double-unseen / combo-zero-shot pair (spec
+    §1.3, §3.4 (b)): both genes are absent from every calibration pair, not merely
+    the pair itself being absent. Predicting it exercises the operator's
+    extrapolation to two simultaneously novel gene factors.
 
     Raises
     ------
     ValueError
-        If every distinct pair over ``n_genes`` genes is already a calibration
-        pair (no held-out pair exists).
+        If fewer than two genes are free (every gene appears in some calibration
+        pair, or only one free gene remains), so no gene-disjoint pair exists.
     """
-    seen = {(min(a, b), max(a, b)) for a, b in pairs}
-    for g in range(n_genes):
-        for h in range(g + 1, n_genes):
-            if (g, h) not in seen:
-                return g, h
-    raise ValueError("no held-out pair available: all distinct pairs are in calibration")
+    used = {g for a, b in pairs for g in (a, b)}
+    free = [g for g in range(n_genes) if g not in used]
+    if len(free) < 2:
+        raise ValueError(
+            "no gene-disjoint held-out pair available: "
+            f"{len(free)} free gene(s) over {n_genes} genes "
+            f"({len(used)} used by calibration pairs); need >= 2"
+        )
+    return free[0], free[1]
 
 
 def _max_recovered_gi(coef: np.ndarray, Z: np.ndarray, pairs: list[tuple[int, int]]) -> float:
@@ -110,10 +116,11 @@ class RecoveryReport:
     noisy_rel_err
         Coefficient recovery error from the noisy ridge fit (§3.4 (b)).
     held_out_pred_rel_err
-        Genuine combo zero-shot generalization error (§3.4 (b), double-unseen):
-        the *noisy* fit predicting a held-out pair that is **disjoint** from the
-        calibration pairs, scored against the ground-truth bilinear response.
-        Noise-dependent; looser than the coefficient tolerance.
+        Genuine double-unseen (combo-zero-shot) generalization error (§3.4 (b)):
+        the *noisy* fit predicting a held-out pair whose BOTH genes are absent
+        from every calibration pair (gene-disjoint), scored against the
+        ground-truth bilinear response. Noise-dependent; looser than the
+        coefficient tolerance.
     false_gi_norm_noiseless
         False-GI algebraic check (§3.4 (d)): with no true GI (rank 0) the
         noiseless ``lam=0`` fit recovers ``eps_hat ~ 0`` (< 1e-8). Pinned to ~0
@@ -174,9 +181,10 @@ def run_recovery(
     coef_noisy = identify_operator(d.Z, d.pairs, d.eps_obs, lam=1e-3)
     noisy_rel = _rel_err(coef_noisy, d.coef_true)
 
-    # Held-out combo zero-shot generalization (§3.4 (b)): the NOISY fit predicts a
-    # held-out pair that is disjoint-by-construction from the calibration pairs (M1),
-    # scored against the ground-truth bilinear response. Genuinely noise-dependent.
+    # Held-out double-unseen (combo-zero-shot) generalization (§3.4 (b)): the NOISY
+    # fit predicts a gene-disjoint pair whose BOTH genes are absent from every
+    # calibration pair, scored against the ground-truth bilinear response.
+    # Genuinely noise-dependent and genuinely zero-shot in both gene factors.
     g, h = _held_out_pair(d.pairs, n_genes)
     held = _rel_err(
         bilinear_predict(coef_noisy, d.Z[g], d.Z[h]),

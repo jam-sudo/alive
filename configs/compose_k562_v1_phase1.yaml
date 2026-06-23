@@ -1,6 +1,8 @@
 # COMPOSE-K562-v1 Phase 1 (synthetic recovery + Norman pre-check gates). DEFERRED.
+# Ridge-lambda selection and an absolute false-GI tolerance are Phase-2 concerns:
+# Phase-1 identification hardcodes lam and the false-GI guard is a scale-relative
+# ratio margin (_FALSE_GI_RATIO_MARGIN in phase1.py), so no grid/tol is consumed here.
 k_grid: [4, 8, 12]
-lambda_grid: [0.0, 0.001, 0.01, 0.1]
 response_dim: 50
 synthetic_n_genes: 60
 synthetic_rank: 3
@@ -9,5 +11,4 @@ min_double_unseen_pairs: 20      # power-gate floor (pre-registered)
 min_cells_per_pair: 50
 calibration_fraction: 0.6
 recovery_rel_err_tol: 0.15       # noisy synthetic recovery acceptance
-false_gi_tol: 0.05               # ||eps_hat|| when eps*=0 must stay below
 registered_seeds: [11, 23, 37]

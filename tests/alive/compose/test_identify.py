@@ -45,3 +45,7 @@ def test_rank_deficient_flagged():
     assert not rep.is_full_rank
     assert rep.rank == 1
     assert rep.sym_dim == sym_basis_dim(4)
+    # A rank-deficient design is effectively infinitely conditioned: the diagnostic
+    # must NOT read "well-conditioned" off only the positive singular values.
+    assert not np.isfinite(rep.condition_number)
+    assert rep.condition_number == float("inf")
