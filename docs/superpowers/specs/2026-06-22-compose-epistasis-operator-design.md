@@ -1,10 +1,10 @@
 # COMPOSE — 식별가능한 Interaction-Composition Operator (Epistasis) Design
 
-> **문서 역할:** 차기 milestone의 scientific claim 계약 (project owner 검토용 설계안)
-> **상태:** DEFERRED — owner 승인·별도 config·prior-art gate 통과 전에는 활성화하지 않음
-> **개정일:** 2026-06-22
-> **작업용 protocol 이름(잠정):** `COMPOSE-K562-v1`
-> **선행 milestone:** `TG-K562-v1` (완료, verdict `NO_DISTINCT_WIN`; 본 milestone은 그 결과에 소급 주장하지 않음)
+> **문서 역할:** milestone의 scientific claim 계약
+> **상태:** **ACTIVE (Phase 2)** — owner 승인 2026-06-23. Phase 1 완료(method `METHOD_VALIDATED`); §9 prerequisite 충족(prior-art §6.1=NOVELTY_NARROWED, 데이터 CC BY 4.0, Phase-1 gate). Phase-2 pre-registration은 §10 + `configs/compose_k562_v1_phase2.yaml`.
+> **개정일:** 2026-06-23
+> **protocol 이름:** `COMPOSE-K562-v1`
+> **선행 milestone:** `TG-K562-v1` (COMPLETE, verdict `NO_DISTINCT_WIN`; 본 milestone은 그 결과에 소급 주장하지 않음, seal 영구 독립 §6.3)
 
 ---
 
@@ -349,3 +349,57 @@ tests(unit/leakage/metric/repro/integration)를 동반한다.
 
 활성화 시 CLAUDE.md §4 protocol registry에 본 protocol을 등재하고, 현재 결과에 소급해 주장하지
 않는다.
+
+---
+
+## 10. Phase-2 활성화 & pre-registration (2026-06-23, owner-approved)
+
+§9 prerequisite 충족으로 `COMPOSE-K562-v1`을 **ACTIVE (Phase 2)**로 활성화한다. exact 값은
+`configs/compose_k562_v1_phase2.yaml`가 source-of-truth(CLAUDE.md §3.1); 본 절은 claim·정직성
+계약을 고정한다.
+
+### 10.1 Headline regime — marquee이되 underpowered로 사전등록
+
+Phase-1 gate(실 Norman)는 **measurability를 강하게 통과**(split-half ε corr 0.868)했으나 **power는
+marginal**(double-unseen ≈ 22쌍, seed 12–27, median 22). win 조건(additive 격파 + family
+동시추론)은 CARTOGRAPHER가 n=247에서도 못 넘긴 바, n≈22에서는 band가 ~3.3× 넓어 **거의 확실히
+인증 불가**. 따라서:
+
+- **double-unseen = marquee headline**(owner 결정)이되, **"underpowered, NO_DISTINCT_WIN이 *예상*
+  결과이며 방법을 falsify하지 않는다"를 사전등록**한다.
+- **single-unseen(~68) = powered secondary** — real win이 통계적으로 *가능*한 regime. 두 regime
+  모두 power와 함께 보고(§10.4).
+
+### 10.2 Value-robust 계약 (real null에도 milestone 가치 유지)
+
+double-unseen이 `NO_DISTINCT_WIN`이어도 산출물은: (a) `METHOD_VALIDATED`(합성 식별가능성 = §6.1
+narrowed novelty의 실제 기여), (b) **학습가능 GI 특성화**(noise ceiling 0.868, calibration/
+single-unseen에서 bilinear-from-singles가 잡는 GI 양), (c) single-unseen powered 결과. milestone은
+double-unseen 단일 인증에 좌우되지 않는다.
+
+### 10.3 고정 split & 식별 제약
+
+split seed = **11 a priori**(count로 선택하지 않음; 단일 sealed partition). rank 조건
+`|Cal| ≥ k(k+1)/2`, `|Cal|≈41` → `k_grid=[4,6,8]`. calibration **gene-disjoint OOF**로 k·λ 선택
+(sealed regime과 동일 난이도). both-seen test는 보류(|Cal| 잠식 → rank floor 위협).
+
+### 10.4 Baselines·metric·inference (roster outcome 전 고정)
+
+family = {additive(null floor), GEARS(published SOTA, GO-graph 사용 — 우리 차별점), CPA(latent-
+additive), ID-only, L1(headline)/L2/L3}. **GEARS/CPA는 singles+combo_calibration에만 학습**(sealed
+미노출, leakage 차단). primary metric = additive 대비 Δ(δ_gh, response-space), **material margin =
+상대오차 감소 5%**; secondary = GI-explained(noise-ceiling 정규화)·구조 복원. 동시추론 =
+max-deviation bootstrap(`alive.eval.bootstrap` 재사용), family-confidence 0.95.
+
+### 10.5 2-phase 실행 & seal
+
+- **Phase 2a (dev, seal 무접촉):** real δ/ε + z_g(+ESM) + L1/L2/L3·ID-only 적합 + GEARS·CPA 학습 +
+  dev 지표·noise-ceiling·rank 진단. **futility checkpoint**(dev Δ 미달 / rank 실패 / measurability
+  실패 → `FUTILITY_STOPPED`, seal 닫힘).
+- **Phase 2b (freeze + seal-once):** 전 method 동결 → `sealed_double_unseen`+`sealed_single_unseen`
+  **1회** 개방 → Δ + 동시추론 + secondary → verdict → report.
+
+seal·run-identity는 TG-K562와 **영구 독립**(§6.3): `artifacts/compose/<run_id>`, composite run_id =
+config+Norman data-card(sha256)+sequence-mapping+raw sha256, sealed access 0(2a/futility)→1(2b),
+write-once. verdict 2축(method × sealed); "모든 무결성 검증 완료"로 표현하지 않는다(구조적 self-check
+한계 명시).

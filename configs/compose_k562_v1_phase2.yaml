@@ -1,0 +1,103 @@
+# COMPOSE-K562-v1 Phase 2 — pre-registered protocol config (real Norman sealed study).
+# ACTIVE (owner-approved 2026-06-23). Separate seal from TG-K562-v1 (never interchangeable).
+# Spec: docs/superpowers/specs/2026-06-22-compose-epistasis-operator-design.md (§10).
+# All values below are PRE-REGISTERED and fixed before any sealed access.
+
+protocol: COMPOSE-K562-v1
+phase: 2
+
+data:
+  source: "scPerturb NormanWeissman2019 (Zenodo 10.5281/zenodo.13350497)"
+  file: NormanWeissman2019_filtered.h5ad
+  license: "CC BY 4.0"
+  cell_line: K562
+  modality: CRISPRa            # NOT CRISPRi — never transfer claims to Replogle KD
+  perturbation_key: perturbation
+  control_token: control
+  combo_sep: "_"
+
+eligibility:                   # outcome-independent (CLAUDE.md §5); NEVER by GI strength
+  min_cells_per_gene: 50
+  min_cells_per_pair: 50
+  require_esm_feature: true     # ESM-2 sequence available for both genes (may shrink counts)
+
+split:                          # unit = perturbation PAIR (claim unit, §6)
+  seed: 11                      # a priori (first registered seed; count ~= median); NOT count-selected
+  calibration_fraction: 0.6
+  roles:
+    combo_calibration: both genes in calibration set  # B identification (~41 pairs)
+    sealed_double_unseen: neither gene in any calibration pair  # HEADLINE (~22)
+    sealed_single_unseen: exactly one gene in calibration set   # powered SECONDARY (~68)
+  both_seen_test: deferred      # would shrink |Cal| below rank floor; not built in Phase 2
+
+response_space:
+  transform: [normalize_total_median, log1p]
+  n_hvg: 1500                   # top variable genes on control cells
+  pca_dim: 50
+  fit_roles: [control, singles]  # NO double-cell leakage; no sealed access
+
+factor_z:
+  pca_k_grid: [4, 6, 8]         # rank cond |Cal|>=k(k+1)/2; |Cal|~41 => k<=8 (sym_dim 10/21/36)
+  include_esm: true
+  esm_model: esm2_t33_650M_UR50D_mean_pool
+  selection: calibration_oof_gene_disjoint   # OOF folds mirror the sealed gene-disjoint regime
+
+identification:
+  estimator: ridge_lsq
+  lambda_grid: [0.0, 0.001, 0.01, 0.1]
+  selection: calibration_oof_gene_disjoint
+
+metric:
+  primary: delta_error_reduction      # Delta = err(additive) - err(L1) on delta_gh, pair-level
+  distance: response_space_mse        # in the PCA-50 response space
+  material_margin: 0.05               # relative error reduction; win requires family-wise LB > this
+  secondary:
+    - gi_explained_fraction           # normalized by the split-half noise ceiling
+    - gi_structure_recovery           # sign/class vs known GI, > chance
+  secondary_no_material_regression: 0.02
+
+inference:
+  method: max_deviation_bootstrap     # reuse alive.eval.bootstrap (CARTOGRAPHER)
+  comparator_family: [additive, gears, cpa, id_only, l3_hypernetwork]
+  family_confidence: 0.95
+  bootstrap_replicates: 10000
+
+regimes:
+  headline: double_unseen             # marquee; PRE-REGISTERED as underpowered (~22), expected NO_DISTINCT_WIN
+  powered_secondary: [single_unseen]  # where a real win is statistically achievable (~68)
+  report_all: true
+
+baselines:                            # roster FROZEN before any outcome (§9 / §6.1)
+  additive: delta_g + delta_h         # primary null floor
+  lower_bounds: [no_change, perturbation_mean]
+  id_only: linear_no_bilinear
+  gears: { package: gears, note: "published combo SOTA; uses GO graph; version pinned in lockfile" }
+  cpa: { package: cpa-tools, note: "latent-additive comparator; version pinned in lockfile" }
+  ablation_ladder: [l1_bilinear_identifiable, l2_saturation, l3_hypernetwork]  # L1 = headline
+
+leakage_control:
+  baseline_training_roles: [singles, combo_calibration]   # GEARS/CPA NEVER see sealed pairs in training
+  sealed_outcomes_touched_before_freeze: false
+
+phasing:
+  phase_2a: dev-stage (real delta/eps + z_g + fit L1/L2/L3+id_only + train GEARS/CPA + dev metrics + futility); NO seal
+  phase_2b: freeze all methods -> open sealed_double_unseen + sealed_single_unseen ONCE -> metric + simultaneous inference -> verdict
+
+futility:                             # development-stage stop (§10); seal stays closed, count 0
+  conditions: [dev_oof_delta_below_threshold, rank_condition_fail, measurability_fail]
+  dev_oof_delta_threshold: 0.0        # calibration-OOF Delta must exceed (lower bound) before continuing
+
+seal:                                 # independent of TG-K562 (§6.3)
+  artifacts_root: artifacts/compose
+  run_id_inputs: [config, data_card, sequence_mapping, raw_data_sha256]
+  sealed_access_max: 1
+  write_once: true
+
+seeds:
+  split_seed: 11                       # fixed partition (single sealed split)
+  registered_seeds: [11, 23, 37]       # model OOF / ensemble determinism
+
+verdict:                              # two axes (spec §4.5)
+  method_axis: [METHOD_VALIDATED, METHOD_NOT_VALIDATED]   # synthetic; already METHOD_VALIDATED
+  sealed_axis: [GI_LEARNABLE_WIN, PARTIAL, NO_DISTINCT_WIN, FUTILITY_STOPPED, INVALID]
+  integrity_clause_disclaimer: "structural run-internal self-check, NOT an independent audit"
