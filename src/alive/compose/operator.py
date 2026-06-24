@@ -6,6 +6,7 @@ B_m flattened by :func:`_sym_to_vec`. The matching pair feature
 :func:`pair_feature` is built so that ``coef @ pair_feature(z_g, z_h)`` equals
 the stacked quadratic forms — and is symmetric in (g, h).
 """
+
 from __future__ import annotations
 
 import numpy as np

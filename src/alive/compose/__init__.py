@@ -5,6 +5,7 @@ No seal access; see docs/superpowers/specs/2026-06-22-compose-epistasis-operator
 
 Public re-exports of the Phase-1 API for convenience.
 """
+
 from __future__ import annotations
 
 from alive.compose.config import ComposePhase1Config, ConfigError, load_compose_config

@@ -5,6 +5,7 @@ operator, the exact GI vectors eps_true, and a noisy observation eps_obs. The
 recovery harness (Task 5) consumes this to prove algebraic recovery (noiseless)
 and characterise noisy recovery — independent of any real data.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -99,9 +100,7 @@ def _held_out_pair(pairs: list[tuple[int, int]], n_genes: int) -> tuple[int, int
 
 def _max_recovered_gi(coef: np.ndarray, Z: np.ndarray, pairs: list[tuple[int, int]]) -> float:
     """Largest recovered-GI norm ``max_p ||coef @ pair_feature(z_a, z_b)||`` over pairs."""
-    return float(
-        np.max([np.linalg.norm(bilinear_predict(coef, Z[a], Z[b])) for a, b in pairs])
-    )
+    return float(np.max([np.linalg.norm(bilinear_predict(coef, Z[a], Z[b])) for a, b in pairs]))
 
 
 @dataclass(frozen=True)
@@ -240,8 +239,13 @@ def frontier_sweep(
     for k in k_grid:
         for n_cal in n_cal_grid:
             r = run_recovery(
-                n_genes=n_genes, p=p, rank=rank, n_pairs=n_cal,
-                noise_sd=noise_sd, seed=seed, k=k,
+                n_genes=n_genes,
+                p=p,
+                rank=rank,
+                n_pairs=n_cal,
+                noise_sd=noise_sd,
+                seed=seed,
+                k=k,
             )
             out.append(
                 {"k": k, "n_cal": n_cal, "rel_err": r.noisy_rel_err, "is_full_rank": r.is_full_rank}

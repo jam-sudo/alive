@@ -5,6 +5,7 @@ Synthetic recovery + dev-only gate inputs come from a profiled Norman split;
 this script wires them and writes the go/no-go report through a write-once run
 dir. Phase 1 opens no seal. See docs/superpowers/plans/2026-06-23-compose-phase1.md.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -37,10 +38,7 @@ def main(argv: list[str] | None = None) -> int:
     rep = run_phase1(cfg, gate_inputs=gate_inputs)
     write_phase1(rep, args.out_dir)
     write_phase1_provenance(rep, args.out_dir, config_path=args.config)
-    print(
-        f"method_axis={rep.method_axis} headline={rep.headline_regime} "
-        f"go_no_go={rep.go_no_go}"
-    )
+    print(f"method_axis={rep.method_axis} headline={rep.headline_regime} go_no_go={rep.go_no_go}")
     return 0
 
 

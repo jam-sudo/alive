@@ -23,6 +23,7 @@ Tolerances asserted here are tied to the Phase-1 config
     ~0.05; the 0.1 margin leaves ~2x headroom while still catching real-GI-
     magnitude hallucination.
 """
+
 from __future__ import annotations
 
 import math
@@ -46,7 +47,7 @@ def test_noiseless_algebraic_recovery():
     r = run_recovery(n_genes=60, p=5, rank=2, n_pairs=60, noise_sd=0.0, seed=0, k=4)
     assert isinstance(r, RecoveryReport)
     assert r.is_full_rank
-    assert r.noiseless_rel_err < 1e-8           # (a) algebraic coefficient recovery
+    assert r.noiseless_rel_err < 1e-8  # (a) algebraic coefficient recovery
     # Held-out uses the ``lam=1e-3`` fit, so at noise_sd=0 only the tiny ridge bias
     # remains (~1e-5); it is not the 1e-8 algebraic floor of the coefficient leg.
     assert r.held_out_pred_rel_err < 1e-3
@@ -54,7 +55,7 @@ def test_noiseless_algebraic_recovery():
 
 def test_noisy_recovery_within_tolerance():
     r = run_recovery(n_genes=60, p=5, rank=2, n_pairs=60, noise_sd=0.05, seed=1, k=4)
-    assert r.noisy_rel_err < RECOVERY_REL_ERR_TOL   # (b) coefficient tol
+    assert r.noisy_rel_err < RECOVERY_REL_ERR_TOL  # (b) coefficient tol
 
 
 def test_held_out_noisy_generalization():
@@ -64,20 +65,18 @@ def test_held_out_noisy_generalization():
     n_genes, n_pairs, seed, k = 60, 60, 1, 4
     r = run_recovery(n_genes=n_genes, p=5, rank=2, n_pairs=n_pairs, noise_sd=0.05, seed=seed, k=k)
     assert math.isfinite(r.held_out_pred_rel_err)
-    assert r.held_out_pred_rel_err > 0.0            # noise => not exactly zero
+    assert r.held_out_pred_rel_err > 0.0  # noise => not exactly zero
     assert r.held_out_pred_rel_err < HELD_OUT_REL_ERR_TOL
 
     # Load-bearing §3.4 (b) evidence: reconstruct the exact synthetic instance the
     # recovery run used and prove the scored held-out pair is TRULY gene-disjoint —
     # i.e. NEITHER gene appears in ANY calibration pair (not merely the pair absent).
-    d = make_synthetic(
-        n_genes=n_genes, k=k, p=5, rank=2, n_pairs=n_pairs, noise_sd=0.05, seed=seed
-    )
+    d = make_synthetic(n_genes=n_genes, k=k, p=5, rank=2, n_pairs=n_pairs, noise_sd=0.05, seed=seed)
     g, h = _held_out_pair(d.pairs, n_genes)
     calibration_genes = {gene for a, b in d.pairs for gene in (a, b)}
-    assert g not in calibration_genes               # gene g unseen in all cal pairs
-    assert h not in calibration_genes               # gene h unseen in all cal pairs
-    assert g != h                                    # a genuine pair
+    assert g not in calibration_genes  # gene g unseen in all cal pairs
+    assert h not in calibration_genes  # gene h unseen in all cal pairs
+    assert g != h  # a genuine pair
     # And the pair itself is therefore absent from calibration (weaker corollary).
     assert (min(g, h), max(g, h)) not in {(min(a, b), max(a, b)) for a, b in d.pairs}
 
@@ -90,7 +89,7 @@ def test_false_gi_guard_noise_robust():
     assert r.false_gi_norm_noiseless < 1e-8
     # Noise-robust leg: spurious (noisy rank-0) GI is much smaller than genuine GI.
     assert math.isfinite(r.false_gi_norm_noisy)
-    assert r.false_gi_norm_noisy > 0.0              # noise does produce *some* fit
+    assert r.false_gi_norm_noisy > 0.0  # noise does produce *some* fit
     assert math.isfinite(r.genuine_gi_norm)
     assert r.false_gi_norm_noisy < FALSE_GI_RATIO_MARGIN * r.genuine_gi_norm
     # Backward-compatible alias tracks the operative (noisy) guard for rank-0 runs.
@@ -101,16 +100,14 @@ def test_false_gi_guard_holds_across_noise_and_seeds():
     # The ratio margin must hold across registered seeds and noise levels, not just one.
     for seed in (11, 23, 37):
         for noise_sd in (0.05, 0.1, 0.2):
-            r = run_recovery(
-                n_genes=60, p=5, rank=0, n_pairs=60, noise_sd=noise_sd, seed=seed, k=4
-            )
+            r = run_recovery(n_genes=60, p=5, rank=0, n_pairs=60, noise_sd=noise_sd, seed=seed, k=4)
             assert r.false_gi_norm_noisy < FALSE_GI_RATIO_MARGIN * r.genuine_gi_norm
 
 
 def test_rank_deficient_degrades_and_flags():
     # Too few pairs for k=8 (sym_dim=36) -> not full rank.
     r = run_recovery(n_genes=40, p=3, rank=2, n_pairs=10, noise_sd=0.0, seed=3, k=8)
-    assert not r.is_full_rank                    # (c) flagged
+    assert not r.is_full_rank  # (c) flagged
 
 
 def test_frontier_sweep_keys():

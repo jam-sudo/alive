@@ -2,6 +2,7 @@
 
 Uses a tiny synthetic AnnData; no real download.
 """
+
 from __future__ import annotations
 
 import numpy as np

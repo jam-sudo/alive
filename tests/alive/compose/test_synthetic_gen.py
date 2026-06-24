@@ -1,4 +1,5 @@
 """Tests for alive.compose.synthetic generator — written FIRST per TDD protocol."""
+
 from __future__ import annotations
 
 import numpy as np
@@ -25,4 +26,4 @@ def test_noise_perturbs_and_is_deterministic():
     a = make_synthetic(n_genes=20, k=4, p=3, rank=2, n_pairs=30, noise_sd=0.1, seed=2)
     b = make_synthetic(n_genes=20, k=4, p=3, rank=2, n_pairs=30, noise_sd=0.1, seed=2)
     np.testing.assert_array_equal(a.eps_obs, b.eps_obs)  # seed-deterministic
-    assert not np.allclose(a.eps_obs, a.eps_true)         # noise applied
+    assert not np.allclose(a.eps_obs, a.eps_true)  # noise applied

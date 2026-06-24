@@ -4,6 +4,7 @@ These gates decide go/no-go for the real Phase-2 study WITHOUT opening any seal.
 The measurability gate enforces the leakage guard: it refuses to run on data
 tagged with a sealed role.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
