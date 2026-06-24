@@ -264,6 +264,164 @@ def test_empty_config_rejected(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# full schema closure on EVERY pre-registered block + nested dicts (I1)
+# ---------------------------------------------------------------------------
+# Representative blocks across the config: a flat block (seal), a nested
+# sub-block via its parent (verdict / verdict.no_distinct_win), an inner role
+# dict (split.roles) and a nested baseline package dict (baselines.gears).
+# Each must reject both an unknown inner key and a deleted required inner key.
+
+# (block-path, callable that injects an unknown key, callable that deletes a key)
+_UNKNOWN_KEY_CASES = [
+    ("seal", lambda raw: raw["seal"].__setitem__("bogus_inner", 1)),
+    ("verdict", lambda raw: raw["verdict"].__setitem__("bogus_inner", 1)),
+    (
+        "verdict.no_distinct_win",
+        lambda raw: raw["verdict"]["no_distinct_win"].__setitem__("bogus_inner", 1),
+    ),
+    ("split.roles", lambda raw: raw["split"]["roles"].__setitem__("bogus_role", "x")),
+    ("baselines.gears", lambda raw: raw["baselines"]["gears"].__setitem__("bogus_inner", 1)),
+    ("data", lambda raw: raw["data"].__setitem__("bogus_inner", 1)),
+    ("eligibility", lambda raw: raw["eligibility"].__setitem__("bogus_inner", 1)),
+    ("identification", lambda raw: raw["identification"].__setitem__("bogus_inner", 1)),
+    ("seeds", lambda raw: raw["seeds"].__setitem__("bogus_inner", 1)),
+]
+
+_MISSING_KEY_CASES = [
+    ("seal", lambda raw: raw["seal"].pop("write_once")),
+    ("verdict", lambda raw: raw["verdict"].pop("integrity_clause_disclaimer")),
+    (
+        "verdict.no_distinct_win",
+        lambda raw: raw["verdict"]["no_distinct_win"].pop("additive_simultaneous_lower_bound_lte"),
+    ),
+    ("split.roles", lambda raw: raw["split"]["roles"].pop("sealed_single_unseen")),
+    ("baselines.gears", lambda raw: raw["baselines"]["gears"].pop("package")),
+    ("data", lambda raw: raw["data"].pop("cell_line")),
+    ("eligibility", lambda raw: raw["eligibility"].pop("min_cells_per_gene")),
+    ("identification", lambda raw: raw["identification"].pop("estimator")),
+    ("seeds", lambda raw: raw["seeds"].pop("split_seed")),
+]
+
+
+@pytest.mark.parametrize(
+    "block, inject", _UNKNOWN_KEY_CASES, ids=[c[0] for c in _UNKNOWN_KEY_CASES]
+)
+def test_unknown_inner_key_rejected_per_block(tmp_path, block, inject):
+    raw = _raw()
+    inject(raw)
+    with pytest.raises(Phase2ConfigError):
+        load_compose_phase2_config(_write(tmp_path, raw))
+
+
+@pytest.mark.parametrize(
+    "block, delete", _MISSING_KEY_CASES, ids=[c[0] for c in _MISSING_KEY_CASES]
+)
+def test_missing_inner_key_rejected_per_block(tmp_path, block, delete):
+    raw = _raw()
+    delete(raw)
+    with pytest.raises(Phase2ConfigError):
+        load_compose_phase2_config(_write(tmp_path, raw))
+
+
+def test_seal_unknown_inner_key_rejected(tmp_path):
+    raw = _raw()
+    raw["seal"]["bogus_inner"] = True
+    with pytest.raises(Phase2ConfigError):
+        load_compose_phase2_config(_write(tmp_path, raw))
+
+
+def test_seal_missing_inner_key_rejected(tmp_path):
+    raw = _raw()
+    del raw["seal"]["write_once"]
+    with pytest.raises(Phase2ConfigError):
+        load_compose_phase2_config(_write(tmp_path, raw))
+
+
+def test_verdict_unknown_inner_key_rejected(tmp_path):
+    raw = _raw()
+    raw["verdict"]["gi_learnable_win"]["bogus_inner"] = 1
+    with pytest.raises(Phase2ConfigError):
+        load_compose_phase2_config(_write(tmp_path, raw))
+
+
+def test_verdict_missing_inner_key_rejected(tmp_path):
+    raw = _raw()
+    del raw["verdict"]["gi_learnable_win"]["additive_simultaneous_lower_bound_gt"]
+    with pytest.raises(Phase2ConfigError):
+        load_compose_phase2_config(_write(tmp_path, raw))
+
+
+def test_split_roles_unknown_inner_key_rejected(tmp_path):
+    raw = _raw()
+    raw["split"]["roles"]["both_seen"] = "x"
+    with pytest.raises(Phase2ConfigError):
+        load_compose_phase2_config(_write(tmp_path, raw))
+
+
+def test_baselines_gears_unknown_inner_key_rejected(tmp_path):
+    raw = _raw()
+    raw["baselines"]["gears"]["bogus_inner"] = "x"
+    with pytest.raises(Phase2ConfigError):
+        load_compose_phase2_config(_write(tmp_path, raw))
+
+
+def test_baselines_gears_missing_inner_key_rejected(tmp_path):
+    raw = _raw()
+    del raw["baselines"]["gears"]["environment_status"]
+    with pytest.raises(Phase2ConfigError):
+        load_compose_phase2_config(_write(tmp_path, raw))
+
+
+# ---------------------------------------------------------------------------
+# status enum (I2)
+# ---------------------------------------------------------------------------
+def test_status_typo_rejected(tmp_path):
+    raw = _raw()
+    raw["status"] = "activ"  # typo: must not silently behave as blocked
+    with pytest.raises(Phase2ConfigError):
+        load_compose_phase2_config(_write(tmp_path, raw))
+
+
+def test_status_unknown_value_rejected(tmp_path):
+    raw = _raw()
+    raw["status"] = "blocked"  # not a registered status
+    with pytest.raises(Phase2ConfigError):
+        load_compose_phase2_config(_write(tmp_path, raw))
+
+
+def test_status_active_accepted(tmp_path):
+    raw = _raw()
+    raw["status"] = "active"
+    cfg = load_compose_phase2_config(_write(tmp_path, raw))
+    assert cfg.status == "active"
+    assert cfg.is_active is True
+
+
+# ---------------------------------------------------------------------------
+# strict int typing in factor_z (M)
+# ---------------------------------------------------------------------------
+def test_string_int_in_total_k_grid_rejected(tmp_path):
+    raw = _raw()
+    raw["factor_z"]["total_k_grid"] = ["4", 6, 8]  # string int must NOT be coerced
+    with pytest.raises(Phase2ConfigError):
+        load_compose_phase2_config(_write(tmp_path, raw))
+
+
+def test_string_int_in_expression_dims_rejected(tmp_path):
+    raw = _raw()
+    raw["factor_z"]["expression_dims"] = ["2", 4, 6]
+    with pytest.raises(Phase2ConfigError):
+        load_compose_phase2_config(_write(tmp_path, raw))
+
+
+def test_bool_in_esm_projection_dim_rejected(tmp_path):
+    raw = _raw()
+    raw["factor_z"]["esm_projection_dim"] = True  # bool is not an int here
+    with pytest.raises(Phase2ConfigError):
+        load_compose_phase2_config(_write(tmp_path, raw))
+
+
+# ---------------------------------------------------------------------------
 # fixture mode is always allowed
 # ---------------------------------------------------------------------------
 def test_fixture_mode_always_allowed_even_when_blocked():

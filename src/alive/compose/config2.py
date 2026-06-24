@@ -7,11 +7,15 @@ that run identity, and so the two protocols' seals remain non-interchangeable
 
 The loader (:func:`load_compose_phase2_config`) parses
 ``configs/compose_k562_v1_phase2.yaml`` into a frozen
-:class:`ComposePhase2Config`. The schema is closed: every key that the candidate
-config declares is required, and any unknown key — at the top level or inside a
-validated nested block — is rejected. The loader also pins the scientifically
-load-bearing values that the pre-registration freezes: total factor dimensions
-and the ESM dimension arithmetic, the exact comparator roster, the primary
+:class:`ComposePhase2Config`. The schema is fully closed: every top-level block
+that carries pre-registered values — and every nested dict within it
+(``split.roles``, ``baselines.gears``/``cpa``, the three ``verdict`` sub-blocks)
+— must carry exactly its canonical key set. A missing required key or an unknown
+key anywhere raises :class:`Phase2ConfigError`. ``status`` is validated against
+the registered enum so a typo cannot silently masquerade as a blocked config.
+The loader also pins the scientifically load-bearing values that the
+pre-registration freezes: total factor dimensions and the ESM dimension
+arithmetic (with strict int typing), the exact comparator roster, the primary
 metric formula and margins, every registered secondary metric's definition /
 interval / material-regression margin (or a governance note that it is
 descriptive-only), the bootstrap settings, the role names and the activation
@@ -75,6 +79,10 @@ _EXPECTED_ACTIVATION_REQUIREMENTS: tuple[str, ...] = (
     "phase2_plan_metric_leakage_and_seal_integration_tests",
 )
 
+# Registered status enum. Any other value (e.g. a typo like "activ") is rejected
+# so a blocked config can never silently masquerade as something else (I2).
+_KNOWN_STATUS = frozenset({"preregistered_activation_blocked", "active"})
+
 # Registered secondary-metric governance. Per spec §10 and the config
 # (``secondary_are_verdict_gates: false``), both secondaries are reported with an
 # effect size, a simultaneous interval and a chance/null definition, but they are
@@ -111,7 +119,7 @@ _EXPECTED_SECONDARY_METRICS: dict[str, dict[str, Any]] = {
 }
 
 # Closed top-level schema. Every key must be present; unknown keys are rejected.
-# Blocks marked with a nested validator below have their inner keys closed too.
+# Each nested block below has its inner keys closed too (I1).
 _KNOWN_TOP_LEVEL = frozenset(
     {
         "protocol",
@@ -136,6 +144,124 @@ _KNOWN_TOP_LEVEL = frozenset(
         "verdict",
     }
 )
+
+# Closed inner schemas for every block that carries pre-registered values. Each
+# key set is derived from the canonical YAML structure
+# (``configs/compose_k562_v1_phase2.yaml``); a missing required key or an unknown
+# key anywhere raises :class:`Phase2ConfigError`. Nested dicts inside a block
+# (``split.roles``, ``baselines.gears``/``cpa``, ``verdict.*``) are closed via
+# their own entries below (I1).
+_KNOWN_DATA = frozenset(
+    {
+        "source",
+        "file",
+        "license",
+        "cell_line",
+        "modality",
+        "perturbation_key",
+        "control_token",
+        "combo_sep",
+    }
+)
+_KNOWN_ELIGIBILITY = frozenset({"min_cells_per_gene", "min_cells_per_pair", "require_esm_feature"})
+_KNOWN_SPLIT = frozenset(
+    {
+        "seed",
+        "calibration_fraction",
+        "eligibility_before_split",
+        "pair_canonicalization",
+        "pair_deduplication",
+        "string_order",
+        "gene_permutation",
+        "calibration_gene_count",
+        "roles",
+        "both_seen_test",
+    }
+)
+_KNOWN_SPLIT_ROLES = frozenset(
+    {"combo_calibration", "sealed_double_unseen", "sealed_single_unseen"}
+)
+_KNOWN_RESPONSE_SPACE = frozenset({"transform", "n_hvg", "pca_dim", "fit_roles"})
+_KNOWN_FACTOR_Z = frozenset(
+    {
+        "total_k_grid",
+        "expression_dims",
+        "include_esm",
+        "esm_model",
+        "esm_projection_dim",
+        "esm_projection_method",
+        "esm_projection_fit_roles",
+        "rank_gate",
+        "selection",
+    }
+)
+_KNOWN_IDENTIFICATION = frozenset({"estimator", "lambda_grid", "selection"})
+_KNOWN_METRIC = frozenset(
+    {
+        "pair_error",
+        "primary",
+        "formula",
+        "distance",
+        "aggregation",
+        "material_margin_vs_additive",
+        "learned_comparator_margin",
+        "nonfinite_or_missing_policy",
+        "secondary",
+        "secondary_are_verdict_gates",
+    }
+)
+_KNOWN_INFERENCE = frozenset(
+    {
+        "method",
+        "comparator_family",
+        "resampling_unit",
+        "shared_resamples_across_contrasts",
+        "family_confidence",
+        "bootstrap_replicates",
+    }
+)
+_KNOWN_REGIMES = frozenset(
+    {"headline_candidate", "registered_secondary", "power_status", "report_all"}
+)
+_KNOWN_BASELINES = frozenset(
+    {
+        "additive",
+        "lower_bounds",
+        "id_only",
+        "gears",
+        "cpa",
+        "ablation_ladder",
+    }
+)
+_KNOWN_BASELINE_GEARS = frozenset({"package", "revision", "environment_status"})
+_KNOWN_BASELINE_CPA = frozenset({"package", "revision", "environment_status"})
+_KNOWN_LEAKAGE_CONTROL = frozenset(
+    {"baseline_training_roles", "sealed_outcomes_touched_before_freeze"}
+)
+_KNOWN_PHASING = frozenset({"phase_2a", "phase_2b"})
+_KNOWN_FUTILITY = frozenset({"conditions", "dev_oof_metric", "dev_oof_threshold"})
+_KNOWN_SEAL = frozenset({"artifacts_root", "run_id_inputs", "sealed_access_max", "write_once"})
+_KNOWN_SEEDS = frozenset({"split_seed", "registered_seeds"})
+_KNOWN_VERDICT = frozenset(
+    {
+        "method_axis",
+        "sealed_axis",
+        "gi_learnable_win",
+        "partial",
+        "no_distinct_win",
+        "integrity_clause_disclaimer",
+    }
+)
+_KNOWN_VERDICT_GI_LEARNABLE_WIN = frozenset(
+    {
+        "additive_simultaneous_lower_bound_gt",
+        "every_learned_comparator_simultaneous_lower_bound_gt",
+    }
+)
+_KNOWN_VERDICT_PARTIAL = frozenset(
+    {"additive_simultaneous_lower_bound_gt", "learned_family_condition"}
+)
+_KNOWN_VERDICT_NO_DISTINCT_WIN = frozenset({"additive_simultaneous_lower_bound_lte"})
 
 
 class Phase2ConfigError(ValueError):
@@ -243,13 +369,57 @@ def _require(mapping: dict[str, Any], key: str, context: str) -> Any:
     return mapping[key]
 
 
-def _reject_unknown(mapping: dict[str, Any], known: frozenset[str], context: str) -> None:
-    """Raise if ``mapping`` carries keys outside ``known``."""
+def _close_schema(mapping: dict[str, Any], known: frozenset[str], context: str) -> None:
+    """Fully close a block's schema: reject unknown AND missing inner keys.
+
+    Parameters
+    ----------
+    mapping
+        The block to validate; must be a mapping.
+    known
+        The exact set of keys the block is allowed (and required) to carry,
+        derived from the canonical YAML structure.
+    context
+        Human-readable block name used in error messages.
+
+    Raises
+    ------
+    Phase2ConfigError
+        If ``mapping`` is not a mapping, carries any key outside ``known``, or is
+        missing any key in ``known``.
+    """
     if not isinstance(mapping, dict):
         raise Phase2ConfigError(f"expected a mapping for {context}")
-    unknown = set(mapping) - known
+    keys = set(mapping)
+    unknown = keys - known
     if unknown:
         raise Phase2ConfigError(f"unknown {context} keys: {sorted(unknown)}")
+    missing = known - keys
+    if missing:
+        raise Phase2ConfigError(f"missing required {context} keys: {sorted(missing)}")
+
+
+def _strict_int(value: Any, context: str) -> int:
+    """Return ``value`` only if it is a real ``int`` (``bool`` rejected).
+
+    Unlike ``int(value)`` this never coerces string ints or floats, so a typo
+    such as ``"4"`` in a frozen grid is surfaced rather than silently accepted.
+
+    Parameters
+    ----------
+    value
+        The candidate value.
+    context
+        Human-readable field name used in the error message.
+
+    Raises
+    ------
+    Phase2ConfigError
+        If ``value`` is not an ``int`` (booleans are explicitly rejected).
+    """
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise Phase2ConfigError(f"{context} must be an int, got {value!r}")
+    return value
 
 
 def load_compose_phase2_config(path: str | Path) -> ComposePhase2Config:
@@ -276,7 +446,8 @@ def load_compose_phase2_config(path: str | Path) -> ComposePhase2Config:
     if not isinstance(raw, dict) or not raw:
         raise Phase2ConfigError("config is empty or not a mapping")
 
-    _reject_unknown(raw, _KNOWN_TOP_LEVEL, "top-level")
+    _close_schema(raw, _KNOWN_TOP_LEVEL, "top-level")
+    _validate_block_schemas(raw)
 
     protocol = _require(raw, "protocol", "top-level")
     if protocol != _EXPECTED_PROTOCOL:
@@ -287,8 +458,8 @@ def load_compose_phase2_config(path: str | Path) -> ComposePhase2Config:
         raise Phase2ConfigError(f"phase must be {_EXPECTED_PHASE}, got {phase!r}")
 
     status = _require(raw, "status", "top-level")
-    if not isinstance(status, str) or not status:
-        raise Phase2ConfigError(f"status must be a non-empty string, got {status!r}")
+    if not isinstance(status, str) or status not in _KNOWN_STATUS:
+        raise Phase2ConfigError(f"status must be one of {sorted(_KNOWN_STATUS)}, got {status!r}")
 
     activation_requirements = _validate_activation_requirements(
         _require(raw, "activation_requirements", "top-level")
@@ -342,6 +513,81 @@ def load_compose_phase2_config(path: str | Path) -> ComposePhase2Config:
     )
 
 
+def _validate_block_schemas(raw: dict[str, Any]) -> None:
+    """Close the schema of every pre-registered block and its nested dicts (I1).
+
+    For each block listed in the top-level schema that carries pre-registered
+    values, require its exact canonical inner-key set: an unknown key or a
+    missing required key anywhere raises :class:`Phase2ConfigError`. Nested
+    mappings (``split.roles``, ``baselines.gears``/``cpa`` and the three
+    ``verdict`` sub-blocks) are closed as well. Value-level checks remain in the
+    dedicated ``_validate_*`` helpers; this function only closes structure.
+
+    Parameters
+    ----------
+    raw
+        The top-level mapping parsed from the YAML config; already confirmed to
+        carry exactly the canonical top-level keys.
+
+    Raises
+    ------
+    Phase2ConfigError
+        If any block (or nested dict) carries an unknown or missing inner key.
+    """
+    _close_schema(_require(raw, "data", "top-level"), _KNOWN_DATA, "data")
+    _close_schema(_require(raw, "eligibility", "top-level"), _KNOWN_ELIGIBILITY, "eligibility")
+
+    split = _require(raw, "split", "top-level")
+    _close_schema(split, _KNOWN_SPLIT, "split")
+    _close_schema(_require(split, "roles", "split"), _KNOWN_SPLIT_ROLES, "split.roles")
+
+    _close_schema(
+        _require(raw, "response_space", "top-level"), _KNOWN_RESPONSE_SPACE, "response_space"
+    )
+    _close_schema(_require(raw, "factor_z", "top-level"), _KNOWN_FACTOR_Z, "factor_z")
+    _close_schema(
+        _require(raw, "identification", "top-level"), _KNOWN_IDENTIFICATION, "identification"
+    )
+    _close_schema(_require(raw, "metric", "top-level"), _KNOWN_METRIC, "metric")
+    _close_schema(_require(raw, "inference", "top-level"), _KNOWN_INFERENCE, "inference")
+    _close_schema(_require(raw, "regimes", "top-level"), _KNOWN_REGIMES, "regimes")
+
+    baselines = _require(raw, "baselines", "top-level")
+    _close_schema(baselines, _KNOWN_BASELINES, "baselines")
+    _close_schema(
+        _require(baselines, "gears", "baselines"), _KNOWN_BASELINE_GEARS, "baselines.gears"
+    )
+    _close_schema(_require(baselines, "cpa", "baselines"), _KNOWN_BASELINE_CPA, "baselines.cpa")
+
+    _close_schema(
+        _require(raw, "leakage_control", "top-level"),
+        _KNOWN_LEAKAGE_CONTROL,
+        "leakage_control",
+    )
+    _close_schema(_require(raw, "phasing", "top-level"), _KNOWN_PHASING, "phasing")
+    _close_schema(_require(raw, "futility", "top-level"), _KNOWN_FUTILITY, "futility")
+    _close_schema(_require(raw, "seal", "top-level"), _KNOWN_SEAL, "seal")
+    _close_schema(_require(raw, "seeds", "top-level"), _KNOWN_SEEDS, "seeds")
+
+    verdict = _require(raw, "verdict", "top-level")
+    _close_schema(verdict, _KNOWN_VERDICT, "verdict")
+    _close_schema(
+        _require(verdict, "gi_learnable_win", "verdict"),
+        _KNOWN_VERDICT_GI_LEARNABLE_WIN,
+        "verdict.gi_learnable_win",
+    )
+    _close_schema(
+        _require(verdict, "partial", "verdict"),
+        _KNOWN_VERDICT_PARTIAL,
+        "verdict.partial",
+    )
+    _close_schema(
+        _require(verdict, "no_distinct_win", "verdict"),
+        _KNOWN_VERDICT_NO_DISTINCT_WIN,
+        "verdict.no_distinct_win",
+    )
+
+
 def _validate_activation_requirements(value: Any) -> tuple[str, ...]:
     """Validate the activation-requirements list against the registered set."""
     if not isinstance(value, list) or not all(isinstance(x, str) for x in value):
@@ -357,24 +603,21 @@ def _validate_activation_requirements(value: Any) -> tuple[str, ...]:
 
 def _validate_factor_z(block: dict[str, Any]) -> tuple[tuple[int, ...], tuple[int, ...], int]:
     """Validate factor dimensions and the total_k = expression + ESM arithmetic."""
-    known = frozenset(
-        {
-            "total_k_grid",
-            "expression_dims",
-            "include_esm",
-            "esm_model",
-            "esm_projection_dim",
-            "esm_projection_method",
-            "esm_projection_fit_roles",
-            "rank_gate",
-            "selection",
-        }
-    )
-    _reject_unknown(block, known, "factor_z")
+    _close_schema(block, _KNOWN_FACTOR_Z, "factor_z")
 
-    total_k_grid = tuple(int(x) for x in _require(block, "total_k_grid", "factor_z"))
-    expression_dims = tuple(int(x) for x in _require(block, "expression_dims", "factor_z"))
-    esm_projection_dim = int(_require(block, "esm_projection_dim", "factor_z"))
+    total_k_raw = _require(block, "total_k_grid", "factor_z")
+    expression_raw = _require(block, "expression_dims", "factor_z")
+    if not isinstance(total_k_raw, list) or not isinstance(expression_raw, list):
+        raise Phase2ConfigError("factor_z.total_k_grid/expression_dims must be lists")
+    # Strict int typing (M): reject string ints, floats and bools rather than
+    # coercing them, so a typo in a frozen dimension grid is surfaced.
+    total_k_grid = tuple(_strict_int(x, "factor_z.total_k_grid entry") for x in total_k_raw)
+    expression_dims = tuple(
+        _strict_int(x, "factor_z.expression_dims entry") for x in expression_raw
+    )
+    esm_projection_dim = _strict_int(
+        _require(block, "esm_projection_dim", "factor_z"), "factor_z.esm_projection_dim"
+    )
 
     if esm_projection_dim != _EXPECTED_ESM_PROJECTION_DIM:
         raise Phase2ConfigError(
@@ -404,21 +647,7 @@ def _validate_metric(
     block: dict[str, Any],
 ) -> tuple[str, str, float, float, tuple[SecondaryMetricSpec, ...], bool]:
     """Validate the primary metric formula/margins and secondary governance."""
-    known = frozenset(
-        {
-            "pair_error",
-            "primary",
-            "formula",
-            "distance",
-            "aggregation",
-            "material_margin_vs_additive",
-            "learned_comparator_margin",
-            "nonfinite_or_missing_policy",
-            "secondary",
-            "secondary_are_verdict_gates",
-        }
-    )
-    _reject_unknown(block, known, "metric")
+    _close_schema(block, _KNOWN_METRIC, "metric")
 
     primary = _require(block, "primary", "metric")
     if primary != _EXPECTED_METRIC_PRIMARY:
@@ -493,17 +722,7 @@ def _validate_inference(
     block: dict[str, Any],
 ) -> tuple[tuple[str, ...], str, str, bool, float, int]:
     """Validate the comparator roster and bootstrap settings."""
-    known = frozenset(
-        {
-            "method",
-            "comparator_family",
-            "resampling_unit",
-            "shared_resamples_across_contrasts",
-            "family_confidence",
-            "bootstrap_replicates",
-        }
-    )
-    _reject_unknown(block, known, "inference")
+    _close_schema(block, _KNOWN_INFERENCE, "inference")
 
     family_raw = _require(block, "comparator_family", "inference")
     if not isinstance(family_raw, list) or not all(isinstance(x, str) for x in family_raw):
