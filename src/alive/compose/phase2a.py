@@ -60,6 +60,17 @@ _DEFAULT_CONFIG_PATH = "configs/compose_k562_v1_phase2.yaml"
 #: A zero-arg factory returning a fresh symmetric model (``fit`` / ``predict_eps``).
 ModelFactory = Callable[[], object]
 
+#: :class:`Phase2aInputs` field names that legitimately carry the ``"sealed"``
+#: token because they hold *registered sealed pair IDs* (identities only, never an
+#: outcome). The full recursive leakage scan walks their VALUES — so a sealed or
+#: outcome token planted inside them still fails closed — but must not trip on the
+#: benign field name itself. This is a property of the typed contract, not a
+#: weakening of the wall: every other field name and every value at every depth is
+#: still scanned.
+_REGISTERED_SEALED_ID_FIELDS: frozenset[str] = frozenset(
+    {"sealed_double_pair_ids", "sealed_single_pair_ids"}
+)
+
 
 class HashMismatchError(ValueError):
     """Raised when a bound upstream hash does not match its expected value.
@@ -263,31 +274,79 @@ def _scan_inputs_for_leakage(inputs: Phase2aInputs, store: DevelopmentOutcomeSto
 
     Scans the typed inputs and outcome store for a sealed role / sealed outcome
     key / sealed path at any nesting depth (reusing the Task-2a-7 recursive
-    scanner). Numeric outcome ARRAYS on the store carry no string token, so the
-    scan does not fire on the legitimate calibration eps; it fires on a leaked
-    sealed *handle*, attribute name or path (plan §2.1).
+    scanner). Numeric outcome ARRAYS carry no string token, so the scan does not
+    fire on the legitimate calibration eps / factor banks / single-gene deltas; it
+    fires on a leaked sealed *handle*, attribute name, identity string or path
+    (plan §2.1).
 
-    The store's gene-id / pair-id / run-id strings are also scanned so a sealed
-    token smuggled into an identity string aborts the run.
+    The scan is **symmetric and exhaustive** on both sides of the wall:
+
+    * the FULL :class:`Phase2aInputs` dataclass is walked field-by-field at every
+      nesting depth — not a hand-picked subset — so a sealed/outcome token planted
+      in ANY field (``cal_pair_ids``, ``cal_idx_pairs``, ``factors_by_k`` keys,
+      ``run_id``, identity mappings, …) fails closed; and
+    * the store's FULL instance state (attribute names + values, recursively, via
+      ``vars`` so an injected handle outside the declared dataclass fields is also
+      caught) is walked the same way.
+
+    Both the sealed-reference scan and the measured-outcome scan are applied to the
+    whole inputs object and the whole store, so a sealed OR outcome token anywhere
+    aborts the run before any compute.
 
     Raises
     ------
     OutcomeLeakageError
-        If any sealed reference or measured-outcome marker is present.
+        If any sealed reference or measured-outcome marker is present in the inputs
+        or the outcome store, at any field or nesting depth.
     """
+    # The whole inputs object as a field-name -> value mapping. Both scanners walk
+    # mappings / sequences / sets / nested dataclasses recursively and tolerate the
+    # numpy-array / callable leaves, so a sealed or outcome token planted in ANY
+    # field value at ANY nesting depth (cal_pair_ids, cal_idx_pairs, factors_by_k
+    # keys, identity mappings, ...) fails closed.
+    _assert_no_sealed(_inputs_scan_view(inputs))
+    _assert_no_outcome_reference(_inputs_scan_view(inputs))
+
     # The store's FULL instance state (attribute names + values, recursively),
     # via ``vars`` so an injected/leaked sealed handle outside the declared
-    # dataclass fields is also caught. delta/factor numeric arrays carry no token.
+    # dataclass fields is also caught. Numeric arrays carry no token.
     store_state = dict(vars(store)) if hasattr(store, "__dict__") else store
     _assert_no_sealed(store_state)
     _assert_no_outcome_reference(store_state)
-    _assert_no_sealed(inputs.run_id)
-    _assert_no_outcome_reference(inputs.run_id)
-    _assert_no_sealed(tuple(inputs.gene_index.keys()))
-    _assert_no_sealed(tuple(tuple(p) for p in inputs.sealed_double_pair_ids))
-    _assert_no_sealed(tuple(tuple(p) for p in inputs.sealed_single_pair_ids))
-    _assert_no_sealed(tuple(inputs.delta_by_gene.keys()))
-    _assert_no_sealed(tuple(inputs.model_factories.keys()))
+
+
+def _inputs_scan_view(inputs: Phase2aInputs) -> dict[str, object]:
+    """Return a leakage-scan view of every :class:`Phase2aInputs` field value.
+
+    The view is a ``field name -> field value`` mapping spanning the WHOLE
+    dataclass (not a hand-picked subset). The recursive scanners then walk every
+    value at every nesting depth, so a sealed/outcome token anywhere fails closed.
+
+    The two registered sealed-ID fields (:data:`_REGISTERED_SEALED_ID_FIELDS`) are
+    keyed by a benign placeholder name so the scanner does not fire on their
+    legitimate ``"sealed"`` field name; their VALUES are still scanned in full, so
+    a sealed/outcome token planted inside a registered pair ID still aborts.
+
+    Parameters
+    ----------
+    inputs : Phase2aInputs
+        The bound development inputs to expose for scanning.
+
+    Returns
+    -------
+    dict of str to object
+        A name-keyed mapping of every field value, safe to hand to the recursive
+        sealed-reference and outcome-reference scanners.
+    """
+    view: dict[str, object] = {}
+    for field_name in type(inputs).__dataclass_fields__:
+        value = getattr(inputs, field_name)
+        if field_name in _REGISTERED_SEALED_ID_FIELDS:
+            # benign key (value still fully scanned for any sealed/outcome token).
+            view[f"registered_pair_ids__{field_name.split('_', 1)[1]}"] = value
+        else:
+            view[field_name] = value
+    return view
 
 
 def _predict_role(

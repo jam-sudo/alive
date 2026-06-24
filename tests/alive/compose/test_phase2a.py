@@ -354,6 +354,51 @@ def test_inputs_with_sealed_token_in_diagnostics_path_rejected():
         run_phase2a(bad, _store(inst), fixture_mode=True, expected_hashes=_HASHES)
 
 
+def test_inputs_with_sealed_token_in_cal_pair_ids_rejected():
+    # the full-dataclass scan must fire on a sealed token planted in cal_pair_ids
+    # (a field the old enumerated subset-scan never touched).
+    rng = np.random.default_rng(14)
+    inst = _build_instance(rng)
+    bad_cal = list(inst["cal_pairs_id"])
+    bad_cal[0] = _canon("sealed_double_unseen", bad_cal[0][1])
+    bad = _inputs(inst, cal_pair_ids=bad_cal)
+    with pytest.raises(OutcomeLeakageError):
+        run_phase2a(bad, _store(inst), fixture_mode=True, expected_hashes=_HASHES)
+
+
+def test_inputs_with_sealed_token_in_factors_by_k_key_rejected():
+    # a sealed token planted as a factors_by_k *key* (string) must also be caught.
+    rng = np.random.default_rng(15)
+    inst = _build_instance(rng)
+    bad_factors = {inst["k"]: inst["Z"], "sealed_single_unseen": inst["Z"]}
+    bad = _inputs(inst, factors_by_k=bad_factors)
+    with pytest.raises(OutcomeLeakageError):
+        run_phase2a(bad, _store(inst), fixture_mode=True, expected_hashes=_HASHES)
+
+
+def test_inputs_with_sealed_token_in_cal_idx_pairs_rejected():
+    # cal_idx_pairs normally carries ints, but a smuggled string token must fail
+    # closed too — the recursive scan tolerates the int leaves and fires on the str.
+    rng = np.random.default_rng(16)
+    inst = _build_instance(rng)
+    bad_idx = list(inst["cal_pairs_idx"]) + [("sealed", "x")]
+    bad = _inputs(inst, cal_idx_pairs=bad_idx)
+    with pytest.raises(OutcomeLeakageError):
+        run_phase2a(bad, _store(inst), fixture_mode=True, expected_hashes=_HASHES)
+
+
+def test_inputs_with_outcome_token_in_string_field_rejected():
+    # the outcome-token scan must now cover the whole inputs object, not just the
+    # store + run_id: an outcome marker in cal_pair_ids must fail closed.
+    rng = np.random.default_rng(17)
+    inst = _build_instance(rng)
+    bad_cal = list(inst["cal_pairs_id"])
+    bad_cal[0] = _canon("y_true_x", bad_cal[0][1])
+    bad = _inputs(inst, cal_pair_ids=bad_cal)
+    with pytest.raises(OutcomeLeakageError):
+        run_phase2a(bad, _store(inst), fixture_mode=True, expected_hashes=_HASHES)
+
+
 # --------------------------------------------------------------------------- #
 # sealed access count stays zero in every path
 # --------------------------------------------------------------------------- #
