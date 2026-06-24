@@ -29,6 +29,7 @@ from typing import Iterable
 import numpy as np
 from numpy.random import PCG64, Generator
 
+from alive.compose.io import atomic_write_once
 from alive.provenance import sha256_json
 
 PAIR_SPLIT_ALGORITHM = "compose_gene_partition_pair_split"
@@ -287,12 +288,11 @@ def write_split_manifest(
     import json
 
     out = Path(path)
-    if out.exists():
-        raise FileExistsError(f"refusing to overwrite existing manifest: {out}")
     manifest = build_split_manifest(
         eligible_pairs, seed=seed, calibration_fraction=calibration_fraction
     )
-    out.write_text(
+    atomic_write_once(
+        out,
         json.dumps(manifest, sort_keys=True, indent=2, ensure_ascii=False),
         encoding="utf-8",
     )

@@ -66,6 +66,8 @@ identification:
   estimator: ridge_lsq
   lambda_grid: [0.0, 0.001, 0.01, 0.1]
   selection: calibration_oof_gene_disjoint
+  oof_folds: 3
+  uncovered_tolerance: 0.75
 
 metric:
   pair_error: mean_squared_error_over_pca_coordinates

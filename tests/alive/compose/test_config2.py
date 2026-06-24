@@ -79,6 +79,27 @@ def test_total_k_grid_and_esm_arithmetic():
         assert total == expr + cfg.esm_projection_dim
 
 
+def test_runtime_contract_values_are_exposed_and_hashed():
+    cfg = load_compose_phase2_config(CANON)
+    assert cfg.lambda_grid == (0.0, 0.001, 0.01, 0.1)
+    assert cfg.oof_folds == 3
+    assert cfg.uncovered_tolerance == 0.75
+    assert cfg.split_seed == 11
+    assert cfg.registered_seeds == (11, 23, 37)
+    assert cfg.method_roster == (
+        "l1_bilinear_identifiable",
+        "l2_saturation",
+        "l3_hypernetwork",
+        "additive",
+        "no_change",
+        "perturbation_mean",
+        "id_only",
+        "gears",
+        "cpa",
+    )
+    assert len(cfg.config_sha256) == 64
+
+
 def test_esm_arithmetic_mismatch_rejected(tmp_path):
     raw = _raw()
     raw["factor_z"]["expression_dims"] = [2, 4, 7]  # 7 + 2 = 9 != 8
@@ -422,23 +443,24 @@ def test_bool_in_esm_projection_dim_rejected(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# fixture mode is always allowed
+# fixture mode cannot be authorized by the scientific guard
 # ---------------------------------------------------------------------------
-def test_fixture_mode_always_allowed_even_when_blocked():
+def test_scientific_guard_rejects_fixture_mode_even_when_blocked():
     cfg = load_compose_phase2_config(CANON)
     assert cfg.status != "active"
-    # Must not raise: fixture mode is for synthetic / tiny-fixture tests only.
-    assert_scientific_mode_allowed(cfg, fixture_mode=True)
+    with pytest.raises(ScientificModeError, match="fixture"):
+        assert_scientific_mode_allowed(cfg, fixture_mode=True)
 
 
-def test_fixture_mode_allowed_without_activation_record():
+def test_fixture_mode_cannot_bypass_activation_record():
     cfg = load_compose_phase2_config(CANON)
-    assert_scientific_mode_allowed(
-        cfg,
-        fixture_mode=True,
-        activation_record=None,
-        git_is_clean=False,
-    )
+    with pytest.raises(ScientificModeError, match="fixture"):
+        assert_scientific_mode_allowed(
+            cfg,
+            fixture_mode=True,
+            activation_record=None,
+            git_is_clean=False,
+        )
 
 
 # ---------------------------------------------------------------------------

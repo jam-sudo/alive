@@ -40,10 +40,14 @@ RESPONSE_DIM = 5
 
 ROSTER = (
     "l1_bilinear_identifiable",
+    "l2_saturation",
+    "l3_hypernetwork",
     "additive",
     "no_change",
+    "perturbation_mean",
     "id_only",
-    "l3_hypernetwork",
+    "gears",
+    "cpa",
 )
 
 DOUBLE_PAIRS = (("g0", "g1"), ("g0", "g2"))
@@ -273,6 +277,16 @@ def test_rejects_incomplete_method_roster():
             method_roster=incomplete,
             predictions_double_unseen={k: _preds_for(DOUBLE_PAIRS) for k in incomplete},
             predictions_single_unseen={k: _preds_for(SINGLE_PAIRS) for k in incomplete},
+        )
+
+
+def test_rejects_unregistered_extra_method():
+    extra = ROSTER + ("post_hoc_model",)
+    with pytest.raises(FreezeError, match="exactly|roster"):
+        _bundle(
+            method_roster=extra,
+            predictions_double_unseen={k: _preds_for(DOUBLE_PAIRS) for k in extra},
+            predictions_single_unseen={k: _preds_for(SINGLE_PAIRS) for k in extra},
         )
 
 

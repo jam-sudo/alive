@@ -191,7 +191,9 @@ class L2Model:
         # Closed-form 1-D LS per output coordinate: scale_m = <sat_m, y_m> / <sat_m, sat_m>.
         num = np.sum(sat * eps_obs, axis=0)
         den = np.sum(sat * sat, axis=0)
-        self.scale_ = np.where(den > 1e-12, num / np.maximum(den, 1e-12), 0.0)
+        unconstrained = np.where(den > 1e-12, num / np.maximum(den, 1e-12), 0.0)
+        # Enforce the registered non-decreasing, sign-preserving saturation.
+        self.scale_ = np.maximum(unconstrained, 0.0)
         return self
 
     def predict_eps(self, Z: np.ndarray, g: int, h: int) -> np.ndarray:

@@ -6,8 +6,8 @@ Phase 2b consumes. It NEVER opens a seal and NEVER reads a sealed outcome.
 
 Pipeline (brief steps 1-9):
 
-1. verify the execution mode (``fixture_mode=True`` for synthetic tests, or the
-   ``config2`` scientific-mode guard — which the blocked config always fails);
+1. enter through either the bounded fixture-only API or the scientific API,
+   whose activation guard the blocked config always fails;
 2. verify the manifest, response-space, factor and environment hashes against the
    bound expected values — a mismatch aborts BEFORE any prediction;
 3. run gene-disjoint OOF selection + the real calibration / futility checkpoint on
@@ -38,15 +38,17 @@ from pathlib import Path
 
 import numpy as np
 
-from alive.compose.baselines_combo import additive, no_change
+from alive.compose.baselines_combo import additive, no_change, perturbation_mean
 from alive.compose.config2 import (
+    ActivationRecord,
     ComposePhase2Config,
+    ScientificModeError,
     assert_scientific_mode_allowed,
     load_compose_phase2_config,
 )
+from alive.compose.datacard import compute_compose_run_id
 from alive.compose.diagnostics2 import FutilityResult, real_calibration_diagnostics
 from alive.compose.freeze import (
-    REQUIRED_METHODS,
     FrozenPredictionBundle,
     OutcomeLeakageError,
     _assert_no_outcome_reference,
@@ -82,6 +84,17 @@ class HashMismatchError(ValueError):
     """
 
 
+@dataclass(frozen=True)
+class OutcomeAccessAudit:
+    """Manifest-bound proof that only the calibration role was materialised."""
+
+    role: str
+    manifest_checksum: str
+    source_checksum: str
+    sealed_access_count: int
+    source_kind: str
+
+
 # --------------------------------------------------------------------------- #
 # typed development inputs + outcome store (unsealed roles only)
 # --------------------------------------------------------------------------- #
@@ -107,6 +120,8 @@ class DevelopmentOutcomeStore:
 
     combo_calibration_eps: np.ndarray
     combo_calibration_pair_ids: tuple[tuple[str, str], ...]
+    access_audit: OutcomeAccessAudit
+    content_checksum: str = field(init=False)
 
     def __post_init__(self) -> None:
         # normalise the pair IDs to a tuple of 2-tuples for stable handling.
@@ -115,6 +130,31 @@ class DevelopmentOutcomeStore:
             "combo_calibration_pair_ids",
             tuple(tuple(p) for p in self.combo_calibration_pair_ids),
         )
+        eps = np.asarray(self.combo_calibration_eps, dtype=float)
+        if eps.ndim != 2 or eps.shape[0] != len(self.combo_calibration_pair_ids):
+            raise ValueError(
+                "combo_calibration_eps must be a 2-D array aligned row-for-row "
+                "with combo_calibration_pair_ids"
+            )
+        if not np.all(np.isfinite(eps)):
+            raise ValueError("combo_calibration_eps contains non-finite values")
+        if self.access_audit.role != "combo_calibration":
+            raise OutcomeLeakageError(
+                f"development outcome audit role must be 'combo_calibration', "
+                f"got {self.access_audit.role!r}"
+            )
+        if self.access_audit.sealed_access_count != 0:
+            raise OutcomeLeakageError(
+                "development outcome store reports a non-zero sealed access count"
+            )
+        if self.access_audit.source_kind not in {"synthetic_fixture", "audited_unsealed"}:
+            raise ValueError(
+                "outcome audit source_kind must be 'synthetic_fixture' or 'audited_unsealed'"
+            )
+        if not self.access_audit.manifest_checksum or not self.access_audit.source_checksum:
+            raise ValueError("outcome access audit checksums must be non-empty")
+        object.__setattr__(self, "combo_calibration_eps", eps.copy())
+        object.__setattr__(self, "content_checksum", _outcome_store_checksum(self))
 
 
 @dataclass(frozen=True)
@@ -190,6 +230,13 @@ class Phase2aInputs:
     manifest_checksum: str
     environment_checksum: str
     registered_seeds: Sequence[int]
+    data_card_checksum: str
+    raw_data_checksum: str
+    sequence_mapping_checksum: str
+    content_checksum: str = field(init=False)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "content_checksum", _phase2a_inputs_checksum(self))
 
 
 @dataclass(frozen=True)
@@ -235,7 +282,78 @@ class Phase2aResult:
 # --------------------------------------------------------------------------- #
 
 
-def _verify_hashes(inputs: Phase2aInputs, expected: Mapping[str, str]) -> None:
+def _array_payload(value: np.ndarray | Sequence) -> list:
+    """Return a deterministic JSON-compatible numeric-array payload."""
+    return np.asarray(value).tolist()
+
+
+def _phase2a_inputs_checksum(inputs: Phase2aInputs) -> str:
+    """Bind every in-memory Phase-2a input that can affect a frozen bundle."""
+    payload = {
+        "run_id": inputs.run_id,
+        "gene_index": sorted(
+            ((str(g), int(i)) for g, i in inputs.gene_index.items()),
+            key=lambda item: item[0].encode("utf-8"),
+        ),
+        "factors_by_k": {
+            str(k): _array_payload(inputs.factors_by_k[k])
+            for k in sorted(inputs.factors_by_k, key=lambda x: str(x))
+        },
+        "cal_idx_pairs": [list(p) for p in inputs.cal_idx_pairs],
+        "cal_pair_ids": [list(p) for p in inputs.cal_pair_ids],
+        "additive_cal": _array_payload(inputs.additive_cal),
+        "eps_split_a": _array_payload(inputs.eps_split_a),
+        "eps_split_b": _array_payload(inputs.eps_split_b),
+        "k_total_grid": [int(x) for x in inputs.k_total_grid],
+        "lambda_grid": [float(x) for x in inputs.lambda_grid],
+        "n_genes": int(inputs.n_genes),
+        "n_folds": int(inputs.n_folds),
+        "seed": int(inputs.seed),
+        "uncovered_tolerance": float(inputs.uncovered_tolerance),
+        "registered_double_pair_ids": [list(p) for p in inputs.sealed_double_pair_ids],
+        "registered_single_pair_ids": [list(p) for p in inputs.sealed_single_pair_ids],
+        "delta_by_gene": {
+            str(g): _array_payload(inputs.delta_by_gene[g])
+            for g in sorted(inputs.delta_by_gene, key=lambda x: str(x).encode("utf-8"))
+        },
+        "model_roster": list(inputs.model_factories),
+        "response_dim": int(inputs.response_dim),
+        "response_space_checksum": inputs.response_space_checksum,
+        "factor_checksum": inputs.factor_checksum,
+        "model_checksum": inputs.model_checksum,
+        "manifest_checksum": inputs.manifest_checksum,
+        "environment_checksum": inputs.environment_checksum,
+        "registered_seeds": [int(x) for x in inputs.registered_seeds],
+        "data_card_checksum": inputs.data_card_checksum,
+        "raw_data_checksum": inputs.raw_data_checksum,
+        "sequence_mapping_checksum": inputs.sequence_mapping_checksum,
+    }
+    return sha256_json(payload)
+
+
+def _outcome_store_checksum(store: DevelopmentOutcomeStore) -> str:
+    """Bind calibration outcomes, their row identities, and access provenance."""
+    audit = store.access_audit
+    return sha256_json(
+        {
+            "combo_calibration_eps": _array_payload(store.combo_calibration_eps),
+            "combo_calibration_pair_ids": [list(p) for p in store.combo_calibration_pair_ids],
+            "access_audit": {
+                "role": audit.role,
+                "manifest_checksum": audit.manifest_checksum,
+                "source_checksum": audit.source_checksum,
+                "sealed_access_count": int(audit.sealed_access_count),
+                "source_kind": audit.source_kind,
+            },
+        }
+    )
+
+
+def _verify_hashes(
+    inputs: Phase2aInputs,
+    outcome_store: DevelopmentOutcomeStore,
+    expected: Mapping[str, str],
+) -> None:
     """Verify every bound upstream hash against the expected values (step 2).
 
     Parameters
@@ -267,6 +385,97 @@ def _verify_hashes(inputs: Phase2aInputs, expected: Mapping[str, str]) -> None:
                 f"upstream hash mismatch for {key!r}: bound {value!r} != expected "
                 f"{expected[key]!r}; lineage differs, refusing to freeze"
             )
+    if _phase2a_inputs_checksum(inputs) != inputs.content_checksum:
+        raise HashMismatchError("Phase2aInputs content changed after its checksum was bound")
+    if _outcome_store_checksum(outcome_store) != outcome_store.content_checksum:
+        raise HashMismatchError("development outcome content changed after its checksum was bound")
+    if outcome_store.access_audit.manifest_checksum != inputs.manifest_checksum:
+        raise HashMismatchError(
+            "development outcome audit manifest does not match the Phase2a pair manifest"
+        )
+
+
+def _validate_config_contract(
+    inputs: Phase2aInputs,
+    config: ComposePhase2Config,
+) -> None:
+    """Require runtime selection and roster values to equal the preregistration."""
+    mismatches: list[str] = []
+    if tuple(int(x) for x in inputs.k_total_grid) != config.total_k_grid:
+        mismatches.append("k_total_grid")
+    if tuple(float(x) for x in inputs.lambda_grid) != config.lambda_grid:
+        mismatches.append("lambda_grid")
+    if int(inputs.n_folds) != config.oof_folds:
+        mismatches.append("n_folds")
+    if float(inputs.uncovered_tolerance) != config.uncovered_tolerance:
+        mismatches.append("uncovered_tolerance")
+    if int(inputs.seed) != config.split_seed:
+        mismatches.append("seed")
+    if tuple(int(x) for x in inputs.registered_seeds) != config.registered_seeds:
+        mismatches.append("registered_seeds")
+    learned_roster = tuple(
+        name
+        for name in config.method_roster
+        if name not in {"additive", "no_change", "perturbation_mean"}
+    )
+    if tuple(inputs.model_factories) != learned_roster:
+        mismatches.append("model_roster")
+    if mismatches:
+        raise ValueError(
+            "runtime inputs differ from the preregistered config: " + ", ".join(mismatches)
+        )
+
+
+def _validate_run_identity(inputs: Phase2aInputs, config: ComposePhase2Config) -> None:
+    """Recompute the composite run ID from its registered provenance inputs."""
+    expected = compute_compose_run_id(
+        config_digest=config.config_sha256,
+        data_card_digest=inputs.data_card_checksum,
+        raw_or_source_digest=inputs.raw_data_checksum,
+        sequence_mapping_digest=inputs.sequence_mapping_checksum,
+    )
+    if inputs.run_id != expected:
+        raise HashMismatchError(
+            f"run_id mismatch: supplied {inputs.run_id!r}, recomputed {expected!r}"
+        )
+
+
+def _validate_pair_alignment(
+    inputs: Phase2aInputs,
+    outcome_store: DevelopmentOutcomeStore,
+) -> None:
+    """Fail closed unless calibration IDs and all row-aligned arrays agree."""
+    input_ids = tuple(tuple(p) for p in inputs.cal_pair_ids)
+    if outcome_store.combo_calibration_pair_ids != input_ids:
+        raise ValueError(
+            "combo_calibration outcome pair IDs are not exactly aligned with cal_pair_ids"
+        )
+    n = len(input_ids)
+    aligned = {
+        "cal_idx_pairs": len(inputs.cal_idx_pairs),
+        "additive_cal": np.asarray(inputs.additive_cal).shape[0],
+        "eps_split_a": np.asarray(inputs.eps_split_a).shape[0],
+        "eps_split_b": np.asarray(inputs.eps_split_b).shape[0],
+        "combo_calibration_eps": np.asarray(outcome_store.combo_calibration_eps).shape[0],
+    }
+    bad = {name: count for name, count in aligned.items() if count != n}
+    if bad:
+        raise ValueError(f"calibration row alignment mismatch: expected {n}, got {bad}")
+
+
+def _assert_fixture_payload(
+    inputs: Phase2aInputs,
+    outcome_store: DevelopmentOutcomeStore,
+) -> None:
+    """Keep the fixture entry point bounded and distinct from scientific data."""
+    if outcome_store.access_audit.source_kind != "synthetic_fixture":
+        raise ScientificModeError(
+            "fixture execution requires an outcome audit with source_kind='synthetic_fixture'"
+        )
+    if inputs.n_genes > 128 or len(inputs.cal_pair_ids) > 4096 or inputs.response_dim > 256:
+        raise ScientificModeError(
+            "fixture payload exceeds the synthetic/tiny-fixture safety limits"
+        )
 
 
 def _scan_inputs_for_leakage(inputs: Phase2aInputs, store: DevelopmentOutcomeStore) -> None:
@@ -310,7 +519,23 @@ def _scan_inputs_for_leakage(inputs: Phase2aInputs, store: DevelopmentOutcomeSto
     # The store's FULL instance state (attribute names + values, recursively),
     # via ``vars`` so an injected/leaked sealed handle outside the declared
     # dataclass fields is also caught. Numeric arrays carry no token.
-    store_state = dict(vars(store)) if hasattr(store, "__dict__") else store
+    store_state = dict(vars(store)) if hasattr(store, "__dict__") else {"store": store}
+    audit = store_state.pop("access_audit", None)
+    if isinstance(audit, OutcomeAccessAudit):
+        # The audit's zero access counter is a required safety signal.  Expose it
+        # under a benign name while still scanning every value and all unexpected
+        # injected attributes.  ``source_kind`` is a construction-validated
+        # two-value enum, not free text: scanning it as a string would false-trip
+        # on the legitimate ``audited_unsealed`` value (it contains "sealed"), so
+        # surface it as a benign boolean instead — the enum itself is already
+        # validated in :meth:`DevelopmentOutcomeStore.__post_init__`.
+        store_state["access_audit_record"] = {
+            "role": audit.role,
+            "manifest_checksum": audit.manifest_checksum,
+            "source_checksum": audit.source_checksum,
+            "seal_open_count": audit.sealed_access_count,
+            "is_synthetic_fixture": audit.source_kind == "synthetic_fixture",
+        }
     _assert_no_sealed(store_state)
     _assert_no_outcome_reference(store_state)
 
@@ -354,6 +579,7 @@ def _predict_role(
     pair_ids: Sequence[tuple[str, str]],
     fitted_models: Mapping[str, object],
     selected_Z: np.ndarray,
+    perturbation_mean_prediction: np.ndarray,
 ) -> dict[str, dict[tuple[str, str], np.ndarray]]:
     """Predict every roster method for a sealed role using identities/features only.
 
@@ -403,6 +629,9 @@ def _predict_role(
     }
     # no-change lower bound
     out["no_change"] = {(g, h): no_change(inputs.response_dim) for g, h in pair_ids}
+    out["perturbation_mean"] = {
+        (g, h): np.asarray(perturbation_mean_prediction, dtype=float).copy() for g, h in pair_ids
+    }
     return out
 
 
@@ -437,18 +666,80 @@ def run_phase2a(
     inputs: Phase2aInputs,
     outcome_store: DevelopmentOutcomeStore,
     *,
-    fixture_mode: bool,
+    fixture_mode: bool = False,
+    expected_hashes: Mapping[str, str],
+    config: ComposePhase2Config | None = None,
+    config_path: str | Path = _DEFAULT_CONFIG_PATH,
+    bundle_path: str | Path | None = None,
+    environment=None,
+    activation_record: ActivationRecord | None = None,
+    git_is_clean: bool | None = None,
+) -> Phase2aResult:
+    """Run scientific Phase-2a after all activation conditions are satisfied.
+
+    ``fixture_mode=True`` is intentionally rejected here.  Synthetic tests must
+    use :func:`run_phase2a_fixture`, so a caller-controlled boolean cannot bypass
+    owner activation, clean-Git, and evidence-hash checks.
+    """
+    if fixture_mode:
+        raise ScientificModeError(
+            "run_phase2a does not accept fixture_mode=True; use run_phase2a_fixture "
+            "with a bounded synthetic outcome audit"
+        )
+    return _run_phase2a_core(
+        inputs,
+        outcome_store,
+        expected_hashes=expected_hashes,
+        config=config,
+        config_path=config_path,
+        bundle_path=bundle_path,
+        environment=environment,
+        fixture_execution=False,
+        activation_record=activation_record,
+        git_is_clean=git_is_clean,
+    )
+
+
+def run_phase2a_fixture(
+    inputs: Phase2aInputs,
+    outcome_store: DevelopmentOutcomeStore,
+    *,
     expected_hashes: Mapping[str, str],
     config: ComposePhase2Config | None = None,
     config_path: str | Path = _DEFAULT_CONFIG_PATH,
     bundle_path: str | Path | None = None,
     environment=None,
 ) -> Phase2aResult:
-    """Run the no-seal Phase-2a orchestration and produce the frozen handoff.
+    """Run the bounded synthetic/tiny-fixture Phase-2a path."""
+    _assert_fixture_payload(inputs, outcome_store)
+    return _run_phase2a_core(
+        inputs,
+        outcome_store,
+        expected_hashes=expected_hashes,
+        config=config,
+        config_path=config_path,
+        bundle_path=bundle_path,
+        environment=environment,
+        fixture_execution=True,
+        activation_record=None,
+        git_is_clean=None,
+    )
 
-    See the module docstring for the full pipeline (brief steps 1-9). No seal is
-    opened and no sealed outcome is read; the returned
-    :attr:`Phase2aResult.sealed_access_count` is always ``0``.
+
+def _run_phase2a_core(
+    inputs: Phase2aInputs,
+    outcome_store: DevelopmentOutcomeStore,
+    *,
+    expected_hashes: Mapping[str, str],
+    config: ComposePhase2Config | None,
+    config_path: str | Path,
+    bundle_path: str | Path | None,
+    environment,
+    fixture_execution: bool,
+    activation_record: ActivationRecord | None,
+    git_is_clean: bool | None,
+) -> Phase2aResult:
+    """Shared implementation after the public execution boundary is resolved.
 
     Parameters
     ----------
@@ -456,10 +747,6 @@ def run_phase2a(
         Typed development inputs (identities/features + bound checksums).
     outcome_store : DevelopmentOutcomeStore
         Outcome store exposing ONLY unsealed (calibration) roles.
-    fixture_mode : bool
-        ``True`` for synthetic/tiny-fixture runs (always allowed). ``False``
-        requires the ``config2`` scientific-mode preconditions, which the blocked
-        config fails.
     expected_hashes : Mapping of str to str
         Expected manifest / response / factor / model / environment checksums; a
         mismatch aborts before any prediction.
@@ -496,12 +783,27 @@ def run_phase2a(
     # before touching the config or any compute (fail closed).
     _scan_inputs_for_leakage(inputs, outcome_store)
 
-    # Step 1b: execution-mode guard (fixture always allowed; scientific blocked).
+    # Step 1b: execution-mode guard.  Only this internal core can receive a
+    # fixture execution flag; the public scientific entry point rejects it.
     cfg = config if config is not None else load_compose_phase2_config(config_path)
-    assert_scientific_mode_allowed(cfg, fixture_mode=fixture_mode)
+    if not fixture_execution:
+        assert_scientific_mode_allowed(
+            cfg,
+            fixture_mode=False,
+            activation_record=activation_record,
+            git_is_clean=git_is_clean,
+        )
+        if outcome_store.access_audit.source_kind != "audited_unsealed":
+            raise ScientificModeError(
+                "scientific Phase2a requires source_kind='audited_unsealed'; "
+                "synthetic fixture outcomes are not scientific evidence"
+            )
 
-    # Step 2: verify the bound upstream hashes (abort before any prediction).
-    _verify_hashes(inputs, expected_hashes)
+    # Step 2: bind runtime values, in-memory contents, role provenance and run ID.
+    _validate_config_contract(inputs, cfg)
+    _verify_hashes(inputs, outcome_store, expected_hashes)
+    _validate_pair_alignment(inputs, outcome_store)
+    _validate_run_identity(inputs, cfg)
 
     # Step 3: selection + real calibration / futility checkpoint on DEVELOPMENT
     # roles only. The L1 model drives selection (headline ablation).
@@ -552,14 +854,24 @@ def run_phase2a(
         model.fit(selected_Z, list(inputs.cal_idx_pairs), eps_cal, lam=float(selected_lambda))
         fitted[name] = model
 
-    double_preds = _predict_role(inputs, inputs.sealed_double_pair_ids, fitted, selected_Z)
-    single_preds = _predict_role(inputs, inputs.sealed_single_pair_ids, fitted, selected_Z)
+    calibration_double_shifts = np.asarray(inputs.additive_cal, dtype=float) + eps_cal
+    mean_prediction = perturbation_mean(calibration_double_shifts)
+    double_preds = _predict_role(
+        inputs,
+        inputs.sealed_double_pair_ids,
+        fitted,
+        selected_Z,
+        mean_prediction,
+    )
+    single_preds = _predict_role(
+        inputs,
+        inputs.sealed_single_pair_ids,
+        fitted,
+        selected_Z,
+        mean_prediction,
+    )
 
-    # the complete registered roster: learned models + additive + no_change.
-    roster = tuple(inputs.model_factories.keys()) + ("additive", "no_change")
-    # de-duplicate while preserving order (in case a factory was named 'additive').
-    seen: set[str] = set()
-    roster = tuple(m for m in roster if not (m in seen or seen.add(m)))
+    roster = cfg.method_roster
 
     # Steps 6-7: validate the complete roster + every prediction and freeze ONCE.
     bundle = FrozenPredictionBundle.create(
@@ -591,7 +903,7 @@ def run_phase2a(
             "seal_open_count": 0,
         },
         response_dim=inputs.response_dim,
-        required_roster=REQUIRED_METHODS,
+        required_roster=cfg.method_roster,
     )
     # post-freeze invariant: no measured outcome present.
     bundle.assert_no_outcomes()
@@ -603,9 +915,12 @@ def run_phase2a(
     # Step 8: record the bundle + method-lock checksums in a write-once ledger.
     method_lock, lock_checksum = _build_method_lock(inputs, roster, futility)
     env = environment if environment is not None else _placeholder_environment(inputs)
-    ledger = RunLedger(
-        run_id=inputs.run_id, config_sha256=inputs.manifest_checksum, environment=env
-    )
+    ledger = RunLedger(run_id=inputs.run_id, config_sha256=cfg.config_sha256, environment=env)
+    ledger.record_artifact("data_card", inputs.data_card_checksum)
+    ledger.record_artifact("raw_data", inputs.raw_data_checksum)
+    ledger.record_artifact("sequence_mapping", inputs.sequence_mapping_checksum)
+    ledger.record_artifact("phase2a_inputs", inputs.content_checksum)
+    ledger.record_artifact("development_outcomes", outcome_store.content_checksum)
     ledger.record_artifact("response_space", inputs.response_space_checksum)
     ledger.record_artifact("factor_bank", inputs.factor_checksum)
     ledger.record_artifact("model", inputs.model_checksum)
@@ -615,10 +930,8 @@ def run_phase2a(
     ledger.record_artifact("frozen_prediction_bundle", bundle.bundle_checksum)
 
     # Step 9: confirm the sealed access count is ZERO (it never opened a seal).
-    if futility.sealed_access_count != 0:
-        raise OutcomeLeakageError(
-            "invariant violated: futility checkpoint reported non-zero sealed access"
-        )
+    if futility.sealed_access_count != 0 or outcome_store.access_audit.sealed_access_count != 0:
+        raise OutcomeLeakageError("invariant violated: Phase2a reported a non-zero sealed access")
 
     return Phase2aResult(
         futility_status=futility.status,

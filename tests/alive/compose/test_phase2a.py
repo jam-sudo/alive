@@ -29,15 +29,19 @@ import numpy as np
 import pytest
 
 from alive.compose.baselines_combo import additive
-from alive.compose.config2 import ScientificModeError
+from alive.compose.config2 import ScientificModeError, load_compose_phase2_config
+from alive.compose.datacard import compute_compose_run_id
 from alive.compose.freeze import FrozenPredictionBundle, OutcomeLeakageError
-from alive.compose.models import IDOnlyModel, L1Model, L3Model
+from alive.compose.models import IDOnlyModel, L1Model, L2Model, L3Model
 from alive.compose.operator import bilinear_predict
 from alive.compose.phase2a import (
     DevelopmentOutcomeStore,
+    OutcomeAccessAudit,
     Phase2aInputs,
     Phase2aResult,
+    _scan_inputs_for_leakage,
     run_phase2a,
+    run_phase2a_fixture,
 )
 
 # --------------------------------------------------------------------------- #
@@ -134,27 +138,45 @@ def _model_factories():
     """The registered model roster -> a fresh-instance factory each."""
     return {
         "l1_bilinear_identifiable": L1Model,
-        "id_only": IDOnlyModel,
+        "l2_saturation": L2Model,
         "l3_hypernetwork": L3Model,
+        "id_only": IDOnlyModel,
+        # Synthetic stand-ins exercise the frozen roster contract. Scientific
+        # activation still requires the separately pinned GEARS/CPA backends.
+        "gears": L1Model,
+        "cpa": L1Model,
     }
 
 
 def _inputs(inst, **overrides) -> Phase2aInputs:
+    cfg = load_compose_phase2_config("configs/compose_k562_v1_phase2.yaml")
+    data_card_checksum = "data-card-checksum"
+    raw_data_checksum = "raw-data-checksum"
+    sequence_mapping_checksum = "sequence-mapping-checksum"
+    run_id = compute_compose_run_id(
+        config_digest=cfg.config_sha256,
+        data_card_digest=data_card_checksum,
+        raw_or_source_digest=raw_data_checksum,
+        sequence_mapping_digest=sequence_mapping_checksum,
+    )
+    z4 = inst["Z"]
+    z6 = np.column_stack((z4, z4[:, 0] ** 2, z4[:, 1] ** 2))
+    z8 = np.column_stack((z6, z4[:, 2] ** 2, z4[:, 3] ** 2))
     kwargs = dict(
-        run_id="abc123abc123abc1",
+        run_id=run_id,
         gene_index=inst["gene_index"],
-        factors_by_k={inst["k"]: inst["Z"]},
+        factors_by_k={4: z4, 6: z6, 8: z8},
         cal_idx_pairs=inst["cal_pairs_idx"],
         cal_pair_ids=inst["cal_pairs_id"],
         additive_cal=inst["additive_cal"],
         eps_split_a=inst["eps_a"],
         eps_split_b=inst["eps_b"],
-        k_total_grid=[inst["k"]],
-        lambda_grid=[0.0, 1e-3],
+        k_total_grid=[4, 6, 8],
+        lambda_grid=[0.0, 1e-3, 1e-2, 1e-1],
         n_genes=len(inst["gene_ids"]),
         n_folds=3,
         seed=11,
-        uncovered_tolerance=1.0,
+        uncovered_tolerance=0.75,
         sealed_double_pair_ids=inst["sealed_double_id"],
         sealed_single_pair_ids=inst["sealed_single_id"],
         delta_by_gene=inst["delta_by_gene"],
@@ -166,6 +188,9 @@ def _inputs(inst, **overrides) -> Phase2aInputs:
         manifest_checksum="manifest-checksum",
         environment_checksum="env-checksum",
         registered_seeds=(11, 23, 37),
+        data_card_checksum=data_card_checksum,
+        raw_data_checksum=raw_data_checksum,
+        sequence_mapping_checksum=sequence_mapping_checksum,
     )
     kwargs.update(overrides)
     return Phase2aInputs(**kwargs)
@@ -176,6 +201,13 @@ def _store(inst, **overrides) -> DevelopmentOutcomeStore:
     kwargs = dict(
         combo_calibration_eps=inst["eps_cal"],
         combo_calibration_pair_ids=inst["cal_pairs_id"],
+        access_audit=OutcomeAccessAudit(
+            role="combo_calibration",
+            manifest_checksum="manifest-checksum",
+            source_checksum="fixture-source-checksum",
+            sealed_access_count=0,
+            source_kind="synthetic_fixture",
+        ),
     )
     kwargs.update(overrides)
     return DevelopmentOutcomeStore(**kwargs)
@@ -196,16 +228,16 @@ _HASHES = dict(
 def test_continue_produces_a_verified_bundle_no_outcomes():
     rng = np.random.default_rng(0)
     inst = _build_instance(rng)
-    res = run_phase2a(_inputs(inst), _store(inst), fixture_mode=True, expected_hashes=_HASHES)
+    res = run_phase2a_fixture(_inputs(inst), _store(inst), expected_hashes=_HASHES)
     assert isinstance(res, Phase2aResult)
     assert res.futility_status == "CONTINUE"
     assert res.sealed_access_count == 0
     assert isinstance(res.bundle, FrozenPredictionBundle)
     res.bundle.verify()
     res.bundle.assert_no_outcomes()
-    # roster covers the registered methods
-    for m in ("l1_bilinear_identifiable", "additive", "no_change", "id_only", "l3_hypernetwork"):
-        assert m in res.bundle.method_roster
+    cfg = load_compose_phase2_config("configs/compose_k562_v1_phase2.yaml")
+    assert res.bundle.method_roster == cfg.method_roster
+    assert res.ledger.to_dict()["config_sha256"] == cfg.config_sha256
     # predictions exist for exactly the registered sealed pairs
     assert set(res.bundle.predictions_double_unseen["additive"]) == set(inst["sealed_double_id"])
     assert set(res.bundle.predictions_single_unseen["additive"]) == set(inst["sealed_single_id"])
@@ -216,7 +248,7 @@ def test_l1_prediction_equals_identity_only_path():
     # double-shift prediction is bilinear_predict(coef, z_g, z_h) + additive(d_g, d_h).
     rng = np.random.default_rng(1)
     inst = _build_instance(rng)
-    res = run_phase2a(_inputs(inst), _store(inst), fixture_mode=True, expected_hashes=_HASHES)
+    res = run_phase2a_fixture(_inputs(inst), _store(inst), expected_hashes=_HASHES)
 
     # refit L1 the same way the orchestrator does, on calibration data only
     l1 = L1Model().fit(inst["Z"], inst["cal_pairs_idx"], inst["eps_cal"], lam=res.selected_lambda)
@@ -232,7 +264,7 @@ def test_l1_prediction_equals_identity_only_path():
 def test_additive_prediction_is_delta_sum():
     rng = np.random.default_rng(2)
     inst = _build_instance(rng)
-    res = run_phase2a(_inputs(inst), _store(inst), fixture_mode=True, expected_hashes=_HASHES)
+    res = run_phase2a_fixture(_inputs(inst), _store(inst), expected_hashes=_HASHES)
     for g, h in inst["sealed_double_id"]:
         expected = additive(inst["delta_by_gene"][g], inst["delta_by_gene"][h])
         got = res.bundle.predictions_double_unseen["additive"][(g, h)]
@@ -242,19 +274,29 @@ def test_additive_prediction_is_delta_sum():
 def test_no_change_prediction_is_zero():
     rng = np.random.default_rng(3)
     inst = _build_instance(rng)
-    res = run_phase2a(_inputs(inst), _store(inst), fixture_mode=True, expected_hashes=_HASHES)
+    res = run_phase2a_fixture(_inputs(inst), _store(inst), expected_hashes=_HASHES)
     for g, h in inst["sealed_double_id"]:
         got = res.bundle.predictions_double_unseen["no_change"][(g, h)]
         np.testing.assert_array_equal(got, np.zeros(inst["p"]))
+
+
+def test_perturbation_mean_uses_calibration_double_shifts_only():
+    rng = np.random.default_rng(31)
+    inst = _build_instance(rng)
+    res = run_phase2a_fixture(_inputs(inst), _store(inst), expected_hashes=_HASHES)
+    expected = np.mean(inst["additive_cal"] + inst["eps_cal"], axis=0)
+    for pair in inst["sealed_double_id"]:
+        np.testing.assert_allclose(
+            res.bundle.predictions_double_unseen["perturbation_mean"][pair],
+            expected,
+        )
 
 
 def test_bundle_written_once(tmp_path):
     rng = np.random.default_rng(4)
     inst = _build_instance(rng)
     out = tmp_path / "compose" / "bundle.json"
-    res = run_phase2a(
-        _inputs(inst), _store(inst), fixture_mode=True, expected_hashes=_HASHES, bundle_path=out
-    )
+    res = run_phase2a_fixture(_inputs(inst), _store(inst), expected_hashes=_HASHES, bundle_path=out)
     assert out.exists()
     loaded = FrozenPredictionBundle.load(out)
     loaded.verify()
@@ -278,6 +320,30 @@ def test_scientific_mode_blocked_refuses_to_run():
         )
 
 
+def test_scientific_entry_rejects_caller_controlled_fixture_boolean():
+    rng = np.random.default_rng(50)
+    inst = _build_instance(rng)
+    with pytest.raises(ScientificModeError, match="run_phase2a_fixture"):
+        run_phase2a(
+            _inputs(inst),
+            _store(inst),
+            fixture_mode=True,
+            expected_hashes=_HASHES,
+        )
+
+
+def test_fixture_entry_requires_synthetic_audit():
+    rng = np.random.default_rng(51)
+    inst = _build_instance(rng)
+    audit = dataclasses.replace(_store(inst).access_audit, source_kind="audited_unsealed")
+    with pytest.raises(ScientificModeError, match="synthetic_fixture"):
+        run_phase2a_fixture(
+            _inputs(inst),
+            _store(inst, access_audit=audit),
+            expected_hashes=_HASHES,
+        )
+
+
 # --------------------------------------------------------------------------- #
 # upstream hash verification (step 2) aborts before prediction
 # --------------------------------------------------------------------------- #
@@ -291,7 +357,79 @@ def test_hash_mismatch_aborts(bad_key):
     tampered = dict(_HASHES)
     tampered[bad_key] = "WRONG"
     with pytest.raises(ValueError, match="hash|checksum"):
-        run_phase2a(_inputs(inst), _store(inst), fixture_mode=True, expected_hashes=tampered)
+        run_phase2a_fixture(_inputs(inst), _store(inst), expected_hashes=tampered)
+
+
+def test_mutated_inputs_after_binding_are_rejected():
+    rng = np.random.default_rng(52)
+    inst = _build_instance(rng)
+    inputs = _inputs(inst)
+    np.asarray(inputs.additive_cal)[0, 0] += 1.0
+    with pytest.raises(ValueError, match="content changed"):
+        run_phase2a_fixture(inputs, _store(inst), expected_hashes=_HASHES)
+
+
+def test_mutated_outcomes_after_binding_are_rejected():
+    rng = np.random.default_rng(56)
+    inst = _build_instance(rng)
+    store = _store(inst)
+    store.combo_calibration_eps[0, 0] += 1.0
+    with pytest.raises(ValueError, match="content changed"):
+        run_phase2a_fixture(_inputs(inst), store, expected_hashes=_HASHES)
+
+
+def test_reordered_outcome_pair_ids_are_rejected():
+    rng = np.random.default_rng(53)
+    inst = _build_instance(rng)
+    reversed_ids = tuple(reversed(inst["cal_pairs_id"]))
+    with pytest.raises(ValueError, match="aligned"):
+        run_phase2a_fixture(
+            _inputs(inst),
+            _store(inst, combo_calibration_pair_ids=reversed_ids),
+            expected_hashes=_HASHES,
+        )
+
+
+def test_outcome_audit_must_bind_the_same_manifest():
+    rng = np.random.default_rng(57)
+    inst = _build_instance(rng)
+    audit = dataclasses.replace(_store(inst).access_audit, manifest_checksum="other-manifest")
+    with pytest.raises(ValueError, match="audit manifest"):
+        run_phase2a_fixture(
+            _inputs(inst),
+            _store(inst, access_audit=audit),
+            expected_hashes=_HASHES,
+        )
+
+
+def test_nonzero_sealed_access_audit_is_rejected_at_construction():
+    rng = np.random.default_rng(58)
+    inst = _build_instance(rng)
+    audit = dataclasses.replace(_store(inst).access_audit, sealed_access_count=1)
+    with pytest.raises(OutcomeLeakageError, match="non-zero sealed access"):
+        _store(inst, access_audit=audit)
+
+
+def test_runtime_grid_must_equal_preregistered_config():
+    rng = np.random.default_rng(54)
+    inst = _build_instance(rng)
+    with pytest.raises(ValueError, match="k_total_grid"):
+        run_phase2a_fixture(
+            _inputs(inst, k_total_grid=[4]),
+            _store(inst),
+            expected_hashes=_HASHES,
+        )
+
+
+def test_run_id_is_recomputed_from_provenance():
+    rng = np.random.default_rng(55)
+    inst = _build_instance(rng)
+    with pytest.raises(ValueError, match="run_id mismatch"):
+        run_phase2a_fixture(
+            _inputs(inst, run_id="0000000000000000"),
+            _store(inst),
+            expected_hashes=_HASHES,
+        )
 
 
 # --------------------------------------------------------------------------- #
@@ -303,7 +441,7 @@ def test_futility_writes_no_bundle(monkeypatch):
     # force the OOF theta <= 0 by making the additive comparator perfect (so L1
     # cannot beat it) — replace eps targets to equal additive exactly.
     store = _store(inst, combo_calibration_eps=inst["additive_cal"])
-    res = run_phase2a(_inputs(inst), store, fixture_mode=True, expected_hashes=_HASHES)
+    res = run_phase2a_fixture(_inputs(inst), store, expected_hashes=_HASHES)
     assert res.futility_status == "FUTILITY_STOPPED"
     assert res.bundle is None
     assert res.sealed_access_count == 0
@@ -314,9 +452,7 @@ def test_futility_does_not_write_bundle_file(tmp_path):
     inst = _build_instance(rng)
     store = _store(inst, combo_calibration_eps=inst["additive_cal"])
     out = tmp_path / "bundle.json"
-    res = run_phase2a(
-        _inputs(inst), store, fixture_mode=True, expected_hashes=_HASHES, bundle_path=out
-    )
+    res = run_phase2a_fixture(_inputs(inst), store, expected_hashes=_HASHES, bundle_path=out)
     assert res.bundle is None
     assert not out.exists()
 
@@ -331,7 +467,7 @@ def test_store_with_sealed_outcome_attribute_is_rejected():
     # inject a sealed-outcome attribute onto the store (simulating a leaked handle)
     object.__setattr__(store, "sealed_double_unseen_eps", inst["eps_cal"])
     with pytest.raises(OutcomeLeakageError):
-        run_phase2a(_inputs(inst), store, fixture_mode=True, expected_hashes=_HASHES)
+        run_phase2a_fixture(_inputs(inst), store, expected_hashes=_HASHES)
 
 
 def test_store_with_sealed_path_nested_deep_is_rejected():
@@ -342,7 +478,7 @@ def test_store_with_sealed_path_nested_deep_is_rejected():
         store, "extra", {"a": [{"b": ["ok", "data/sealed_single_unseen/outcomes.npy"]}]}
     )
     with pytest.raises(OutcomeLeakageError):
-        run_phase2a(_inputs(inst), store, fixture_mode=True, expected_hashes=_HASHES)
+        run_phase2a_fixture(_inputs(inst), store, expected_hashes=_HASHES)
 
 
 def test_inputs_with_sealed_token_in_diagnostics_path_rejected():
@@ -351,7 +487,7 @@ def test_inputs_with_sealed_token_in_diagnostics_path_rejected():
     # a sealed token smuggled into the run_id-adjacent free field
     bad = _inputs(inst, run_id="run-sealed_double_unseen-xyz")
     with pytest.raises(OutcomeLeakageError):
-        run_phase2a(bad, _store(inst), fixture_mode=True, expected_hashes=_HASHES)
+        run_phase2a_fixture(bad, _store(inst), expected_hashes=_HASHES)
 
 
 def test_inputs_with_sealed_token_in_cal_pair_ids_rejected():
@@ -363,7 +499,7 @@ def test_inputs_with_sealed_token_in_cal_pair_ids_rejected():
     bad_cal[0] = _canon("sealed_double_unseen", bad_cal[0][1])
     bad = _inputs(inst, cal_pair_ids=bad_cal)
     with pytest.raises(OutcomeLeakageError):
-        run_phase2a(bad, _store(inst), fixture_mode=True, expected_hashes=_HASHES)
+        run_phase2a_fixture(bad, _store(inst), expected_hashes=_HASHES)
 
 
 def test_inputs_with_sealed_token_in_factors_by_k_key_rejected():
@@ -373,7 +509,7 @@ def test_inputs_with_sealed_token_in_factors_by_k_key_rejected():
     bad_factors = {inst["k"]: inst["Z"], "sealed_single_unseen": inst["Z"]}
     bad = _inputs(inst, factors_by_k=bad_factors)
     with pytest.raises(OutcomeLeakageError):
-        run_phase2a(bad, _store(inst), fixture_mode=True, expected_hashes=_HASHES)
+        run_phase2a_fixture(bad, _store(inst), expected_hashes=_HASHES)
 
 
 def test_inputs_with_sealed_token_in_cal_idx_pairs_rejected():
@@ -384,7 +520,7 @@ def test_inputs_with_sealed_token_in_cal_idx_pairs_rejected():
     bad_idx = list(inst["cal_pairs_idx"]) + [("sealed", "x")]
     bad = _inputs(inst, cal_idx_pairs=bad_idx)
     with pytest.raises(OutcomeLeakageError):
-        run_phase2a(bad, _store(inst), fixture_mode=True, expected_hashes=_HASHES)
+        run_phase2a_fixture(bad, _store(inst), expected_hashes=_HASHES)
 
 
 def test_inputs_with_outcome_token_in_string_field_rejected():
@@ -396,7 +532,30 @@ def test_inputs_with_outcome_token_in_string_field_rejected():
     bad_cal[0] = _canon("y_true_x", bad_cal[0][1])
     bad = _inputs(inst, cal_pair_ids=bad_cal)
     with pytest.raises(OutcomeLeakageError):
-        run_phase2a(bad, _store(inst), fixture_mode=True, expected_hashes=_HASHES)
+        run_phase2a_fixture(bad, _store(inst), expected_hashes=_HASHES)
+
+
+def test_audited_unsealed_store_passes_the_leakage_scan():
+    # The scientific source_kind is 'audited_unsealed' (it contains the substring
+    # "sealed"). The leakage scan must NOT false-trip on that construction-validated
+    # enum: it is the only legal scientific value, so a trip here would make the
+    # activated path unreachable. The scan passes; the run still stops at the
+    # activation guard (blocked config) with ScientificModeError, never with a
+    # leakage error.
+    rng = np.random.default_rng(59)
+    inst = _build_instance(rng)
+    sci_audit = dataclasses.replace(_store(inst).access_audit, source_kind="audited_unsealed")
+    store = _store(inst, access_audit=sci_audit)
+    # The leakage wall itself is clean for a legitimate scientific store.
+    _scan_inputs_for_leakage(_inputs(inst), store)
+    # End-to-end: the blocked config stops at the guard, not the (false) scan.
+    with pytest.raises(ScientificModeError):
+        run_phase2a(
+            _inputs(inst),
+            store,
+            fixture_mode=False,
+            expected_hashes=_HASHES,
+        )
 
 
 # --------------------------------------------------------------------------- #
@@ -405,17 +564,17 @@ def test_inputs_with_outcome_token_in_string_field_rejected():
 def test_sealed_access_count_zero_on_continue_and_futility():
     rng = np.random.default_rng(12)
     inst = _build_instance(rng)
-    ok = run_phase2a(_inputs(inst), _store(inst), fixture_mode=True, expected_hashes=_HASHES)
+    ok = run_phase2a_fixture(_inputs(inst), _store(inst), expected_hashes=_HASHES)
     assert ok.sealed_access_count == 0
     fut_store = _store(inst, combo_calibration_eps=inst["additive_cal"])
-    fut = run_phase2a(_inputs(inst), fut_store, fixture_mode=True, expected_hashes=_HASHES)
+    fut = run_phase2a_fixture(_inputs(inst), fut_store, expected_hashes=_HASHES)
     assert fut.sealed_access_count == 0
 
 
 def test_result_is_frozen_dataclass():
     rng = np.random.default_rng(13)
     inst = _build_instance(rng)
-    res = run_phase2a(_inputs(inst), _store(inst), fixture_mode=True, expected_hashes=_HASHES)
+    res = run_phase2a_fixture(_inputs(inst), _store(inst), expected_hashes=_HASHES)
     assert dataclasses.is_dataclass(res)
     with pytest.raises(dataclasses.FrozenInstanceError):
         res.sealed_access_count = 1  # type: ignore[misc]

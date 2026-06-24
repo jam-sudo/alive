@@ -21,10 +21,10 @@ interval / material-regression margin (or a governance note that it is
 descriptive-only), the bootstrap settings, the role names and the activation
 requirements.
 
-The guard (:func:`assert_scientific_mode_allowed`) encodes the two-mode
-execution contract. ``fixture_mode=True`` is always allowed because it only
-touches synthetic / tiny-fixture data. Scientific mode (the default) requires
-**all** of: config ``status == "active"``, a matching owner
+The guard (:func:`assert_scientific_mode_allowed`) is scientific-only.
+``fixture_mode=True`` is rejected so a caller-controlled boolean cannot bypass
+activation; fixture execution has a separate bounded entry point in
+``phase2a``. Scientific mode requires **all** of: config ``status == "active"``, a matching owner
 :class:`ActivationRecord`, a clean committed Git state, and an evidence hash for
 every activation requirement. The current candidate config carries
 ``status: preregistered_activation_blocked``, so a real-data pipeline cannot be
@@ -39,6 +39,8 @@ from typing import Any
 
 import yaml
 
+from alive.provenance import sha256_json
+
 # ---------------------------------------------------------------------------
 # Frozen, pre-registered expected values. These are the contract the loader
 # validates the candidate YAML against. Changing any of them requires a new
@@ -49,12 +51,28 @@ _EXPECTED_PHASE = 2
 _EXPECTED_TOTAL_K_GRID: tuple[int, ...] = (4, 6, 8)
 _EXPECTED_EXPRESSION_DIMS: tuple[int, ...] = (2, 4, 6)
 _EXPECTED_ESM_PROJECTION_DIM = 2
+_EXPECTED_LAMBDA_GRID: tuple[float, ...] = (0.0, 0.001, 0.01, 0.1)
+_EXPECTED_OOF_FOLDS = 3
+_EXPECTED_UNCOVERED_TOLERANCE = 0.75
+_EXPECTED_SPLIT_SEED = 11
+_EXPECTED_REGISTERED_SEEDS: tuple[int, ...] = (11, 23, 37)
 _EXPECTED_COMPARATOR_FAMILY: tuple[str, ...] = (
     "additive",
     "gears",
     "cpa",
     "id_only",
     "l3_hypernetwork",
+)
+_EXPECTED_METHOD_ROSTER: tuple[str, ...] = (
+    "l1_bilinear_identifiable",
+    "l2_saturation",
+    "l3_hypernetwork",
+    "additive",
+    "no_change",
+    "perturbation_mean",
+    "id_only",
+    "gears",
+    "cpa",
 )
 _EXPECTED_METRIC_PRIMARY = "paired_relative_error_reduction"
 _EXPECTED_METRIC_FORMULA = "1 - mean(error_l1) / max(mean(error_comparator), 1e-12)"
@@ -195,7 +213,9 @@ _KNOWN_FACTOR_Z = frozenset(
         "selection",
     }
 )
-_KNOWN_IDENTIFICATION = frozenset({"estimator", "lambda_grid", "selection"})
+_KNOWN_IDENTIFICATION = frozenset(
+    {"estimator", "lambda_grid", "selection", "oof_folds", "uncovered_tolerance"}
+)
 _KNOWN_METRIC = frozenset(
     {
         "pair_error",
@@ -341,7 +361,13 @@ class ComposePhase2Config:
     total_k_grid: tuple[int, ...]
     expression_dims: tuple[int, ...]
     esm_projection_dim: int
+    lambda_grid: tuple[float, ...]
+    oof_folds: int
+    uncovered_tolerance: float
+    split_seed: int
+    registered_seeds: tuple[int, ...]
     comparator_family: tuple[str, ...]
+    method_roster: tuple[str, ...]
     metric_primary: str
     metric_formula: str
     material_margin_vs_additive: float
@@ -355,6 +381,7 @@ class ComposePhase2Config:
     bootstrap_replicates: int
     role_names: tuple[str, ...]
     fit_roles: tuple[str, ...]
+    config_sha256: str
 
     @property
     def is_active(self) -> bool:
@@ -467,6 +494,11 @@ def load_compose_phase2_config(path: str | Path) -> ComposePhase2Config:
     total_k_grid, expression_dims, esm_projection_dim = _validate_factor_z(
         _require(raw, "factor_z", "top-level")
     )
+    lambda_grid, oof_folds, uncovered_tolerance = _validate_identification(
+        _require(raw, "identification", "top-level")
+    )
+    split_seed, registered_seeds = _validate_seeds(_require(raw, "seeds", "top-level"))
+    method_roster = _validate_baselines(_require(raw, "baselines", "top-level"))
     (
         metric_primary,
         metric_formula,
@@ -496,7 +528,13 @@ def load_compose_phase2_config(path: str | Path) -> ComposePhase2Config:
         total_k_grid=total_k_grid,
         expression_dims=expression_dims,
         esm_projection_dim=esm_projection_dim,
+        lambda_grid=lambda_grid,
+        oof_folds=oof_folds,
+        uncovered_tolerance=uncovered_tolerance,
+        split_seed=split_seed,
+        registered_seeds=registered_seeds,
         comparator_family=comparator_family,
+        method_roster=method_roster,
         metric_primary=metric_primary,
         metric_formula=metric_formula,
         material_margin_vs_additive=material_margin,
@@ -510,6 +548,7 @@ def load_compose_phase2_config(path: str | Path) -> ComposePhase2Config:
         bootstrap_replicates=bootstrap_replicates,
         role_names=role_names,
         fit_roles=fit_roles,
+        config_sha256=sha256_json(raw),
     )
 
 
@@ -641,6 +680,65 @@ def _validate_factor_z(block: dict[str, Any]) -> tuple[tuple[int, ...], tuple[in
                 f"({total}) != expression_dim ({expr}) + esm_projection_dim ({esm_projection_dim})"
             )
     return total_k_grid, expression_dims, esm_projection_dim
+
+
+def _validate_identification(block: dict[str, Any]) -> tuple[tuple[float, ...], int, float]:
+    """Validate the exact preregistered ridge grid."""
+    _close_schema(block, _KNOWN_IDENTIFICATION, "identification")
+    raw = _require(block, "lambda_grid", "identification")
+    if not isinstance(raw, list) or any(isinstance(x, bool) for x in raw):
+        raise Phase2ConfigError("identification.lambda_grid must be a numeric list")
+    try:
+        grid = tuple(float(x) for x in raw)
+    except (TypeError, ValueError) as exc:
+        raise Phase2ConfigError("identification.lambda_grid must be a numeric list") from exc
+    if grid != _EXPECTED_LAMBDA_GRID:
+        raise Phase2ConfigError(
+            "identification.lambda_grid must match the registered grid exactly: "
+            f"expected {list(_EXPECTED_LAMBDA_GRID)}, got {list(grid)}"
+        )
+    oof_folds = _strict_int(
+        _require(block, "oof_folds", "identification"), "identification.oof_folds"
+    )
+    tolerance_raw = _require(block, "uncovered_tolerance", "identification")
+    if isinstance(tolerance_raw, bool) or not isinstance(tolerance_raw, (int, float)):
+        raise Phase2ConfigError("identification.uncovered_tolerance must be numeric")
+    tolerance = float(tolerance_raw)
+    if oof_folds != _EXPECTED_OOF_FOLDS or tolerance != _EXPECTED_UNCOVERED_TOLERANCE:
+        raise Phase2ConfigError(
+            "identification OOF controls must match the preregistration exactly: "
+            f"oof_folds={_EXPECTED_OOF_FOLDS}, "
+            f"uncovered_tolerance={_EXPECTED_UNCOVERED_TOLERANCE}"
+        )
+    return grid, oof_folds, tolerance
+
+
+def _validate_seeds(block: dict[str, Any]) -> tuple[int, tuple[int, ...]]:
+    """Validate the fixed split seed and registered model seeds."""
+    _close_schema(block, _KNOWN_SEEDS, "seeds")
+    split_seed = _strict_int(_require(block, "split_seed", "seeds"), "seeds.split_seed")
+    raw = _require(block, "registered_seeds", "seeds")
+    if not isinstance(raw, list):
+        raise Phase2ConfigError("seeds.registered_seeds must be a list")
+    registered = tuple(_strict_int(x, "seeds.registered_seeds entry") for x in raw)
+    if split_seed != _EXPECTED_SPLIT_SEED or registered != _EXPECTED_REGISTERED_SEEDS:
+        raise Phase2ConfigError(
+            "seeds must match the preregistration exactly: "
+            f"split_seed={_EXPECTED_SPLIT_SEED}, registered={list(_EXPECTED_REGISTERED_SEEDS)}"
+        )
+    return split_seed, registered
+
+
+def _validate_baselines(block: dict[str, Any]) -> tuple[str, ...]:
+    """Validate and return the exact Phase-2a/2b method roster."""
+    _close_schema(block, _KNOWN_BASELINES, "baselines")
+    lower_bounds = _require(block, "lower_bounds", "baselines")
+    ladder = _require(block, "ablation_ladder", "baselines")
+    if lower_bounds != ["no_change", "perturbation_mean"]:
+        raise Phase2ConfigError("baselines.lower_bounds must be [no_change, perturbation_mean]")
+    if ladder != ["l1_bilinear_identifiable", "l2_saturation", "l3_hypernetwork"]:
+        raise Phase2ConfigError("baselines.ablation_ladder does not match the registered ladder")
+    return _EXPECTED_METHOD_ROSTER
 
 
 def _validate_metric(
@@ -813,9 +911,8 @@ def assert_scientific_mode_allowed(
 ) -> None:
     """Guard the boundary between fixture mode and a real-data scientific run.
 
-    Fixture mode (``fixture_mode=True``) is always permitted: it only exercises
-    synthetic or tiny-fixture data and never opens a seal or touches real Norman
-    outcomes. Scientific mode (the default) is permitted only when **every**
+    Fixture mode is not accepted by this scientific guard. Scientific mode is
+    permitted only when **every**
     precondition holds:
 
     1. the config ``status`` is exactly ``active``;
@@ -830,7 +927,8 @@ def assert_scientific_mode_allowed(
     config
         The loaded, validated Phase-2 config.
     fixture_mode
-        When ``True``, allow synthetic / tiny-fixture execution unconditionally.
+        Deprecated compatibility parameter. ``True`` is rejected; use the
+        dedicated bounded fixture entry point.
     activation_record
         Owner authorization record; required in scientific mode.
     git_is_clean
@@ -845,7 +943,10 @@ def assert_scientific_mode_allowed(
         ``preregistered_activation_blocked`` config always fails here.
     """
     if fixture_mode:
-        return
+        raise ScientificModeError(
+            "scientific-mode guard does not authorize fixture execution; "
+            "use the dedicated bounded fixture entry point"
+        )
 
     if not config.is_active:
         raise ScientificModeError(

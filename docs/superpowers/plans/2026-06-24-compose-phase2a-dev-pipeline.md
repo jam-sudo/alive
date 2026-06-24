@@ -105,6 +105,7 @@ Implement a frozen config model that rejects unknown or missing keys and validat
 - `status`;
 - total factor dimensions and ESM dimension arithmetic;
 - exact comparator roster;
+- exact `k_total`, ridge-lambda, OOF-fold, uncovered-pair tolerance and seed values;
 - metric formula and margins;
 - exact definitions, intervals and any material-regression margin for every registered secondary
   metric, or a versioned governance reconciliation explaining why a secondary is descriptive only;
@@ -112,11 +113,13 @@ Implement a frozen config model that rejects unknown or missing keys and validat
 - role names;
 - activation requirements.
 
-Two explicit modes are allowed:
+Two separate entry points are required:
 
-- `fixture_mode=True`: synthetic/tiny-fixture tests only;
-- scientific mode: requires config status `active`, an owner activation record, clean committed
-  Git state and all activation evidence hashes.
+- bounded fixture entry point: synthetic/tiny-fixture tests carrying a synthetic-source audit only;
+- scientific entry point: requires config status `active`, an owner activation record, clean
+  committed Git state and all activation evidence hashes.
+
+A caller-controlled `fixture_mode=True` flag must never bypass the scientific guard.
 
 Tests must prove a blocked config cannot start a real-data pipeline.
 

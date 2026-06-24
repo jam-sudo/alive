@@ -171,9 +171,8 @@ def test_l2_is_monotone_saturation_of_l1():
     """L2 output is a coordinatewise monotone map of the L1 score.
 
     With ``scale_m * tanh(L1_m)`` the L2 prediction must, per output coordinate
-    ``m``, be monotone in the L1 score in the direction set by ``sign(scale_m)``
-    (non-decreasing for ``scale_m >= 0``, non-increasing for ``scale_m < 0``).
-    This is the exact preregistered-saturation invariant, not a seed accident.
+    ``m``, be non-decreasing and sign-preserving in the L1 score.  The fitted
+    scale is constrained non-negative to make this a structural invariant.
     """
     rng = np.random.default_rng(6)
     Z, _, pairs, eps = _make(rng)
@@ -190,9 +189,8 @@ def test_l2_is_monotone_saturation_of_l1():
         order = np.argsort(l1_scores[:, c])
         sorted_l2 = l2_scores[order, c]
         diffs = np.diff(sorted_l2)
-        sign = np.sign(l2.scale_[c]) if l2.scale_[c] != 0 else 1.0
-        # Monotone in the direction of the fitted scale's sign.
-        assert np.all(sign * diffs >= -1e-9)
+        assert l2.scale_[c] >= 0.0
+        assert np.all(diffs >= -1e-9)
         # Each L2 value equals scale_c * tanh(L1_c) EXACTLY (the defining map).
         np.testing.assert_allclose(
             l2_scores[:, c], l2.scale_[c] * np.tanh(l1_scores[:, c]), atol=1e-12

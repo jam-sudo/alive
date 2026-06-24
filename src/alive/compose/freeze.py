@@ -42,17 +42,20 @@ from pathlib import Path
 import numpy as np
 
 from alive.compose.baselines_combo import _assert_no_sealed_reference
+from alive.compose.io import atomic_write_once
 from alive.provenance import sha256_json
 
-#: The core methods every freezing run must validate (brief step 6). GEARS/CPA are
-#: optional (adapter seam; recorded as unavailable when no backend is present) and
-#: may extend the roster, but none of the core methods may be missing.
+#: Exact pre-registered method roster required by the Phase-2b comparison family.
 REQUIRED_METHODS: tuple[str, ...] = (
     "l1_bilinear_identifiable",
+    "l2_saturation",
+    "l3_hypernetwork",
     "additive",
     "no_change",
+    "perturbation_mean",
     "id_only",
-    "l3_hypernetwork",
+    "gears",
+    "cpa",
 )
 
 #: Substrings that mark a *measured outcome* (vs a prediction). The bundle holds
@@ -421,10 +424,9 @@ class FrozenPredictionBundle:
         if len(set(roster)) != len(roster):
             raise FreezeError(f"method roster has duplicates: {roster}")
         required = tuple(required_roster) if required_roster is not None else REQUIRED_METHODS
-        missing_required = [m for m in required if m not in roster]
-        if missing_required:
+        if roster != required:
             raise FreezeError(
-                f"method roster is incomplete: missing required methods {missing_required} "
+                "method roster must equal the registered roster exactly "
                 f"(roster={roster}, required={required})"
             )
 
@@ -585,13 +587,16 @@ class FrozenPredictionBundle:
             If ``path`` already exists.
         """
         path = Path(path)
-        if path.exists():
+        try:
+            atomic_write_once(
+                path,
+                json.dumps(self.to_dict(), sort_keys=True, separators=(",", ":")),
+            )
+        except FileExistsError as exc:
             raise FreezeError(
                 f"refusing to overwrite existing bundle at {path}: the frozen bundle "
                 "is write-once (CLAUDE.md §11)"
-            )
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(self.to_dict(), sort_keys=True, separators=(",", ":")))
+            ) from exc
 
     @classmethod
     def load(cls, path: str | Path) -> "FrozenPredictionBundle":
