@@ -73,6 +73,7 @@ scrub_exception_message(message)
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -188,12 +189,33 @@ def _looks_like_raw_vector(obj: object) -> bool:
 def _assert_no_raw_outcomes(payload: object) -> None:
     """Recursively reject any raw outcome matrix anywhere in ``payload``.
 
+    This is a COARSE BACKSTOP, not the primary owner of the no-raw-outcome
+    property. The contract is that the Task-8 orchestrator constructs every
+    terminal payload as a summary / checksum-only structure (verdicts, scalar
+    metrics, ids, hashes) and is RESPONSIBLE for never handing raw outcomes to
+    the terminal. This guard exists to catch a gross programming mistake (a whole
+    expression matrix or per-cell vector leaking in), not to certify an
+    adversarial payload safe.
+
     Walks the whole structure (mappings, sequences, sets) and raises
     :class:`TerminalError` on the first of:
 
     * a NumPy ``ndarray`` (or any object exposing ``.shape`` + ``__array__``);
     * a nested raw cell/observation matrix (:func:`_looks_like_raw_matrix`); or
     * an oversized flat numeric list (:func:`_looks_like_raw_vector`).
+
+    Threshold rationale
+    -------------------
+    The matrix / vector thresholds (:data:`_MATRIX_MIN_ROWS`,
+    :data:`_MATRIX_MIN_COLS`, :data:`_MAX_NUMERIC_LIST`) are deliberately set
+    ABOVE the smallest legitimate scalar metric table so that legitimate summary
+    payloads (a 3x3 confusion-style table, a handful of per-method metric
+    scalars, a short per-fold score list) never false-positive. The cost of that
+    headroom is that a small raw block (e.g. a 3x3 numeric matrix or a 50-element
+    float vector) can slip past — which is acceptable precisely because this is a
+    backstop and the orchestrator, not this function, owns the property. Do NOT
+    lower the thresholds to chase such cases: that would reject legitimate metric
+    tables and is the wrong layer to enforce the invariant.
 
     Strings and bytes are never recursed into (a digit-bearing string is not a
     matrix). The guard runs BEFORE any artifact byte is written so a rejected
@@ -305,6 +327,12 @@ class Phase2bTerminal:
     guarantees that, once :meth:`claim_access` is called, every exit path leaves
     exactly one write-once terminal artifact.
 
+    The no-raw-outcome property of terminal artifacts is OWNED BY the Task-8
+    orchestrator, which must construct every payload as a summary / checksum-only
+    structure. :func:`_assert_no_raw_outcomes` here is only a COARSE BACKSTOP
+    against a gross leak (a whole matrix / per-cell vector), not a certification
+    that an arbitrary payload is outcome-free.
+
     Parameters
     ----------
     run_dir : str or Path
@@ -400,6 +428,10 @@ class Phase2bTerminal:
                 f"exclusive evaluation lock {str(lock_path)!r} is already held; "
                 "a concurrent or prior owner holds the run. Refusing to acquire."
             ) from exc
+        # The lock FILE on disk is the lock (O_EXCL); the descriptor is not needed
+        # once it exists. Close it so we never leak a fd. Never unlink the file.
+        os.close(self._lock_fd)
+        self._lock_fd = None
 
         # 2. Refuse if any terminal artifact already exists (run already ran).
         existing = [name for name in self._artifact_names() if (self._run_dir / name).exists()]
@@ -507,6 +539,14 @@ class Phase2bTerminal:
         the failing ``stage`` and the preflight artifact CHECKSUMS — never raw
         outcomes. Only valid from :attr:`TerminalState.ACCESS_CLAIMED`.
 
+        The CORE abort record — state ``ABORTED_AFTER_SEAL``, the exception class
+        name, the scrubbed message and the stage — must essentially always be
+        writable: it is the durable proof a consumed seal did not vanish silently.
+        Therefore an unsafe ``preflight_checksums`` block (one that fails the
+        raw-outcome guard, or is otherwise unserialisable) is DROPPED — recorded as
+        ``"OMITTED_UNSAFE"`` — rather than allowed to block the core record. The
+        scrubbed message is still never allowed to embed raw outcomes.
+
         Parameters
         ----------
         exception : BaseException
@@ -515,6 +555,8 @@ class Phase2bTerminal:
             The pipeline stage at which the abort occurred.
         preflight_checksums : Mapping of str to str or None, optional
             Outcome-free preflight artifact checksums to record (never raw data).
+            If they carry raw outcomes or are otherwise unserialisable they are
+            dropped (``"OMITTED_UNSAFE"``) so the core abort record still writes.
 
         Raises
         ------
@@ -522,8 +564,15 @@ class Phase2bTerminal:
             If not in ``ACCESS_CLAIMED`` or if the destination already exists.
         """
         self._require_state(TerminalState.ACCESS_CLAIMED, "aborted")
-        checksums = dict(preflight_checksums) if preflight_checksums is not None else {}
-        # Guard the checksum payload too: it must carry no raw outcomes.
+        checksums: object = dict(preflight_checksums) if preflight_checksums is not None else {}
+        # The optional checksum block must never block the core abort record. If it
+        # carries raw outcomes (guard rejection) or cannot be JSON-serialised, drop
+        # it for a safe marker rather than failing the whole abort write.
+        try:
+            _assert_no_raw_outcomes(checksums)
+            json.dumps(checksums, sort_keys=True, separators=(",", ":"))
+        except (TerminalError, TypeError, ValueError):
+            checksums = "OMITTED_UNSAFE"
         body = {
             "terminal_state": TerminalState.ABORTED_AFTER_SEAL.value,
             "exception_class": type(exception).__name__,
@@ -531,6 +580,8 @@ class Phase2bTerminal:
             "stage": stage,
             "preflight_checksums": checksums,
         }
+        # The body's checksum field is now guaranteed safe, so guard the (possibly
+        # reduced) value rather than the original unsafe input.
         self._write_terminal(self.ABORTED_ARTIFACT, body, payload_to_guard=checksums)
         self._state = TerminalState.ABORTED_AFTER_SEAL
 
@@ -710,8 +761,6 @@ class Phase2bTerminal:
 
 def _sha256_text(text: str) -> str:
     """SHA-256 hex of a UTF-8 string (matches :func:`sha256_file` of the file)."""
-    import hashlib
-
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
@@ -756,27 +805,94 @@ class _ProtectBoundary:
             )
         return self._owner
 
+    #: Prefix for the best-effort last-resort finalization-failure marker. Used
+    #: only when :meth:`Phase2bTerminal.aborted` itself fails on exit.
+    _LAST_RESORT_PREFIX = "terminal_abort_failure"
+
     def __exit__(self, exc_type, exc, exc_tb) -> bool:
         if exc is not None:
-            # An exception escaped the block: record the abort then RE-RAISE.
-            # If the block had already written a terminal (state no longer
-            # ACCESS_CLAIMED), do not attempt a second terminal write.
+            # An exception escaped the block: record the abort then RE-RAISE the
+            # ORIGINAL exception. If the block already wrote a terminal (state no
+            # longer ACCESS_CLAIMED) there is nothing to record.
             if self._owner.state is TerminalState.ACCESS_CLAIMED:
-                self._owner.aborted(
-                    exception=exc,
-                    stage=self._stage,
-                    preflight_checksums=self._preflight_checksums,
-                )
+                try:
+                    self._owner.aborted(
+                        exception=exc,
+                        stage=self._stage,
+                        preflight_checksums=self._preflight_checksums,
+                    )
+                except BaseException as abort_err:
+                    # Finalization itself failed (e.g. a terminal already exists, or
+                    # the ledger already records the abort name). Drop a best-effort
+                    # durable marker so the run never ends silently with no terminal
+                    # record, then let the ORIGINAL exception propagate — abort_err
+                    # must never mask the real failure.
+                    self._write_last_resort_marker(exc, abort_err)
             return False  # propagate (re-raise) the original exception
 
         # Clean exit. If no terminal was written inside the block, the seal would
         # be consumed with no terminal record — write the safety-net abort.
         if self._owner.state is TerminalState.ACCESS_CLAIMED:
-            self._owner.aborted(
-                exception=NoTerminalWritten(
-                    "protected block exited without writing a terminal artifact"
-                ),
-                stage="no-terminal-written",
-                preflight_checksums=self._preflight_checksums,
-            )
+            try:
+                self._owner.aborted(
+                    exception=NoTerminalWritten(
+                        "protected block exited without writing a terminal artifact"
+                    ),
+                    stage="no-terminal-written",
+                    preflight_checksums=self._preflight_checksums,
+                )
+            except BaseException as abort_err:
+                # No in-flight exception to preserve here, so the run genuinely
+                # failed to finalize. Drop a best-effort marker, then surface the
+                # finalization failure as a TerminalError chained from abort_err.
+                self._write_last_resort_marker(None, abort_err)
+                raise TerminalError(
+                    "protected block exited cleanly with the seal still consumed but "
+                    "the safety-net abort write failed; the run did not finalize."
+                ) from abort_err
         return False
+
+    def _write_last_resort_marker(
+        self,
+        original: BaseException | None,
+        abort_err: BaseException,
+    ) -> None:
+        """Best-effort durable marker that finalization itself failed.
+
+        Writes a uniquely-named ``terminal_abort_failure-<n>.json`` via
+        :func:`atomic_write_once` so a consumed seal never ends with zero durable
+        terminal markers, even when :meth:`Phase2bTerminal.aborted` could not
+        install its own artifact. Records only outcome-free metadata (exception
+        CLASS NAMES and scrubbed messages — never raw outcomes or checksums). Any
+        error from this last-resort attempt is swallowed: it must never raise.
+
+        Parameters
+        ----------
+        original : BaseException or None
+            The in-flight exception being preserved (``None`` on the clean path).
+        abort_err : BaseException
+            The exception raised by the failed :meth:`Phase2bTerminal.aborted` call.
+        """
+        body = {
+            "terminal_state": TerminalState.ABORTED_AFTER_SEAL.value,
+            "finalization_failed": True,
+            "stage": self._stage,
+            "original_exception_class": (type(original).__name__ if original is not None else None),
+            "original_message": (
+                scrub_exception_message(str(original)) if original is not None else None
+            ),
+            "abort_failure_class": type(abort_err).__name__,
+            "abort_failure_message": scrub_exception_message(str(abort_err)),
+        }
+        text = json.dumps(body, sort_keys=True, separators=(",", ":"))
+        run_dir = self._owner.run_dir
+        for n in range(1000):
+            destination = run_dir / f"{self._LAST_RESORT_PREFIX}-{n}.json"
+            try:
+                atomic_write_once(destination, text)
+                return
+            except FileExistsError:
+                continue
+            except BaseException:
+                # Disk full, permissions, etc. Nothing more we can durably do.
+                return

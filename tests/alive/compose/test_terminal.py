@@ -570,3 +570,119 @@ def test_aborted_then_no_further_terminal(tmp_path: Path) -> None:
     with pytest.raises(TerminalError):
         term.complete(_payload())
     assert len(_existing_terminal_artifacts(term.run_dir)) == 1
+
+
+# ---------------------------------------------------------------------------
+# Double-fault in the protection boundary — aborted() itself fails on exit
+# ---------------------------------------------------------------------------
+
+
+def _last_resort_markers(run_dir: Path) -> list[Path]:
+    """Every best-effort last-resort finalization-failure marker in the run dir."""
+    return sorted(run_dir.glob("terminal_abort_failure-*.json"))
+
+
+def _durable_terminal_markers(run_dir: Path) -> list[Path]:
+    """Every durable terminal marker: real terminal artifacts plus last-resort ones."""
+    return _existing_terminal_artifacts(run_dir) + _last_resort_markers(run_dir)
+
+
+def test_protect_preserves_original_exception_when_abort_write_fails(tmp_path: Path) -> None:
+    # The abort destination already exists on disk, so aborted() -> atomic_write_once
+    # raises FileExistsError -> TerminalError inside __exit__. The original exception
+    # must STILL be what propagates (not the TerminalError/FileExistsError), and a
+    # durable last-resort marker must exist (never zero terminal markers).
+    term = _terminal(tmp_path)
+    run_dir = term.run_dir
+    term.acquire()
+    term.claim_access()
+
+    # Pre-create the canonical abort artifact so aborted() cannot install its own.
+    (run_dir / Phase2bTerminal.ABORTED_ARTIFACT).write_text("STALE-ABORT", encoding="utf-8")
+
+    class OriginalBoom(RuntimeError):
+        pass
+
+    with pytest.raises(OriginalBoom) as excinfo:
+        with term.protect(stage="scoring"):
+            raise OriginalBoom("the real failure")
+
+    # The ORIGINAL exception type/message is what the caller sees.
+    assert isinstance(excinfo.value, OriginalBoom)
+    assert "the real failure" in str(excinfo.value)
+    assert not isinstance(excinfo.value, TerminalError)
+
+    # A durable last-resort marker exists; we are NOT left with zero terminal markers.
+    assert _durable_terminal_markers(run_dir), "no durable terminal marker on disk"
+    markers = _last_resort_markers(run_dir)
+    assert markers, "best-effort last-resort marker not written"
+    # The stale pre-existing abort artifact was NOT overwritten.
+    assert (run_dir / Phase2bTerminal.ABORTED_ARTIFACT).read_text() == "STALE-ABORT"
+
+
+def test_protect_preserves_original_exception_when_checksums_are_raw(tmp_path: Path) -> None:
+    # preflight_checksums carrying a raw ndarray makes aborted()'s guard reject —
+    # but because aborted() drops unsafe checksums, the abort still writes. Force a
+    # genuine double-fault by ALSO pre-creating the abort destination, and confirm
+    # the original exception propagates with a durable marker present.
+    term = _terminal(tmp_path)
+    run_dir = term.run_dir
+    term.acquire()
+    term.claim_access()
+    (run_dir / Phase2bTerminal.ABORTED_ARTIFACT).write_text("STALE", encoding="utf-8")
+
+    class OriginalBoom(ValueError):
+        pass
+
+    bad_checksums = {"pair_manifest": np.arange(10)}
+    with pytest.raises(OriginalBoom):
+        with term.protect(stage="scoring", preflight_checksums=bad_checksums):
+            raise OriginalBoom("real failure with bad checksums")
+
+    assert _durable_terminal_markers(run_dir), "no durable terminal marker on disk"
+
+
+def test_aborted_direct_with_raw_checksums_omits_unsafe_and_does_not_raise(tmp_path: Path) -> None:
+    # aborted() called directly with preflight_checksums containing a raw ndarray
+    # must STILL write a valid ABORTED_AFTER_SEAL artifact (checksums omitted-unsafe)
+    # and must NOT raise — the core abort record cannot be blocked by a bad field.
+    term = _terminal(tmp_path)
+    run_dir = term.run_dir
+    term.acquire()
+    term.claim_access()
+
+    term.aborted(
+        exception=RuntimeError("core abort message"),
+        stage="scoring",
+        preflight_checksums={"pair_manifest": np.arange(64)},
+    )
+
+    assert term.state is TerminalState.ABORTED_AFTER_SEAL
+    artifact = run_dir / Phase2bTerminal.ABORTED_ARTIFACT
+    assert artifact.exists()
+    body = json.loads(artifact.read_text(encoding="utf-8"))
+    assert body["terminal_state"] == TerminalState.ABORTED_AFTER_SEAL.value
+    assert body["exception_class"] == "RuntimeError"
+    assert body["stage"] == "scoring"
+    # The unsafe checksum block was dropped, not embedded.
+    assert body["preflight_checksums"] == "OMITTED_UNSAFE"
+    # The artifact still verifies in the ledger.
+    assert term.ledger.verify_file(Phase2bTerminal.ABORTED_ARTIFACT, artifact) is True
+
+
+def test_clean_silent_return_raises_terminal_error_when_abort_write_fails(tmp_path: Path) -> None:
+    # Clean exit, state still ACCESS_CLAIMED (silent return), but the safety-net
+    # abort write is forced to fail (abort destination pre-exists). There is NO
+    # original exception to preserve → a TerminalError must be raised, and a
+    # last-resort marker must exist.
+    term = _terminal(tmp_path)
+    run_dir = term.run_dir
+    term.acquire()
+    term.claim_access()
+    (run_dir / Phase2bTerminal.ABORTED_ARTIFACT).write_text("STALE", encoding="utf-8")
+
+    with pytest.raises(TerminalError):
+        with term.protect(stage="scoring"):
+            pass  # silent return, no terminal written
+
+    assert _last_resort_markers(run_dir), "best-effort last-resort marker not written"
