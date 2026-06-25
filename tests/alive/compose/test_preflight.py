@@ -18,9 +18,10 @@ Load-bearing contracts under test (Task 2b-2 brief):
   * on success it returns a fully-populated :class:`EvaluationLock` carrying only
     role-labelled pair IDs, predictions, thresholds, verified hashes and seeds —
     and NO measured outcomes;
-  * in EVERY failure test a spy :class:`ComposeOutcomeStore` records zero sealed
-    access (``sealed_access_count == 0``), proving the preflight never causes
-    access.
+  * outcome-freedom is proven STRUCTURALLY: ``run_preflight`` has no
+    outcome-store / observed-data parameter, so there is nothing to access. This
+    is asserted directly against :func:`inspect.signature` rather than via a spy
+    store the function never receives (which could only ever be vacuously true).
 
 ACTIVATION BLOCKED: pure ``numpy`` on synthetic fixtures only; NO real Norman,
 NO seal open, NO sealed-outcome read.
@@ -29,6 +30,7 @@ NO seal open, NO sealed-outcome read.
 from __future__ import annotations
 
 import dataclasses
+import inspect
 
 import numpy as np
 import pytest
@@ -38,7 +40,6 @@ from alive.compose.freeze import FrozenPredictionBundle, OutcomeLeakageError
 from alive.compose.outcome_store import ComposeOutcomeStore
 from alive.compose.phase2a import Phase2aResult, run_phase2a_fixture
 from alive.compose.preflight import EvaluationLock, PreflightError, run_preflight
-from alive.compose.split import build_split_manifest
 
 # Reuse the Phase-2a synthetic fixture builders so the bundle is real and
 # self-consistent (full control of roster / pairs / predictions / checksums).
@@ -85,47 +86,6 @@ def _pair_manifest_for(bundle: FrozenPredictionBundle) -> dict:
         },
         "checksum": bundle.manifest_checksum,
     }
-
-
-def _spy_store(tmp_path) -> ComposeOutcomeStore:
-    """A well-formed sealed store used purely as an access SPY.
-
-    The preflight must NEVER touch this object; the tests assert its
-    ``sealed_access_count`` is 0 after every call. Constructed from an
-    independent manifest so it is a fully valid seal boundary (its pairs are
-    unrelated to the preflight's bundle — that is fine; the preflight never sees
-    it).
-    """
-    eligible = [
-        ("GENEA", "GENEB"),
-        ("GENEA", "GENEC"),
-        ("GENEB", "GENEC"),
-        ("GENEC", "GENED"),
-        ("GENED", "GENEE"),
-        ("GENEE", "GENEF"),
-        ("GENEA", "GENED"),
-        ("GENEB", "GENEF"),
-    ]
-    manifest = build_split_manifest(eligible, seed=7, calibration_fraction=0.5)
-    all_pairs: list[tuple[str, str]] = []
-    for role in ("combo_calibration", "sealed_double_unseen", "sealed_single_unseen"):
-        all_pairs.extend(tuple(p) for p in manifest["roles"][role])
-    pair_index: dict[tuple[str, str], np.ndarray] = {}
-    cursor = 0
-    for pair in all_pairs:
-        pair_index[pair] = np.arange(cursor, cursor + 2, dtype=np.int64)
-        cursor += 2
-
-    class _Source:
-        def __init__(self, n_rows: int) -> None:
-            self.X = (np.arange(n_rows, dtype=np.float64) + 1.0)[:, None] * np.ones((1, 4))
-
-    return ComposeOutcomeStore(
-        pair_index=pair_index,
-        source=_Source(cursor),
-        manifest=manifest,
-        audit_path=tmp_path / "spy_audit.jsonl",
-    )
 
 
 def _tampered_ledger(res: Phase2aResult, *, artifact: str, value: str):
@@ -179,11 +139,9 @@ def _preflight_kwargs(res: Phase2aResult, *, manifest=None, ledger=None, **overr
 # --------------------------------------------------------------------------- #
 def test_happy_path_returns_valid_lock(tmp_path):
     res, inst = _phase2a_result(seed=0)
-    spy = _spy_store(tmp_path)
 
     lock = run_preflight(**_preflight_kwargs(res))
 
-    assert spy.sealed_access_count == 0
     assert isinstance(lock, EvaluationLock)
 
     bundle = res.bundle
@@ -242,11 +200,53 @@ def test_lock_with_smuggled_outcome_marker_is_rejected(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# structural outcome-freedom (the load-bearing safety property)
+# --------------------------------------------------------------------------- #
+def test_run_preflight_signature_is_structurally_outcome_free():
+    """``run_preflight`` exposes NO outcome-store / observed-data parameter.
+
+    This is the genuine, non-vacuous proof of outcome-freedom: if the function
+    cannot receive a sealed outcome store / truth / observed population, it
+    cannot access one. The test inspects the live signature, so it FAILS the
+    moment a future edit adds, e.g., an ``outcome_store`` parameter or a
+    :class:`ComposeOutcomeStore`-annotated argument.
+    """
+    # Names that would smuggle in (or hint at) a measured-outcome / sealed-data
+    # input. Substring match, case-insensitive.
+    forbidden_substrings = (
+        "store",
+        "outcome",
+        "truth",
+        "sealed",
+        "observed",
+        "population",
+        "cells",
+    )
+    forbidden_annotations = {ComposeOutcomeStore, ComposeOutcomeStore.__name__}
+
+    sig = inspect.signature(run_preflight)
+    assert sig.parameters, "run_preflight should take parameters"
+    for name, param in sig.parameters.items():
+        lowered = name.lower()
+        offending = [s for s in forbidden_substrings if s in lowered]
+        assert not offending, (
+            f"run_preflight parameter {name!r} contains an outcome/store substring "
+            f"{offending!r}; the function must be structurally outcome-free"
+        )
+        ann = param.annotation
+        # Tolerate string ('from __future__ import annotations') and real-class
+        # annotations alike.
+        assert ann not in forbidden_annotations, (
+            f"run_preflight parameter {name!r} is annotated as an outcome store "
+            f"({ann!r}); the function must be structurally outcome-free"
+        )
+
+
+# --------------------------------------------------------------------------- #
 # roster: missing / extra / reordered method
 # --------------------------------------------------------------------------- #
 def test_missing_method_fails_closed(tmp_path):
     res, _ = _phase2a_result(seed=3)
-    spy = _spy_store(tmp_path)
     bundle = res.bundle
     # drop one roster method from the bundle (and its predictions)
     short_roster = bundle.method_roster[:-1]
@@ -258,12 +258,10 @@ def test_missing_method_fails_closed(tmp_path):
     )
     with pytest.raises(PreflightError):
         run_preflight(**_preflight_kwargs(res, bundle=bad))
-    assert spy.sealed_access_count == 0
 
 
 def test_extra_method_fails_closed(tmp_path):
     res, _ = _phase2a_result(seed=4)
-    spy = _spy_store(tmp_path)
     bundle = res.bundle
     extra_roster = bundle.method_roster + ("rogue_method",)
     extra_double = dict(bundle.predictions_double_unseen)
@@ -278,18 +276,15 @@ def test_extra_method_fails_closed(tmp_path):
     )
     with pytest.raises(PreflightError):
         run_preflight(**_preflight_kwargs(res, bundle=bad))
-    assert spy.sealed_access_count == 0
 
 
 def test_reordered_roster_fails_closed(tmp_path):
     res, _ = _phase2a_result(seed=5)
-    spy = _spy_store(tmp_path)
     bundle = res.bundle
     reordered = (bundle.method_roster[1], bundle.method_roster[0]) + bundle.method_roster[2:]
     bad = dataclasses.replace(bundle, method_roster=reordered)
     with pytest.raises(PreflightError):
         run_preflight(**_preflight_kwargs(res, bundle=bad))
-    assert spy.sealed_access_count == 0
 
 
 # --------------------------------------------------------------------------- #
@@ -298,32 +293,27 @@ def test_reordered_roster_fails_closed(tmp_path):
 def test_missing_pair_in_regime_fails_closed(tmp_path):
     # manifest role has MORE pairs than the bundle predicts (bundle missing one).
     res, _ = _phase2a_result(seed=6)
-    spy = _spy_store(tmp_path)
     bundle = res.bundle
     manifest = _pair_manifest_for(bundle)
     # add a phantom pair to the manifest's double role only.
     manifest["roles"]["sealed_double_unseen"].append(["ZZZ1", "ZZZ2"])
     with pytest.raises(PreflightError):
         run_preflight(**_preflight_kwargs(res, manifest=manifest))
-    assert spy.sealed_access_count == 0
 
 
 def test_extra_pair_in_bundle_fails_closed(tmp_path):
     # bundle has a pair the manifest role does not list.
     res, _ = _phase2a_result(seed=7)
-    spy = _spy_store(tmp_path)
     bundle = res.bundle
     manifest = _pair_manifest_for(bundle)
     # drop a pair from the manifest's double role so the bundle is now a superset.
     manifest["roles"]["sealed_double_unseen"] = manifest["roles"]["sealed_double_unseen"][:-1]
     with pytest.raises(PreflightError):
         run_preflight(**_preflight_kwargs(res, manifest=manifest))
-    assert spy.sealed_access_count == 0
 
 
 def test_method_missing_one_prediction_fails_closed(tmp_path):
     res, _ = _phase2a_result(seed=8)
-    spy = _spy_store(tmp_path)
     bundle = res.bundle
     # remove a single (method, pair) prediction from the double regime.
     double = {m: dict(d) for m, d in bundle.predictions_double_unseen.items()}
@@ -332,19 +322,16 @@ def test_method_missing_one_prediction_fails_closed(tmp_path):
     bad = dataclasses.replace(bundle, predictions_double_unseen=double)
     with pytest.raises(PreflightError):
         run_preflight(**_preflight_kwargs(res, bundle=bad))
-    assert spy.sealed_access_count == 0
 
 
 def test_method_extra_prediction_fails_closed(tmp_path):
     res, _ = _phase2a_result(seed=18)
-    spy = _spy_store(tmp_path)
     bundle = res.bundle
     double = {m: dict(d) for m, d in bundle.predictions_double_unseen.items()}
     double["additive"][("PHANTOM1", "PHANTOM2")] = np.zeros(_EXPECTED_RESPONSE_DIM)
     bad = dataclasses.replace(bundle, predictions_double_unseen=double)
     with pytest.raises(PreflightError):
         run_preflight(**_preflight_kwargs(res, bundle=bad))
-    assert spy.sealed_access_count == 0
 
 
 # --------------------------------------------------------------------------- #
@@ -352,7 +339,6 @@ def test_method_extra_prediction_fails_closed(tmp_path):
 # --------------------------------------------------------------------------- #
 def test_wrong_shape_prediction_fails_closed(tmp_path):
     res, _ = _phase2a_result(seed=9)
-    spy = _spy_store(tmp_path)
     bundle = res.bundle
     double = {m: dict(d) for m, d in bundle.predictions_double_unseen.items()}
     victim = bundle.pair_ids_double_unseen[0]
@@ -360,12 +346,10 @@ def test_wrong_shape_prediction_fails_closed(tmp_path):
     bad = dataclasses.replace(bundle, predictions_double_unseen=double)
     with pytest.raises(PreflightError):
         run_preflight(**_preflight_kwargs(res, bundle=bad))
-    assert spy.sealed_access_count == 0
 
 
 def test_nonfinite_prediction_fails_closed(tmp_path):
     res, _ = _phase2a_result(seed=10)
-    spy = _spy_store(tmp_path)
     bundle = res.bundle
     double = {m: dict(d) for m, d in bundle.predictions_double_unseen.items()}
     victim = bundle.pair_ids_double_unseen[0]
@@ -375,16 +359,13 @@ def test_nonfinite_prediction_fails_closed(tmp_path):
     bad = dataclasses.replace(bundle, predictions_double_unseen=double)
     with pytest.raises(PreflightError):
         run_preflight(**_preflight_kwargs(res, bundle=bad))
-    assert spy.sealed_access_count == 0
 
 
 def test_response_dim_mismatch_fails_closed(tmp_path):
     # the caller's expected_response_dim disagrees with the bundle's.
     res, _ = _phase2a_result(seed=19)
-    spy = _spy_store(tmp_path)
     with pytest.raises(PreflightError):
         run_preflight(**_preflight_kwargs(res, expected_response_dim=_EXPECTED_RESPONSE_DIM + 1))
-    assert spy.sealed_access_count == 0
 
 
 # --------------------------------------------------------------------------- #
@@ -392,10 +373,8 @@ def test_response_dim_mismatch_fails_closed(tmp_path):
 # --------------------------------------------------------------------------- #
 def test_run_id_recompute_mismatch_fails_closed(tmp_path):
     res, _ = _phase2a_result(seed=11)
-    spy = _spy_store(tmp_path)
     with pytest.raises(PreflightError):
         run_preflight(**_preflight_kwargs(res, data_card_digest="WRONG-DIGEST"))
-    assert spy.sealed_access_count == 0
 
 
 # --------------------------------------------------------------------------- #
@@ -403,21 +382,17 @@ def test_run_id_recompute_mismatch_fails_closed(tmp_path):
 # --------------------------------------------------------------------------- #
 def test_ledger_bundle_checksum_mismatch_fails_closed(tmp_path):
     res, _ = _phase2a_result(seed=12)
-    spy = _spy_store(tmp_path)
     bad_ledger = _tampered_ledger(res, artifact="frozen_prediction_bundle", value="TAMPERED")
     with pytest.raises(PreflightError):
         run_preflight(**_preflight_kwargs(res, ledger=bad_ledger))
-    assert spy.sealed_access_count == 0
 
 
 def test_ledger_upstream_artifact_mismatch_fails_closed(tmp_path):
     # a mismatch on a non-bundle artifact (response_space) must also fail closed.
     res, _ = _phase2a_result(seed=20)
-    spy = _spy_store(tmp_path)
     bad_ledger = _tampered_ledger(res, artifact="response_space", value="TAMPERED")
     with pytest.raises(PreflightError):
         run_preflight(**_preflight_kwargs(res, ledger=bad_ledger))
-    assert spy.sealed_access_count == 0
 
 
 # --------------------------------------------------------------------------- #
@@ -425,12 +400,10 @@ def test_ledger_upstream_artifact_mismatch_fails_closed(tmp_path):
 # --------------------------------------------------------------------------- #
 def test_futility_stopped_bundle_fails_closed(tmp_path):
     res, _ = _phase2a_result(seed=13)
-    spy = _spy_store(tmp_path)
     # a frozen bundle whose dev run was futility-stopped must be refused.
     bad = dataclasses.replace(res.bundle, futility_status="FUTILITY_STOPPED")
     with pytest.raises(PreflightError):
         run_preflight(**_preflight_kwargs(res, bundle=bad))
-    assert spy.sealed_access_count == 0
 
 
 # --------------------------------------------------------------------------- #
@@ -438,12 +411,10 @@ def test_futility_stopped_bundle_fails_closed(tmp_path):
 # --------------------------------------------------------------------------- #
 def test_manifest_checksum_mismatch_fails_closed(tmp_path):
     res, _ = _phase2a_result(seed=14)
-    spy = _spy_store(tmp_path)
     manifest = _pair_manifest_for(res.bundle)
     manifest["checksum"] = "DIFFERENT-CHECKSUM"
     with pytest.raises(PreflightError):
         run_preflight(**_preflight_kwargs(res, manifest=manifest))
-    assert spy.sealed_access_count == 0
 
 
 # --------------------------------------------------------------------------- #
@@ -451,9 +422,7 @@ def test_manifest_checksum_mismatch_fails_closed(tmp_path):
 # --------------------------------------------------------------------------- #
 def test_tampered_bundle_checksum_fails_closed(tmp_path):
     res, _ = _phase2a_result(seed=15)
-    spy = _spy_store(tmp_path)
     # mutate a recorded checksum without recomputing -> bundle.verify() raises.
     bad = dataclasses.replace(res.bundle, model_checksum="MUTATED-AFTER-FREEZE")
     with pytest.raises(PreflightError):
         run_preflight(**_preflight_kwargs(res, bundle=bad))
-    assert spy.sealed_access_count == 0

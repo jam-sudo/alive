@@ -163,6 +163,8 @@ class EvaluationLock:
         OutcomeLeakageError
             If a measured-outcome marker is present anywhere.
         """
+        # Numeric prediction arrays are intentionally excluded from this token scan: they are
+        # token-free numpy floats already validated finite/shaped by freeze.py.
         _assert_no_outcome_reference(
             {
                 "run_id": self.run_id,
