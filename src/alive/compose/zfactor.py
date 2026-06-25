@@ -26,9 +26,9 @@ Determinism / orientation policy
 PCA component signs are arbitrary (SVD sign degeneracy). The registered policy,
 identical to :mod:`alive.compose.response`, fixes each component's sign so that
 its **largest-magnitude loading is positive** (ties broken by the lowest index).
-This makes ``z`` byte-reproducible across runs, platforms and global input sign
-flips. The scores are mean-centered before projection, so a global negation of
-every input vector yields identical scores after re-orientation.
+This makes ``z`` deterministic and byte-reproducible across runs and platforms
+for a given set of input vectors: the same inputs always yield the same scores,
+independent of the raw SVD sign convention returned by the backend.
 
 Provenance
 ----------
