@@ -213,15 +213,37 @@ class ComposeOutcomeStore:
         self._manifest = manifest
         self._audit_path = Path(audit_path)
 
-        roles = manifest["roles"]
-        self._double_ids: frozenset[PairID] = frozenset(
-            self._canonical(p) for p in roles["sealed_double_unseen"]
-        )
-        self._single_ids: frozenset[PairID] = frozenset(
-            self._canonical(p) for p in roles["sealed_single_unseen"]
-        )
+        # Guard the manifest at construction: a malformed manifest must fail
+        # closed via ComposeSealingError, never a raw KeyError mid-access.
+        try:
+            roles = manifest["roles"]
+            self._double_ids: frozenset[PairID] = frozenset(
+                self._canonical(p) for p in roles["sealed_double_unseen"]
+            )
+            self._single_ids: frozenset[PairID] = frozenset(
+                self._canonical(p) for p in roles["sealed_single_unseen"]
+            )
+            self._manifest_checksum: str = manifest["checksum"]
+        except KeyError as exc:
+            raise ComposeSealingError(
+                f"malformed manifest: missing required key {exc}. "
+                "Expected 'roles' (with 'sealed_double_unseen' and 'sealed_single_unseen') "
+                "and 'checksum'."
+            ) from exc
         self._sealed_ids: frozenset[PairID] = self._double_ids | self._single_ids
-        self._manifest_checksum: str = manifest["checksum"]
+
+        # Fail closed BEFORE any access: every sealed pair must be present in the
+        # pair_index. Otherwise _materialise_pairs would raise a raw KeyError only
+        # AFTER evaluate_sealed_once has already burned the audit. Reject the
+        # misconfigured index here so no access can ever be consumed.
+        missing_sealed = sorted(self._sealed_ids - set(self._pair_index))
+        if missing_sealed:
+            raise ComposeSealingError(
+                f"pair_index is missing {len(missing_sealed)} sealed pair(s): "
+                f"{missing_sealed!r}. Every sealed pair (sealed_double_unseen ∪ "
+                "sealed_single_unseen) must have bounded rows in pair_index before "
+                "the seal boundary can be constructed."
+            )
 
     # ------------------------------------------------------------------
     # Pair-id canonicalisation

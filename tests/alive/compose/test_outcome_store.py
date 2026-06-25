@@ -455,7 +455,7 @@ class TestAuditTamperFailsClosed:
         with audit_path.open("a", encoding="utf-8") as fh:
             fh.write("{ this is not valid json\n")
 
-        with pytest.raises((ComposeSealingError, json.JSONDecodeError, ValueError)):
+        with pytest.raises(ComposeSealingError):
             _ = store.sealed_access_count
 
     def test_partial_line_fails_closed_on_next_access(self, tmp_path: Path) -> None:
@@ -470,8 +470,66 @@ class TestAuditTamperFailsClosed:
         store = ComposeOutcomeStore(
             pair_index=pair_index, source=source, manifest=manifest, audit_path=audit_path
         )
-        with pytest.raises((ComposeSealingError, json.JSONDecodeError, ValueError)):
+        with pytest.raises(ComposeSealingError):
             store.evaluate_sealed_once("run-after-partial", _sealed_union(manifest))
+
+
+# ---------------------------------------------------------------------------
+# 9b. Constructor fails closed BEFORE any access can be consumed
+# ---------------------------------------------------------------------------
+
+
+class TestConstructorGuards:
+    def test_missing_sealed_pair_in_index_raises_at_construction(self, tmp_path: Path) -> None:
+        """A pair_index missing a sealed pair must be rejected at construction —
+        BEFORE any audit can be burned. Today a missing sealed pair would surface
+        as a raw KeyError only after evaluate_sealed_once has already written the
+        audit record; the seal boundary must instead reject the misconfigured
+        index at __init__."""
+        manifest = _build_manifest()
+        source, pair_index = _build_pair_index(manifest)
+        # Drop one sealed pair from the index so a sealed id has no rows.
+        union = _sealed_union(manifest)
+        missing = union[0]
+        del pair_index[missing]
+
+        audit_path = tmp_path / "compose_audit.jsonl"
+        with pytest.raises(ComposeSealingError, match="pair_index"):
+            ComposeOutcomeStore(
+                pair_index=pair_index,
+                source=source,
+                manifest=manifest,
+                audit_path=audit_path,
+            )
+        # Raised at CONSTRUCTION: no evaluate_sealed_once was ever called, and the
+        # audit file was never created (the once-only access was not consumed).
+        assert not audit_path.exists()
+
+    def test_manifest_missing_roles_raises_at_construction(self, tmp_path: Path) -> None:
+        manifest = _build_manifest()
+        source, pair_index = _build_pair_index(manifest)
+        bad = dict(manifest)
+        del bad["roles"]
+        with pytest.raises(ComposeSealingError, match="roles"):
+            ComposeOutcomeStore(
+                pair_index=pair_index,
+                source=source,
+                manifest=bad,
+                audit_path=tmp_path / "compose_audit.jsonl",
+            )
+
+    def test_manifest_missing_checksum_raises_at_construction(self, tmp_path: Path) -> None:
+        manifest = _build_manifest()
+        source, pair_index = _build_pair_index(manifest)
+        bad = dict(manifest)
+        del bad["checksum"]
+        with pytest.raises(ComposeSealingError, match="checksum"):
+            ComposeOutcomeStore(
+                pair_index=pair_index,
+                source=source,
+                manifest=bad,
+                audit_path=tmp_path / "compose_audit.jsonl",
+            )
 
 
 # ---------------------------------------------------------------------------
