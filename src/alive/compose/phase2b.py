@@ -283,6 +283,10 @@ def _build_provenance(
     seeds and the regime-result checksums. Used for the post-access consistency
     check and recorded into the terminal report.
     """
+    # TODO(activation): populate the scientific provenance digests (data_card /
+    # raw / processed / sequence_mapping / dependency_lock / gears+cpa revisions /
+    # device / precision / git_commit) from the ledger + environment on the
+    # activated run; empty/UNKNOWN values are fixture-only.
     return Phase2bProvenance(
         protocol=config.protocol,
         config_digest=config.config_sha256,
@@ -734,6 +738,8 @@ def _evaluate_inside_boundary(
 
     # --- Step 9 + 10: headline = double-unseen bounds; verdict (double ONLY). --
     sealed_n = regime_double.sample_count
+    # TODO(activation): source minimum_sealed from the activated config's
+    # registered minimum-sealed-N, not a literal.
     minimum_sealed = 1  # at least one sealed pair must have been scored.
     bounds = regime_double.bounds
     all_finite = bool(
@@ -782,6 +788,11 @@ def _evaluate_inside_boundary(
     # TEST-ONLY: a tampered provenance (registered before access, mismatched now)
     # forces the post-access INVALID path. It is a checksum/identity record only.
     consistency_provenance = provenance_tamper if provenance_tamper is not None else provenance
+    # TODO(activation): bind post-access provenance/result consistency against a
+    # PERSISTED registered value (recorded into the ledger BEFORE access), not the
+    # in-memory provenance object — otherwise the provenance/result legs are
+    # self-referential and can never fail in production; only the run-id/
+    # request-checksum legs cross-check today.
     post_status = check_post_access_consistency(
         recomputed_run_id=recomputed_run_id,
         seal_audit_run_id=seal_audit_run_id,
