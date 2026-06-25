@@ -251,6 +251,42 @@ def test_role_label_preserved():
     assert score.regime == "sealed_single_unseen"
 
 
+def test_alignment_is_by_canonical_pair_id_not_insertion_order():
+    """Shuffling a method's prediction-dict insertion order leaves pair_errors unchanged.
+
+    Alignment is by canonical pair ID, never positional: reordering the entries
+    of one method's prediction mapping (same pairs, different insertion order)
+    must produce byte-identical per-method MSE arrays. We also present the SAME
+    pairs in a reversed insertion order to be doubly sure no positional indexing
+    leaks in.
+    """
+    kwargs, _, _ = _build_regime()
+    base = score_regime(**kwargs)
+
+    # Reorder the headline method's prediction dict: same pairs, shuffled
+    # insertion order (and reversed for the comparator to vary the pattern).
+    shuffled_predictions = {}
+    for method, block in kwargs["predictions"].items():
+        items = list(block.items())
+        if method == HEADLINE:
+            # rotate the insertion order
+            items = items[1:] + items[:1]
+        elif method == "gears":
+            items = list(reversed(items))
+        shuffled_predictions[method] = {pid: vec for pid, vec in items}
+
+    perturbed_kwargs = dict(kwargs)
+    perturbed_kwargs["predictions"] = shuffled_predictions
+    perturbed = score_regime(**perturbed_kwargs)
+
+    # Every per-method MSE array is UNCHANGED — alignment is by pair ID.
+    assert set(perturbed.pair_errors) == set(base.pair_errors)
+    for name in base.pair_errors:
+        np.testing.assert_array_equal(perturbed.pair_errors[name], base.pair_errors[name])
+    # and the whole regime checksum is identical (order had no effect anywhere).
+    assert perturbed.checksum == base.checksum
+
+
 # ---------------------------------------------------------------------------
 # Missing / failed pairs — fail-closed-but-reported policy
 # ---------------------------------------------------------------------------
@@ -345,6 +381,81 @@ def test_secondary_does_not_touch_bounds():
     assert perturbed.secondary.gi_structure is NOT_EVALUABLE
 
 
+def test_secondary_isolation_no_public_input_can_move_gi_without_moving_primary():
+    """Structural fact: the secondary GI anchor double-duties as a primary input.
+
+    The brief asked, ideally, for a perturbation that MOVES ``gi_explained``
+    while leaving every primary error array byte-identical. That is provably
+    impossible through the public ``score_regime`` inputs, and this test
+    DOCUMENTS WHY rather than faking it:
+
+    * ``gi_explained`` is computed from
+      ``eps_pred = headline_pred - additive_pred`` and
+      ``eps_truth = observed_δ_gh - additive_pred``.
+    * The ONLY public inputs to those terms are the ``headline`` prediction, the
+      ``additive`` prediction and the ``observed`` populations.
+    * ``headline_pred`` feeds the PRIMARY ``pair_errors[headline]`` (the bounds'
+      headline input); ``additive_pred`` feeds the PRIMARY ``pair_errors`` of
+      the ``additive`` COMPARATOR; ``observed`` feeds EVERY primary error.
+
+    So every public input that moves the secondary also moves a primary error
+    array — secondary isolation is enforced by the call ordering (bounds built
+    first), not by an input that the verdict ignores. We demonstrate the
+    coupling concretely: translating only the ``additive`` prediction moves
+    ``gi_explained`` AND moves the ``additive`` comparator's primary error.
+    """
+    kwargs, _, _ = _build_regime()
+    base = score_regime(**kwargs)
+    pair_ids = kwargs["pair_ids"]
+
+    # Move ONLY the additive anchor (the smallest input that touches the GI eps
+    # identity). This shifts the secondary GI-explained point...
+    shift = np.array([0.6, -0.3])
+    moved_predictions = {m: dict(block) for m, block in kwargs["predictions"].items()}
+    for pid in pair_ids:
+        moved_predictions["additive"][pid] = kwargs["predictions"]["additive"][pid] + shift
+
+    moved_kwargs = dict(kwargs)
+    moved_kwargs["predictions"] = moved_predictions
+    moved = score_regime(**moved_kwargs)
+
+    # ...the secondary genuinely moved...
+    assert moved.secondary.gi_explained_point != base.secondary.gi_explained_point
+    # ...AND, inseparably, so did the PRIMARY additive-comparator error and the
+    # bounds: there is no public input that isolates the two. The verdict input
+    # is protected by construction order, not by an inert input.
+    assert not np.array_equal(moved.pair_errors["additive"], base.pair_errors["additive"])
+    assert moved.bounds.checksum != base.bounds.checksum
+    # The headline primary error is unchanged (we only touched the additive
+    # anchor), confirming the move was localized to the additive coupling.
+    np.testing.assert_array_equal(moved.pair_errors[HEADLINE], base.pair_errors[HEADLINE])
+
+
+def test_bounds_constructed_before_any_secondary_computation():
+    """Structural guarantee: the bounds are built strictly before the secondary block.
+
+    Documents (and locks in) WHY no secondary value can feed back into the
+    verdict input: ``score_regime`` constructs the
+    :class:`ComposeSimultaneousBounds` from the primary per-pair MSE arrays
+    BEFORE the secondary GI-explained / eps computation runs. A read of the
+    module source confirms the ordering: ``simultaneous_theta_bounds(`` precedes
+    the ``# --- 6. Secondary block`` section and every eps / gi_* computation.
+    """
+    import inspect
+
+    from alive.compose import scoring2
+
+    body = inspect.getsource(scoring2.score_regime)
+    # Anchor on unique CODE substrings (the docstring uses different wording, so
+    # these match the executable statements, not prose references).
+    idx_bounds = body.index("bounds = simultaneous_theta_bounds(")
+    idx_secondary = body.index("# --- 6. Secondary block")
+    idx_eps = body.index("eps_pred = pred_matrices[headline]")
+    idx_gi_point = body.index("gi_point = gi_explained_fraction(")
+    # bounds are constructed strictly before the secondary block and any eps / GI math.
+    assert idx_bounds < idx_secondary < idx_eps < idx_gi_point
+
+
 def test_bounds_only_consume_primary_errors():
     """The bounds' headline_errors equal the headline per-pair MSE (no secondary leakage)."""
     kwargs, observed_delta, _ = _build_regime()
@@ -395,6 +506,24 @@ def test_missing_secondary_spec_raises():
     with pytest.raises(ComposeScoringError) as exc:
         score_regime(**kwargs)
     assert "gi_explained_fraction" in str(exc.value)
+
+
+def test_primary_confidence_must_match_family_confidence():
+    """A primary ``confidence`` != ``config.family_confidence`` is a fail-closed seam error.
+
+    The primary simultaneous band uses the passed ``confidence`` while the
+    secondary GI interval uses ``config.family_confidence`` directly. If the
+    orchestrator ever passes a divergent value the two would silently disagree,
+    so ``score_regime`` must refuse to score.
+    """
+    kwargs, _, _ = _build_regime()
+    assert kwargs["confidence"] == kwargs["config"].family_confidence  # baseline is consistent
+    kwargs["confidence"] = kwargs["config"].family_confidence - 0.05
+    with pytest.raises(ComposeScoringError) as exc:
+        score_regime(**kwargs)
+    msg = str(exc.value).lower()
+    assert "family_confidence" in msg
+    assert "confidence" in msg
 
 
 def test_secondary_interval_method_and_margin_come_from_config():

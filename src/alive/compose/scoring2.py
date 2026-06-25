@@ -543,6 +543,19 @@ def score_regime(
     # --- 0. Governance: secondary interval method / margin come from config. ---
     secondary_spec = _resolve_secondary_governance(config)
 
+    # Fail-closed seam guard: the PRIMARY simultaneous band uses ``confidence``
+    # while the SECONDARY GI interval uses ``config.family_confidence`` directly.
+    # If a caller (the Task 8 orchestrator) ever passes a primary ``confidence``
+    # that disagrees with the config family confidence, the two would silently
+    # diverge — so refuse to score rather than emit an inconsistent regime.
+    if float(confidence) != float(config.family_confidence):
+        raise ComposeScoringError(
+            "primary confidence must equal config.family_confidence "
+            f"(got confidence={confidence!r}, family_confidence={config.family_confidence!r}). "
+            "The primary simultaneous band and the secondary GI interval are required to "
+            "share one family confidence; they must never diverge."
+        )
+
     # --- 1. Validate the method roster + preserve manifest order. --------------
     comparators = tuple(comparators)
     if headline in comparators:
