@@ -38,6 +38,7 @@ comfortable full rank and a stable ridge, and avoids the borderline max-noise
 regime. Empirically across all registered seeds: noiseless ~1e-15, noisy
 ~0.003, held-out ~0.003, false-GI ratio ~0.004 — all well inside tolerance.
 """
+
 from __future__ import annotations
 
 import json
@@ -96,8 +97,10 @@ def _validate_method(config: ComposePhase1Config) -> tuple[bool, RecoveryReport]
     run-config rationale.
     """
     k = min(config.k_grid)
-    noise = sorted(config.synthetic_noise_sd)[1] if len(config.synthetic_noise_sd) > 1 else (
-        max(config.synthetic_noise_sd)
+    noise = (
+        sorted(config.synthetic_noise_sd)[1]
+        if len(config.synthetic_noise_sd) > 1
+        else (max(config.synthetic_noise_sd))
     )
     seed = config.registered_seeds[0]
     held_out_tol = 2.0 * config.recovery_rel_err_tol
@@ -250,8 +253,7 @@ def _gate_payload(g: GateResult) -> dict:
         "name": g.name,
         "passed": bool(g.passed),
         "detail": {
-            k: (_json_float(float(v)) if isinstance(v, float) else v)
-            for k, v in g.detail.items()
+            k: (_json_float(float(v)) if isinstance(v, float) else v) for k, v in g.detail.items()
         },
         "recommendation": g.recommendation,
     }

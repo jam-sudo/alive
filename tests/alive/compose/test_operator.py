@@ -1,4 +1,5 @@
 """Tests for alive.compose.operator — written FIRST per TDD protocol."""
+
 from __future__ import annotations
 
 import numpy as np
@@ -39,6 +40,7 @@ def test_predict_matches_quadratic_form():
     Bs = []
     coef_rows = []
     from alive.compose.operator import _sym_to_vec  # internal, see impl
+
     for _ in range(p):
         M = rng.normal(size=(k, k))
         B = (M + M.T) / 2

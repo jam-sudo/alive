@@ -6,6 +6,7 @@ underpowered; NO_GO when unmeasurable; write-once. Adapted to the actual
 synthetic runs (a rank>0 recovery run + a rank-0 false-GI guard run), not the
 NaN-at-rank>0 ``false_gi_norm`` alias.
 """
+
 from __future__ import annotations
 
 import json

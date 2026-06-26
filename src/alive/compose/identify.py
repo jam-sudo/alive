@@ -5,6 +5,7 @@ operator ``coef`` from calibration pairs by (ridge) least squares on the design
 matrix, and reports the algebraic rank condition (noiseless identifiability) +
 the conditioning that governs noisy recovery.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass

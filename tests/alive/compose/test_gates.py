@@ -2,6 +2,7 @@
 
 Includes a leakage test: the measurability gate must refuse sealed arrays.
 """
+
 from __future__ import annotations
 
 import numpy as np

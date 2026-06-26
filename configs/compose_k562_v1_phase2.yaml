@@ -1,0 +1,142 @@
+# COMPOSE-K562-v1 Phase 2 — candidate pre-registration for a real Norman sealed study.
+# PRE-REGISTERED, ACTIVATION BLOCKED. This file does not authorize real fit or seal access.
+# Spec: docs/superpowers/specs/2026-06-22-compose-epistasis-operator-design.md (§10).
+# Candidate values are frozen before activation; blocker resolution requires a new run identity.
+
+protocol: COMPOSE-K562-v1
+phase: 2
+status: preregistered_activation_blocked
+
+activation_requirements:
+  - real_norman_phi_rank_and_condition_report
+  - regime_specific_detectable_effect_analysis
+  - finalized_norman_data_card_and_sha256
+  - gears_cpa_reproducible_dependency_lock
+  - independent_compose_outcome_store_and_access_audit
+  - phase2_plan_metric_leakage_and_seal_integration_tests
+
+data:
+  source: "scPerturb NormanWeissman2019 (Zenodo 10.5281/zenodo.13350497)"
+  file: NormanWeissman2019_filtered.h5ad
+  license: "CC BY 4.0"
+  cell_line: K562
+  modality: CRISPRa            # NOT CRISPRi — never transfer claims to Replogle KD
+  perturbation_key: perturbation
+  control_token: control
+  combo_sep: "_"
+
+eligibility:                   # outcome-independent (CLAUDE.md §5); NEVER by GI strength
+  min_cells_per_gene: 50
+  min_cells_per_pair: 50
+  require_esm_feature: true     # ESM-2 sequence available for both genes (may shrink counts)
+
+split:                          # unit = perturbation PAIR (claim unit, §6)
+  seed: 11                      # a priori (first registered seed; count ~= median); NOT count-selected
+  calibration_fraction: 0.6
+  eligibility_before_split: true
+  pair_canonicalization: lexicographic_min_max
+  pair_deduplication: true
+  string_order: utf8_lexicographic
+  gene_permutation: numpy_generator_pcg64
+  calibration_gene_count: round_half_to_even
+  roles:
+    combo_calibration: both genes in calibration gene set
+    sealed_double_unseen: neither gene in calibration gene set
+    sealed_single_unseen: exactly one gene in calibration gene set
+  both_seen_test: deferred      # would shrink |Cal| below rank floor; not built in Phase 2
+
+response_space:
+  transform: [normalize_total_median, log1p]
+  n_hvg: 1500                   # top variable genes on control cells
+  pca_dim: 50
+  fit_roles: [control, singles]  # NO double-cell leakage; no sealed access
+
+factor_z:
+  total_k_grid: [4, 6, 8]       # total z dimension; sym_dim = 10/21/36
+  expression_dims: [2, 4, 6]    # total_k - esm_projection_dim
+  include_esm: true
+  esm_model: esm2_t33_650M_UR50D_mean_pool
+  esm_projection_dim: 2
+  esm_projection_method: pca_without_outcomes
+  esm_projection_fit_roles: [singles]
+  rank_gate: exact_phi_rank_and_condition_on_combo_calibration
+  selection: calibration_oof_gene_disjoint   # OOF folds mirror the sealed gene-disjoint regime
+
+identification:
+  estimator: ridge_lsq
+  lambda_grid: [0.0, 0.001, 0.01, 0.1]
+  selection: calibration_oof_gene_disjoint
+  oof_folds: 3
+  uncovered_tolerance: 0.75
+
+metric:
+  pair_error: mean_squared_error_over_pca_coordinates
+  primary: paired_relative_error_reduction
+  formula: "1 - mean(error_l1) / max(mean(error_comparator), 1e-12)"
+  distance: response_space_mse        # in the PCA-50 response space
+  aggregation: ratio_of_mean_pair_errors
+  material_margin_vs_additive: 0.05
+  learned_comparator_margin: 0.0
+  nonfinite_or_missing_policy: invalidate_run
+  secondary:
+    - gi_explained_fraction           # normalized by the split-half noise ceiling
+    - gi_structure_recovery           # sign/class vs known GI, > chance
+  secondary_are_verdict_gates: false
+
+inference:
+  method: max_deviation_bootstrap     # reuse alive.eval.bootstrap (CARTOGRAPHER)
+  comparator_family: [additive, gears, cpa, id_only, l3_hypernetwork]
+  resampling_unit: perturbation_pair
+  shared_resamples_across_contrasts: true
+  family_confidence: 0.95
+  bootstrap_replicates: 10000
+
+regimes:
+  headline_candidate: double_unseen
+  registered_secondary: [single_unseen]
+  power_status: unestablished_activation_blocker
+  report_all: true
+
+baselines:                            # roster FROZEN before any outcome (§9 / §6.1)
+  additive: delta_g + delta_h         # primary null floor
+  lower_bounds: [no_change, perturbation_mean]
+  id_only: linear_no_bilinear
+  gears: { package: gears, revision: null, environment_status: unpinned_activation_blocker }
+  cpa: { package: cpa-tools, revision: null, environment_status: unpinned_activation_blocker }
+  ablation_ladder: [l1_bilinear_identifiable, l2_saturation, l3_hypernetwork]  # L1 = headline
+
+leakage_control:
+  baseline_training_roles: [singles, combo_calibration]   # GEARS/CPA NEVER see sealed pairs in training
+  sealed_outcomes_touched_before_freeze: false
+
+phasing:
+  phase_2a: dev-stage (real delta/eps + z_g + fit L1/L2/L3+id_only + train GEARS/CPA + dev metrics + futility); NO seal
+  phase_2b: freeze all methods -> open sealed_double_unseen + sealed_single_unseen ONCE -> metric + simultaneous inference -> verdict
+
+futility:                             # development-stage stop (§10); seal stays closed, count 0
+  conditions: [dev_oof_delta_below_threshold, rank_condition_fail, measurability_fail]
+  dev_oof_metric: paired_relative_error_reduction_vs_additive
+  dev_oof_threshold: 0.0
+
+seal:                                 # independent of TG-K562 (§6.3)
+  artifacts_root: artifacts/compose
+  run_id_inputs: [config, data_card, sequence_mapping, raw_data_sha256]
+  sealed_access_max: 1
+  write_once: true
+
+seeds:
+  split_seed: 11                       # fixed partition (single sealed split)
+  registered_seeds: [11, 23, 37]       # model OOF / ensemble determinism
+
+verdict:                              # two axes (spec §4.5)
+  method_axis: [METHOD_VALIDATED, METHOD_NOT_VALIDATED]
+  sealed_axis: [GI_LEARNABLE_WIN, PARTIAL, NO_DISTINCT_WIN, FUTILITY_STOPPED, INVALID]
+  gi_learnable_win:
+    additive_simultaneous_lower_bound_gt: 0.05
+    every_learned_comparator_simultaneous_lower_bound_gt: 0.0
+  partial:
+    additive_simultaneous_lower_bound_gt: 0.05
+    learned_family_condition: failed
+  no_distinct_win:
+    additive_simultaneous_lower_bound_lte: 0.05
+  integrity_clause_disclaimer: "structural run-internal self-check, NOT an independent audit"

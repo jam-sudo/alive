@@ -1,18 +1,19 @@
 # COMPOSE — 식별가능한 Interaction-Composition Operator (Epistasis) Design
 
-> **문서 역할:** 차기 milestone의 scientific claim 계약 (project owner 검토용 설계안)
-> **상태:** DEFERRED — owner 승인·별도 config·prior-art gate 통과 전에는 활성화하지 않음
-> **개정일:** 2026-06-22
-> **작업용 protocol 이름(잠정):** `COMPOSE-K562-v1`
-> **선행 milestone:** `TG-K562-v1` (완료, verdict `NO_DISTINCT_WIN`; 본 milestone은 그 결과에 소급 주장하지 않음)
+> **문서 역할:** milestone의 scientific claim 계약
+> **상태:** **PRE-REGISTERED, ACTIVATION BLOCKED** — owner가 Phase-2 설계와 사전등록 후보 작성을 승인했으나 §9/§10.1 blocker 충족 전 real fit·seal 접근 금지. Phase-2 candidate config는 `configs/compose_k562_v1_phase2.yaml`.
+> **개정일:** 2026-06-24
+> **protocol 이름:** `COMPOSE-K562-v1`
+> **선행 milestone:** `TG-K562-v1` (COMPLETE, verdict `NO_DISTINCT_WIN`; 본 milestone은 그 결과에 소급 주장하지 않음, seal 영구 독립 §6.3)
 
 ---
 
 ## 0. 문서 역할, source-of-truth, 활성화 prerequisite
 
 본 문서는 **조합 perturbation의 비가산(genetic-interaction) 성분을 식별가능한 composition
-operator로 예측**하는 차기 milestone의 과학 계약 *설계안*이다. CLAUDE.md(safety/governance) 하위,
-milestone claim 도메인의 최상위 문서로 의도되나, **아직 활성 protocol이 아니다.**
+operator로 예측**하는 차기 milestone의 과학 계약과 Phase-2 사전등록 후보이다.
+CLAUDE.md(safety/governance) 하위, milestone claim 도메인의 최상위 문서이나,
+**activation blocker가 남아 있어 아직 active scientific protocol이 아니다.**
 
 이 milestone은 다음이 모두 충족되기 전까지 활성화하지 않는다(§9):
 
@@ -229,10 +230,11 @@ cross-validation으로 선택하되, **OOF fold는 sealed와 동일한 gene-disj
 
 ### 4.2 Primary metric & 방향
 
-쌍별 $\hat\delta_{gh}$의 응답공간 오차. 핵심 = **additive 대비 paired error reduction**
-$\Delta=\text{err}_{\text{additive}}-\text{err}_{L1}$ (쌍-level). additive가 큰 효과를 이미 잡으므로
-$\Delta$는 **비가산 성분만 격리** → metric gaming 방지. GI 부분공간에서 별도 보고. noise-ceiling
-(§2.4)으로 정규화한 "설명한 GI 분산 비율"을 2차로 보고.
+쌍별 $\hat\delta_{gh}$의 응답공간 MSE를 primitive로 둔다. confirmatory estimand는 additive 대비
+**paired relative error reduction**
+$1-\overline e_{L1}/\overline e_{\mathrm{additive}}$이며, perturbation pair를 resampling unit으로
+bootstrap한다. additive가 큰 효과를 이미 잡으므로 이 대비는 비가산 개선을 겨냥한다. GI
+부분공간 오차와 noise-ceiling(§2.4)으로 정규화한 "설명한 GI 분산 비율"은 2차로 보고한다.
 
 ### 4.3 Scientific event 위계 (CARTOGRAPHER 교훈 반영)
 
@@ -349,3 +351,100 @@ tests(unit/leakage/metric/repro/integration)를 동반한다.
 
 활성화 시 CLAUDE.md §4 protocol registry에 본 protocol을 등재하고, 현재 결과에 소급해 주장하지
 않는다.
+
+---
+
+## 10. Phase-2 candidate pre-registration (owner-approved design; activation blocked)
+
+Owner는 2026-06-23 Phase-2 설계와 사전등록 후보 작성을 승인했다. exact 후보 값은
+`configs/compose_k562_v1_phase2.yaml`가 source-of-truth(CLAUDE.md §3.1)이며, 본 절은
+claim·정직성 계약을 고정한다. 이는 sealed scientific run의 승인이 아니다.
+
+### 10.1 Activation blockers
+
+다음이 version-control된 evidence/artifact와 tests로 충족되고 `CLAUDE.md` registry가 같은
+activation commit에서 `ACTIVE`로 전환되기 전에는 real Phase-2 fit, sealed outcome 접근과 verdict
+산출을 금지한다.
+
+1. 실제 Norman `combo_calibration`에서 각 후보 total factor dimension에 대한
+   $\Phi$ rank·condition number 보고.
+2. double-unseen과 single-unseen 각각의 detectable-effect/power 분석. 단순 pair count는
+   “powered” 판정이 아니다.
+3. source URL/DOI, license, raw/processed SHA-256, obs schema와 exclusion summary를 포함한 확정
+   Norman data-card.
+4. GEARS/CPA package revision, transitive dependencies, device/precision을 고정한 재현 환경.
+5. TG-K562와 독립된 COMPOSE outcome store, access audit와 write-once run lifecycle.
+6. Phase-2 implementation plan, metric known-answer tests, split reproducibility tests,
+   leakage tests와 seal-once integration test.
+
+### 10.2 Regimes and current evidence limits
+
+개발 메모에는 calibration-role split-half $\varepsilon$ correlation 0.868과 seed survey의
+double-unseen 약 22쌍·single-unseen 약 68쌍이 기록되어 있다. 그러나 현재 저장소에는 이 수치의
+독립 재현에 필요한 immutable input hash와 실제 Norman $\Phi$ rank evidence가 없다. 따라서 이
+수치는 provisional planning estimate이며 activation evidence나 power 판정으로 사용하지 않는다.
+
+- **double-unseen = confirmatory headline candidate.**
+- **single-unseen = registered secondary candidate; power status unestablished.**
+- activation 전 power 분석이 headline의 minimum detectable relative improvement를 충족하지 못하면
+  double-unseen을 exploratory로 강등하고 config/run identity를 새로 등록한다. 결과를 본 뒤 regime을
+  교체하지 않는다.
+
+### 10.3 Negative-result value without overclaim
+
+double-unseen이 `NO_DISTINCT_WIN`이어도 합성 known-answer 결과와 calibration-only GI
+특성화는 별도 산출물로 유지한다. 합성 `METHOD_VALIDATED`는 real 일반화나 생물학적 GI
+학습가능성을 입증하지 않는다. single-unseen도 등록된 secondary 결과로 보고하되, power evidence
+없이는 “powered” 또는 confirmatory win으로 표현하지 않는다.
+
+### 10.4 Deterministic split and identifiability
+
+split seed = **11 a priori**(단일 sealed partition). eligibility를 먼저 적용하고 pair를
+`(min(g,h), max(g,h))`로 canonicalize·중복 제거·UTF-8 lexicographic 정렬한다. eligible gene
+목록도 같은 정렬을 사용하고 NumPy `Generator(PCG64(seed))` permutation의 앞
+`round-half-to-even(0.6 × n_genes)`개를 calibration genes로 둔다. 두 gene이 calibration이면
+`combo_calibration`, 둘 다 아니면 `sealed_double_unseen`, 정확히 하나면
+`sealed_single_unseen`이다. NumPy와 lock hash는 run identity에 포함한다.
+
+$z_g$의 **total dimension**만 `k_total_grid=[4,6,8]`로 선택한다. ESM을 사용할 때 각 total
+dimension 중 2차원은 eligible single-gene ESM vectors에 outcome 없이 적합한 고정 PCA projection,
+나머지 `k_total-2`차원은 expression PCA이다. 따라서 rank 조건은 결합 후 total dimension에 대해
+`rank(Φ)=k_total(k_total+1)/2`이며, 단순 pair-count floor가 아니라 실제 $\Phi$ rank와 condition
+number를 gate로 사용한다. calibration gene-disjoint OOF로 `k_total`·$\lambda$를 선택한다.
+
+### 10.5 Baselines, metric and inference
+
+family = {additive(null floor), GEARS(published SOTA, GO-graph 사용 — 우리 차별점), CPA(latent-
+additive), ID-only, L1(headline)/L2/L3}. **GEARS/CPA는 singles+combo_calibration에만 학습**(sealed
+미노출, leakage 차단).
+
+pair $i$, method $M$의 response-space error는
+$e_{M,i}=p^{-1}\|\hat\delta_{M,i}-\delta_i\|_2^2$이다. comparator $C$ 대비 paired relative
+improvement는 $\theta_{M,C}=1-\overline e_M/\max(\overline e_C,10^{-12})$로 고정한다. headline
+primary estimand은 $\theta_{L1,additive}$이며 material margin은 0.05다. 동일 sealed pair
+resample에서 각 replicate의 두 mean error를 다시 계산하고, 그 resample을 모든 contrast에 공유하는
+10,000회 max-deviation bootstrap으로 simultaneous 95% lower bounds를 계산한다.
+
+- `GI_LEARNABLE_WIN`: headline에서 additive contrast lower bound $>0.05$이고
+  {GEARS, CPA, ID-only, L3} 각각의 contrast lower bound $>0$.
+- `PARTIAL`: additive lower bound $>0.05$이나 learned-family 조건 실패.
+- `NO_DISTINCT_WIN`: additive lower bound $\le0.05$.
+- non-finite/missing pair prediction, roster 불완전, provenance/leakage 실패는 `INVALID`;
+  해당 pair/method를 사후 제외하지 않는다.
+
+secondary = GI-explained fraction과 구조 복원이며 verdict gate로 사용하지 않고 effect size,
+simultaneous interval, chance/null definition과 함께 전부 보고한다.
+
+### 10.6 Two-phase execution and seal
+
+- **Phase 2a (dev, seal 무접촉):** real calibration-role δ/ε + z_g(+ESM) +
+  L1/L2/L3·ID-only 적합 + GEARS·CPA 학습 + calibration gene-disjoint OOF relative improvement,
+  noise-ceiling·실 $\Phi$ rank 진단. OOF mean relative improvement $\le0$, rank 실패 또는
+  measurability floor 실패면 `FUTILITY_STOPPED`, seal은 닫힌다.
+- **Phase 2b (freeze + seal-once):** 전 method 동결 → `sealed_double_unseen`+`sealed_single_unseen`
+  **1회** 개방 → Δ + 동시추론 + secondary → verdict → report.
+
+seal·run-identity는 TG-K562와 **영구 독립**(§6.3): `artifacts/compose/<run_id>`, composite run_id =
+config+Norman data-card(sha256)+sequence-mapping+raw sha256, sealed access 0(2a/futility)→1(2b),
+write-once. verdict 2축(method × sealed); "모든 무결성 검증 완료"로 표현하지 않는다(구조적 self-check
+한계 명시).

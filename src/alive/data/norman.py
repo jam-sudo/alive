@@ -3,6 +3,7 @@
 Outcome-independent: eligibility uses cell counts + feature availability only,
 never GI strength (CLAUDE.md §5; spec §2.2). Combo labels are "<g><sep><h>".
 """
+
 from __future__ import annotations
 
 import numpy as np
@@ -54,9 +55,7 @@ def eligible_genes(
 ) -> list[str]:
     """Genes with enough single cells AND an available sequence feature."""
     return sorted(
-        g
-        for g, ix in singles.items()
-        if len(ix) >= min_cells and g in available_feature_ids
+        g for g, ix in singles.items() if len(ix) >= min_cells and g in available_feature_ids
     )
 
 

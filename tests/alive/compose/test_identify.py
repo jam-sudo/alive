@@ -1,4 +1,5 @@
 """Tests for alive.compose.identify — written FIRST per TDD protocol."""
+
 from __future__ import annotations
 
 import numpy as np
