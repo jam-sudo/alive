@@ -434,16 +434,25 @@ def run_preflight(
         )
 
     # All checks passed: freeze the validated, outcome-free evaluation inputs.
+    def _immutable_predictions(
+        predictions: Mapping[str, Mapping[tuple[str, str], np.ndarray]],
+    ) -> dict[str, dict[tuple[str, str], np.ndarray]]:
+        snapshot: dict[str, dict[tuple[str, str], np.ndarray]] = {}
+        for method, block in predictions.items():
+            method_snapshot: dict[tuple[str, str], np.ndarray] = {}
+            for pair, vector in block.items():
+                copied = np.array(vector, dtype=np.float64, copy=True)
+                copied.setflags(write=False)
+                method_snapshot[tuple(pair)] = copied
+            snapshot[method] = method_snapshot
+        return snapshot
+
     return EvaluationLock(
         run_id=bundle.run_id,
         pair_ids_double_unseen=tuple(tuple(p) for p in bundle.pair_ids_double_unseen),
         pair_ids_single_unseen=tuple(tuple(p) for p in bundle.pair_ids_single_unseen),
-        predictions_double_unseen={
-            method: dict(block) for method, block in bundle.predictions_double_unseen.items()
-        },
-        predictions_single_unseen={
-            method: dict(block) for method, block in bundle.predictions_single_unseen.items()
-        },
+        predictions_double_unseen=_immutable_predictions(bundle.predictions_double_unseen),
+        predictions_single_unseen=_immutable_predictions(bundle.predictions_single_unseen),
         material_margin_vs_additive=float(config.material_margin_vs_additive),
         learned_comparator_margin=float(config.learned_comparator_margin),
         bundle_checksum=bundle.bundle_checksum,

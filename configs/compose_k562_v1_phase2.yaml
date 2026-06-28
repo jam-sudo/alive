@@ -122,6 +122,7 @@ seal:                                 # independent of TG-K562 (§6.3)
   artifacts_root: artifacts/compose
   run_id_inputs: [config, data_card, sequence_mapping, raw_data_sha256]
   sealed_access_max: 1
+  minimum_sealed_n: 1                  # pre-registered floor: >=1 sealed pair must be scored
   write_once: true
 
 seeds:
