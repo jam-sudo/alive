@@ -1,9 +1,9 @@
 # ALIVE — Virtual Cell Project Governance
 
 > **문서 역할:** project-wide scientific governance and agent operating contract
-> **개정일:** 2026-06-21
-> **현재 활성 protocol:** `TG-K562-v1`
-> **다음 milestone:** `CT-RPE1-v1` (deferred; 별도 승인·protocol 필요)
+> **개정일:** 2026-06-28
+> **현재 활성 protocol:** 없음 (TG-K562-v1 COMPLETE; COMPOSE-K562-v1 PRE-REGISTERED — ACTIVATION BLOCKED)
+> **다음 milestone:** `COMPOSE-K562-v1` (activation blocked) → `CT-RPE1-v1` (deferred)
 
 ---
 
@@ -103,7 +103,7 @@ protocol-independent safety invariant는 모든 protocol에 적용된다. Protoc
 
 ## 4. Protocol registry
 
-### 4.1 `TG-K562-v1` — CURRENT ACTIVE
+### 4.1 `TG-K562-v1` — COMPLETE
 
 목적:
 
@@ -130,7 +130,30 @@ protocol-independent safety invariant는 모든 protocol에 적용된다. Protoc
 
 이 protocol의 exact split과 verdict는 versioned CARTOGRAPHER spec/plan/config가 결정한다.
 
-### 4.2 `CT-RPE1-v1` — DEFERRED NEXT MILESTONE
+### 4.2 `COMPOSE-K562-v1` — PRE-REGISTERED, ACTIVATION BLOCKED
+
+목적:
+
+> Norman K562 CRISPRa 조합 perturbation에서 단일-gene signature로 고정한 factor를 사용해
+> transcriptome-valued 비가산 성분을 식별가능한 bilinear operator로 예측한다.
+
+Scientific claim contract와 candidate Phase-2 config는 다음에 있다.
+
+- Spec: `docs/superpowers/specs/2026-06-22-compose-epistasis-operator-design.md`
+- Candidate config: `configs/compose_k562_v1_phase2.yaml`
+
+Owner는 Phase 2 설계와 사전등록 후보 작성을 승인했다. 그러나 다음 activation blocker가 모두
+해소되고 같은 commit에서 registry가 `ACTIVE`로 전환되기 전에는 real Phase-2 fit, sealed outcome
+접근 또는 scientific verdict 산출을 금지한다.
+
+- 실제 Norman `combo_calibration` 설계행렬의 rank/conditioning evidence
+- adequate sample-size / detectable-effect analysis
+- 확정 Norman data-card와 raw-data checksum
+- GEARS/CPA의 재현 가능한 dependency lock 및 실행 환경
+- 독립 COMPOSE outcome store, access audit와 write-once run lifecycle
+- Phase-2 implementation plan, metric known-answer tests와 leakage/integration tests
+
+### 4.3 `CT-RPE1-v1` — DEFERRED NEXT MILESTONE
 
 목적:
 
@@ -157,7 +180,7 @@ RPE1 perturbed outcomes (day 7)                  -> external sealed evaluation o
 - K562 seal과 독립된 RPE1 outcome store/audit lifecycle
 - adequate sample-size and detectable-effect analysis
 
-### 4.3 Future protocols
+### 4.4 Future protocols
 
 R2/R3, causal masking, Norman/Tahoe OOD, perturbation combinations, drugs, time series,
 distribution-valued prediction sets와 Active Cartography는 각각 별도 이름·spec·seal·success
@@ -441,11 +464,16 @@ Scientific run 전에는 active spec/plan/config와 runtime behavior의 contract
 ## 16. Current governance summary
 
 ```text
-ACTIVE:
+COMPLETE:
   TG-K562-v1
   K562 internal four-way split
   K562 sealed evaluation
   scalar error calibration + Trust-Gate routing
+
+PRE-REGISTERED — ACTIVATION BLOCKED:
+  COMPOSE-K562-v1
+  Norman K562 CRISPRa pair-level split
+  independent COMPOSE seal (not yet implemented or open)
 
 DEFERRED:
   CT-RPE1-v1
@@ -453,8 +481,9 @@ DEFERRED:
   independent RPE1 external seal
 
 RULE:
-  The two seals, claims, manifests, run IDs and reports are never interchangeable.
+  Protocol seals, claims, manifests, run IDs and reports are never interchangeable.
 ```
 
-현재 모든 agent는 `TG-K562-v1`을 active milestone으로 취급한다. RPE1 perturbed outcomes에
-접근하거나 CT-RPE1 claim을 구현하려면 owner가 별도 protocol을 명시적으로 활성화해야 한다.
+현재 active scientific protocol은 없다. `COMPOSE-K562-v1`은 사전등록 후보이지만 activation
+blocker가 남아 있다. Norman sealed outcomes 또는 RPE1 perturbed outcomes에 접근하려면 owner가
+해당 protocol을 별도 commit에서 명시적으로 `ACTIVE`로 전환해야 한다.
