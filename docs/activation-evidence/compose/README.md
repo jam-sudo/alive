@@ -16,7 +16,7 @@ data-card). K562 CRISPRa. Generated on a rented A100 (torch 2.6.0+cu124).
 | 1 | `real_norman_phi_rank_and_condition_report` | ✅ evidence | `real_norman_phi_rank_report.json` |
 | 2 | `regime_specific_detectable_effect_analysis` | ✅ evidence | `real_norman_detectable_effect_report.json` |
 | 3 | `finalized_norman_data_card_and_sha256` | ✅ done | `docs/data-cards/norman_compose_k562_v1.json` |
-| 4 | `gears_cpa_reproducible_dependency_lock` | ⬜ deferred | — |
+| 4 | `gears_cpa_reproducible_dependency_lock` | ✅ evidence | `gears_cpa_dependency_lock.json` + `requirements.{gears,cpa}_env.lock` |
 | 5 | `independent_compose_outcome_store_and_access_audit` | ✅ built (Phase 2b) | `src/alive/compose/outcome_store.py` (+ tests) |
 | 6 | `phase2_plan_metric_leakage_and_seal_integration_tests` | ✅ built | plans + `tests/alive/compose/` |
 
@@ -44,10 +44,33 @@ contribute outcome-independent counts only:
   cells=286 **PASS** (marginal, just above the 20 floor; seed-sensitive per the
   Phase-1 seed survey); `sealed_single_unseen` n=68 cells=300 **PASS**.
 
+**3. GEARS/CPA reproducible dependency lock** (`gears_cpa_dependency_lock.json`,
+git 79b01e0) — pinned, import-verified environments for the two black-box
+comparator baselines, captured on the A100 (driver 550.127.05, uv 0.9.0). Two
+**isolated per-baseline** environments (the activation-time guarded seam runs
+each as a separate subprocess backend; neither shares the main ALIVE `.venv`):
+
+| env | python | key pins | `import` | CUDA |
+|---|---|---|---|---|
+| `gears_env` (74 pkgs) | system 3.12 | cell-gears 0.1.2, torch 2.6.0+cu124, torch-geometric 2.8.0 | ✅ `import gears` | ✅ A100 |
+| `cpa_env` (115 pkgs) | **managed 3.10.18** | cpa-tools 0.7.2, scvi-tools 0.20.3, jax/jaxlib 0.4.38, anndata 0.10.9, numpy 1.26.4, torch 2.6.0+cu124 | ✅ `import cpa` / `from cpa import CPA` | ✅ A100 |
+
+The CPA lock was **verified by `uv pip sync`-ing it into a fresh managed env and
+re-importing `cpa`** (`lock_verified_by_fresh_sync: true`), so the lock provably
+reconstructs a working CPA — not just the warm build env. cpa-tools 0.7.2 is a
+2023-era package; reproducing it required pinning its whole stack back (scvi
+0.20.3 for `parse_use_gpu_arg`, jax 0.4.38 for `jaxlib.xla_extension`, anndata
+<0.11 for `SparseDataset`, seaborn ≥0.13, excluding the abandoned rdkit-pypi);
+the full rationale is in each env's `runtime_notes`. Canonical reproduction is
+`uv pip sync requirements.<env>.lock --extra-index-url <cu124> --index-strategy
+unsafe-best-match`. Runtime: set `MPLBACKEND=Agg` (headless).
+
 ## Honest caveats
 
-- Evidence, **not** a green light: items 4 (GEARS/CPA lock) remains, and activation
-  is the owner's call.
+- Evidence, **not** a green light: all six §10.1 items now have evidence, but
+  activation remains the owner's explicit act (config `status` → active +
+  ActivationRecord + CLAUDE.md flip). This dependency lock builds/verifies the
+  baseline environments; it does **not** fit GEARS/CPA or open any seal.
 - `|combo_calibration|` = 41 and double-unseen = 22 are small; the double-unseen
   power margin is thin (registered seed 11; other seeds vary 12–27).
 - Drivers: `src/alive/compose/{phi_rank,detectable_effect}.py` (pure, unit-tested)
