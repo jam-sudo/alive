@@ -7,7 +7,8 @@ predictions against already-computed truth in the PCA-50 response space.
 Primary metric (config ``metric.primary = paired_relative_error_reduction``)::
 
     e_{M,i}     = mean_j( (pred_{M,i,j} - truth_{i,j})^2 )          # per-pair MSE
-    theta_{M,C} = 1 - mean_i(e_{M,i}) / max(mean_i(e_{C,i}), 1e-12) # paired ratio
+    theta_{M,C} = (mean_i(e_{C,i}) - mean_i(e_{M,i}))
+                  / max(mean_i(e_{C,i}), 1e-12) # paired ratio
 
 ``theta`` is the paired relative error reduction of a method ``M`` over a
 comparator ``C`` (config ``metric.aggregation = ratio_of_mean_pair_errors``).
@@ -185,7 +186,8 @@ def paired_relative_error_reduction(
 
     ::
 
-        theta = 1 - mean_i(e_{M,i}) / max(mean_i(e_{C,i}), 1e-12)
+        theta = (mean_i(e_{C,i}) - mean_i(e_{M,i}))
+                / max(mean_i(e_{C,i}), 1e-12)
 
     where ``e_{M,i}`` / ``e_{C,i}`` are the per-pair MSEs of method ``M`` and
     comparator ``C`` against the shared truth. The comparator and truth are
@@ -231,7 +233,7 @@ def paired_relative_error_reduction(
 
     mean_method = float(np.mean(e_method))
     mean_comparator = float(np.mean(e_comparator))
-    return 1.0 - mean_method / max(mean_comparator, _EPS_FLOOR)
+    return (mean_comparator - mean_method) / max(mean_comparator, _EPS_FLOOR)
 
 
 def gi_explained_fraction(

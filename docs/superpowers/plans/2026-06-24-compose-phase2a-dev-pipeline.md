@@ -215,7 +215,7 @@ Primary primitives:
 
 ```text
 e_M,i = mean_j((prediction_M,i,j - truth_i,j)^2)
-theta_M,C = 1 - mean_i(e_M,i) / max(mean_i(e_C,i), 1e-12)
+theta_M,C = (mean_i(e_C,i) - mean_i(e_M,i)) / max(mean_i(e_C,i), 1e-12)
 ```
 
 Reject empty, misaligned, duplicated-ID, non-finite and shape-mismatched inputs.

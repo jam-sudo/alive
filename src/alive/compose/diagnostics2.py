@@ -148,6 +148,7 @@ def real_calibration_diagnostics(
     uncovered_tolerance: float,
     eps_split_a: np.ndarray,
     eps_split_b: np.ndarray,
+    dev_oof_threshold: float = 0.0,
     measurability_role: str = "combo_calibration",
 ) -> FutilityResult:
     r"""Run the Phase-2a development checkpoint on development-role inputs only.
@@ -243,9 +244,10 @@ def real_calibration_diagnostics(
             f"measurability failure: GI signal at/below noise floor "
             f"(ceiling={measurability.detail.get('ceiling')})"
         )
-    if oof_theta <= 0.0:
+    if oof_theta <= float(dev_oof_threshold):
         failures.append(
-            f"OOF primary theta <= 0: L1 does not beat additive out-of-fold (theta={oof_theta})"
+            "OOF primary theta does not clear the preregistered threshold: "
+            f"theta={oof_theta}, threshold={float(dev_oof_threshold)}"
         )
 
     status = _CONTINUE if not failures else _FUTILITY_STOPPED

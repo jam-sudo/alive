@@ -233,6 +233,20 @@ def test_zero_comparator_error_is_finite_large_negative() -> None:
     assert np.isfinite(res.band_halfwidth)
 
 
+def test_all_methods_perfect_is_an_exact_tie_not_a_win() -> None:
+    zero = np.zeros(12, dtype=np.float64)
+    res = simultaneous_theta_bounds(
+        headline_errors=zero,
+        comparator_errors={c: zero.copy() for c in FAMILY},
+        comparators=FAMILY,
+        confidence=CONF,
+        n_replicates=REPS,
+        seed=SEED,
+    )
+    assert all(value == pytest.approx(0.0) for value in res.theta.values())
+    assert all(value == pytest.approx(0.0) for value in res.lower.values())
+
+
 # ---------------------------------------------------------------------------
 # Validation: non-finite, negative, missing comparator, empty/length/confidence
 # ---------------------------------------------------------------------------
@@ -466,7 +480,8 @@ def test_determinism_pinned_to_shared_replicate_indices() -> None:
     # Independently reconstruct the max-deviation array using the SHARED primitive
     # and the SAME idx for headline and every comparator.
     point_theta = {
-        c: 1.0 - float(np.mean(headline)) / max(float(np.mean(comparator_errors[c])), 1e-12)
+        c: (float(np.mean(comparator_errors[c])) - float(np.mean(headline)))
+        / max(float(np.mean(comparator_errors[c])), 1e-12)
         for c in FAMILY
     }
     max_dev = np.empty(REPS, dtype=np.float64)
@@ -476,7 +491,7 @@ def test_determinism_pinned_to_shared_replicate_indices() -> None:
         devs = []
         for c in FAMILY:
             mean_c_b = float(np.mean(comparator_errors[c][idx]))
-            theta_c_b = 1.0 - mean_h_b / max(mean_c_b, 1e-12)
+            theta_c_b = (mean_c_b - mean_h_b) / max(mean_c_b, 1e-12)
             devs.append(point_theta[c] - theta_c_b)
         max_dev[b] = max(devs)
     q_expected = float(np.quantile(max_dev, CONF, method="linear"))

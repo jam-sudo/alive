@@ -72,7 +72,7 @@ identification:
 metric:
   pair_error: mean_squared_error_over_pca_coordinates
   primary: paired_relative_error_reduction
-  formula: "1 - mean(error_l1) / max(mean(error_comparator), 1e-12)"
+  formula: "(mean(error_comparator) - mean(error_l1)) / max(mean(error_comparator), 1e-12)"
   distance: response_space_mse        # in the PCA-50 response space
   aggregation: ratio_of_mean_pair_errors
   material_margin_vs_additive: 0.05

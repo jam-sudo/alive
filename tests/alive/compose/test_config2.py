@@ -159,9 +159,37 @@ def test_comparator_roster_reordered_rejected(tmp_path):
 def test_metric_formula_and_margins():
     cfg = load_compose_phase2_config(CANON)
     assert cfg.metric_primary == "paired_relative_error_reduction"
-    assert cfg.metric_formula == "1 - mean(error_l1) / max(mean(error_comparator), 1e-12)"
+    assert cfg.metric_formula == (
+        "(mean(error_comparator) - mean(error_l1)) / max(mean(error_comparator), 1e-12)"
+    )
     assert cfg.material_margin_vs_additive == pytest.approx(0.05)
     assert cfg.learned_comparator_margin == pytest.approx(0.0)
+
+
+def test_futility_rule_is_loaded_and_frozen():
+    cfg = load_compose_phase2_config(CANON)
+    assert cfg.futility_conditions == (
+        "dev_oof_delta_below_threshold",
+        "rank_condition_fail",
+        "measurability_fail",
+    )
+    assert cfg.dev_oof_metric == "paired_relative_error_reduction_vs_additive"
+    assert cfg.dev_oof_threshold == 0.0
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("conditions", ["anything"]),
+        ("dev_oof_metric", "unregistered"),
+        ("dev_oof_threshold", 999.0),
+    ],
+)
+def test_futility_rule_change_rejected(tmp_path, field, value):
+    raw = _raw()
+    raw["futility"][field] = value
+    with pytest.raises(Phase2ConfigError, match="futility"):
+        load_compose_phase2_config(_write(tmp_path, raw))
 
 
 def test_metric_formula_change_rejected(tmp_path):
