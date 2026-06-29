@@ -1,0 +1,68 @@
+{
+  "activation": "BLOCKED — no seal opened, no double/sealed outcomes read for fitting",
+  "config_sha256": "d8c65ac443d33748285e5fd208c808ec7d6f46b93ca032205433724929d8ca94",
+  "data_sha256": "efde6f5301fe256725dce1d980f37bd96a13481a9a16135515897368e631affc",
+  "deliverable": "real_norman_phi_rank_and_condition_report",
+  "device": {
+    "cuda_available": true,
+    "device_name": "NVIDIA A100 80GB PCIe",
+    "torch_version": "2.6.0+cu124"
+  },
+  "esm_model": "esm2_t33_650M_UR50D",
+  "generated_at_utc": "2026-06-29T03:11:59.980408+00:00",
+  "git_sha": "82a9c83",
+  "long_sequence_policy": "truncate",
+  "n_cells": 111445,
+  "n_control_cells": 11855,
+  "n_doubles_total": 131,
+  "n_eligible_genes": 105,
+  "n_singles_total": 105,
+  "n_z_universe_genes": 73,
+  "protocol": "COMPOSE-K562-v1",
+  "report": {
+    "calibration_fraction": 0.6,
+    "esm_dim": 2,
+    "n_calibration_genes": 44,
+    "n_combo_calibration": 41,
+    "n_eligible_pairs": 131,
+    "n_sealed_double_unseen": 22,
+    "n_sealed_single_unseen": 68,
+    "per_k_total": [
+      {
+        "condition_number": 15.818827489986518,
+        "factor_bank_checksum": "a925666aa175e0d2d3e81921e6709a84f0530a9a939dbf8af327ed62205bd805",
+        "is_full_rank": true,
+        "k_total": 4,
+        "n_calibration_pairs_scored": 41,
+        "n_calibration_pairs_skipped": 0,
+        "n_genes": 73,
+        "rank": 10,
+        "sym_dim": 10
+      },
+      {
+        "condition_number": 32.8584445720215,
+        "factor_bank_checksum": "1f5f7f101638f2969aa74312efd410d3f50124567dc66834d883f6ab7f62dbf7",
+        "is_full_rank": true,
+        "k_total": 6,
+        "n_calibration_pairs_scored": 41,
+        "n_calibration_pairs_skipped": 0,
+        "n_genes": 73,
+        "rank": 21,
+        "sym_dim": 21
+      },
+      {
+        "condition_number": 484.19624879989277,
+        "factor_bank_checksum": "474c01dedcb55ccccb3d97614105078a8433f60818c96aab78f85a1e708e7608",
+        "is_full_rank": true,
+        "k_total": 8,
+        "n_calibration_pairs_scored": 41,
+        "n_calibration_pairs_skipped": 0,
+        "n_genes": 73,
+        "rank": 36,
+        "sym_dim": 36
+      }
+    ],
+    "split_seed": 11
+  },
+  "sequence_mapping_sha256": "eab9d41dcd4ed53d8d106923a0c4709c93286c667eff993b93e5c8e274915bbb"
+}

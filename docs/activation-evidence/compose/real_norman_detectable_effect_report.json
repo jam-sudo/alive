@@ -1,0 +1,56 @@
+{
+  "activation": "BLOCKED — dev-only ε on combo_calibration; sealed = counts only; no seal",
+  "calibration_fraction": 0.6,
+  "config_sha256": "d8c65ac443d33748285e5fd208c808ec7d6f46b93ca032205433724929d8ca94",
+  "data_sha256": "efde6f5301fe256725dce1d980f37bd96a13481a9a16135515897368e631affc",
+  "generated_at_utc": "2026-06-29T03:27:47.789641+00:00",
+  "git_sha": "79b01e0",
+  "phase1_config_sha256": "2e044e75d993f20cd693607d5778ef16621de1bb6e5347515dcb7120ae757b63",
+  "protocol": "COMPOSE-K562-v1",
+  "regime_cells_per_pair": {
+    "combo_calibration": 306.0,
+    "sealed_double_unseen": 286.0,
+    "sealed_single_unseen": 300.5
+  },
+  "regime_pair_counts": {
+    "combo_calibration": 41,
+    "sealed_double_unseen": 22,
+    "sealed_single_unseen": 68
+  },
+  "report": {
+    "deliverable": "regime_specific_detectable_effect_analysis",
+    "effect_size": {
+      "mean_pair_eps_l2": 3.0458875166483077,
+      "median_pair_eps_l2": 2.898442524134179,
+      "signal_to_noise": 4.278242029333857,
+      "split_half_noise_l2": 0.7119483880912103
+    },
+    "headline_powered": true,
+    "headline_regime": "sealed_double_unseen",
+    "measurability": {
+      "ceiling": 0.917552407951911,
+      "n_calibration_pairs": 41,
+      "passed": true,
+      "recommendation": "GI signal measurable above noise floor"
+    },
+    "power_floors": {
+      "min_cells": 50,
+      "min_pairs": 20
+    },
+    "regimes": {
+      "sealed_double_unseen": {
+        "cells_per_pair": 286.0,
+        "n_pairs": 22,
+        "power_passed": true,
+        "recommendation": "double-unseen adequately powered as headline"
+      },
+      "sealed_single_unseen": {
+        "cells_per_pair": 300.5,
+        "n_pairs": 68,
+        "power_passed": true,
+        "recommendation": "double-unseen adequately powered as headline"
+      }
+    }
+  },
+  "split_seed": 11
+}
