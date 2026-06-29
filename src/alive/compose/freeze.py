@@ -42,7 +42,7 @@ from pathlib import Path
 import numpy as np
 
 from alive.compose.baselines_combo import _assert_no_sealed_reference
-from alive.compose.io import atomic_write_once
+from alive.io import atomic_write_once
 from alive.provenance import sha256_json
 
 #: Exact pre-registered method roster required by the Phase-2b comparison family.

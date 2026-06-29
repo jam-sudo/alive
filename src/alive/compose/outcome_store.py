@@ -53,6 +53,8 @@ from typing import TYPE_CHECKING, Protocol, runtime_checkable
 import numpy as np
 import scipy.sparse as sp
 
+from alive.compose.split import verify_split_manifest
+from alive.io import atomic_write_once
 from alive.provenance import sha256_json
 
 if TYPE_CHECKING:
@@ -205,10 +207,42 @@ class ComposeOutcomeStore:
         *,
         audit_path: str | Path,
     ) -> None:
-        # Canonicalise the pair_index keys to plain 2-tuples for stable lookup.
-        self._pair_index: dict[PairID, np.ndarray] = {
-            self._canonical(pair): np.asarray(rows) for pair, rows in pair_index.items()
-        }
+        try:
+            verify_split_manifest(dict(manifest))
+        except ValueError as exc:
+            raise ComposeSealingError(f"invalid split manifest: {exc}") from exc
+
+        # Canonicalise without silently collapsing reversed duplicate keys, and
+        # freeze validated row vectors so callers cannot retarget a pair later.
+        self._pair_index = {}
+        claimed_rows: set[int] = set()
+        source_rows = getattr(getattr(source, "X", None), "shape", (None,))[0]
+        for raw_pair, raw_rows in pair_index.items():
+            pair = self._canonical(raw_pair)
+            if pair in self._pair_index:
+                raise ComposeSealingError(
+                    f"pair_index contains a canonical key collision: {pair!r}"
+                )
+            rows = np.asarray(raw_rows)
+            if rows.ndim != 1 or rows.size == 0:
+                raise ComposeSealingError(f"pair_index[{pair!r}] must be a non-empty 1-D array")
+            if rows.dtype.kind not in {"i", "u"} or rows.dtype.kind == "b":
+                raise ComposeSealingError(f"pair_index[{pair!r}] must contain integer row indices")
+            rows = np.array(rows, dtype=np.int64, copy=True)
+            if np.any(rows < 0) or len(np.unique(rows)) != len(rows):
+                raise ComposeSealingError(
+                    f"pair_index[{pair!r}] contains negative or duplicate row indices"
+                )
+            if source_rows is not None and np.any(rows >= int(source_rows)):
+                raise ComposeSealingError(f"pair_index[{pair!r}] contains an out-of-range row")
+            overlap = claimed_rows.intersection(int(row) for row in rows)
+            if overlap:
+                raise ComposeSealingError(
+                    f"pair_index rows overlap across pairs; first overlap={min(overlap)}"
+                )
+            claimed_rows.update(int(row) for row in rows)
+            rows.setflags(write=False)
+            self._pair_index[pair] = rows
         self._source = source
         self._manifest = manifest
         self._audit_path = Path(audit_path)
@@ -231,6 +265,14 @@ class ComposeOutcomeStore:
                 "and 'checksum'."
             ) from exc
         self._sealed_ids: frozenset[PairID] = self._double_ids | self._single_ids
+        manifest_pairs = {self._canonical(pair) for role in roles.values() for pair in role}
+        if set(self._pair_index) != manifest_pairs:
+            missing = sorted(manifest_pairs - set(self._pair_index))
+            extra = sorted(set(self._pair_index) - manifest_pairs)
+            raise ComposeSealingError(
+                "pair_index keys must equal the complete manifest role union "
+                f"(missing={missing!r}, extra={extra!r})"
+            )
 
         # Fail closed BEFORE any access: every sealed pair must be present in the
         # pair_index. Otherwise _materialise_pairs would raise a raw KeyError only
@@ -267,6 +309,10 @@ class ComposeOutcomeStore:
         if len(items) != 2:
             raise ComposeSealingError(f"pair id must have exactly 2 genes, got {items!r}")
         a, b = items
+        if not isinstance(a, str) or not isinstance(b, str) or not a or not b:
+            raise ComposeSealingError(f"pair genes must be non-empty strings, got {items!r}")
+        if a == b:
+            raise ComposeSealingError(f"self-pair is not valid: {items!r}")
         return (a, b) if a.encode("utf-8") <= b.encode("utf-8") else (b, a)
 
     # ------------------------------------------------------------------
@@ -589,6 +635,10 @@ class ComposeOutcomeStore:
             "request_checksum": sha256_json(sorted_pairs),
         }
         line = json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n"
-        with self._audit_path.open("a", encoding="utf-8") as fh:
-            fh.write(line)
-            fh.flush()
+        try:
+            atomic_write_once(self._audit_path, line, encoding="utf-8")
+        except FileExistsError as exc:
+            raise ComposeSealingError(
+                f"sealed cohort was claimed concurrently at {str(self._audit_path)!r}; "
+                "the seal may be opened exactly once"
+            ) from exc

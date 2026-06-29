@@ -8,7 +8,9 @@ All tests use small synthetic AnnData fixtures; the real .h5ad is NOT required.
 from __future__ import annotations
 
 import json
+import threading
 from collections.abc import Sequence
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import anndata
@@ -289,6 +291,48 @@ class TestEvaluateSealedOnce:
 
 
 class TestOnceOnlyEnforcement:
+    def test_concurrent_claim_has_exactly_one_winner(self, tmp_path: Path, monkeypatch) -> None:
+        """Two stores on one audit_path racing distinct run_ids past the audit
+        check: the write-once audit (O_EXCL link) admits exactly one winner."""
+        adata = _make_adata()
+        schema = DatasetSchema(perturbation_key=_PERT_KEY, control_value=_CTRL_VAL)
+        index = build_index(adata, schema, min_cells=5)
+        manifest = build_manifest_from_index(index, _FRACTIONS, _SEED)
+        sealed_ids = list(manifest.ids_for("sealed_evaluation"))
+        audit_path = tmp_path / "audit.jsonl"
+        stores = [
+            ReplogleOutcomeStore(
+                index=index, source=adata, manifest=manifest, audit_path=audit_path
+            )
+            for _ in range(2)
+        ]
+        barrier = threading.Barrier(2)
+        original = ReplogleOutcomeStore._assert_not_previously_accessed
+
+        def synchronized_check(store, run_id):
+            # Force both threads past the (empty) audit check before either writes.
+            original(store, run_id)
+            barrier.wait()
+
+        monkeypatch.setattr(
+            ReplogleOutcomeStore,
+            "_assert_not_previously_accessed",
+            synchronized_check,
+        )
+
+        def attempt(item):
+            run_id, store = item
+            try:
+                store.evaluate_sealed_once(run_id, sealed_ids)
+                return "success"
+            except SealingError:
+                return "refused"
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(attempt, [("run-a", stores[0]), ("run-b", stores[1])]))
+        assert sorted(results) == ["refused", "success"]
+        assert len(audit_path.read_text(encoding="utf-8").splitlines()) == 1
+
     def test_second_call_same_run_id_raises(self, tmp_path: Path) -> None:
         adata = _make_adata()
         store, _, sealed_ids = _build_store(adata, tmp_path)

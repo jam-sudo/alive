@@ -17,6 +17,7 @@ from alive.compose.split import (
     ComposeSplit,
     build_pair_split,
     build_split_manifest,
+    verify_split_manifest,
     write_split_manifest,
 )
 
@@ -24,6 +25,13 @@ from alive.compose.split import (
 def _pairs():
     genes = [chr(ord("A") + i) for i in range(8)]
     return [(genes[i], genes[j]) for i in range(8) for j in range(i + 1, 8)]
+
+
+def test_manifest_verifier_rejects_stale_checksum_payload():
+    manifest = build_split_manifest(_pairs(), seed=11, calibration_fraction=0.6)
+    manifest["seed"] = 12
+    with pytest.raises(ValueError, match="checksum mismatch"):
+        verify_split_manifest(manifest)
 
 
 # --------------------------------------------------------------------------- #

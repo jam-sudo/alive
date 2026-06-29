@@ -44,6 +44,7 @@ import numpy as np
 
 from alive.compose.identify import identify_operator
 from alive.compose.operator import bilinear_predict
+from alive.provenance import sha256_json
 
 # Deterministic seed for the L3 numpy MLP (init + training are reproducible).
 _L3_SEED = 20260624
@@ -385,3 +386,62 @@ class L3Model:
         Z = np.asarray(Z, dtype=np.float64)
         _check_indices(Z, g, h)
         return np.asarray(self._forward(Z, g, h), dtype=np.float64)
+
+
+def _array_state(value: np.ndarray) -> dict:
+    """Return a lossless canonical representation of a fitted numeric array."""
+    array = np.asarray(value)
+    return {
+        "dtype": array.dtype.str,
+        "shape": list(array.shape),
+        "float64_hex": [float(item).hex() for item in array.astype(np.float64).ravel(order="C")],
+    }
+
+
+def fitted_model_artifact(model: SymmetricModel) -> dict:
+    """Return the canonical fitted-state artifact for a built-in COMPOSE model.
+
+    Arbitrary duck-typed objects are rejected: a scientific method cannot gain a
+    trusted checksum merely by using a registered roster name.
+    """
+    if isinstance(model, L1Model):
+        if model.coef_ is None:
+            raise ValueError("cannot serialize an unfitted L1Model")
+        state = {"coef": _array_state(model.coef_)}
+    elif isinstance(model, L2Model):
+        if model.l1_.coef_ is None or model.scale_ is None:
+            raise ValueError("cannot serialize an unfitted L2Model")
+        state = {
+            "l1_coef": _array_state(model.l1_.coef_),
+            "scale": _array_state(model.scale_),
+        }
+    elif isinstance(model, IDOnlyModel):
+        if model.weight_ is None:
+            raise ValueError("cannot serialize an unfitted IDOnlyModel")
+        state = {"weight": _array_state(model.weight_)}
+    elif isinstance(model, L3Model):
+        if model.weights_ is None or model._dims is None:
+            raise ValueError("cannot serialize an unfitted L3Model")
+        state = {
+            "dims": list(model._dims),
+            "hidden": list(model._HIDDEN),
+            "n_steps": model._N_STEPS,
+            "learning_rate": float(model._LR).hex(),
+            "seed": _L3_SEED,
+            "weights": [_array_state(value) for value in model.weights_],
+        }
+    else:
+        raise TypeError(
+            "unregistered fitted model type; external baselines require a versioned "
+            f"adapter artifact, got {type(model).__module__}.{type(model).__qualname__}"
+        )
+    return {
+        "schema": "compose_fitted_model_v1",
+        "implementation": f"{type(model).__module__}.{type(model).__qualname__}",
+        "state": state,
+    }
+
+
+def fitted_model_checksum(model: SymmetricModel) -> str:
+    """SHA-256 of :func:`fitted_model_artifact`."""
+    return sha256_json(fitted_model_artifact(model))

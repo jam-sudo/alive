@@ -55,6 +55,7 @@ from alive.compose.freeze import (
     _assert_no_outcome_reference,
     _assert_no_sealed,
 )
+from alive.compose.models import fitted_model_checksum
 from alive.compose.response import ResponseSpace, verify_response_artifact
 from alive.compose.zfactor import GeneFactorBank
 from alive.provenance import RunLedger, sha256_bytes, sha256_file, sha256_json
@@ -203,9 +204,10 @@ class Phase2aInputs:
         ``"l1_bilinear_identifiable"`` -> :class:`~alive.compose.models.L1Model`).
     response_dim : int
         Response dimension ``p``.
-    response_space_checksum, factor_checksum, model_checksum, manifest_checksum,
-    environment_checksum : str
-        Bound upstream artifact checksums (verified in step 2).
+    response_space_checksum, factor_checksum, manifest_checksum, environment_checksum : str
+        Bound upstream artifact checksums (verified in step 2). The model
+        checksum is NOT a bound input: it is computed post-fit from the actual
+        fitted model set (``effective_model_checksum`` in the orchestrator).
     registered_seeds : sequence of int
         Registered random seeds recorded in the bundle / ledger.
     """
@@ -231,7 +233,6 @@ class Phase2aInputs:
     response_dim: int
     response_space_checksum: str
     factor_checksum: str
-    model_checksum: str
     manifest_checksum: str
     environment_checksum: str
     registered_seeds: Sequence[int]
@@ -363,7 +364,6 @@ def _phase2a_inputs_checksum(inputs: Phase2aInputs) -> str:
         "response_dim": int(inputs.response_dim),
         "response_space_checksum": inputs.response_space_checksum,
         "factor_checksum": inputs.factor_checksum,
-        "model_checksum": inputs.model_checksum,
         "manifest_checksum": inputs.manifest_checksum,
         "environment_checksum": inputs.environment_checksum,
         "registered_seeds": [int(x) for x in inputs.registered_seeds],
@@ -424,7 +424,6 @@ def _verify_hashes(
     bound = {
         "response_space_checksum": inputs.response_space_checksum,
         "factor_checksum": inputs.factor_checksum,
-        "model_checksum": inputs.model_checksum,
         "manifest_checksum": inputs.manifest_checksum,
         "environment_checksum": inputs.environment_checksum,
         "data_card_checksum": inputs.data_card_checksum,
@@ -880,7 +879,13 @@ def _predict_role(
     return out
 
 
-def _build_method_lock(inputs: Phase2aInputs, roster: tuple[str, ...], result: FutilityResult):
+def _build_method_lock(
+    inputs: Phase2aInputs,
+    roster: tuple[str, ...],
+    result: FutilityResult,
+    *,
+    model_checksum: str,
+):
     """Build the frozen method lock (roster + selected hyperparameters + checksums).
 
     The method lock binds the exact roster and the selected ``(k_total, lambda)``
@@ -895,7 +900,7 @@ def _build_method_lock(inputs: Phase2aInputs, roster: tuple[str, ...], result: F
         "registered_seeds": list(int(s) for s in inputs.registered_seeds),
         "response_space_checksum": inputs.response_space_checksum,
         "factor_checksum": inputs.factor_checksum,
-        "model_checksum": inputs.model_checksum,
+        "model_checksum": model_checksum,
         "manifest_checksum": inputs.manifest_checksum,
         "environment_checksum": inputs.environment_checksum,
     }
@@ -1091,6 +1096,7 @@ def _run_phase2a_core(
         uncovered_tolerance=float(inputs.uncovered_tolerance),
         eps_split_a=np.asarray(inputs.eps_split_a, dtype=float),
         eps_split_b=np.asarray(inputs.eps_split_b, dtype=float),
+        dev_oof_threshold=cfg.dev_oof_threshold,
         measurability_role="combo_calibration",
     )
     selected_k = futility.selected_k_total
@@ -1117,6 +1123,17 @@ def _run_phase2a_core(
         model = factory()
         model.fit(selected_Z, list(inputs.cal_idx_pairs), eps_cal, lam=float(selected_lambda))
         fitted[name] = model
+    model_artifact_checksums = {
+        name: fitted_model_checksum(model) for name, model in sorted(fitted.items())
+    }
+    effective_model_checksum = sha256_json(
+        {
+            "schema": "compose_model_set_v1",
+            "methods": model_artifact_checksums,
+            "selected_k_total": int(selected_k),
+            "selected_lambda": float(selected_lambda).hex(),
+        }
+    )
 
     calibration_double_shifts = np.asarray(inputs.additive_cal, dtype=float) + eps_cal
     mean_prediction = perturbation_mean(calibration_double_shifts)
@@ -1147,7 +1164,7 @@ def _run_phase2a_core(
         predictions_single_unseen=single_preds,
         response_space_checksum=inputs.response_space_checksum,
         factor_checksum=inputs.factor_checksum,
-        model_checksum=inputs.model_checksum,
+        model_checksum=effective_model_checksum,
         manifest_checksum=inputs.manifest_checksum,
         selected_k_total=selected_k,
         selected_lambda=selected_lambda,
@@ -1177,7 +1194,12 @@ def _run_phase2a_core(
         bundle.write(bundle_path)
 
     # Step 8: record the bundle + method-lock checksums in a write-once ledger.
-    method_lock, lock_checksum = _build_method_lock(inputs, roster, futility)
+    method_lock, lock_checksum = _build_method_lock(
+        inputs,
+        roster,
+        futility,
+        model_checksum=effective_model_checksum,
+    )
     env = environment if environment is not None else _placeholder_environment(inputs)
     ledger = RunLedger(run_id=inputs.run_id, config_sha256=cfg.config_sha256, environment=env)
     ledger.record_artifact("data_card", inputs.data_card_checksum)
@@ -1187,7 +1209,7 @@ def _run_phase2a_core(
     ledger.record_artifact("development_outcomes", outcome_store.content_checksum)
     ledger.record_artifact("response_space", inputs.response_space_checksum)
     ledger.record_artifact("factor_bank", inputs.factor_checksum)
-    ledger.record_artifact("model", inputs.model_checksum)
+    ledger.record_artifact("model", effective_model_checksum)
     ledger.record_artifact("pair_manifest", inputs.manifest_checksum)
     ledger.record_artifact("environment", inputs.environment_checksum)
     ledger.record_artifact("method_lock", lock_checksum)

@@ -71,6 +71,7 @@ from alive.compose.provenance2 import (
 )
 from alive.compose.response import ResponseSpace, verify_response_artifact
 from alive.compose.scoring2 import RegimeScore, score_regime
+from alive.compose.split import verify_split_manifest
 from alive.compose.terminal import Phase2bTerminal, TerminalState
 from alive.compose.verdict2 import (
     ComposeIntegrityReport,
@@ -582,6 +583,11 @@ def _run_phase2b_core(
     access count zero and the seal closed, leaving NO terminal artifact.
     """
     run_dir = Path(run_dir)
+    if not fixture_execution:
+        try:
+            verify_split_manifest(dict(pair_manifest))
+        except ValueError as exc:
+            raise Phase2bError(f"invalid pair manifest: {exc}") from exc
     response_space, control_mean, response_artifact_checksum = _resolve_response_artifact(
         response_artifact,
         require_checksum=not fixture_execution,

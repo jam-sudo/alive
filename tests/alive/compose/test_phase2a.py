@@ -191,7 +191,6 @@ def _inputs(inst, **overrides) -> Phase2aInputs:
         response_dim=inst["p"],
         response_space_checksum="rs-checksum",
         factor_checksum="zf-checksum",
-        model_checksum="model-checksum",
         manifest_checksum="manifest-checksum",
         environment_checksum="env-checksum",
         registered_seeds=(11, 23, 37),
@@ -244,7 +243,6 @@ def _factor_banks(inputs: Phase2aInputs) -> dict[int, GeneFactorBank]:
 _HASHES = dict(
     response_space_checksum="rs-checksum",
     factor_checksum="zf-checksum",
-    model_checksum="model-checksum",
     manifest_checksum="manifest-checksum",
     environment_checksum="env-checksum",
     data_card_checksum="data-card-checksum",
@@ -265,6 +263,9 @@ def test_continue_produces_a_verified_bundle_no_outcomes():
     assert res.sealed_access_count == 0
     assert isinstance(res.bundle, FrozenPredictionBundle)
     res.bundle.verify()
+    assert len(res.bundle.model_checksum) == 64
+    assert res.bundle.model_checksum != "model-checksum"
+    assert res.ledger.artifact_sha("model") == res.bundle.model_checksum
     res.bundle.assert_no_outcomes()
     cfg = load_compose_phase2_config("configs/compose_k562_v1_phase2.yaml")
     assert res.bundle.method_roster == cfg.method_roster
@@ -383,7 +384,6 @@ def test_fixture_entry_requires_synthetic_audit():
     [
         "response_space_checksum",
         "factor_checksum",
-        "model_checksum",
         "manifest_checksum",
         "environment_checksum",
         "data_card_checksum",
