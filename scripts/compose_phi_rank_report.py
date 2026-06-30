@@ -93,9 +93,7 @@ def main(argv: list[str] | None = None) -> int:
     genes_elig = eligible_genes(
         singles, min_cells=int(el["min_cells_per_gene"]), available_feature_ids=available
     )
-    pairs_elig = eligible_pairs(
-        doubles, set(genes_elig), min_cells=int(el["min_cells_per_pair"])
-    )
+    pairs_elig = eligible_pairs(doubles, set(genes_elig), min_cells=int(el["min_cells_per_pair"]))
     genes = sorted({g for pair in pairs_elig for g in pair})
     if not pairs_elig:
         raise SystemExit("no eligible pairs after outcome-independent filtering")
@@ -111,9 +109,7 @@ def main(argv: list[str] | None = None) -> int:
         seed=split_seed,
     )
     ctrl_mean = space.project(adata.X, control_idx).mean(axis=0)
-    delta_by_gene = {
-        g: space.project(adata.X, singles[g]).mean(axis=0) - ctrl_mean for g in genes
-    }
+    delta_by_gene = {g: space.project(adata.X, singles[g]).mean(axis=0) - ctrl_mean for g in genes}
 
     # --- real ESM-2 mean-pooled sequence vectors (GPU) ----------------------
     encoder = Esm2Encoder(

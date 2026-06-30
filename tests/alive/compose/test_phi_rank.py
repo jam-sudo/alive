@@ -44,12 +44,9 @@ def _report(seed: int = 11) -> dict:
 def test_split_counts_partition_the_eligible_universe():
     rep = _report()
     assert rep["n_eligible_pairs"] == len(_ELIGIBLE)
-    assert (
-        rep["n_combo_calibration"]
-        + rep["n_sealed_double_unseen"]
-        + rep["n_sealed_single_unseen"]
-        == len(_ELIGIBLE)
-    )
+    assert rep["n_combo_calibration"] + rep["n_sealed_double_unseen"] + rep[
+        "n_sealed_single_unseen"
+    ] == len(_ELIGIBLE)
     assert rep["n_combo_calibration"] == 28  # C(8, 2)
     assert rep["n_calibration_genes"] == 8
 
