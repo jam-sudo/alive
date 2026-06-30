@@ -64,6 +64,17 @@ def test_power_gate_is_reported_per_regime_headline_double_unseen():
     assert rep["headline_powered"] is True
 
 
+def test_per_regime_recommendation_names_its_own_regime():
+    # Each regime's recommendation text must reference ITS OWN regime, not the
+    # headline — power_gate's raw string hardcodes the double-unseen headline.
+    rep = _report(double=22, single=68, cells=60.0)
+    dbl = rep["regimes"]["sealed_double_unseen"]["recommendation"]
+    sgl = rep["regimes"]["sealed_single_unseen"]["recommendation"]
+    assert "sealed_double_unseen" in dbl and "headline" in dbl
+    assert "sealed_single_unseen" in sgl and "secondary" in sgl
+    assert "sealed_double_unseen" not in sgl  # the mislabel that bug_001 caught
+
+
 def test_underpowered_double_unseen_downgrades_headline():
     rep = _report(double=12, single=68, cells=60.0)
     assert rep["regimes"]["sealed_double_unseen"]["power_passed"] is False

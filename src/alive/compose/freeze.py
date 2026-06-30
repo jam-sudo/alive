@@ -264,8 +264,9 @@ def _predictions_payload(
 ) -> dict[str, dict[str, list[str]]]:
     """Canonical, lossless JSON-serialisable predictions payload.
 
-    Keys are flattened to ``"g|h"`` so the mapping is JSON-serialisable; values are
-    encoded as exact float64 hexadecimal strings so every prediction bit is bound.
+    Pair keys ``(g, h)`` are flattened with a tab separator (``"g\th"``) so the
+    mapping is JSON-serialisable; values are encoded as exact float64 hexadecimal
+    strings so every prediction bit is bound.
     """
     payload: dict[str, dict[str, list[str]]] = {}
     for method in sorted(predictions):

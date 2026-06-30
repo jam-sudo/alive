@@ -29,6 +29,25 @@ from alive.compose.gates import measurability_gate, power_gate
 #: development role ``combo_calibration`` is NOT an evaluation regime.
 _EVAL_REGIMES = ("sealed_double_unseen", "sealed_single_unseen")
 
+#: The headline regime; the other eval regime is a secondary/fallback.
+_HEADLINE_REGIME = "sealed_double_unseen"
+
+
+def _regime_power_recommendation(regime: str, passed: bool) -> str:
+    """Regime-correct power recommendation.
+
+    ``power_gate``'s own recommendation string names the *headline* regime
+    (``sealed_double_unseen``), which is correct in the Phase-1 go/no-go but
+    mislabels ``sealed_single_unseen`` when the gate is reported per regime here.
+    """
+    role = "headline" if regime == _HEADLINE_REGIME else "secondary regime"
+    if passed:
+        return f"{regime} adequately powered as {role}"
+    return (
+        f"{regime} underpowered; downgrade headline to the strongest "
+        "adequately-powered regime (e.g. single-unseen)"
+    )
+
 
 def compute_regime_detectable_effect_report(
     *,
@@ -84,10 +103,10 @@ def compute_regime_detectable_effect_report(
             "n_pairs": n_pairs,
             "cells_per_pair": cells,
             "power_passed": bool(gate.passed),
-            "recommendation": gate.recommendation,
+            "recommendation": _regime_power_recommendation(regime, gate.passed),
         }
 
-    headline = "sealed_double_unseen"
+    headline = _HEADLINE_REGIME
     return {
         "deliverable": "regime_specific_detectable_effect_analysis",
         "measurability": {

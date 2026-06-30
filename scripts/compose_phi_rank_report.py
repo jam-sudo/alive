@@ -62,7 +62,7 @@ def _device_info() -> dict:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Assemble real inputs, compute the Φ rank report, and write it write-once-safe."""
+    """Assemble real inputs, compute the Φ rank report, and write the JSON envelope."""
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--config", required=True, type=Path)
     ap.add_argument("--h5ad", required=True, type=Path)
