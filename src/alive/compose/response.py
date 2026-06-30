@@ -28,7 +28,7 @@ densified. The full matrix is never materialised.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import numpy as np
 from numpy.typing import NDArray
@@ -218,6 +218,46 @@ class ResponseSpace:
 
     # internal cache for the control mean used by ``mean_shift``
     _control_mean: NDArray[np.float64] = field(default=None, repr=False, compare=False)
+
+
+def verify_response_artifact(
+    space: ResponseSpace,
+    control_mean: NDArray | list[float],
+) -> tuple[ResponseSpace, NDArray[np.float64], str]:
+    """Verify and snapshot the response space plus its frozen control mean."""
+    actual_space_checksum = sha256_bytes(space.artifact_bytes())
+    if actual_space_checksum != space.checksum:
+        raise ValueError(
+            "response-space checksum mismatch: fitted state changed after the artifact was sealed"
+        )
+
+    ctrl = np.array(control_mean, dtype=np.float64, copy=True)
+    if ctrl.ndim != 1 or ctrl.shape != (space.pca_dim,):
+        raise ValueError(f"control_mean must have shape ({space.pca_dim},), got {ctrl.shape}")
+    if not np.all(np.isfinite(ctrl)):
+        raise ValueError("control_mean contains non-finite values")
+
+    def _readonly(value, *, dtype=None):
+        copied = np.array(value, dtype=dtype, copy=True)
+        copied.setflags(write=False)
+        return copied
+
+    snapshot = replace(
+        space,
+        hvg_idx=_readonly(space.hvg_idx, dtype=np.intp),
+        pca_components=_readonly(space.pca_components, dtype=np.float64),
+        pca_mean=_readonly(space.pca_mean, dtype=np.float64),
+        pca_explained_variance=_readonly(space.pca_explained_variance, dtype=np.float64),
+        _control_mean=None,
+    )
+    ctrl.setflags(write=False)
+    combined_checksum = sha256_json(
+        {
+            "response_space_checksum": actual_space_checksum,
+            "control_mean_float64_hex": [float(value).hex() for value in ctrl],
+        }
+    )
+    return snapshot, ctrl, combined_checksum
 
 
 # ---------------------------------------------------------------------------

@@ -12,7 +12,7 @@ CARTOGRAPHER's :func:`alive.eval.bootstrap.simultaneous_delta_bounds` forms
 per-method scalar metrics. COMPOSE's registered statistic is a
 *ratio-of-means relative-error-reduction*::
 
-    theta_C = 1 - mean(e_L1) / max(mean(e_C), 1e-12)
+    theta_C = (mean(e_C) - mean(e_L1)) / max(mean(e_C), 1e-12)
 
 which does not map onto that difference API. This module therefore implements
 a COMPOSE-specific function that **reuses the exact resampling / quantile
@@ -34,9 +34,9 @@ For the headline method ``l1_bilinear_identifiable`` with per-pair errors
 ``additive, gears, cpa, id_only, l3_hypernetwork``) with per-pair errors
 ``e_C``::
 
-    theta_C       = 1 - mean(e_L1) / max(mean(e_C), 1e-12)
+    theta_C       = (mean(e_C) - mean(e_L1)) / max(mean(e_C), 1e-12)
     # shared resamples across contrasts: same idx for headline and EVERY C
-    theta_C_b     = 1 - mean(e_L1[idx]) / max(mean(e_C[idx]), 1e-12)
+    theta_C_b     = (mean(e_C[idx]) - mean(e_L1[idx])) / max(mean(e_C[idx]), 1e-12)
     max_dev[b]    = max_C ( theta_C - theta_C_b )
     q             = quantile_confidence( max_dev )           # common half-width
     lower_C       = theta_C - q                              # simultaneous lower
@@ -98,7 +98,7 @@ class ComposeSimultaneousBounds:
         ``inference.comparator_family``). The headline
         ``l1_bilinear_identifiable`` is never a member.
     theta : dict[str, float]
-        Comparator → point ``theta_C = 1 - mean(e_L1) / max(mean(e_C), 1e-12)``
+        Comparator → stabilized relative error reduction.
         on the full data.
     lower : dict[str, float]
         Comparator → simultaneous one-sided lower bound ``theta_C - q``, sharing
@@ -148,7 +148,7 @@ class ComposeSimultaneousBounds:
 
 def _theta(mean_headline: float, mean_comparator: float) -> float:
     """Registered relative-error-reduction statistic with the 1e-12 floor."""
-    return 1.0 - mean_headline / max(mean_comparator, _EPS_FLOOR)
+    return (mean_comparator - mean_headline) / max(mean_comparator, _EPS_FLOOR)
 
 
 def _validate_error_array(arr: np.ndarray, n: int, name: str) -> np.ndarray:
@@ -181,7 +181,7 @@ def simultaneous_theta_bounds(
     For each comparator ``C`` in the exact registered family, the point
     statistic is the COMPOSE relative-error-reduction::
 
-        theta_C = 1 - mean(e_L1) / max(mean(e_C), 1e-12)
+        theta_C = (mean(e_C) - mean(e_L1)) / max(mean(e_C), 1e-12)
 
     A single common quantile ``q`` of the max-over-comparators centered
     deviation defines the family-wise lower band (``shared_resamples_across_
@@ -190,7 +190,7 @@ def simultaneous_theta_bounds(
 
         for b in range(n_replicates):
             idx        = _replicate_indices(seed, b, n)   # shared primitive
-            theta_C_b  = 1 - mean(e_L1[idx]) / max(mean(e_C[idx]), 1e-12)
+            theta_C_b  = (mean(e_C[idx]) - mean(e_L1[idx])) / max(mean(e_C[idx]), 1e-12)
             max_dev[b] = max_C ( theta_C - theta_C_b )
         q       = quantile(max_dev, confidence, method="linear")
         lower_C = theta_C - q

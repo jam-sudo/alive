@@ -1,0 +1,121 @@
+{
+  "activation": "BLOCKED \u2014 environment provenance only; no fit, no seal, no sealed outcome read; main .venv untouched",
+  "both_backends_import_ok": true,
+  "deliverable": "gears_cpa_reproducible_dependency_lock",
+  "environments": {
+    "cpa_env": {
+      "cuda": {
+        "available": true,
+        "device_count": 1,
+        "device_name": "NVIDIA A100 80GB PCIe",
+        "torch_cuda_version": "12.4"
+      },
+      "env_dir": "/workspace/cpa_env",
+      "install_commands": [
+        "uv venv /workspace/cpa_env --python 3.10 --python-preference only-managed",
+        "uv pip sync requirements.cpa_env.lock --extra-index-url https://download.pytorch.org/whl/cu124 --index-strategy unsafe-best-match"
+      ],
+      "lock_verified_by_fresh_sync": true,
+      "managed_python": true,
+      "n_packages": 115,
+      "python": "3.10",
+      "python_build": {
+        "executable_realpath": "/root/.local/share/uv/python/cpython-3.10.18-linux-x86_64-gnu/bin/python3.10",
+        "python_version": "3.10.18",
+        "sys_version": "3.10.18 (main, Oct  7 2025, 15:34:08) [Clang 20.1.4 ]"
+      },
+      "requirements_lock": "requirements.cpa_env.lock",
+      "requirements_lock_sha256": "50d26900063859bf0b36d8a407cfd9942b47f27e1f6a6f6e29663117b4868ccd",
+      "resolved": {
+        "anndata": "0.10.9",
+        "cpa": "imported(no __version__)",
+        "cpa_class": "CPA class import OK",
+        "gears": "IMPORT_FAILED: ModuleNotFoundError: No module named 'gears'",
+        "jax": "0.4.38",
+        "jaxlib": "0.4.38",
+        "lightning": "2.6.5",
+        "llvmlite": "0.47.0",
+        "numba": "0.65.1",
+        "numpy": "1.26.4",
+        "pytorch_lightning": "1.9.5",
+        "rdkit": "2026.03.3",
+        "scanpy": "1.11.5",
+        "scvi": "0.20.3",
+        "seaborn": "0.13.2",
+        "torch": "2.6.0+cu124",
+        "torch_geometric": "IMPORT_FAILED: ModuleNotFoundError: No module named 'torch_geometric'"
+      },
+      "runtime_notes": [
+        "Requires a uv-MANAGED CPython 3.10 (cpython-3.10.18): cpa-tools 0.7.2's numba/llvmlite pin needs Python >=3.7,<3.11, and the pod's system /usr/bin/python3.10 lacks _tkinter (cpa/_model.py has a spurious `from tkinter import N`; the managed build bundles Tcl/Tk).",
+        "Lock derived by pinning the 2023-era stack cpa-tools 0.7.2 targets: scvi-tools==0.20.3 (has parse_use_gpu_arg; newer scvi removed it and imports the removed jaxlib.xla_extension), jax/jaxlib==0.4.38 (newest <0.5 exposing jaxlib.xla_extension), anndata<0.11 (0.10.9; anndata 0.11 removed SparseDataset), numpy 1.26.4, plus seaborn>=0.13 (0.13.2; old seaborn calls the removed matplotlib.cm.register_cmap), and scanpy + requests (imported by cpa/scvi but not pulled).",
+        "rdkit is the modern wheel (2026.3.3); cpa-tools declares the abandoned rdkit-pypi which double-installs the rdkit namespace and triggers a Boost.Python converter error \u2014 the lock excludes rdkit-pypi, so a fresh `uv pip sync` of the lock is clean.",
+        "Set MPLBACKEND=Agg for headless matplotlib at runtime."
+      ],
+      "target_backend": "cpa",
+      "target_import_ok": true
+    },
+    "gears_env": {
+      "cuda": {
+        "available": true,
+        "device_count": 1,
+        "device_name": "NVIDIA A100 80GB PCIe",
+        "torch_cuda_version": "12.4"
+      },
+      "env_dir": "/workspace/gears_env",
+      "install_commands": [
+        "uv venv /workspace/gears_env --python 3.12",
+        "uv pip install torch==2.6.0 --index-url https://download.pytorch.org/whl/cu124 --extra-index-url https://pypi.org/simple",
+        "uv pip install torch_geometric cell-gears --extra-index-url https://download.pytorch.org/whl/cu124"
+      ],
+      "managed_python": false,
+      "n_packages": 74,
+      "python": "3.12",
+      "python_build": {
+        "executable_realpath": "/usr/bin/python3.12",
+        "python_version": "3.12.3",
+        "sys_version": "3.12.3 (main, Aug 14 2025, 17:47:21) [GCC 13.3.0]"
+      },
+      "requirements_lock": "requirements.gears_env.lock",
+      "requirements_lock_sha256": "f0a62c63849983762a3e3e62d83c28b30baf09c041f252d7557d923e9e0d251f",
+      "resolved": {
+        "anndata": "0.11.3",
+        "cpa": "IMPORT_FAILED: ModuleNotFoundError: No module named 'cpa'",
+        "gears": "imported(no __version__)",
+        "jax": "IMPORT_FAILED: ModuleNotFoundError: No module named 'jax'",
+        "jaxlib": "IMPORT_FAILED: ModuleNotFoundError: No module named 'jaxlib'",
+        "lightning": "IMPORT_FAILED: ModuleNotFoundError: No module named 'lightning'",
+        "llvmlite": "0.47.0",
+        "numba": "0.65.1",
+        "numpy": "2.4.4",
+        "pytorch_lightning": "IMPORT_FAILED: ModuleNotFoundError: No module named 'pytorch_lightning'",
+        "rdkit": "IMPORT_FAILED: ModuleNotFoundError: No module named 'rdkit'",
+        "scanpy": "1.11.5",
+        "scvi": "IMPORT_FAILED: ModuleNotFoundError: No module named 'scvi'",
+        "seaborn": "0.13.2",
+        "torch": "2.6.0+cu124",
+        "torch_geometric": "2.8.0"
+      },
+      "runtime_notes": [
+        "Built on the pod's system CPython 3.12; GEARS (cell-gears 0.1.2) imports cleanly with numba 0.65 / llvmlite 0.47 on 3.12.",
+        "Canonical reproduction: `uv pip sync requirements.gears_env.lock --extra-index-url https://download.pytorch.org/whl/cu124 --index-strategy unsafe-best-match`."
+      ],
+      "target_backend": "gears",
+      "target_import_ok": true
+    }
+  },
+  "generated_at_utc": "2026-06-29T19:20:50Z",
+  "git_sha": "79b01e0",
+  "host": {
+    "gpu": "NVIDIA A100 80GB PCIe",
+    "hostname": "3b45f0395b0b",
+    "nvidia_driver": "550.127.05",
+    "uv_version": "uv 0.9.0"
+  },
+  "indexes": {
+    "pypi_index": "https://pypi.org/simple",
+    "torch_index_url": "https://download.pytorch.org/whl/cu124",
+    "torch_pin": "torch==2.6.0 (resolves to 2.6.0+cu124)"
+  },
+  "isolation_rationale": "GEARS (torch-geometric) and CPA (scvi-tools/lightning) carry independent, frequently-conflicting torch-ecosystem constraints, and the activation-time guarded seam invokes each baseline as an isolated subprocess backend. Two per-baseline environments are therefore the correct unit of reproducibility; neither shares the main ALIVE .venv.",
+  "protocol": "COMPOSE-K562-v1"
+}

@@ -16,7 +16,9 @@ ever opened.
 from __future__ import annotations
 
 import json
+import threading
 from collections.abc import Mapping
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
@@ -307,6 +309,46 @@ class TestExactUnionEnforcement:
 
 
 class TestOnceOnly:
+    def test_concurrent_claim_has_exactly_one_winner(self, tmp_path: Path, monkeypatch) -> None:
+        manifest = _build_manifest()
+        source, pair_index = _build_pair_index(manifest)
+        audit_path = tmp_path / "compose_audit.jsonl"
+        stores = [
+            ComposeOutcomeStore(
+                pair_index=pair_index,
+                source=source,
+                manifest=manifest,
+                audit_path=audit_path,
+            )
+            for _ in range(2)
+        ]
+        union = _sealed_union(manifest)
+        barrier = threading.Barrier(2)
+        original = ComposeOutcomeStore._assert_not_previously_accessed
+
+        def synchronized_check(store, run_id):
+            original(store, run_id)
+            barrier.wait()
+
+        monkeypatch.setattr(
+            ComposeOutcomeStore,
+            "_assert_not_previously_accessed",
+            synchronized_check,
+        )
+
+        def attempt(item):
+            run_id, store = item
+            try:
+                store.evaluate_sealed_once(run_id, union)
+                return "success"
+            except ComposeSealingError:
+                return "refused"
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(attempt, [("run-a", stores[0]), ("run-b", stores[1])]))
+        assert sorted(results) == ["refused", "success"]
+        assert len(audit_path.read_text(encoding="utf-8").splitlines()) == 1
+
     def test_second_call_same_run_id_refused(self, tmp_path: Path) -> None:
         store, manifest = _build_store(tmp_path)
         union = _sealed_union(manifest)
@@ -480,6 +522,35 @@ class TestAuditTamperFailsClosed:
 
 
 class TestConstructorGuards:
+    @pytest.mark.parametrize(
+        "bad_rows",
+        [np.array([-1], dtype=np.int64), np.array([0, 0], dtype=np.int64), np.array([0.5])],
+    )
+    def test_invalid_pair_rows_rejected_at_construction(self, tmp_path: Path, bad_rows) -> None:
+        manifest = _build_manifest()
+        source, pair_index = _build_pair_index(manifest)
+        pair_index[next(iter(pair_index))] = bad_rows
+        with pytest.raises(ComposeSealingError, match="row|integer|duplicate|negative"):
+            ComposeOutcomeStore(
+                pair_index=pair_index,
+                source=source,
+                manifest=manifest,
+                audit_path=tmp_path / "compose_audit.jsonl",
+            )
+
+    def test_pair_rows_cannot_overlap(self, tmp_path: Path) -> None:
+        manifest = _build_manifest()
+        source, pair_index = _build_pair_index(manifest)
+        first, second = list(pair_index)[:2]
+        pair_index[second] = pair_index[first].copy()
+        with pytest.raises(ComposeSealingError, match="overlap"):
+            ComposeOutcomeStore(
+                pair_index=pair_index,
+                source=source,
+                manifest=manifest,
+                audit_path=tmp_path / "compose_audit.jsonl",
+            )
+
     def test_missing_sealed_pair_in_index_raises_at_construction(self, tmp_path: Path) -> None:
         """A pair_index missing a sealed pair must be rejected at construction —
         BEFORE any audit can be burned. Today a missing sealed pair would surface

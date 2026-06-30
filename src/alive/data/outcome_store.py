@@ -42,6 +42,7 @@ import anndata as ad
 import numpy as np
 import scipy.sparse as sp
 
+from alive.io import atomic_write_once
 from alive.provenance import sha256_json
 
 if TYPE_CHECKING:
@@ -444,7 +445,10 @@ class ReplogleOutcomeStore:
             "content_hash": sha256_json({"run_id": run_id, "perturbation_ids": sorted_ids}),
         }
         line = json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n"
-        # Append atomically: open in append mode (creates if absent)
-        with self._audit_path.open("a", encoding="utf-8") as fh:
-            fh.write(line)
-            fh.flush()
+        try:
+            atomic_write_once(self._audit_path, line, encoding="utf-8")
+        except FileExistsError as exc:
+            raise SealingError(
+                f"sealed cohort was claimed concurrently at {str(self._audit_path)!r}; "
+                "the cohort may be opened exactly once"
+            ) from exc

@@ -29,7 +29,7 @@ from typing import Iterable
 import numpy as np
 from numpy.random import PCG64, Generator
 
-from alive.compose.io import atomic_write_once
+from alive.io import atomic_write_once
 from alive.provenance import sha256_json
 
 PAIR_SPLIT_ALGORITHM = "compose_gene_partition_pair_split"
@@ -37,6 +37,18 @@ PAIR_SPLIT_VERSION = "2a.1"
 
 #: Manifest role keys, emitted in this fixed order.
 ROLE_NAMES = ("combo_calibration", "sealed_double_unseen", "sealed_single_unseen")
+_MANIFEST_KEYS = frozenset(
+    {
+        "algorithm",
+        "version",
+        "seed",
+        "calibration_fraction",
+        "eligibility_hash",
+        "calibration_genes",
+        "roles",
+        "checksum",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -252,7 +264,80 @@ def build_split_manifest(
     }
     manifest = dict(payload)
     manifest["checksum"] = sha256_json(payload)
+    verify_split_manifest(manifest)
     return manifest
+
+
+def verify_split_manifest(manifest: dict) -> str:
+    """Validate a complete split manifest and return its verified checksum.
+
+    Verification is self-contained: the role union reconstructs the eligible
+    pair universe, and the registered seed/fraction reproduce the gene split.
+    """
+    if not isinstance(manifest, dict) or set(manifest) != _MANIFEST_KEYS:
+        raise ValueError(f"split manifest must contain exactly {sorted(_MANIFEST_KEYS)!r}")
+    checksum = manifest["checksum"]
+    if not isinstance(checksum, str) or len(checksum) != 64:
+        raise ValueError("split manifest checksum must be a 64-character SHA-256 hex string")
+    try:
+        int(checksum, 16)
+    except ValueError as exc:
+        raise ValueError("split manifest checksum is not hexadecimal") from exc
+    payload = {key: value for key, value in manifest.items() if key != "checksum"}
+    actual = sha256_json(payload)
+    if actual != checksum:
+        raise ValueError(
+            f"split manifest checksum mismatch: stored {checksum!r}, recomputed {actual!r}"
+        )
+    if manifest["algorithm"] != PAIR_SPLIT_ALGORITHM or manifest["version"] != PAIR_SPLIT_VERSION:
+        raise ValueError("split manifest algorithm/version does not match this implementation")
+    seed = manifest["seed"]
+    fraction = manifest["calibration_fraction"]
+    if isinstance(seed, bool) or not isinstance(seed, int):
+        raise ValueError("split manifest seed must be an int")
+    if isinstance(fraction, bool) or not isinstance(fraction, (int, float)):
+        raise ValueError("split manifest calibration_fraction must be numeric")
+    if not 0.0 < float(fraction) < 1.0:
+        raise ValueError("split manifest calibration_fraction must be in (0, 1)")
+    roles = manifest["roles"]
+    if not isinstance(roles, dict) or tuple(roles) != ROLE_NAMES:
+        raise ValueError(f"split manifest roles must be exactly {ROLE_NAMES!r} in order")
+
+    role_pairs: dict[str, list[tuple[str, str]]] = {}
+    union: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for role in ROLE_NAMES:
+        raw_pairs = roles[role]
+        if not isinstance(raw_pairs, list):
+            raise ValueError(f"split manifest role {role!r} must be a list")
+        canonical = _canonicalize_pairs([tuple(pair) for pair in raw_pairs]) if raw_pairs else []
+        if canonical != [tuple(pair) for pair in raw_pairs]:
+            raise ValueError(f"split manifest role {role!r} is not canonical, sorted and unique")
+        overlap = seen.intersection(canonical)
+        if overlap:
+            raise ValueError(f"split manifest roles overlap at {sorted(overlap)!r}")
+        seen.update(canonical)
+        union.extend(canonical)
+        role_pairs[role] = canonical
+    if not union:
+        raise ValueError("split manifest role union is empty")
+    eligible = sorted(union, key=lambda p: (p[0].encode("utf-8"), p[1].encode("utf-8")))
+    expected_eligibility = sha256_json([[a, b] for a, b in eligible])
+    if manifest["eligibility_hash"] != expected_eligibility:
+        raise ValueError("split manifest eligibility_hash does not match the role union")
+
+    reproduced = build_pair_split(eligible, seed=seed, calibration_fraction=float(fraction))
+    expected_roles = {
+        "combo_calibration": reproduced.combo_calibration,
+        "sealed_double_unseen": reproduced.sealed_double_unseen,
+        "sealed_single_unseen": reproduced.sealed_single_unseen,
+    }
+    if role_pairs != expected_roles:
+        raise ValueError("split manifest role membership does not reproduce from seed/fraction")
+    expected_genes = sorted(reproduced.combo_genes, key=lambda g: g.encode("utf-8"))
+    if manifest["calibration_genes"] != expected_genes:
+        raise ValueError("split manifest calibration_genes does not reproduce from seed/fraction")
+    return checksum
 
 
 def write_split_manifest(

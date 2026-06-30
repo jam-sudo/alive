@@ -32,6 +32,7 @@ sealed handle anywhere at any nesting depth aborts the run.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -54,7 +55,10 @@ from alive.compose.freeze import (
     _assert_no_outcome_reference,
     _assert_no_sealed,
 )
-from alive.provenance import RunLedger, sha256_json
+from alive.compose.models import fitted_model_checksum
+from alive.compose.response import ResponseSpace, verify_response_artifact
+from alive.compose.zfactor import GeneFactorBank
+from alive.provenance import RunLedger, sha256_bytes, sha256_file, sha256_json
 
 #: Default Phase-2 config consulted by the execution-mode guard.
 _DEFAULT_CONFIG_PATH = "configs/compose_k562_v1_phase2.yaml"
@@ -153,7 +157,9 @@ class DevelopmentOutcomeStore:
             )
         if not self.access_audit.manifest_checksum or not self.access_audit.source_checksum:
             raise ValueError("outcome access audit checksums must be non-empty")
-        object.__setattr__(self, "combo_calibration_eps", eps.copy())
+        eps_snapshot = eps.copy()
+        eps_snapshot.setflags(write=False)
+        object.__setattr__(self, "combo_calibration_eps", eps_snapshot)
         object.__setattr__(self, "content_checksum", _outcome_store_checksum(self))
 
 
@@ -198,9 +204,10 @@ class Phase2aInputs:
         ``"l1_bilinear_identifiable"`` -> :class:`~alive.compose.models.L1Model`).
     response_dim : int
         Response dimension ``p``.
-    response_space_checksum, factor_checksum, model_checksum, manifest_checksum,
-    environment_checksum : str
-        Bound upstream artifact checksums (verified in step 2).
+    response_space_checksum, factor_checksum, manifest_checksum, environment_checksum : str
+        Bound upstream artifact checksums (verified in step 2). The model
+        checksum is NOT a bound input: it is computed post-fit from the actual
+        fitted model set (``effective_model_checksum`` in the orchestrator).
     registered_seeds : sequence of int
         Registered random seeds recorded in the bundle / ledger.
     """
@@ -226,16 +233,53 @@ class Phase2aInputs:
     response_dim: int
     response_space_checksum: str
     factor_checksum: str
-    model_checksum: str
     manifest_checksum: str
     environment_checksum: str
     registered_seeds: Sequence[int]
     data_card_checksum: str
     raw_data_checksum: str
     sequence_mapping_checksum: str
+    factor_banks_by_k: Mapping[int, GeneFactorBank] | None = None
     content_checksum: str = field(init=False)
 
     def __post_init__(self) -> None:
+        def _readonly(value: np.ndarray | Sequence) -> np.ndarray:
+            snapshot = np.array(value, dtype=np.float64, copy=True)
+            snapshot.setflags(write=False)
+            return snapshot
+
+        object.__setattr__(self, "gene_index", dict(self.gene_index))
+        object.__setattr__(
+            self,
+            "factors_by_k",
+            {k: _readonly(value) for k, value in self.factors_by_k.items()},
+        )
+        object.__setattr__(self, "cal_idx_pairs", tuple(tuple(p) for p in self.cal_idx_pairs))
+        object.__setattr__(self, "cal_pair_ids", tuple(tuple(p) for p in self.cal_pair_ids))
+        object.__setattr__(self, "additive_cal", _readonly(self.additive_cal))
+        object.__setattr__(self, "eps_split_a", _readonly(self.eps_split_a))
+        object.__setattr__(self, "eps_split_b", _readonly(self.eps_split_b))
+        object.__setattr__(self, "k_total_grid", tuple(int(x) for x in self.k_total_grid))
+        object.__setattr__(self, "lambda_grid", tuple(float(x) for x in self.lambda_grid))
+        object.__setattr__(
+            self, "sealed_double_pair_ids", tuple(tuple(p) for p in self.sealed_double_pair_ids)
+        )
+        object.__setattr__(
+            self, "sealed_single_pair_ids", tuple(tuple(p) for p in self.sealed_single_pair_ids)
+        )
+        object.__setattr__(
+            self,
+            "delta_by_gene",
+            {str(g): _readonly(value) for g, value in self.delta_by_gene.items()},
+        )
+        object.__setattr__(self, "model_factories", dict(self.model_factories))
+        object.__setattr__(self, "registered_seeds", tuple(int(x) for x in self.registered_seeds))
+        if self.factor_banks_by_k is not None:
+            object.__setattr__(
+                self,
+                "factor_banks_by_k",
+                {int(k): bank for k, bank in self.factor_banks_by_k.items()},
+            )
         object.__setattr__(self, "content_checksum", _phase2a_inputs_checksum(self))
 
 
@@ -320,13 +364,20 @@ def _phase2a_inputs_checksum(inputs: Phase2aInputs) -> str:
         "response_dim": int(inputs.response_dim),
         "response_space_checksum": inputs.response_space_checksum,
         "factor_checksum": inputs.factor_checksum,
-        "model_checksum": inputs.model_checksum,
         "manifest_checksum": inputs.manifest_checksum,
         "environment_checksum": inputs.environment_checksum,
         "registered_seeds": [int(x) for x in inputs.registered_seeds],
         "data_card_checksum": inputs.data_card_checksum,
         "raw_data_checksum": inputs.raw_data_checksum,
         "sequence_mapping_checksum": inputs.sequence_mapping_checksum,
+        "factor_banks_by_k": (
+            None
+            if inputs.factor_banks_by_k is None
+            else {
+                str(k): inputs.factor_banks_by_k[k].checksum
+                for k in sorted(inputs.factor_banks_by_k)
+            }
+        ),
     }
     return sha256_json(payload)
 
@@ -373,9 +424,11 @@ def _verify_hashes(
     bound = {
         "response_space_checksum": inputs.response_space_checksum,
         "factor_checksum": inputs.factor_checksum,
-        "model_checksum": inputs.model_checksum,
         "manifest_checksum": inputs.manifest_checksum,
         "environment_checksum": inputs.environment_checksum,
+        "data_card_checksum": inputs.data_card_checksum,
+        "raw_data_checksum": inputs.raw_data_checksum,
+        "sequence_mapping_checksum": inputs.sequence_mapping_checksum,
     }
     for key, value in bound.items():
         if key not in expected:
@@ -392,6 +445,78 @@ def _verify_hashes(
     if outcome_store.access_audit.manifest_checksum != inputs.manifest_checksum:
         raise HashMismatchError(
             "development outcome audit manifest does not match the Phase2a pair manifest"
+        )
+
+
+def _verify_scientific_data_assets(
+    inputs: Phase2aInputs,
+    *,
+    data_card_path: str | Path | None,
+    raw_asset_path: str | Path | None,
+) -> None:
+    """Bind the scientific run identity to the actual data-card and raw asset."""
+    if data_card_path is None or raw_asset_path is None:
+        raise HashMismatchError(
+            "scientific Phase2a requires data_card_path and raw_asset_path so provenance "
+            "digests are verified against actual files"
+        )
+
+    try:
+        card = json.loads(Path(data_card_path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise HashMismatchError(f"failed to read canonical data-card: {exc}") from exc
+    card_digest = sha256_json(card)
+    if card_digest != inputs.data_card_checksum:
+        raise HashMismatchError(
+            f"data-card digest mismatch: actual {card_digest!r} != "
+            f"bound {inputs.data_card_checksum!r}"
+        )
+
+    try:
+        raw_digest = sha256_file(raw_asset_path)
+    except OSError as exc:
+        raise HashMismatchError(f"failed to hash raw/source asset: {exc}") from exc
+    if raw_digest != inputs.raw_data_checksum:
+        raise HashMismatchError(
+            f"raw/source digest mismatch: actual {raw_digest!r} != "
+            f"bound {inputs.raw_data_checksum!r}"
+        )
+
+    recorded = card.get("raw_or_source", {}) if isinstance(card, dict) else {}
+    if not isinstance(recorded, dict) or recorded.get("digest") != raw_digest:
+        raise HashMismatchError(
+            "data-card raw_or_source.digest does not match the actual raw/source asset"
+        )
+
+
+def _verify_scientific_response_artifact(
+    inputs: Phase2aInputs,
+    response_artifact: Mapping | None,
+) -> None:
+    """Bind Phase2a to the actual response-space state and control mean."""
+    if response_artifact is None:
+        raise HashMismatchError(
+            "scientific Phase2a requires response_artifact with response_space, "
+            "control_mean and checksum"
+        )
+    space = response_artifact.get("response_space")
+    control_mean = response_artifact.get("control_mean")
+    declared = response_artifact.get("checksum")
+    if (
+        not isinstance(space, ResponseSpace)
+        or control_mean is None
+        or not isinstance(declared, str)
+    ):
+        raise HashMismatchError(
+            "scientific response_artifact requires a ResponseSpace, control_mean and checksum"
+        )
+    try:
+        _, _, computed = verify_response_artifact(space, control_mean)
+    except ValueError as exc:
+        raise HashMismatchError(f"invalid response artifact: {exc}") from exc
+    if declared != computed or computed != inputs.response_space_checksum:
+        raise HashMismatchError(
+            "response artifact checksum does not match its contents and bound Phase2a checksum"
         )
 
 
@@ -444,7 +569,43 @@ def _validate_pair_alignment(
     inputs: Phase2aInputs,
     outcome_store: DevelopmentOutcomeStore,
 ) -> None:
-    """Fail closed unless calibration IDs and all row-aligned arrays agree."""
+    """Fail closed unless gene identities, pair indices and aligned rows agree."""
+    if isinstance(inputs.n_genes, bool) or not isinstance(inputs.n_genes, int):
+        raise ValueError("n_genes must be an int")
+    if inputs.n_genes <= 0:
+        raise ValueError("n_genes must be positive")
+
+    gene_index = dict(inputs.gene_index)
+    if len(gene_index) != inputs.n_genes:
+        raise ValueError(
+            f"gene_index has {len(gene_index)} genes, expected n_genes={inputs.n_genes}"
+        )
+    if not all(isinstance(g, str) and g for g in gene_index):
+        raise ValueError("gene_index keys must be non-empty gene strings")
+    values = list(gene_index.values())
+    if any(isinstance(i, bool) or not isinstance(i, (int, np.integer)) for i in values):
+        raise ValueError("gene_index values must be integer row indices")
+    integer_values = [int(i) for i in values]
+    if set(integer_values) != set(range(inputs.n_genes)):
+        raise ValueError("gene_index values must be a bijection onto range(n_genes)")
+
+    delta_genes = set(inputs.delta_by_gene)
+    if delta_genes != set(gene_index):
+        missing = sorted(set(gene_index) - delta_genes)
+        extra = sorted(delta_genes - set(gene_index))
+        raise ValueError(
+            "delta_by_gene must cover the gene_index universe exactly "
+            f"(missing={missing}, extra={extra})"
+        )
+
+    for k_total, factors in inputs.factors_by_k.items():
+        rows = np.asarray(factors)
+        if rows.ndim != 2 or rows.shape[0] != inputs.n_genes:
+            raise ValueError(
+                f"factors_by_k[{k_total!r}] must have n_genes={inputs.n_genes} rows; "
+                f"got shape {rows.shape}"
+            )
+
     input_ids = tuple(tuple(p) for p in inputs.cal_pair_ids)
     if outcome_store.combo_calibration_pair_ids != input_ids:
         raise ValueError(
@@ -461,6 +622,89 @@ def _validate_pair_alignment(
     bad = {name: count for name, count in aligned.items() if count != n}
     if bad:
         raise ValueError(f"calibration row alignment mismatch: expected {n}, got {bad}")
+
+    def _validate_id_pair(raw_pair, *, context: str) -> tuple[str, str]:
+        pair = tuple(raw_pair)
+        if len(pair) != 2 or not all(isinstance(g, str) and g for g in pair):
+            raise ValueError(f"{context} must be a pair of non-empty gene strings: {pair!r}")
+        g, h = pair
+        if g == h:
+            raise ValueError(f"{context} cannot be a self-pair: {pair!r}")
+        if g.encode("utf-8") > h.encode("utf-8"):
+            raise ValueError(f"{context} is not UTF-8 canonical: {pair!r}")
+        missing = [gene for gene in pair if gene not in gene_index]
+        if missing:
+            raise ValueError(f"{context} contains genes absent from gene_index: {missing}")
+        return g, h
+
+    for row, (pair_id, raw_idx_pair) in enumerate(zip(input_ids, inputs.cal_idx_pairs)):
+        g, h = _validate_id_pair(pair_id, context=f"cal_pair_ids[{row}]")
+        idx_pair = tuple(raw_idx_pair)
+        if len(idx_pair) != 2 or any(
+            isinstance(i, bool) or not isinstance(i, (int, np.integer)) for i in idx_pair
+        ):
+            raise ValueError(f"cal_idx_pairs[{row}] must be a pair of integer indices")
+        observed = {int(idx_pair[0]), int(idx_pair[1])}
+        expected = {int(gene_index[g]), int(gene_index[h])}
+        if observed != expected or len(observed) != 2:
+            raise ValueError(
+                f"calibration pair mismatch at row {row}: ID pair {(g, h)!r} maps to "
+                f"{tuple(sorted(expected))!r}, got index pair {idx_pair!r}"
+            )
+
+    for role, pairs in (
+        ("sealed_double_pair_ids", inputs.sealed_double_pair_ids),
+        ("sealed_single_pair_ids", inputs.sealed_single_pair_ids),
+    ):
+        for row, pair in enumerate(pairs):
+            _validate_id_pair(pair, context=f"{role}[{row}]")
+
+
+def _verify_factor_banks(inputs: Phase2aInputs, *, require_banks: bool) -> None:
+    """Bind every runtime factor row to a checksummed factor-bank artifact."""
+    banks = inputs.factor_banks_by_k
+    if banks is None:
+        if require_banks:
+            raise HashMismatchError(
+                "scientific Phase2a requires factor_banks_by_k; raw matrices alone do not "
+                "prove factor provenance"
+            )
+        return
+
+    matrix_keys = {int(k) for k in inputs.factors_by_k}
+    if set(banks) != matrix_keys:
+        raise HashMismatchError(
+            "factor_banks_by_k keys must exactly match factors_by_k keys "
+            f"(banks={sorted(banks)}, matrices={sorted(matrix_keys)})"
+        )
+
+    genes = set(inputs.gene_index)
+    for k_total in sorted(matrix_keys):
+        bank = banks[k_total]
+        if sha256_bytes(bank.artifact_bytes()) != bank.checksum:
+            raise HashMismatchError(f"factor bank k={k_total} checksum does not verify")
+        if int(bank.k_total) != k_total:
+            raise HashMismatchError(
+                f"factor bank key {k_total} disagrees with bank.k_total={bank.k_total}"
+            )
+        if set(bank.gene_order) != genes or set(bank.z_by_gene) != genes:
+            raise HashMismatchError(f"factor bank k={k_total} gene universe mismatch")
+        if bank.sequence_mapping_hash != inputs.sequence_mapping_checksum:
+            raise HashMismatchError(f"factor bank k={k_total} sequence mapping checksum mismatch")
+        matrix = np.asarray(inputs.factors_by_k[k_total], dtype=np.float64)
+        for gene, row in inputs.gene_index.items():
+            if not np.array_equal(matrix[int(row)], np.asarray(bank.z_by_gene[gene])):
+                raise HashMismatchError(
+                    f"factor matrix k={k_total} row {row} does not match bank gene {gene!r}"
+                )
+
+    aggregate = sha256_json(
+        {"factor_banks_by_k": {str(k): banks[k].checksum for k in sorted(banks)}}
+    )
+    if aggregate != inputs.factor_checksum:
+        raise HashMismatchError(
+            f"aggregate factor checksum {aggregate!r} != bound {inputs.factor_checksum!r}"
+        )
 
 
 def _assert_fixture_payload(
@@ -635,7 +879,13 @@ def _predict_role(
     return out
 
 
-def _build_method_lock(inputs: Phase2aInputs, roster: tuple[str, ...], result: FutilityResult):
+def _build_method_lock(
+    inputs: Phase2aInputs,
+    roster: tuple[str, ...],
+    result: FutilityResult,
+    *,
+    model_checksum: str,
+):
     """Build the frozen method lock (roster + selected hyperparameters + checksums).
 
     The method lock binds the exact roster and the selected ``(k_total, lambda)``
@@ -650,7 +900,7 @@ def _build_method_lock(inputs: Phase2aInputs, roster: tuple[str, ...], result: F
         "registered_seeds": list(int(s) for s in inputs.registered_seeds),
         "response_space_checksum": inputs.response_space_checksum,
         "factor_checksum": inputs.factor_checksum,
-        "model_checksum": inputs.model_checksum,
+        "model_checksum": model_checksum,
         "manifest_checksum": inputs.manifest_checksum,
         "environment_checksum": inputs.environment_checksum,
     }
@@ -674,6 +924,9 @@ def run_phase2a(
     environment=None,
     activation_record: ActivationRecord | None = None,
     git_is_clean: bool | None = None,
+    data_card_path: str | Path | None = None,
+    raw_asset_path: str | Path | None = None,
+    response_artifact: Mapping | None = None,
 ) -> Phase2aResult:
     """Run scientific Phase-2a after all activation conditions are satisfied.
 
@@ -697,6 +950,9 @@ def run_phase2a(
         fixture_execution=False,
         activation_record=activation_record,
         git_is_clean=git_is_clean,
+        data_card_path=data_card_path,
+        raw_asset_path=raw_asset_path,
+        response_artifact=response_artifact,
     )
 
 
@@ -723,6 +979,9 @@ def run_phase2a_fixture(
         fixture_execution=True,
         activation_record=None,
         git_is_clean=None,
+        data_card_path=None,
+        raw_asset_path=None,
+        response_artifact=None,
     )
 
 
@@ -738,6 +997,9 @@ def _run_phase2a_core(
     fixture_execution: bool,
     activation_record: ActivationRecord | None,
     git_is_clean: bool | None,
+    data_card_path: str | Path | None,
+    raw_asset_path: str | Path | None,
+    response_artifact: Mapping | None,
 ) -> Phase2aResult:
     """Shared implementation after the public execution boundary is resolved.
 
@@ -798,11 +1060,18 @@ def _run_phase2a_core(
                 "scientific Phase2a requires source_kind='audited_unsealed'; "
                 "synthetic fixture outcomes are not scientific evidence"
             )
+        _verify_scientific_data_assets(
+            inputs,
+            data_card_path=data_card_path,
+            raw_asset_path=raw_asset_path,
+        )
+        _verify_scientific_response_artifact(inputs, response_artifact)
 
     # Step 2: bind runtime values, in-memory contents, role provenance and run ID.
     _validate_config_contract(inputs, cfg)
     _verify_hashes(inputs, outcome_store, expected_hashes)
     _validate_pair_alignment(inputs, outcome_store)
+    _verify_factor_banks(inputs, require_banks=not fixture_execution)
     _validate_run_identity(inputs, cfg)
 
     # Step 3: selection + real calibration / futility checkpoint on DEVELOPMENT
@@ -827,6 +1096,7 @@ def _run_phase2a_core(
         uncovered_tolerance=float(inputs.uncovered_tolerance),
         eps_split_a=np.asarray(inputs.eps_split_a, dtype=float),
         eps_split_b=np.asarray(inputs.eps_split_b, dtype=float),
+        dev_oof_threshold=cfg.dev_oof_threshold,
         measurability_role="combo_calibration",
     )
     selected_k = futility.selected_k_total
@@ -853,6 +1123,17 @@ def _run_phase2a_core(
         model = factory()
         model.fit(selected_Z, list(inputs.cal_idx_pairs), eps_cal, lam=float(selected_lambda))
         fitted[name] = model
+    model_artifact_checksums = {
+        name: fitted_model_checksum(model) for name, model in sorted(fitted.items())
+    }
+    effective_model_checksum = sha256_json(
+        {
+            "schema": "compose_model_set_v1",
+            "methods": model_artifact_checksums,
+            "selected_k_total": int(selected_k),
+            "selected_lambda": float(selected_lambda).hex(),
+        }
+    )
 
     calibration_double_shifts = np.asarray(inputs.additive_cal, dtype=float) + eps_cal
     mean_prediction = perturbation_mean(calibration_double_shifts)
@@ -883,7 +1164,7 @@ def _run_phase2a_core(
         predictions_single_unseen=single_preds,
         response_space_checksum=inputs.response_space_checksum,
         factor_checksum=inputs.factor_checksum,
-        model_checksum=inputs.model_checksum,
+        model_checksum=effective_model_checksum,
         manifest_checksum=inputs.manifest_checksum,
         selected_k_total=selected_k,
         selected_lambda=selected_lambda,
@@ -913,7 +1194,12 @@ def _run_phase2a_core(
         bundle.write(bundle_path)
 
     # Step 8: record the bundle + method-lock checksums in a write-once ledger.
-    method_lock, lock_checksum = _build_method_lock(inputs, roster, futility)
+    method_lock, lock_checksum = _build_method_lock(
+        inputs,
+        roster,
+        futility,
+        model_checksum=effective_model_checksum,
+    )
     env = environment if environment is not None else _placeholder_environment(inputs)
     ledger = RunLedger(run_id=inputs.run_id, config_sha256=cfg.config_sha256, environment=env)
     ledger.record_artifact("data_card", inputs.data_card_checksum)
@@ -923,7 +1209,7 @@ def _run_phase2a_core(
     ledger.record_artifact("development_outcomes", outcome_store.content_checksum)
     ledger.record_artifact("response_space", inputs.response_space_checksum)
     ledger.record_artifact("factor_bank", inputs.factor_checksum)
-    ledger.record_artifact("model", inputs.model_checksum)
+    ledger.record_artifact("model", effective_model_checksum)
     ledger.record_artifact("pair_manifest", inputs.manifest_checksum)
     ledger.record_artifact("environment", inputs.environment_checksum)
     ledger.record_artifact("method_lock", lock_checksum)

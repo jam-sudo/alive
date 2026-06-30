@@ -42,7 +42,7 @@ from pathlib import Path
 import numpy as np
 
 from alive.compose.baselines_combo import _assert_no_sealed_reference
-from alive.compose.io import atomic_write_once
+from alive.io import atomic_write_once
 from alive.provenance import sha256_json
 
 #: Exact pre-registered method roster required by the Phase-2b comparison family.
@@ -245,7 +245,7 @@ def _validate_role_predictions(
 
         method_out: dict[tuple[str, str], np.ndarray] = {}
         for pair, vec in method_preds.items():
-            arr = np.asarray(vec, dtype=float)
+            arr = np.array(vec, dtype=np.float64, copy=True)
             if arr.shape != (response_dim,):
                 raise FreezeError(
                     f"{role}/{method}: prediction for {pair!r} has shape {arr.shape}, "
@@ -253,6 +253,7 @@ def _validate_role_predictions(
                 )
             if not np.all(np.isfinite(arr)):
                 raise FreezeError(f"{role}/{method}: prediction for {pair!r} is not finite")
+            arr.setflags(write=False)
             method_out[tuple(pair)] = arr
         out[method] = method_out
     return out
@@ -260,24 +261,25 @@ def _validate_role_predictions(
 
 def _predictions_payload(
     predictions: Mapping[str, Mapping[tuple[str, str], np.ndarray]],
-) -> dict[str, dict[str, list[float]]]:
-    """Canonical, JSON-serialisable predictions payload (rounded for stable hashing).
+) -> dict[str, dict[str, list[str]]]:
+    """Canonical, lossless JSON-serialisable predictions payload.
 
-    Keys are flattened to ``"g|h"`` so the mapping is JSON-serialisable; values are
-    rounded to 12 decimals so the checksum is stable across platforms.
+    Pair keys ``(g, h)`` are flattened with a tab separator (``"g\th"``) so the
+    mapping is JSON-serialisable; values are encoded as exact float64 hexadecimal
+    strings so every prediction bit is bound.
     """
-    payload: dict[str, dict[str, list[float]]] = {}
+    payload: dict[str, dict[str, list[str]]] = {}
     for method in sorted(predictions):
-        method_block: dict[str, list[float]] = {}
+        method_block: dict[str, list[str]] = {}
         for pair in sorted(predictions[method]):
             vec = np.asarray(predictions[method][pair], dtype=float)
-            method_block["\t".join(pair)] = [round(float(v), 12) for v in vec.tolist()]
+            method_block["\t".join(pair)] = [float(v).hex() for v in vec.tolist()]
         payload[method] = method_block
     return payload
 
 
 def _predictions_from_payload(
-    payload: Mapping[str, Mapping[str, Sequence[float]]],
+    payload: Mapping[str, Mapping[str, Sequence[float | str]]],
 ) -> dict[str, dict[tuple[str, str], np.ndarray]]:
     """Inverse of :func:`_predictions_payload` (used by :meth:`from_dict`)."""
     out: dict[str, dict[tuple[str, str], np.ndarray]] = {}
@@ -285,7 +287,12 @@ def _predictions_from_payload(
         method_out: dict[tuple[str, str], np.ndarray] = {}
         for flat, vec in block.items():
             g, h = flat.split("\t")
-            method_out[(g, h)] = np.asarray(vec, dtype=float)
+            arr = np.asarray(
+                [float.fromhex(v) if isinstance(v, str) else float(v) for v in vec],
+                dtype=np.float64,
+            )
+            arr.setflags(write=False)
+            method_out[(g, h)] = arr
         out[method] = method_out
     return out
 

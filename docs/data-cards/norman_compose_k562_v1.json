@@ -1,0 +1,53 @@
+{
+  "cell_line": "K562",
+  "counts": {
+    "n_cells": 111445,
+    "n_control": 11855,
+    "n_doubles": 131,
+    "n_genes": 33694,
+    "n_singles": 105
+  },
+  "exclusions": [],
+  "exclusions_manifest_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+  "license": "CC BY 4.0",
+  "modality": "CRISPRa",
+  "processed_sha256": "efde6f5301fe256725dce1d980f37bd96a13481a9a16135515897368e631affc",
+  "processing_version": "scPerturb-NormanWeissman2019_filtered",
+  "raw_or_source": {
+    "digest": "efde6f5301fe256725dce1d980f37bd96a13481a9a16135515897368e631affc",
+    "kind": "raw_sha256"
+  },
+  "schema": {
+    "obs_columns": [
+      "UMI_count",
+      "cancer",
+      "cell_line",
+      "celltype",
+      "coverage",
+      "disease",
+      "gemgroup",
+      "good_coverage",
+      "guide_id",
+      "ncounts",
+      "ngenes",
+      "nperts",
+      "number_of_cells",
+      "organism",
+      "percent_mito",
+      "percent_ribo",
+      "perturbation",
+      "perturbation_type",
+      "read_count",
+      "tissue_type"
+    ],
+    "var_columns": [
+      "ensemble_id",
+      "ncells",
+      "ncounts"
+    ]
+  },
+  "source": {
+    "doi": "10.5281/zenodo.13350497",
+    "uri": "scPerturb NormanWeissman2019 (Zenodo 10.5281/zenodo.13350497)"
+  }
+}

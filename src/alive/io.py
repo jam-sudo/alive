@@ -1,4 +1,10 @@
-"""Crash-resistant, non-overwriting artifact writes for COMPOSE."""
+"""Crash-resistant, non-overwriting artifact writes (milestone-neutral).
+
+This primitive is shared by every protocol's write-once seal/audit lifecycle
+(§11): it lives at the package root so that lower/shared layers (e.g.
+``alive.data``) never need to depend on any single milestone package such as
+``alive.compose``.
+"""
 
 from __future__ import annotations
 

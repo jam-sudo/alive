@@ -27,6 +27,7 @@ from alive.compose.models import (
     L2Model,
     L3Model,
     SymmetricModel,
+    fitted_model_checksum,
 )
 from alive.compose.operator import bilinear_predict, sym_basis_dim
 
@@ -280,3 +281,21 @@ def test_models_accept_varying_p():
         for cls in ALL_MODEL_CLASSES:
             out = cls().fit(Z, pairs, eps, lam=1e-2).predict_eps(Z, 0, 1)
             assert out.shape == (p,)
+
+
+def test_fitted_model_checksum_is_deterministic_and_state_sensitive():
+    rng = np.random.default_rng(908)
+    Z, _, pairs, eps = _make(rng)
+    first = L1Model().fit(Z, pairs, eps, lam=1e-3)
+    second = L1Model().fit(Z, pairs, eps, lam=1e-3)
+    assert fitted_model_checksum(first) == fitted_model_checksum(second)
+    second.coef_[0, 0] += 1e-13
+    assert fitted_model_checksum(first) != fitted_model_checksum(second)
+
+
+def test_fitted_model_checksum_rejects_unregistered_type():
+    class DuckModel:
+        pass
+
+    with pytest.raises(TypeError, match="unregistered fitted model type"):
+        fitted_model_checksum(DuckModel())  # type: ignore[arg-type]

@@ -18,7 +18,7 @@ import numpy as np
 import pytest
 from scipy import sparse
 
-from alive.compose.response import ResponseSpace, fit_response_space
+from alive.compose.response import ResponseSpace, fit_response_space, verify_response_artifact
 
 # ---------------------------------------------------------------------------
 # Fixtures / helpers
@@ -307,3 +307,53 @@ def test_epsilon_is_pair_shift_minus_single_deltas():
     eps = space.epsilon(pair_shift, delta_g, delta_h)
     np.testing.assert_allclose(eps, pair_shift - delta_g - delta_h)
     assert eps.shape == (2,)
+
+
+def test_verify_response_artifact_returns_immutable_snapshot():
+    X, c, s, _, _ = _toy()
+    space = fit_response_space(X, control_idx=c, eligible_single_idx=s, n_hvg=4, pca_dim=2, seed=0)
+    control_mean = space.project(X, c).mean(axis=0)
+
+    snapshot, frozen_control, checksum = verify_response_artifact(space, control_mean)
+
+    assert len(checksum) == 64
+    assert not snapshot.hvg_idx.flags.writeable
+    assert not snapshot.pca_components.flags.writeable
+    assert not snapshot.pca_mean.flags.writeable
+    assert not snapshot.pca_explained_variance.flags.writeable
+    assert not frozen_control.flags.writeable
+    with pytest.raises(ValueError):
+        frozen_control[0] = 0.0
+
+
+def test_verify_response_artifact_rejects_tampered_space():
+    X, c, s, _, _ = _toy()
+    space = fit_response_space(X, control_idx=c, eligible_single_idx=s, n_hvg=4, pca_dim=2, seed=0)
+    control_mean = space.project(X, c).mean(axis=0)
+    space.pca_components[0, 0] += 1.0
+
+    with pytest.raises(ValueError, match="checksum"):
+        verify_response_artifact(space, control_mean)
+
+
+def test_response_artifact_checksum_binds_control_mean():
+    X, c, s, _, _ = _toy()
+    space = fit_response_space(X, control_idx=c, eligible_single_idx=s, n_hvg=4, pca_dim=2, seed=0)
+    control_mean = space.project(X, c).mean(axis=0)
+
+    _, _, first = verify_response_artifact(space, control_mean)
+    changed = control_mean.copy()
+    changed[0] += 1e-13
+    _, _, second = verify_response_artifact(space, changed)
+
+    assert first != second
+
+
+def test_verify_response_artifact_rejects_nonfinite_control_mean():
+    X, c, s, _, _ = _toy()
+    space = fit_response_space(X, control_idx=c, eligible_single_idx=s, n_hvg=4, pca_dim=2, seed=0)
+    control_mean = space.project(X, c).mean(axis=0)
+    control_mean[0] = np.nan
+
+    with pytest.raises(ValueError, match="finite"):
+        verify_response_artifact(space, control_mean)

@@ -4,7 +4,7 @@ Synthetic-only (ACTIVATION BLOCKED): no real Norman outcomes are touched.
 The primary metric is the paired relative error reduction
 
     e_{M,i}     = mean_j( (pred_{M,i,j} - truth_{i,j})^2 )
-    theta_{M,C} = 1 - mean_i(e_{M,i}) / max(mean_i(e_{C,i}), 1e-12)
+    theta_{M,C} = (mean_i(e_{C,i}) - mean_i(e_{M,i})) / max(mean_i(e_{C,i}), 1e-12)
 
 and the secondary GI-explained fraction
 
@@ -121,9 +121,9 @@ def test_theta_zero_denominator_guard():
         comparator_ids=["a", "b"],
         truth_ids=["a", "b"],
     )
-    # 1 - 0/1e-12 = 1.0, finite (no nan/inf)
+    # Both methods are perfect: the stabilized contrast is an exact tie.
     assert np.isfinite(theta)
-    assert theta == pytest.approx(1.0)
+    assert theta == pytest.approx(0.0)
 
 
 def test_theta_shuffled_pair_ids_aligned_not_positional():

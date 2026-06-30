@@ -69,8 +69,9 @@ from alive.compose.provenance2 import (
     recompute_run_id,
     verify_upstream_before_access,
 )
-from alive.compose.response import ResponseSpace
+from alive.compose.response import ResponseSpace, verify_response_artifact
 from alive.compose.scoring2 import RegimeScore, score_regime
+from alive.compose.split import verify_split_manifest
 from alive.compose.terminal import Phase2bTerminal, TerminalState
 from alive.compose.verdict2 import (
     ComposeIntegrityReport,
@@ -157,7 +158,11 @@ class Phase2bResult:
 # --------------------------------------------------------------------------- #
 
 
-def _resolve_response_artifact(response_artifact: Mapping) -> tuple[ResponseSpace, np.ndarray]:
+def _resolve_response_artifact(
+    response_artifact: Mapping,
+    *,
+    require_checksum: bool = False,
+) -> tuple[ResponseSpace, np.ndarray, str]:
     """Extract the frozen response space and the explicit control mean.
 
     The ``_control_mean`` cache on a reloaded :class:`ResponseSpace` does not
@@ -189,13 +194,22 @@ def _resolve_response_artifact(response_artifact: Mapping) -> tuple[ResponseSpac
         raise Phase2bError("response_artifact['response_space'] must be a ResponseSpace")
     if control_mean is None:
         raise Phase2bError("response_artifact['control_mean'] is required (explicit control mean)")
-    ctrl = np.asarray(control_mean, dtype=np.float64)
-    if ctrl.ndim != 1 or ctrl.shape[0] != space.pca_dim:
+    try:
+        snapshot, ctrl, computed_checksum = verify_response_artifact(space, control_mean)
+    except ValueError as exc:
+        raise Phase2bError(f"invalid response artifact: {exc}") from exc
+    declared_checksum = response_artifact.get("checksum")
+    if require_checksum and declared_checksum is None:
         raise Phase2bError(
-            f"response_artifact['control_mean'] must be a (pca_dim={space.pca_dim},) vector, "
-            f"got shape {ctrl.shape}"
+            "scientific response_artifact requires a combined 'checksum' covering "
+            "ResponseSpace + control_mean"
         )
-    return space, ctrl
+    if declared_checksum is not None and declared_checksum != computed_checksum:
+        raise Phase2bError(
+            "response_artifact checksum mismatch: declared checksum does not cover the "
+            "supplied ResponseSpace + control_mean"
+        )
+    return snapshot, ctrl, computed_checksum
 
 
 def _truth_from_release(
@@ -569,7 +583,15 @@ def _run_phase2b_core(
     access count zero and the seal closed, leaving NO terminal artifact.
     """
     run_dir = Path(run_dir)
-    response_space, control_mean = _resolve_response_artifact(response_artifact)
+    if not fixture_execution:
+        try:
+            verify_split_manifest(dict(pair_manifest))
+        except ValueError as exc:
+            raise Phase2bError(f"invalid pair manifest: {exc}") from exc
+    response_space, control_mean, response_artifact_checksum = _resolve_response_artifact(
+        response_artifact,
+        require_checksum=not fixture_execution,
+    )
 
     # --- Step 2 (pre-access, outcome-free): preflight + composite gate. --------
     # The seal is untouched here; any failure leaves access_count==0 and no
@@ -592,6 +614,10 @@ def _run_phase2b_core(
         ledger=ledger,
         expected_response_dim=expected_response_dim,
     )
+    if not fixture_execution and response_artifact_checksum != lock.response_space_checksum:
+        raise Phase2bError(
+            "verified response artifact checksum does not match the frozen bundle / ledger"
+        )
 
     # The COMPLETE composite pre-access gate (a focused superset of the preflight
     # run-id check): recompute the run id and verify the upstream artifacts. On
@@ -738,9 +764,7 @@ def _evaluate_inside_boundary(
 
     # --- Step 9 + 10: headline = double-unseen bounds; verdict (double ONLY). --
     sealed_n = regime_double.sample_count
-    # TODO(activation): source minimum_sealed from the activated config's
-    # registered minimum-sealed-N, not a literal.
-    minimum_sealed = 1  # at least one sealed pair must have been scored.
+    minimum_sealed = config.sealed_minimum_n
     bounds = regime_double.bounds
     all_finite = bool(
         np.all(np.isfinite(list(bounds.lower.values())))

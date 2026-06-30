@@ -75,7 +75,9 @@ _EXPECTED_METHOD_ROSTER: tuple[str, ...] = (
     "cpa",
 )
 _EXPECTED_METRIC_PRIMARY = "paired_relative_error_reduction"
-_EXPECTED_METRIC_FORMULA = "1 - mean(error_l1) / max(mean(error_comparator), 1e-12)"
+_EXPECTED_METRIC_FORMULA = (
+    "(mean(error_comparator) - mean(error_l1)) / max(mean(error_comparator), 1e-12)"
+)
 _EXPECTED_MATERIAL_MARGIN_VS_ADDITIVE = 0.05
 _EXPECTED_LEARNED_COMPARATOR_MARGIN = 0.0
 _EXPECTED_INFERENCE_METHOD = "max_deviation_bootstrap"
@@ -87,6 +89,18 @@ _EXPECTED_ROLE_NAMES: tuple[str, ...] = (
     "sealed_double_unseen",
     "sealed_single_unseen",
 )
+#: Pre-registered floor on the number of sealed pairs that must be scored before
+#: a sealed verdict is trusted (config ``seal.minimum_sealed_n``). The
+#: orchestrator sources its ``minimum_sealed`` integrity input from here rather
+#: than a literal so the floor is versioned with the config.
+_EXPECTED_MINIMUM_SEALED_N = 1
+_EXPECTED_FUTILITY_CONDITIONS = (
+    "dev_oof_delta_below_threshold",
+    "rank_condition_fail",
+    "measurability_fail",
+)
+_EXPECTED_DEV_OOF_METRIC = "paired_relative_error_reduction_vs_additive"
+_EXPECTED_DEV_OOF_THRESHOLD = 0.0
 _EXPECTED_FIT_ROLES: tuple[str, ...] = ("control", "singles")
 _EXPECTED_ACTIVATION_REQUIREMENTS: tuple[str, ...] = (
     "real_norman_phi_rank_and_condition_report",
@@ -260,7 +274,9 @@ _KNOWN_LEAKAGE_CONTROL = frozenset(
 )
 _KNOWN_PHASING = frozenset({"phase_2a", "phase_2b"})
 _KNOWN_FUTILITY = frozenset({"conditions", "dev_oof_metric", "dev_oof_threshold"})
-_KNOWN_SEAL = frozenset({"artifacts_root", "run_id_inputs", "sealed_access_max", "write_once"})
+_KNOWN_SEAL = frozenset(
+    {"artifacts_root", "run_id_inputs", "sealed_access_max", "minimum_sealed_n", "write_once"}
+)
 _KNOWN_SEEDS = frozenset({"split_seed", "registered_seeds"})
 _KNOWN_VERDICT = frozenset(
     {
@@ -381,6 +397,10 @@ class ComposePhase2Config:
     bootstrap_replicates: int
     role_names: tuple[str, ...]
     fit_roles: tuple[str, ...]
+    sealed_minimum_n: int
+    futility_conditions: tuple[str, ...]
+    dev_oof_metric: str
+    dev_oof_threshold: float
     config_sha256: str
 
     @property
@@ -498,6 +518,10 @@ def load_compose_phase2_config(path: str | Path) -> ComposePhase2Config:
         _require(raw, "identification", "top-level")
     )
     split_seed, registered_seeds = _validate_seeds(_require(raw, "seeds", "top-level"))
+    sealed_minimum_n = _validate_seal(_require(raw, "seal", "top-level"))
+    futility_conditions, dev_oof_metric, dev_oof_threshold = _validate_futility(
+        _require(raw, "futility", "top-level")
+    )
     method_roster = _validate_baselines(_require(raw, "baselines", "top-level"))
     (
         metric_primary,
@@ -548,6 +572,10 @@ def load_compose_phase2_config(path: str | Path) -> ComposePhase2Config:
         bootstrap_replicates=bootstrap_replicates,
         role_names=role_names,
         fit_roles=fit_roles,
+        sealed_minimum_n=sealed_minimum_n,
+        futility_conditions=futility_conditions,
+        dev_oof_metric=dev_oof_metric,
+        dev_oof_threshold=dev_oof_threshold,
         config_sha256=sha256_json(raw),
     )
 
@@ -727,6 +755,78 @@ def _validate_seeds(block: dict[str, Any]) -> tuple[int, tuple[int, ...]]:
             f"split_seed={_EXPECTED_SPLIT_SEED}, registered={list(_EXPECTED_REGISTERED_SEEDS)}"
         )
     return split_seed, registered
+
+
+def _validate_seal(block: dict[str, Any]) -> int:
+    """Validate the seal block and return the pre-registered minimum-sealed floor.
+
+    The ``minimum_sealed_n`` floor is the pre-registered number of sealed pairs
+    that must have been scored before a sealed verdict is trusted (the
+    orchestrator sources its integrity ``minimum_sealed`` input from this rather
+    than a literal). It is parsed with strict int typing (``bool`` and string
+    ints rejected) and must be a strictly positive integer matching the
+    pre-registration.
+
+    Parameters
+    ----------
+    block
+        The ``seal`` block mapping (already schema-closed).
+
+    Returns
+    -------
+    int
+        The validated ``minimum_sealed_n`` floor.
+
+    Raises
+    ------
+    Phase2ConfigError
+        If ``minimum_sealed_n`` is not a strictly positive int, or does not match
+        the pre-registered floor.
+    """
+    _close_schema(block, _KNOWN_SEAL, "seal")
+    minimum_sealed_n = _strict_int(
+        _require(block, "minimum_sealed_n", "seal"), "seal.minimum_sealed_n"
+    )
+    if minimum_sealed_n < 1:
+        raise Phase2ConfigError(
+            f"seal.minimum_sealed_n must be a strictly positive int, got {minimum_sealed_n}"
+        )
+    if minimum_sealed_n != _EXPECTED_MINIMUM_SEALED_N:
+        raise Phase2ConfigError(
+            f"seal.minimum_sealed_n must be {_EXPECTED_MINIMUM_SEALED_N} "
+            f"(the pre-registered floor), got {minimum_sealed_n}"
+        )
+    return minimum_sealed_n
+
+
+def _validate_futility(block: dict[str, Any]) -> tuple[tuple[str, ...], str, float]:
+    """Validate and return the complete preregistered development futility rule."""
+    _close_schema(block, _KNOWN_FUTILITY, "futility")
+    raw_conditions = _require(block, "conditions", "futility")
+    if not isinstance(raw_conditions, list) or not all(
+        isinstance(value, str) for value in raw_conditions
+    ):
+        raise Phase2ConfigError("futility.conditions must be a list of strings")
+    conditions = tuple(raw_conditions)
+    metric = _require(block, "dev_oof_metric", "futility")
+    threshold_raw = _require(block, "dev_oof_threshold", "futility")
+    if isinstance(threshold_raw, bool) or not isinstance(threshold_raw, (int, float)):
+        raise Phase2ConfigError("futility.dev_oof_threshold must be numeric")
+    threshold = float(threshold_raw)
+    if conditions != _EXPECTED_FUTILITY_CONDITIONS:
+        raise Phase2ConfigError(
+            "futility.conditions must match the preregistration exactly: "
+            f"{list(_EXPECTED_FUTILITY_CONDITIONS)!r}"
+        )
+    if metric != _EXPECTED_DEV_OOF_METRIC:
+        raise Phase2ConfigError(
+            f"futility.dev_oof_metric must be {_EXPECTED_DEV_OOF_METRIC!r}, got {metric!r}"
+        )
+    if threshold != _EXPECTED_DEV_OOF_THRESHOLD:
+        raise Phase2ConfigError(
+            f"futility.dev_oof_threshold must be {_EXPECTED_DEV_OOF_THRESHOLD}, got {threshold}"
+        )
+    return conditions, metric, threshold
 
 
 def _validate_baselines(block: dict[str, Any]) -> tuple[str, ...]:

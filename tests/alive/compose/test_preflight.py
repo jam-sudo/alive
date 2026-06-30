@@ -189,6 +189,19 @@ def test_lock_is_frozen_and_outcome_free(tmp_path):
     lock.assert_no_outcomes()
 
 
+def test_lock_prediction_arrays_are_independent_read_only_snapshots():
+    res, _ = _phase2a_result(seed=101)
+    lock = run_preflight(**_preflight_kwargs(res))
+    pair = lock.pair_ids_double_unseen[0]
+    locked = lock.predictions_double_unseen["additive"][pair]
+    bundled = res.bundle.predictions_double_unseen["additive"][pair]
+
+    assert locked is not bundled
+    assert not locked.flags.writeable
+    with pytest.raises(ValueError, match="read-only"):
+        locked[0] = 123.0
+
+
 def test_lock_with_smuggled_outcome_marker_is_rejected(tmp_path):
     # The lock's own outcome-free check must fire if a measured-outcome marker is
     # forced into its contents (proving the check is non-vacuous). The check runs

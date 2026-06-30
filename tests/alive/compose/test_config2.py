@@ -86,6 +86,7 @@ def test_runtime_contract_values_are_exposed_and_hashed():
     assert cfg.uncovered_tolerance == 0.75
     assert cfg.split_seed == 11
     assert cfg.registered_seeds == (11, 23, 37)
+    assert cfg.sealed_minimum_n == 1
     assert cfg.method_roster == (
         "l1_bilinear_identifiable",
         "l2_saturation",
@@ -98,6 +99,14 @@ def test_runtime_contract_values_are_exposed_and_hashed():
         "cpa",
     )
     assert len(cfg.config_sha256) == 64
+
+
+@pytest.mark.parametrize("bad", [0, -1, True, "1", 1.0])
+def test_minimum_sealed_n_is_strict_registered_positive_int(tmp_path, bad):
+    raw = _raw()
+    raw["seal"]["minimum_sealed_n"] = bad
+    with pytest.raises(Phase2ConfigError):
+        load_compose_phase2_config(_write(tmp_path, raw))
 
 
 def test_esm_arithmetic_mismatch_rejected(tmp_path):
@@ -150,9 +159,37 @@ def test_comparator_roster_reordered_rejected(tmp_path):
 def test_metric_formula_and_margins():
     cfg = load_compose_phase2_config(CANON)
     assert cfg.metric_primary == "paired_relative_error_reduction"
-    assert cfg.metric_formula == "1 - mean(error_l1) / max(mean(error_comparator), 1e-12)"
+    assert cfg.metric_formula == (
+        "(mean(error_comparator) - mean(error_l1)) / max(mean(error_comparator), 1e-12)"
+    )
     assert cfg.material_margin_vs_additive == pytest.approx(0.05)
     assert cfg.learned_comparator_margin == pytest.approx(0.0)
+
+
+def test_futility_rule_is_loaded_and_frozen():
+    cfg = load_compose_phase2_config(CANON)
+    assert cfg.futility_conditions == (
+        "dev_oof_delta_below_threshold",
+        "rank_condition_fail",
+        "measurability_fail",
+    )
+    assert cfg.dev_oof_metric == "paired_relative_error_reduction_vs_additive"
+    assert cfg.dev_oof_threshold == 0.0
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("conditions", ["anything"]),
+        ("dev_oof_metric", "unregistered"),
+        ("dev_oof_threshold", 999.0),
+    ],
+)
+def test_futility_rule_change_rejected(tmp_path, field, value):
+    raw = _raw()
+    raw["futility"][field] = value
+    with pytest.raises(Phase2ConfigError, match="futility"):
+        load_compose_phase2_config(_write(tmp_path, raw))
 
 
 def test_metric_formula_change_rejected(tmp_path):

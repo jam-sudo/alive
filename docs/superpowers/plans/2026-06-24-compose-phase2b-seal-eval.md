@@ -150,7 +150,7 @@ Implement one-sided non-studentized max-deviation bounds for the exact comparato
 For each regime and comparator:
 
 ```text
-theta_C = 1 - mean(e_L1) / max(mean(e_C), 1e-12)
+theta_C = (mean(e_C) - mean(e_L1)) / max(mean(e_C), 1e-12)
 q = quantile_confidence(max_C(theta_C - theta_C_boot))
 lower_C = theta_C - q
 ```

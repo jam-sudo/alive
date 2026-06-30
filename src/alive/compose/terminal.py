@@ -42,7 +42,7 @@ Write discipline (every terminal artifact)
 1. Guard the payload — :func:`_assert_no_raw_outcomes` rejects any ``np.ndarray``,
    nested raw cell/observation matrix, or oversized numeric list ANYWHERE in the
    payload (recursive) BEFORE a single byte is written.
-2. Install canonical JSON via :func:`alive.compose.io.atomic_write_once`
+2. Install canonical JSON via :func:`alive.io.atomic_write_once`
    (same-directory temp file + flush + fsync of file and dir, then non-overwriting
    ``os.link`` — a second write to the same destination raises ``FileExistsError``).
 3. VERIFY the installed file (recompute its sha and confirm) BEFORE touching the
@@ -83,7 +83,7 @@ from pathlib import Path
 
 import numpy as np
 
-from alive.compose.io import atomic_write_once
+from alive.io import atomic_write_once
 from alive.provenance import (
     DuplicateArtifactError,
     RunLedger,

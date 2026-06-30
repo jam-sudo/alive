@@ -24,6 +24,7 @@ Load-bearing contracts under test (brief steps 1-9, plan §2.1 / §2.5):
 from __future__ import annotations
 
 import dataclasses
+import json
 
 import numpy as np
 import pytest
@@ -40,9 +41,15 @@ from alive.compose.phase2a import (
     Phase2aInputs,
     Phase2aResult,
     _scan_inputs_for_leakage,
+    _verify_factor_banks,
+    _verify_scientific_data_assets,
+    _verify_scientific_response_artifact,
     run_phase2a,
     run_phase2a_fixture,
 )
+from alive.compose.response import fit_response_space, verify_response_artifact
+from alive.compose.zfactor import GeneFactorBank
+from alive.provenance import sha256_bytes, sha256_file, sha256_json
 
 # --------------------------------------------------------------------------- #
 # synthetic instance
@@ -184,7 +191,6 @@ def _inputs(inst, **overrides) -> Phase2aInputs:
         response_dim=inst["p"],
         response_space_checksum="rs-checksum",
         factor_checksum="zf-checksum",
-        model_checksum="model-checksum",
         manifest_checksum="manifest-checksum",
         environment_checksum="env-checksum",
         registered_seeds=(11, 23, 37),
@@ -213,12 +219,35 @@ def _store(inst, **overrides) -> DevelopmentOutcomeStore:
     return DevelopmentOutcomeStore(**kwargs)
 
 
+def _factor_banks(inputs: Phase2aInputs) -> dict[int, GeneFactorBank]:
+    gene_order = tuple(sorted(inputs.gene_index, key=lambda g: g.encode("utf-8")))
+    banks: dict[int, GeneFactorBank] = {}
+    for k_total, matrix in inputs.factors_by_k.items():
+        bank = GeneFactorBank(
+            k_total=k_total,
+            expression_dim=k_total,
+            esm_dim=0,
+            gene_order=gene_order,
+            z_by_gene={g: np.asarray(matrix[inputs.gene_index[g]]).copy() for g in gene_order},
+            expression_explained_variance=np.zeros(k_total),
+            esm_explained_variance=np.zeros(0),
+            expression_components=np.zeros((k_total, k_total)),
+            esm_components=np.zeros((0, 0)),
+            encoder_revision="fixture-revision",
+            sequence_mapping_hash=inputs.sequence_mapping_checksum,
+        )
+        banks[k_total] = dataclasses.replace(bank, checksum=sha256_bytes(bank.artifact_bytes()))
+    return banks
+
+
 _HASHES = dict(
     response_space_checksum="rs-checksum",
     factor_checksum="zf-checksum",
-    model_checksum="model-checksum",
     manifest_checksum="manifest-checksum",
     environment_checksum="env-checksum",
+    data_card_checksum="data-card-checksum",
+    raw_data_checksum="raw-data-checksum",
+    sequence_mapping_checksum="sequence-mapping-checksum",
 )
 
 
@@ -234,6 +263,9 @@ def test_continue_produces_a_verified_bundle_no_outcomes():
     assert res.sealed_access_count == 0
     assert isinstance(res.bundle, FrozenPredictionBundle)
     res.bundle.verify()
+    assert len(res.bundle.model_checksum) == 64
+    assert res.bundle.model_checksum != "model-checksum"
+    assert res.ledger.artifact_sha("model") == res.bundle.model_checksum
     res.bundle.assert_no_outcomes()
     cfg = load_compose_phase2_config("configs/compose_k562_v1_phase2.yaml")
     assert res.bundle.method_roster == cfg.method_roster
@@ -349,7 +381,15 @@ def test_fixture_entry_requires_synthetic_audit():
 # --------------------------------------------------------------------------- #
 @pytest.mark.parametrize(
     "bad_key",
-    ["response_space_checksum", "factor_checksum", "manifest_checksum", "environment_checksum"],
+    [
+        "response_space_checksum",
+        "factor_checksum",
+        "manifest_checksum",
+        "environment_checksum",
+        "data_card_checksum",
+        "raw_data_checksum",
+        "sequence_mapping_checksum",
+    ],
 )
 def test_hash_mismatch_aborts(bad_key):
     rng = np.random.default_rng(6)
@@ -364,18 +404,92 @@ def test_mutated_inputs_after_binding_are_rejected():
     rng = np.random.default_rng(52)
     inst = _build_instance(rng)
     inputs = _inputs(inst)
-    np.asarray(inputs.additive_cal)[0, 0] += 1.0
-    with pytest.raises(ValueError, match="content changed"):
-        run_phase2a_fixture(inputs, _store(inst), expected_hashes=_HASHES)
+    with pytest.raises(ValueError, match="read-only"):
+        np.asarray(inputs.additive_cal)[0, 0] += 1.0
 
 
 def test_mutated_outcomes_after_binding_are_rejected():
     rng = np.random.default_rng(56)
     inst = _build_instance(rng)
     store = _store(inst)
-    store.combo_calibration_eps[0, 0] += 1.0
-    with pytest.raises(ValueError, match="content changed"):
-        run_phase2a_fixture(_inputs(inst), store, expected_hashes=_HASHES)
+    with pytest.raises(ValueError, match="read-only"):
+        store.combo_calibration_eps[0, 0] += 1.0
+
+
+def test_factor_bank_artifacts_bind_runtime_factor_rows():
+    inst = _build_instance(np.random.default_rng(57))
+    base = _inputs(inst)
+    banks = _factor_banks(base)
+    aggregate = sha256_json(
+        {"factor_banks_by_k": {str(k): banks[k].checksum for k in sorted(banks)}}
+    )
+    bound = dataclasses.replace(base, factor_banks_by_k=banks, factor_checksum=aggregate)
+
+    _verify_factor_banks(bound, require_banks=True)
+
+    changed = np.array(bound.factors_by_k[4], copy=True)
+    changed[0, 0] += 1.0
+    mismatched = dataclasses.replace(bound, factors_by_k={**bound.factors_by_k, 4: changed})
+    with pytest.raises(ValueError, match="does not match bank"):
+        _verify_factor_banks(mismatched, require_banks=True)
+
+
+def test_scientific_data_assets_are_hashed_from_actual_files(tmp_path):
+    raw_path = tmp_path / "source.bin"
+    raw_path.write_bytes(b"audited source bytes")
+    raw_digest = sha256_file(raw_path)
+    card = {"raw_or_source": {"digest": raw_digest}, "dataset": "fixture-card"}
+    card_path = tmp_path / "data-card.json"
+    card_path.write_text(json.dumps(card), encoding="utf-8")
+
+    inst = _build_instance(np.random.default_rng(58))
+    inputs = _inputs(
+        inst,
+        data_card_checksum=sha256_json(card),
+        raw_data_checksum=raw_digest,
+    )
+    _verify_scientific_data_assets(
+        inputs,
+        data_card_path=card_path,
+        raw_asset_path=raw_path,
+    )
+
+    raw_path.write_bytes(b"changed after binding")
+    with pytest.raises(ValueError, match="raw/source digest mismatch"):
+        _verify_scientific_data_assets(
+            inputs,
+            data_card_path=card_path,
+            raw_asset_path=raw_path,
+        )
+
+
+def test_scientific_response_artifact_binds_space_and_control_mean():
+    X = np.arange(60, dtype=np.float64).reshape(10, 6) + 1.0
+    controls = np.array([0, 1, 2])
+    singles = np.array([3, 4, 5])
+    space = fit_response_space(
+        X,
+        control_idx=controls,
+        eligible_single_idx=singles,
+        n_hvg=4,
+        pca_dim=2,
+        seed=0,
+    )
+    control_mean = space.project(X, controls).mean(axis=0)
+    _, _, checksum = verify_response_artifact(space, control_mean)
+    artifact = {
+        "response_space": space,
+        "control_mean": control_mean,
+        "checksum": checksum,
+    }
+    inst = _build_instance(np.random.default_rng(59))
+    inputs = _inputs(inst, response_space_checksum=checksum)
+
+    _verify_scientific_response_artifact(inputs, artifact)
+
+    artifact["control_mean"] = control_mean + 1e-12
+    with pytest.raises(ValueError, match="checksum"):
+        _verify_scientific_response_artifact(inputs, artifact)
 
 
 def test_reordered_outcome_pair_ids_are_rejected():
@@ -386,6 +500,33 @@ def test_reordered_outcome_pair_ids_are_rejected():
         run_phase2a_fixture(
             _inputs(inst),
             _store(inst, combo_calibration_pair_ids=reversed_ids),
+            expected_hashes=_HASHES,
+        )
+
+
+def test_calibration_string_and_index_pairs_must_match_gene_index():
+    rng = np.random.default_rng(104)
+    inst = _build_instance(rng)
+    bad_idx = list(inst["cal_pairs_idx"])
+    bad_idx[0], bad_idx[1] = bad_idx[1], bad_idx[0]
+    with pytest.raises(ValueError, match="calibration pair mismatch"):
+        run_phase2a_fixture(
+            _inputs(inst, cal_idx_pairs=bad_idx),
+            _store(inst),
+            expected_hashes=_HASHES,
+        )
+
+
+def test_gene_index_must_be_bijective():
+    rng = np.random.default_rng(105)
+    inst = _build_instance(rng)
+    bad_index = dict(inst["gene_index"])
+    genes = list(bad_index)
+    bad_index[genes[1]] = bad_index[genes[0]]
+    with pytest.raises(ValueError, match="bijection"):
+        run_phase2a_fixture(
+            _inputs(inst, gene_index=bad_index),
+            _store(inst),
             expected_hashes=_HASHES,
         )
 

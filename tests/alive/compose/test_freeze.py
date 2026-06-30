@@ -201,11 +201,29 @@ def test_verify_fails_when_upstream_checksum_mutated():
         b.verify()
 
 
-def test_verify_fails_when_a_prediction_mutated():
+def test_frozen_prediction_cannot_be_mutated():
     b = _bundle()
-    b.predictions_double_unseen["additive"][("g0", "g1")][0] = 999.0
-    with pytest.raises(FreezeError, match="checksum"):
-        b.verify()
+    with pytest.raises(ValueError, match="read-only"):
+        b.predictions_double_unseen["additive"][("g0", "g1")][0] = 999.0
+
+
+def test_create_copies_prediction_arrays():
+    predictions = _roster_preds(DOUBLE_PAIRS)
+    b = _bundle(predictions_double_unseen=predictions)
+    predictions["additive"][("g0", "g1")][0] = 999.0
+    assert b.predictions_double_unseen["additive"][("g0", "g1")][0] != 999.0
+    b.verify()
+
+
+def test_checksum_binds_sub_picounit_prediction_change():
+    first = _roster_preds(DOUBLE_PAIRS)
+    second = _roster_preds(DOUBLE_PAIRS)
+    second["additive"][("g0", "g1")][0] += 1e-13
+
+    assert (
+        _bundle(predictions_double_unseen=first).bundle_checksum
+        != _bundle(predictions_double_unseen=second).bundle_checksum
+    )
 
 
 def test_verify_fails_when_run_id_mutated():
