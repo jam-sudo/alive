@@ -27,7 +27,7 @@ def _context() -> BaselineTrainingContext:
     )
 
 
-def test_unavailable_backend_raises_baseline_unavailable():
+def test_unavailable_backend_raises_baseline_unavailable() -> None:
     be = SubprocessBaselineBackend(
         name="gears",
         env_python=sys.executable,
@@ -39,7 +39,7 @@ def test_unavailable_backend_raises_baseline_unavailable():
         adapter.predict(_context(), [("A", "B")], 3)
 
 
-def test_incomplete_roster_after_unavailable_backend_raises_freezeerror():
+def test_incomplete_roster_after_unavailable_backend_raises_freezeerror() -> None:
     # An unavailable deep backend (e.g. gears) contributes NO predictions; the
     # roster-completeness check must then raise FreezeError, never accept a
     # partial roster (the fail-closed terminal state — see spec-review med finding).

@@ -166,6 +166,7 @@ class SubprocessBaselineBackend:
         payload = dict(self._payload)
         payload["pair_ids"] = [list(p) for p in pair_ids]
         payload["response_dim"] = int(response_dim)
+        payload["seed"] = int(self.seed)
         _assert_no_sealed_reference(payload)  # fit-role-only guard on the payload
         with tempfile.TemporaryDirectory() as work_dir:
             write_payload(work_dir, payload)

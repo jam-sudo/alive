@@ -37,7 +37,7 @@ def _payload() -> dict:
     }
 
 
-def test_payload_round_trip_preserves_values_and_checksum(tmp_path):
+def test_payload_round_trip_preserves_values_and_checksum(tmp_path) -> None:
     p = _payload()
     c1 = write_payload(str(tmp_path), p)
     back = read_payload(str(tmp_path))
@@ -49,21 +49,21 @@ def test_payload_round_trip_preserves_values_and_checksum(tmp_path):
     assert c1 == c2 and len(c1) == 64
 
 
-def test_missing_key_rejected(tmp_path):
+def test_missing_key_rejected(tmp_path) -> None:
     p = _payload()
     del p["control_mean"]
     with pytest.raises(PayloadError):
         write_payload(str(tmp_path), p)
 
 
-def test_unknown_key_rejected(tmp_path):
+def test_unknown_key_rejected(tmp_path) -> None:
     p = _payload()
     p["surprise"] = 1
     with pytest.raises(PayloadError):
         write_payload(str(tmp_path), p)
 
 
-def test_prediction_round_trip(tmp_path):
+def test_prediction_round_trip(tmp_path) -> None:
     preds = {("A", "B"): np.array([1.0, 2.0, 3.0]), ("A", "C"): np.array([4.0, 5.0, 6.0])}
     path = str(tmp_path / "preds")
     c = write_predictions(path, preds)
@@ -73,14 +73,14 @@ def test_prediction_round_trip(tmp_path):
     assert len(c) == 64
 
 
-def test_is_available_true_for_importable_module():
+def test_is_available_true_for_importable_module() -> None:
     be = SubprocessBaselineBackend(
         name="stub", env_python=sys.executable, worker_script="x", import_name="json"
     )
     assert be.is_available is True
 
 
-def test_is_available_false_for_missing_module():
+def test_is_available_false_for_missing_module() -> None:
     be = SubprocessBaselineBackend(
         name="gears",
         env_python=sys.executable,
@@ -90,7 +90,7 @@ def test_is_available_false_for_missing_module():
     assert be.is_available is False
 
 
-def test_is_available_false_for_bad_python():
+def test_is_available_false_for_bad_python() -> None:
     be = SubprocessBaselineBackend(
         name="cpa", env_python="/no/such/python", worker_script="x", import_name="cpa"
     )
@@ -116,7 +116,7 @@ def _backend() -> SubprocessBaselineBackend:
     )
 
 
-def test_predict_end_to_end_through_adapter(tmp_path):
+def test_predict_end_to_end_through_adapter() -> None:
     be = _backend()
     be._payload = _payload()  # test injects the fit-role payload (see Step 3 note)
     adapter = BaselineAdapter(name="stub", backend=be)
@@ -126,7 +126,7 @@ def test_predict_end_to_end_through_adapter(tmp_path):
     np.testing.assert_allclose(out[("A", "B")], np.array([0.5, 0.7, 0.9]))
 
 
-def test_predict_is_deterministic(tmp_path):
+def test_predict_is_deterministic() -> None:
     be1, be2 = _backend(), _backend()
     be1._payload = _payload()
     be2._payload = _payload()
@@ -135,7 +135,7 @@ def test_predict_is_deterministic(tmp_path):
     np.testing.assert_allclose(a[("A", "B")], b[("A", "B")])
 
 
-def test_payload_with_sealed_token_is_refused():
+def test_payload_with_sealed_token_is_refused() -> None:
     be = _backend()
     bad = _payload()
     bad["single_gene_ids"] = ["A", "sealed_double_unseen", "C"]
