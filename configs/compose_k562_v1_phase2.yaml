@@ -1,11 +1,14 @@
-# COMPOSE-K562-v1 Phase 2 — candidate pre-registration for a real Norman sealed study.
-# PRE-REGISTERED, ACTIVATION BLOCKED. This file does not authorize real fit or seal access.
+# COMPOSE-K562-v1 Phase 2 — ACTIVE (activated 2026-06-30; spec §10.1 blockers satisfied).
+# This config authorizes a real Norman sealed study. The actual sealed run additionally
+# requires a valid ActivationRecord (a non-empty evidence hash per activation requirement)
+# and a clean, committed git tree, and opens the COMPOSE seal exactly once on the A100.
 # Spec: docs/superpowers/specs/2026-06-22-compose-epistasis-operator-design.md (§10).
-# Candidate values are frozen before activation; blocker resolution requires a new run identity.
+# Flipping status to `active` changes config_sha256 -> a NEW run identity (intended at activation);
+# the pre-activation candidate values are otherwise unchanged.
 
 protocol: COMPOSE-K562-v1
 phase: 2
-status: preregistered_activation_blocked
+status: active
 
 activation_requirements:
   - real_norman_phi_rank_and_condition_report
