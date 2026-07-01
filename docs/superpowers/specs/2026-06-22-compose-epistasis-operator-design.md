@@ -1,8 +1,8 @@
 # COMPOSE — 식별가능한 Interaction-Composition Operator (Epistasis) Design
 
 > **문서 역할:** milestone의 scientific claim 계약
-> **상태:** **PRE-REGISTERED, ACTIVATION BLOCKED** — owner가 Phase-2 설계와 사전등록 후보 작성을 승인했으나 §9/§10.1 blocker 충족 전 real fit·seal 접근 금지. Phase-2 candidate config는 `configs/compose_k562_v1_phase2.yaml`.
-> **개정일:** 2026-06-24
+> **상태:** **ACTIVE** (2026-06-30 activation) — §10.1 activation blocker 6개가 version-controlled evidence/tests로 충족되어 CLAUDE.md registry가 같은 activation commit에서 `ACTIVE`로 전환됨. real Phase-2 fit·sealed 접근 인가; 실제 sealed run은 A100에서 유효한 `ActivationRecord`(requirement별 evidence hash) + clean git tree로만 실행되고 COMPOSE seal은 정확히 한 번 열린다(§6.3). Phase-2 config는 `configs/compose_k562_v1_phase2.yaml`.
+> **개정일:** 2026-06-30
 > **protocol 이름:** `COMPOSE-K562-v1`
 > **선행 milestone:** `TG-K562-v1` (COMPLETE, verdict `NO_DISTINCT_WIN`; 본 milestone은 그 결과에 소급 주장하지 않음, seal 영구 독립 §6.3)
 
@@ -12,8 +12,10 @@
 
 본 문서는 **조합 perturbation의 비가산(genetic-interaction) 성분을 식별가능한 composition
 operator로 예측**하는 차기 milestone의 과학 계약과 Phase-2 사전등록 후보이다.
-CLAUDE.md(safety/governance) 하위, milestone claim 도메인의 최상위 문서이나,
-**activation blocker가 남아 있어 아직 active scientific protocol이 아니다.**
+CLAUDE.md(safety/governance) 하위, milestone claim 도메인의 최상위 문서이다.
+**§10.1 activation blocker 6개가 2026-06-30 모두 충족되어 active scientific protocol로 전환됐다**
+(CLAUDE.md registry 동일 commit `ACTIVE`). 실제 sealed run은 여전히 A100 + ActivationRecord +
+clean tree를 요구하고 COMPOSE seal은 1회 열린다.
 
 이 milestone은 다음이 모두 충족되기 전까지 활성화하지 않는다(§9):
 
@@ -361,6 +363,12 @@ Owner는 2026-06-23 Phase-2 설계와 사전등록 후보 작성을 승인했다
 claim·정직성 계약을 고정한다. 이는 sealed scientific run의 승인이 아니다.
 
 ### 10.1 Activation blockers
+
+> **상태 (2026-06-30): 6개 blocker 전부 충족 — activation 완료.** evidence는
+> `docs/activation-evidence/compose/`(phi-rank, detectable-effect, GEARS/CPA lock)와
+> `docs/data-cards/norman_compose_k562_v1.json`, tests는 `tests/alive/compose/` (591 green).
+> CLAUDE.md registry는 같은 activation commit에서 `ACTIVE`로 전환된다. 아래 목록은 충족한
+> 계약을 기록으로 보존한다.
 
 다음이 version-control된 evidence/artifact와 tests로 충족되고 `CLAUDE.md` registry가 같은
 activation commit에서 `ACTIVE`로 전환되기 전에는 real Phase-2 fit, sealed outcome 접근과 verdict

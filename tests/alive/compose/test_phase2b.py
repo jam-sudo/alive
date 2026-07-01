@@ -19,10 +19,12 @@ Load-bearing contracts under test (brief + plan §5):
   * every consumed access leaves a write-once terminal artifact (COMPLETE /
     INVALID / ABORTED_AFTER_SEAL); a preflight/pre-access failure keeps
     ``sealed_access_count == 0`` and the seal closed;
-  * scientific ``run_phase2b`` enforces activation — the BLOCKED candidate config
-    makes it fail; the bounded synthetic ``run_phase2b_fixture`` is the test path.
+  * scientific ``run_phase2b`` enforces activation — a blocked config makes it
+    fail; the bounded synthetic ``run_phase2b_fixture`` is the test path. (The
+    canonical config is ``active`` as of the 2026-06-30 activation; blocked
+    rejection is pinned via a synthetic blocked config.)
 
-ACTIVATION BLOCKED: pure synthetic / tiny-fixture values only; NO real Norman,
+SYNTHETIC-ONLY: pure synthetic / tiny-fixture values only; NO real Norman,
 NO seal open beyond the synthetic in-memory store, NO real sealed-outcome read.
 """
 
@@ -889,7 +891,11 @@ def _activation_record(cfg):
 
 
 def test_scientific_entry_blocked_config_raises(tmp_path):
+    # Safety invariant preserved after the 2026-06-30 activation: a BLOCKED config
+    # is refused by the scientific entry point before the seal is ever opened. The
+    # canonical config is now ``active``, so a synthetic blocked config pins this.
     kit = _make_run(tmp_path, fixture_store=False)
+    blocked_cfg = dataclasses.replace(kit["cfg"], status="preregistered_activation_blocked")
     with pytest.raises(ScientificModeError):
         run_phase2b(
             run_dir=kit["run_dir"],
@@ -897,7 +903,7 @@ def test_scientific_entry_blocked_config_raises(tmp_path):
             frozen_bundle=kit["bundle"],
             pair_manifest=kit["manifest"],
             response_artifact=kit["response_artifact"],
-            config=kit["cfg"],
+            config=blocked_cfg,
             ledger=kit["ledger"],
             activation_record=_activation_record(kit["cfg"]),
             git_is_clean=True,
@@ -909,8 +915,9 @@ def test_scientific_entry_blocked_config_raises(tmp_path):
 
 def test_scientific_entry_rejects_fixture_store(tmp_path):
     kit = _make_run(tmp_path, fixture_store=True)
-    # even with a (fake) activation, a synthetic-fixture store is not scientific
-    # evidence; and the blocked config fails activation regardless.
+    # a synthetic-fixture store is not scientific evidence and is refused by the
+    # scientific entry point even under an active config with a full activation
+    # record — the fixture path (`run_phase2b_fixture`) is the only synthetic entry.
     with pytest.raises((ScientificModeError, PreflightError, ComposeSealingError)):
         run_phase2b(
             run_dir=kit["run_dir"],

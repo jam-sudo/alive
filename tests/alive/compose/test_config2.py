@@ -2,8 +2,10 @@
 
 These tests pin the COMPOSE-K562-v1 Phase-2 strict config loader and the
 execution-mode guard. The central safety property is: a config whose status is
-``preregistered_activation_blocked`` (the current candidate) MUST NOT be able to
-start a real-data scientific pipeline.
+``preregistered_activation_blocked`` MUST NOT be able to start a real-data
+scientific pipeline. The canonical config is ACTIVE as of the 2026-06-30
+activation; the blocked-rejection invariant is pinned here via a synthetic
+blocked config, and the activated canonical config is checked to pass the gate.
 """
 
 from __future__ import annotations
@@ -60,7 +62,7 @@ def test_canonical_round_trip():
     assert isinstance(cfg, ComposePhase2Config)
     assert cfg.protocol == "COMPOSE-K562-v1"
     assert cfg.phase == 2
-    assert cfg.status == "preregistered_activation_blocked"
+    assert cfg.status == "active"
 
 
 def test_config_is_frozen():
@@ -482,9 +484,10 @@ def test_bool_in_esm_projection_dim_rejected(tmp_path):
 # ---------------------------------------------------------------------------
 # fixture mode cannot be authorized by the scientific guard
 # ---------------------------------------------------------------------------
-def test_scientific_guard_rejects_fixture_mode_even_when_blocked():
+def test_scientific_guard_rejects_fixture_mode():
+    # Fixture mode is rejected regardless of config status (it is the first guard
+    # check, before status). Verified here on the canonical (now active) config.
     cfg = load_compose_phase2_config(CANON)
-    assert cfg.status != "active"
     with pytest.raises(ScientificModeError, match="fixture"):
         assert_scientific_mode_allowed(cfg, fixture_mode=True)
 
@@ -503,8 +506,15 @@ def test_fixture_mode_cannot_bypass_activation_record():
 # ---------------------------------------------------------------------------
 # the core safety property: a BLOCKED config cannot start a real pipeline
 # ---------------------------------------------------------------------------
-def test_blocked_config_cannot_start_scientific_pipeline():
-    cfg = load_compose_phase2_config(CANON)
+def test_blocked_config_cannot_start_scientific_pipeline(tmp_path):
+    # Safety invariant preserved after the 2026-06-30 activation: a config whose
+    # status is ``preregistered_activation_blocked`` cannot start a real pipeline
+    # even with a full activation record + clean tree. The canonical config is now
+    # ``active``, so this pins the guard's blocked-rejection via a synthetic
+    # blocked config.
+    raw = _raw()
+    raw["status"] = "preregistered_activation_blocked"
+    cfg = load_compose_phase2_config(_write(tmp_path, raw))
     assert cfg.status == "preregistered_activation_blocked"
     with pytest.raises(ScientificModeError):
         assert_scientific_mode_allowed(
@@ -513,6 +523,21 @@ def test_blocked_config_cannot_start_scientific_pipeline():
             activation_record=_activation_record(),
             git_is_clean=True,
         )
+
+
+def test_activated_canonical_config_passes_scientific_gate():
+    # The canonical config is ACTIVE (2026-06-30 activation). With a full owner
+    # activation record and a clean tree it passes the scientific-mode gate
+    # (does not raise). This is the positive counterpart to the blocked-rejection
+    # invariant above; the real sealed run additionally happens only on the A100.
+    cfg = load_compose_phase2_config(CANON)
+    assert cfg.status == "active"
+    assert_scientific_mode_allowed(
+        cfg,
+        fixture_mode=False,
+        activation_record=_activation_record(),
+        git_is_clean=True,
+    )
 
 
 def test_scientific_mode_requires_activation_record(tmp_path):

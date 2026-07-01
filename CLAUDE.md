@@ -1,9 +1,9 @@
 # ALIVE — Virtual Cell Project Governance
 
 > **문서 역할:** project-wide scientific governance and agent operating contract
-> **개정일:** 2026-06-28
-> **현재 활성 protocol:** 없음 (TG-K562-v1 COMPLETE; COMPOSE-K562-v1 PRE-REGISTERED — ACTIVATION BLOCKED)
-> **다음 milestone:** `COMPOSE-K562-v1` (activation blocked) → `CT-RPE1-v1` (deferred)
+> **개정일:** 2026-06-30
+> **현재 활성 protocol:** `COMPOSE-K562-v1` (ACTIVE, 2026-06-30 activation; TG-K562-v1 COMPLETE) — sealed confirmatory run은 A100에서 1회
+> **다음 milestone:** `COMPOSE-K562-v1` sealed double-unseen 확정 실행 → `CT-RPE1-v1` (deferred)
 
 ---
 
@@ -130,7 +130,7 @@ protocol-independent safety invariant는 모든 protocol에 적용된다. Protoc
 
 이 protocol의 exact split과 verdict는 versioned CARTOGRAPHER spec/plan/config가 결정한다.
 
-### 4.2 `COMPOSE-K562-v1` — PRE-REGISTERED, ACTIVATION BLOCKED
+### 4.2 `COMPOSE-K562-v1` — ACTIVE
 
 목적:
 
@@ -142,16 +142,21 @@ Scientific claim contract와 candidate Phase-2 config는 다음에 있다.
 - Spec: `docs/superpowers/specs/2026-06-22-compose-epistasis-operator-design.md`
 - Candidate config: `configs/compose_k562_v1_phase2.yaml`
 
-Owner는 Phase 2 설계와 사전등록 후보 작성을 승인했다. 그러나 다음 activation blocker가 모두
-해소되고 같은 commit에서 registry가 `ACTIVE`로 전환되기 전에는 real Phase-2 fit, sealed outcome
-접근 또는 scientific verdict 산출을 금지한다.
+Owner는 Phase 2 설계와 사전등록 후보를 승인했고, 아래 6개 activation blocker가 모두
+version-controlled evidence/tests로 충족되어 **2026-06-30 이 commit에서 registry를 `ACTIVE`로
+전환한다**(spec §10.1). 이로써 real Phase-2 fit과 sealed outcome 접근이 인가된다. 단, 실제
+sealed confirmatory run은 A100에서 유효한 `ActivationRecord`(requirement별 non-empty evidence
+hash) + clean git tree로만 실행되며, COMPOSE seal은 TG-K562와 독립적으로 정확히 한 번 열린다
+(§6.3). 활성화는 기존 결과에 소급 적용하지 않는다.
 
-- 실제 Norman `combo_calibration` 설계행렬의 rank/conditioning evidence
-- adequate sample-size / detectable-effect analysis
-- 확정 Norman data-card와 raw-data checksum
-- GEARS/CPA의 재현 가능한 dependency lock 및 실행 환경
-- 독립 COMPOSE outcome store, access audit와 write-once run lifecycle
-- Phase-2 implementation plan, metric known-answer tests와 leakage/integration tests
+충족된 activation blocker (evidence: `docs/activation-evidence/compose/`, `docs/data-cards/`):
+
+- 실제 Norman `combo_calibration` 설계행렬의 rank/conditioning evidence — `real_norman_phi_rank_report.json` (k=4/6/8 full-rank)
+- adequate sample-size / detectable-effect analysis — `real_norman_detectable_effect_report.json` (double-unseen powered)
+- 확정 Norman data-card와 raw-data checksum — `norman_compose_k562_v1.json`
+- GEARS/CPA의 재현 가능한 dependency lock 및 실행 환경 — `gears_cpa_dependency_lock.json` (fresh-sync verified)
+- 독립 COMPOSE outcome store, access audit와 write-once run lifecycle — `outcome_store.py`/`terminal.py`/`provenance2.py`
+- Phase-2 implementation plan, metric known-answer tests와 leakage/integration tests — Phase-2a/2b plans + compose suite green
 
 ### 4.3 `CT-RPE1-v1` — DEFERRED NEXT MILESTONE
 
@@ -470,10 +475,10 @@ COMPLETE:
   K562 sealed evaluation
   scalar error calibration + Trust-Gate routing
 
-PRE-REGISTERED — ACTIVATION BLOCKED:
+ACTIVE (2026-06-30 activation):
   COMPOSE-K562-v1
   Norman K562 CRISPRa pair-level split
-  independent COMPOSE seal (not yet implemented or open)
+  independent COMPOSE seal (activated; opens once — A100 sealed run pending)
 
 DEFERRED:
   CT-RPE1-v1
@@ -484,6 +489,7 @@ RULE:
   Protocol seals, claims, manifests, run IDs and reports are never interchangeable.
 ```
 
-현재 active scientific protocol은 없다. `COMPOSE-K562-v1`은 사전등록 후보이지만 activation
-blocker가 남아 있다. Norman sealed outcomes 또는 RPE1 perturbed outcomes에 접근하려면 owner가
-해당 protocol을 별도 commit에서 명시적으로 `ACTIVE`로 전환해야 한다.
+현재 active scientific protocol은 `COMPOSE-K562-v1`이다(2026-06-30 activation, spec §10.1의 6개
+blocker 충족). real Phase-2 fit과 sealed outcome 접근이 인가됐으나, 실제 sealed confirmatory run은
+A100에서 유효한 `ActivationRecord` + clean git tree로만 실행되고 COMPOSE seal은 정확히 한 번
+열린다. RPE1 perturbed outcomes 접근은 여전히 별도 protocol(`CT-RPE1-v1`) 활성화를 요구한다.
