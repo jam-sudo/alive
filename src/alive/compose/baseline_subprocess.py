@@ -12,7 +12,9 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import subprocess
 from collections.abc import Mapping
+from dataclasses import dataclass, field
 
 import numpy as np
 
@@ -85,3 +87,33 @@ def read_predictions(path: str) -> dict[tuple[str, str], np.ndarray]:
     if obj.get("schema_version") != _SCHEMA_VERSION:
         raise PayloadError("prediction file has an unexpected schema_version")
     return {tuple(pair): np.asarray(vec, dtype=float) for pair, vec in obj["pairs"]}
+
+
+@dataclass
+class SubprocessBaselineBackend:
+    """Guarded deep-baseline backend that runs a worker under a locked-env python.
+
+    Implements the seam contract (``is_available`` + ``predict``) from
+    ``baselines_combo.BaselineAdapter``. Imports no gears/cpa itself.
+    """
+
+    name: str
+    env_python: str
+    worker_script: str
+    import_name: str
+    seed: int = 11
+    _available: bool | None = field(default=None, init=False, repr=False)
+
+    @property
+    def is_available(self) -> bool:
+        if self._available is None:
+            try:
+                r = subprocess.run(
+                    [self.env_python, "-c", f"import {self.import_name}"],
+                    capture_output=True,
+                    timeout=120,
+                )
+                self._available = r.returncode == 0
+            except Exception:
+                self._available = False
+        return self._available

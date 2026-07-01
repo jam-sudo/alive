@@ -3,11 +3,14 @@
 
 from __future__ import annotations
 
+import sys
+
 import numpy as np
 import pytest
 
 from alive.compose.baseline_subprocess import (
     PayloadError,
+    SubprocessBaselineBackend,
     read_payload,
     read_predictions,
     write_payload,
@@ -66,3 +69,27 @@ def test_prediction_round_trip(tmp_path):
     assert set(back) == set(preds)
     np.testing.assert_allclose(back[("A", "B")], preds[("A", "B")])
     assert len(c) == 64
+
+
+def test_is_available_true_for_importable_module():
+    be = SubprocessBaselineBackend(
+        name="stub", env_python=sys.executable, worker_script="x", import_name="json"
+    )
+    assert be.is_available is True
+
+
+def test_is_available_false_for_missing_module():
+    be = SubprocessBaselineBackend(
+        name="gears",
+        env_python=sys.executable,
+        worker_script="x",
+        import_name="definitely_not_a_real_module_xyz",
+    )
+    assert be.is_available is False
+
+
+def test_is_available_false_for_bad_python():
+    be = SubprocessBaselineBackend(
+        name="cpa", env_python="/no/such/python", worker_script="x", import_name="cpa"
+    )
+    assert be.is_available is False
