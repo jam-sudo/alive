@@ -13,10 +13,13 @@ import hashlib
 import json
 import os
 import subprocess
+import tempfile
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 
 import numpy as np
+
+from alive.compose.baselines_combo import BaselineUnavailable, _assert_no_sealed_reference
 
 _SCHEMA_VERSION = 1
 _REQUIRED_KEYS: frozenset[str] = frozenset(
@@ -103,6 +106,7 @@ class SubprocessBaselineBackend:
     import_name: str
     seed: int = 11
     _available: bool | None = field(default=None, init=False, repr=False)
+    _payload: dict | None = field(default=None, init=False, repr=False)
 
     @property
     def is_available(self) -> bool:
@@ -117,3 +121,61 @@ class SubprocessBaselineBackend:
             except Exception:
                 self._available = False
         return self._available
+
+    def predict(
+        self,
+        context: object,
+        pair_ids: list[tuple[str, str]],
+        response_dim: int,
+    ) -> dict[tuple[str, str], np.ndarray]:
+        """Run the locked-env worker on the assigned fit-role payload.
+
+        The fit-role ``_payload`` is assigned by the caller / Phase-2a wiring
+        (never carrying a sealed role, token or path). This method scans the
+        serialized payload for any sealed reference, writes it to a fresh temp
+        work directory, invokes ``<env_python> <worker_script> --in <work_dir>
+        --out <preds>``, and returns the parsed response-space delta.
+
+        Parameters
+        ----------
+        context : object
+            The frozen development-role context (validated by the adapter seam
+            before this backend is touched); unused here beyond the seam guard.
+        pair_ids : list of tuple of str
+            The canonical pair IDs to predict.
+        response_dim : int
+            The required response dimension for every prediction vector.
+
+        Returns
+        -------
+        dict
+            Mapping from each requested canonical pair ID to a
+            length-``response_dim`` prediction vector.
+
+        Raises
+        ------
+        PayloadError
+            If no fit-role payload has been assigned.
+        ValueError
+            If the serialized payload contains any sealed reference.
+        BaselineUnavailable
+            If the worker subprocess exits non-zero.
+        """
+        if self._payload is None:
+            raise PayloadError(f"{self.name} backend has no fit-role payload assigned")
+        payload = dict(self._payload)
+        payload["pair_ids"] = [list(p) for p in pair_ids]
+        payload["response_dim"] = int(response_dim)
+        _assert_no_sealed_reference(payload)  # fit-role-only guard on the payload
+        with tempfile.TemporaryDirectory() as work_dir:
+            write_payload(work_dir, payload)
+            out = f"{work_dir}/preds"
+            r = subprocess.run(
+                [self.env_python, self.worker_script, "--in", work_dir, "--out", out],
+                capture_output=True,
+                text=True,
+                timeout=1800,
+            )
+            if r.returncode != 0:
+                raise BaselineUnavailable(f"{self.name} worker failed: {r.stderr[-500:]}")
+            return read_predictions(out)
