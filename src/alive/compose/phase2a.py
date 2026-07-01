@@ -1,6 +1,6 @@
 """No-seal Phase-2a orchestrator + frozen handoff (Task 2a-11, plan §2.5 / §2.1).
 
-ACTIVATION BLOCKED: pure ``numpy`` on synthetic fixtures only. ``run_phase2a``
+SYNTHETIC-ONLY: pure ``numpy`` on synthetic fixtures only. ``run_phase2a``
 ties Tasks 2a-1..2a-10 together and produces the :class:`FrozenPredictionBundle`
 Phase 2b consumes. It NEVER opens a seal and NEVER reads a sealed outcome.
 

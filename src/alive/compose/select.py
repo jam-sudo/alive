@@ -1,6 +1,6 @@
 """End-to-end gene-disjoint OOF hyperparameter selection (Task 2a-8, plan §2.4).
 
-ACTIVATION BLOCKED. Pure ``numpy``; no sealed access. Out-of-fold (OOF)
+SYNTHETIC-ONLY. Pure ``numpy``; no sealed access. Out-of-fold (OOF)
 hyperparameter selection runs on **development calibration pairs only**: the
 folds mirror the sealed gene-disjoint regime so the selected ``(k_total, lambda)``
 is chosen the way the sealed double-unseen claim will be scored, but no sealed

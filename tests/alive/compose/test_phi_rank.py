@@ -1,4 +1,4 @@
-"""Synthetic-only tests for the Φ rank/condition report (ACTIVATION BLOCKED).
+"""Synthetic-only tests for the Φ rank/condition report.
 
 No real Norman outcomes are touched: the pure :func:`compute_phi_rank_report`
 is exercised with random single-role ``δ_g`` and outcome-free sequence vectors,

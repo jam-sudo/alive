@@ -8,7 +8,7 @@ This store is THE seal boundary for COMPOSE-K562-v1 Phase 2b. It mirrors the
 their UNION, and ``evaluate_sealed_once`` opens BOTH regimes in a single
 audited call requiring the requested set to equal the union EXACTLY.
 
-ACTIVATION BLOCKED: all fixtures use a tiny in-memory synthetic source hidden
+SYNTHETIC-ONLY: all fixtures use a tiny in-memory synthetic source hidden
 behind the store. The real Norman dataset is NEVER touched and no real seal is
 ever opened.
 """

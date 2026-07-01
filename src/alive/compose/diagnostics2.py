@@ -1,6 +1,6 @@
 """Real calibration diagnostics + futility checkpoint (Task 2a-9; spec §10.6).
 
-ACTIVATION BLOCKED: pure ``numpy`` on synthetic inputs only; **NO seal access**.
+SYNTHETIC-ONLY: pure ``numpy`` on synthetic inputs only; **NO seal access**.
 This module runs the Phase-2a development checkpoint on
 **development-role inputs only** (``singles_train`` + ``combo_calibration``) and
 decides whether the real study may CONTINUE or must be ``FUTILITY_STOPPED``

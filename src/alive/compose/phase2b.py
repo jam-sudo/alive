@@ -40,7 +40,7 @@ Two-entry activation pattern (mirrors :mod:`alive.compose.phase2a`)
 Both delegate to a shared :func:`_run_phase2b_core`. NEITHER entry accepts raw
 truth.
 
-ACTIVATION BLOCKED: this is code + synthetic/tiny-fixture integration tests
+SYNTHETIC-ONLY: this is code + synthetic/tiny-fixture integration tests
 only. Real execution remains blocked until the owner activation commit and every
 §10.1 activation requirement is complete.
 """

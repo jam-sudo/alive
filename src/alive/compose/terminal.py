@@ -53,7 +53,7 @@ Abort artifacts never embed raw outcomes: they carry the exception CLASS NAME, a
 SCRUBBED message (numeric arrays stripped via :func:`scrub_exception_message`),
 the failing ``stage`` and the preflight artifact CHECKSUMS — never the data.
 
-ACTIVATION BLOCKED: this is code only. It touches no seal, no outcome store and
+SYNTHETIC-ONLY: this is code only. It touches no seal, no outcome store and
 no real Norman data. The COMPOSE terminal is independent of TG-K562 (§6.3): a
 COMPOSE terminal artifact can never represent a CARTOGRAPHER seal, and vice versa.
 

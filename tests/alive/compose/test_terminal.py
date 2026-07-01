@@ -20,7 +20,7 @@ Raw outcome matrices may NEVER appear in a report, in provenance, or in scrubbed
 exception text. The guard rejects arrays / nested raw matrices BEFORE any write
 and scrubs exception messages before they are persisted.
 
-ACTIVATION BLOCKED: pure synthetic / tiny-fixture values only; NO real Norman,
+SYNTHETIC-ONLY: pure synthetic / tiny-fixture values only; NO real Norman,
 NO seal open, NO sealed-outcome read.
 """
 

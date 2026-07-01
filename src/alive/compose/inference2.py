@@ -1,6 +1,6 @@
 """COMPOSE-K562-v1 Phase-2b simultaneous theta inference (Task 2b-3).
 
-ACTIVATION BLOCKED: pure-``numpy`` numeric primitive on already-computed
+SYNTHETIC-ONLY: pure-``numpy`` numeric primitive on already-computed
 per-pair errors. This module touches **no** seal, **no** outcome store and
 **no** real Norman data — it receives per-pair errors that were scored
 elsewhere and returns family-wise simultaneous lower bounds.

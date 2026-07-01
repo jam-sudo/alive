@@ -1,4 +1,4 @@
-"""Synthetic-only tests for the regime detectable-effect report (ACTIVATION BLOCKED).
+"""Synthetic-only tests for the regime detectable-effect report.
 
 No real Norman outcomes are touched: ``ε`` arrays are synthetic, so measurability
 (split-half agreement) and the per-regime power gate are known-answer properties.

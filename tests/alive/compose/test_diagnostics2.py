@@ -1,7 +1,7 @@
 """Tests for alive.compose.diagnostics2 — written FIRST per TDD protocol (Task 2a-9).
 
 Real calibration diagnostics + futility checkpoint on DEVELOPMENT-role inputs only.
-ACTIVATION BLOCKED: pure ``numpy`` on synthetic inputs; NO sealed access.
+SYNTHETIC-ONLY: pure ``numpy`` on synthetic inputs; NO sealed access.
 
 Load-bearing contracts under test (brief Task 9 + spec §10.4 / §10.6):
 

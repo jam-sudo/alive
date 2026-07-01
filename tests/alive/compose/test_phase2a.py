@@ -1,7 +1,7 @@
 """Tests for alive.compose.phase2a — written FIRST per TDD protocol (Task 2a-11).
 
 ``run_phase2a`` is the no-seal Phase-2a orchestrator. It ties Tasks 2a-1..2a-10
-together and produces the frozen handoff Phase 2b consumes. ACTIVATION BLOCKED:
+together and produces the frozen handoff Phase 2b consumes. SYNTHETIC-ONLY:
 pure ``numpy`` on synthetic fixtures only; NO real Norman, NO seal open, NO
 sealed-outcome read.
 
