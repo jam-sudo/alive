@@ -1,6 +1,6 @@
 """Combo lower-bound baselines + a GUARDED GEARS/CPA adapter seam (Phase 2a).
 
-ACTIVATION BLOCKED. This module is pure ``numpy`` and adds **no** real
+SYNTHETIC-ONLY. This module is pure ``numpy`` and adds **no** real
 ``gears`` / ``cpa`` package dependency. It provides:
 
 * the registered lower-bound / null baselines

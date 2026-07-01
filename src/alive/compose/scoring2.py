@@ -1,6 +1,6 @@
 """COMPOSE-K562-v1 Phase-2b regime-specific primary + secondary scoring (Task 2b-4).
 
-ACTIVATION BLOCKED: pure-``numpy`` scoring on synthetic / tiny-fixture inputs.
+SYNTHETIC-ONLY: pure-``numpy`` scoring on synthetic / tiny-fixture inputs.
 This module performs **no** seal access and **no** data ingestion. It receives
 the populations the single sealed access already yielded (one regime's worth)
 plus already-computed per-method predictions, and scores exactly ONE regime.

@@ -34,7 +34,7 @@ assembly plus the pre/post-access split; it does not modify preflight.
 
 This module's run identity is independent of TG-K562 (CLAUDE.md §6.3): a COMPOSE
 run id, audit file or result can never represent a CARTOGRAPHER seal, and vice
-versa. ACTIVATION BLOCKED: this is code only — it touches no seal, no outcome
+versa. SYNTHETIC-ONLY: this is code only — it touches no seal, no outcome
 store and no real Norman data.
 
 Public API

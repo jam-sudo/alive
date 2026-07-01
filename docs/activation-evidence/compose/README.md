@@ -1,9 +1,10 @@
 # COMPOSE-K562-v1 — activation-blocker evidence
 
-> **Status:** PRE-REGISTERED, **ACTIVATION BLOCKED**. These are dev-stage evidence
-> artifacts produced on real Norman data with **no seal opened** and **no sealed
-> outcomes read**. They do **not** activate the protocol. Activation remains the
-> owner's explicit act (config `status` → active + ActivationRecord + CLAUDE.md flip).
+> **Status:** protocol **ACTIVE** (2026-06-30 activation). These are the dev-stage
+> activation-blocker evidence artifacts, produced on real Norman data with **no seal
+> opened** and **no sealed outcomes read**; they satisfied the §10.1 blockers that
+> activation required. The real sealed run (config `status: active` + a live
+> ActivationRecord + clean git tree) still opens the COMPOSE seal exactly once on the A100.
 
 Real data: scPerturb `NormanWeissman2019_filtered.h5ad`, sha256
 `efde6f5301fe256725dce1d980f37bd96a13481a9a16135515897368e631affc` (== committed

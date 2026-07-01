@@ -18,7 +18,7 @@ The CRITICAL distinction under test is the two-path split:
   * a mismatch / absence detectable BEFORE access RAISES (seal closed);
   * a mismatch detectable only AFTER access returns ``INVALID`` (seal consumed).
 
-ACTIVATION BLOCKED: pure synthetic / tiny-fixture values only; NO real Norman,
+SYNTHETIC-ONLY: pure synthetic / tiny-fixture values only; NO real Norman,
 NO seal open, NO sealed-outcome read.
 """
 

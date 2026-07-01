@@ -1,6 +1,6 @@
 """Tests for COMPOSE-K562-v1 Phase-2b regime-specific scoring (Task 2b-4).
 
-ACTIVATION BLOCKED: pure-``numpy`` / synthetic fixtures only — NO real Norman,
+SYNTHETIC-ONLY: pure-``numpy`` / synthetic fixtures only — NO real Norman,
 NO seal access, NO real outcomes. ``score_regime`` receives ALREADY-OBSERVED
 populations (whatever the single sealed access yielded) plus already-computed
 per-method predictions and scores exactly ONE regime: it transforms observed

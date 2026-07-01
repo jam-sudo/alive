@@ -1,6 +1,7 @@
 # COMPOSE-K562-v1 Phase 2a Development Pipeline — Corrected Implementation Plan
 
-> **Status:** PRE-REGISTERED, ACTIVATION BLOCKED
+> **Status:** ACTIVE (2026-06-30 activation). This plan delivered the dev implementation;
+> the real activated Phase-2a run (real Norman δ/ε on the A100) is the separate execution step.
 > **Scope:** implementation and synthetic/tiny-fixture tests only. No real Norman Phase-2a run,
 > no sealed role materialisation, and no scientific verdict.
 > **Contract:** `CLAUDE.md`, the COMPOSE design spec §10, and

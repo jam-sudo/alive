@@ -1,6 +1,6 @@
 """COMPOSE-K562-v1 Phase-2b EXACT-ROSTER sealed verdict (Task 2b-5).
 
-ACTIVATION BLOCKED: pure decision logic — this module touches **no** seal, **no**
+SYNTHETIC-ONLY: pure decision logic — this module touches **no** seal, **no**
 outcome store and **no** real Norman data. It maps the headline DOUBLE-UNSEEN
 simultaneous lower bounds (computed elsewhere by
 :func:`alive.compose.inference2.simultaneous_theta_bounds`) onto the registered

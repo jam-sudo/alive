@@ -1,8 +1,9 @@
 # COMPOSE-K562-v1 Phase 2b Seal and Verdict — Corrected Implementation Plan
 
-> **Status:** PRE-REGISTERED, ACTIVATION BLOCKED
-> **Scope:** seal machinery and inference tested only with synthetic/tiny fixtures. No real Norman
-> sealed outcome may be opened under this plan.
+> **Status:** ACTIVE (2026-06-30 activation). This plan delivered the seal machinery + inference;
+> the real one-time COMPOSE seal open runs on the A100 with a live ActivationRecord + clean tree.
+> **Scope:** seal machinery and inference built and tested with synthetic/tiny fixtures. The real
+> Norman sealed outcome is opened only by the separate activated A100 run, exactly once.
 > **Contract:** `CLAUDE.md`, COMPOSE design spec §10.5–§10.6,
 > `configs/compose_k562_v1_phase2.yaml`, and the corrected Phase-2a plan.
 

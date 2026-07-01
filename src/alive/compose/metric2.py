@@ -1,6 +1,6 @@
 """COMPOSE-K562-v1 Phase-2 registered metrics (spec §10.5, config metric block).
 
-ACTIVATION BLOCKED: pure-``numpy`` scoring on synthetic inputs only. This module
+SYNTHETIC-ONLY: pure-``numpy`` scoring on synthetic inputs only. This module
 contains no seal access and no data ingestion; it scores already-computed
 predictions against already-computed truth in the PCA-50 response space.
 

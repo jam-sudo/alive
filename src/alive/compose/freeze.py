@@ -1,6 +1,6 @@
 """Frozen Phase-2a -> Phase-2b prediction handoff (Task 2a-11, plan §2.5).
 
-ACTIVATION BLOCKED: pure ``numpy`` + JSON on synthetic inputs only; **NO seal
+SYNTHETIC-ONLY: pure ``numpy`` + JSON on synthetic inputs only; **NO seal
 access** and **NO measured sealed outcome** ever enters this module.
 
 The :class:`FrozenPredictionBundle` is the single artifact Phase 2b consumes

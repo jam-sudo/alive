@@ -23,7 +23,7 @@ Load-bearing contracts under test (Task 2b-2 brief):
     is asserted directly against :func:`inspect.signature` rather than via a spy
     store the function never receives (which could only ever be vacuously true).
 
-ACTIVATION BLOCKED: pure ``numpy`` on synthetic fixtures only; NO real Norman,
+SYNTHETIC-ONLY: pure ``numpy`` on synthetic fixtures only; NO real Norman,
 NO seal open, NO sealed-outcome read.
 """
 

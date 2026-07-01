@@ -1,6 +1,6 @@
 """Known-answer + guard tests for COMPOSE Phase-2 metrics (spec §10.5).
 
-Synthetic-only (ACTIVATION BLOCKED): no real Norman outcomes are touched.
+Synthetic-only: no real Norman outcomes are touched.
 The primary metric is the paired relative error reduction
 
     e_{M,i}     = mean_j( (pred_{M,i,j} - truth_{i,j})^2 )
