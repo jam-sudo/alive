@@ -152,6 +152,15 @@ def recompute_run_id(
     )
 
 
+#: Fields knowable only AFTER the single sealed opening; excluded from the
+#: pre-access digest subset (Change C). Fixed set — do not extend.
+_POST_ACCESS_FIELDS: tuple[str, ...] = (
+    "regime_result_double_sha256",
+    "regime_result_single_sha256",
+    "terminal_report_sha256",
+)
+
+
 @dataclass(frozen=True)
 class Phase2bProvenance:
     """Frozen, self-checksummed COMPLETE Phase-2b provenance record.
@@ -292,6 +301,41 @@ class Phase2bProvenance:
             64-character lowercase hex SHA-256 of the content.
         """
         return sha256_json(self.to_dict())
+
+    def pre_access_digest_subset(self) -> dict:
+        """Return the pre-access digest subset (``to_dict`` minus post-access fields).
+
+        The subset is everything computable BEFORE the seal opens: it drops the
+        regime-result and terminal-report checksums (:data:`_POST_ACCESS_FIELDS`),
+        which are known only after the single sealed access. Recording this
+        subset's checksum before access (Change C) turns the post-access
+        provenance consistency check into a real tamper detector rather than a
+        self-reference (CLAUDE.md §11).
+
+        Returns
+        -------
+        dict
+            The content dict with the post-access keys removed.
+        """
+        subset = self.to_dict()
+        for key in _POST_ACCESS_FIELDS:
+            subset.pop(key)
+        return subset
+
+    @cached_property
+    def pre_access_checksum(self) -> str:
+        """Canonical-JSON SHA-256 of :meth:`pre_access_digest_subset`.
+
+        Stable across changes to post-access-only fields; moves on any change to
+        a pre-access field. This is the value persisted into the write-once
+        ledger before seal access and re-checked afterwards (Change C).
+
+        Returns
+        -------
+        str
+            64-character lowercase hex SHA-256 of the pre-access subset.
+        """
+        return sha256_json(self.pre_access_digest_subset())
 
 
 #: Canonical write-once artifact names → the :class:`Phase2bProvenance` field

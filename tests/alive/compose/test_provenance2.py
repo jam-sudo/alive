@@ -565,3 +565,46 @@ def test_provenance_error_and_ledger_error_are_distinct():
     """ProvenanceError is the gate's abort type; LedgerError is the ledger's."""
     assert issubclass(ProvenanceError, Exception)
     assert ProvenanceError is not LedgerError
+
+
+# ---------------------------------------------------------------------------
+# Change C infra: pre-access digest subset (excludes post-access fields)
+# ---------------------------------------------------------------------------
+
+_POST_ACCESS_KEYS = (
+    "regime_result_double_sha256",
+    "regime_result_single_sha256",
+    "terminal_report_sha256",
+)
+
+
+def test_pre_access_subset_excludes_post_access_fields():
+    sub = _provenance().pre_access_digest_subset()
+    for key in _POST_ACCESS_KEYS:
+        assert key not in sub
+    # a pre-access field survives in the subset.
+    assert sub["data_card_sha256"] == _DATA_CARD_DIGEST
+
+
+def test_pre_access_checksum_ignores_post_access_fields():
+    a = _provenance()
+    b = _provenance(
+        regime_result_double_sha256="X",
+        regime_result_single_sha256="Y",
+        terminal_report_sha256="Z",
+    )
+    # The subset checksum is stable across post-access-only changes ...
+    assert a.pre_access_checksum == b.pre_access_checksum
+    # ... while the FULL self-checksum still moves (post-access fields are in it).
+    assert a.self_checksum != b.self_checksum
+
+
+def test_pre_access_checksum_moves_on_a_pre_access_field():
+    a = _provenance()
+    b = _provenance(processed_sha256="TAMPERED")
+    assert a.pre_access_checksum != b.pre_access_checksum
+
+
+def test_pre_access_checksum_is_64_hex():
+    c = _provenance().pre_access_checksum
+    assert len(c) == 64 and all(ch in "0123456789abcdef" for ch in c)
