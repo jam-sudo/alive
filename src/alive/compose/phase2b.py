@@ -280,55 +280,135 @@ def _score_one_regime(
     )
 
 
+@dataclass(frozen=True)
+class ActivationProvenanceInputs:
+    """Evidence-sourced provenance digests for an activated Phase-2b run.
+
+    Carries the scientific digests that are NOT on the run-identity path (which
+    flows from the upstream ledger). Assembled by the caller from the run
+    environment and committed activation evidence; passed to :func:`run_phase2b`
+    on the activated run. Never carries ``data_card`` / ``raw_data`` /
+    ``sequence_mapping`` — those come from the ledger (single source of truth).
+
+    Attributes
+    ----------
+    processed_sha256, feature_bank_sha256, dependency_lock_sha256 : str
+        Processed-AnnData, frozen feature-bank, and dependency-lock digests.
+    gears_revision, cpa_revision : str
+        Pinned GEARS / CPA baseline revisions (from the dependency lock).
+    python_version, platform, device, precision : str
+        Run environment tags.
+    git_commit : str
+        Full Git SHA of the run.
+    """
+
+    processed_sha256: str
+    feature_bank_sha256: str
+    dependency_lock_sha256: str
+    gears_revision: str
+    cpa_revision: str
+    python_version: str
+    platform: str
+    device: str
+    precision: str
+    git_commit: str
+
+
 def _build_provenance(
     *,
     bundle: FrozenPredictionBundle,
     pair_manifest: Mapping,
     config: ComposePhase2Config,
     audit_reference: str,
-    regime_double: RegimeScore,
-    regime_single: RegimeScore,
+    regime_double: RegimeScore | None,
+    regime_single: RegimeScore | None,
     git_clean: bool,
+    ledger: RunLedger,
+    inputs: ActivationProvenanceInputs | None,
+    fixture_execution: bool,
 ) -> Phase2bProvenance:
     """Assemble the COMPLETE composite provenance record for this run.
 
     Binds the upstream artifact checksums the run consumed (bundle / manifest /
-    response-space / factor / model), the provenance digests, the registered
-    seeds and the regime-result checksums. Used for the post-access consistency
-    check and recorded into the terminal report.
+    response-space / factor / model), the scientific provenance digests, the
+    registered seeds and the regime-result checksums.
+
+    On the fixture path the scientific digests are synthetic-empty (they are not
+    real evidence). On the scientific path the run-identity digests
+    (``data_card`` / ``raw_data`` / ``sequence_mapping``) come from the upstream
+    ledger — the same values preflight and the run-id recomputation consume, so
+    there is ONE source of truth — and the remaining scientific digests come from
+    ``inputs``. A scientific run with ``inputs is None`` fails closed (an
+    activated run must supply real evidence, never empty digests).
+
+    ``regime_double`` / ``regime_single`` may be ``None`` to build the pre-access
+    record (Change C): the regime-result checksums are then empty, which is
+    correct because the pre-access subset excludes them.
     """
-    # TODO(activation): populate the scientific provenance digests (data_card /
-    # raw / processed / sequence_mapping / dependency_lock / gears+cpa revisions /
-    # device / precision / git_commit) from the ledger + environment on the
-    # activated run; empty/UNKNOWN values are fixture-only.
+    if fixture_execution:
+        data_card_sha256 = ""
+        raw_or_source_sha256 = ""
+        processed_sha256 = ""
+        sequence_mapping_sha256 = ""
+        feature_bank_sha256 = ""
+        dependency_lock_sha256 = ""
+        gears_revision = ""
+        cpa_revision = ""
+        python_version = ""
+        platform = ""
+        device = ""
+        precision = ""
+        git_commit = "UNKNOWN"
+    else:
+        if inputs is None:
+            raise Phase2bError(
+                "scientific Phase-2b requires ActivationProvenanceInputs to populate the "
+                "provenance digests; refusing to assemble a provenance record with empty "
+                "scientific evidence on an activated run"
+            )
+        # Single source of truth: run-identity digests from the upstream ledger.
+        data_card_sha256 = _required_digest(ledger, "data_card")
+        raw_or_source_sha256 = _required_digest(ledger, "raw_data")
+        sequence_mapping_sha256 = _required_digest(ledger, "sequence_mapping")
+        processed_sha256 = inputs.processed_sha256
+        feature_bank_sha256 = inputs.feature_bank_sha256
+        dependency_lock_sha256 = inputs.dependency_lock_sha256
+        gears_revision = inputs.gears_revision
+        cpa_revision = inputs.cpa_revision
+        python_version = inputs.python_version
+        platform = inputs.platform
+        device = inputs.device
+        precision = inputs.precision
+        git_commit = inputs.git_commit
+
     return Phase2bProvenance(
         protocol=config.protocol,
         config_digest=config.config_sha256,
         pair_manifest_sha256=pair_manifest["checksum"],
         exclusion_manifest_sha256=pair_manifest.get("eligibility_hash", ""),
-        data_card_sha256="",
-        raw_or_source_sha256="",
-        processed_sha256="",
-        sequence_mapping_sha256="",
-        feature_bank_sha256="",
+        data_card_sha256=data_card_sha256,
+        raw_or_source_sha256=raw_or_source_sha256,
+        processed_sha256=processed_sha256,
+        sequence_mapping_sha256=sequence_mapping_sha256,
+        feature_bank_sha256=feature_bank_sha256,
         response_space_sha256=bundle.response_space_checksum,
         factor_bank_sha256=bundle.factor_checksum,
         model_lock_sha256=bundle.model_checksum,
         frozen_prediction_bundle_sha256=bundle.bundle_checksum,
-        git_commit="UNKNOWN",
+        git_commit=git_commit,
         git_clean=bool(git_clean),
-        dependency_lock_sha256="",
-        gears_revision="",
-        cpa_revision="",
-        python_version="",
-        platform="",
-        device="",
-        precision="",
+        dependency_lock_sha256=dependency_lock_sha256,
+        gears_revision=gears_revision,
+        cpa_revision=cpa_revision,
+        python_version=python_version,
+        platform=platform,
+        device=device,
+        precision=precision,
         registered_seeds=tuple(int(s) for s in config.registered_seeds),
         split_seed=int(config.split_seed),
         seal_audit_reference=audit_reference,
-        regime_result_double_sha256=regime_double.checksum,
-        regime_result_single_sha256=regime_single.checksum,
+        regime_result_double_sha256=regime_double.checksum if regime_double is not None else "",
+        regime_result_single_sha256=regime_single.checksum if regime_single is not None else "",
         terminal_report_sha256="",
     )
 
@@ -392,6 +472,7 @@ def run_phase2b(
     ledger: RunLedger,
     activation_record: ActivationRecord | None,
     git_is_clean: bool | None = None,
+    provenance_inputs: ActivationProvenanceInputs | None = None,
 ) -> Phase2bResult:
     """Run the SCIENTIFIC Phase-2b sealed evaluation after activation.
 
@@ -423,6 +504,9 @@ def run_phase2b(
     git_is_clean : bool or None, optional
         Whether the working tree is a clean committed Git state; required in
         scientific mode (the caller resolves it so this performs no I/O).
+    provenance_inputs : ActivationProvenanceInputs or None, optional
+        The activated run's evidence-sourced provenance digests; required to
+        populate the scientific provenance on the sealed run.
 
     Returns
     -------
@@ -456,6 +540,7 @@ def run_phase2b(
         fixture_execution=False,
         git_clean=bool(git_is_clean),
         provenance_tamper=None,
+        provenance_inputs=provenance_inputs,
     )
 
 
@@ -515,6 +600,7 @@ def run_phase2b_fixture(
         fixture_execution=True,
         git_clean=True,
         provenance_tamper=_tamper_provenance_after_register,
+        provenance_inputs=None,
     )
 
 
@@ -558,6 +644,7 @@ def _run_phase2b_core(
     fixture_execution: bool,
     git_clean: bool,
     provenance_tamper: Phase2bProvenance | None,
+    provenance_inputs: ActivationProvenanceInputs | None,
 ) -> Phase2bResult:
     """The shared 12-step sealed-evaluation flow (after the public boundary).
 
@@ -703,6 +790,8 @@ def _run_phase2b_core(
             audit_reference=str(audit_path) if audit_path is not None else "in-memory",
             git_clean=git_clean,
             provenance_tamper=provenance_tamper,
+            provenance_inputs=provenance_inputs,
+            fixture_execution=fixture_execution,
             result_box=result_box,
         )
 
@@ -723,6 +812,8 @@ def _evaluate_inside_boundary(
     audit_reference: str,
     git_clean: bool,
     provenance_tamper: Phase2bProvenance | None,
+    provenance_inputs: ActivationProvenanceInputs | None,
+    fixture_execution: bool,
     result_box: dict[str, object],
 ) -> None:
     """Steps 6-12, executed INSIDE the terminal protection boundary.
@@ -797,6 +888,9 @@ def _evaluate_inside_boundary(
         regime_double=regime_double,
         regime_single=regime_single,
         git_clean=git_clean,
+        ledger=terminal.ledger,
+        inputs=provenance_inputs,
+        fixture_execution=fixture_execution,
     )
     expected_provenance_checksum = provenance.self_checksum
 

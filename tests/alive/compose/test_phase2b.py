@@ -55,7 +55,10 @@ from alive.compose.verdict2 import MethodAxis, SealedAxis
 from alive.provenance import EnvironmentInfo, RunLedger
 
 from alive.compose.phase2b import (  # isort: skip
+    ActivationProvenanceInputs,
+    Phase2bError,
     Phase2bResult,
+    _build_provenance,
     run_phase2b,
     run_phase2b_fixture,
 )
@@ -931,3 +934,96 @@ def test_scientific_entry_rejects_fixture_store(tmp_path):
             git_is_clean=True,
         )
     assert kit["store"].sealed_access_count == 0
+
+
+# ===========================================================================
+# Change B: _build_provenance digest population
+# ===========================================================================
+
+
+def _prov_inputs() -> ActivationProvenanceInputs:
+    return ActivationProvenanceInputs(
+        processed_sha256="proc-sha",
+        feature_bank_sha256="fb-sha",
+        dependency_lock_sha256="lock-sha",
+        gears_revision="gears-9",
+        cpa_revision="cpa-9",
+        python_version="3.12.3",
+        platform="linux-x86_64",
+        device="cuda",
+        precision="float32",
+        git_commit="f" * 40,
+    )
+
+
+def test_build_provenance_fixture_leaves_scientific_digests_empty(tmp_path):
+    kit = _make_run(tmp_path)
+    prov = _build_provenance(
+        bundle=kit["bundle"],
+        pair_manifest=kit["manifest"],
+        config=kit["cfg"],
+        audit_reference="ref",
+        regime_double=None,
+        regime_single=None,
+        git_clean=True,
+        ledger=kit["ledger"],
+        inputs=None,
+        fixture_execution=True,
+    )
+    assert prov.data_card_sha256 == ""
+    assert prov.processed_sha256 == ""
+    assert prov.gears_revision == ""
+    assert prov.git_commit == "UNKNOWN"
+    # upstream (bundle-derived) hashes are still populated on the fixture path.
+    assert prov.frozen_prediction_bundle_sha256 == kit["bundle"].bundle_checksum
+
+
+def test_build_provenance_scientific_requires_inputs(tmp_path):
+    kit = _make_run(tmp_path)
+    with pytest.raises(Phase2bError, match="ActivationProvenanceInputs"):
+        _build_provenance(
+            bundle=kit["bundle"],
+            pair_manifest=kit["manifest"],
+            config=kit["cfg"],
+            audit_reference="ref",
+            regime_double=None,
+            regime_single=None,
+            git_clean=True,
+            ledger=kit["ledger"],
+            inputs=None,
+            fixture_execution=False,
+        )
+
+
+def test_build_provenance_scientific_populates_from_ledger_and_inputs(tmp_path):
+    kit = _make_run(tmp_path)
+    ledger = kit["ledger"]
+    # Single source of truth: run-identity digests come from the upstream ledger.
+    ledger.record_artifact("data_card", "dc-sha")
+    ledger.record_artifact("raw_data", "raw-sha")
+    ledger.record_artifact("sequence_mapping", "seq-sha")
+    prov = _build_provenance(
+        bundle=kit["bundle"],
+        pair_manifest=kit["manifest"],
+        config=kit["cfg"],
+        audit_reference="ref",
+        regime_double=None,
+        regime_single=None,
+        git_clean=True,
+        ledger=ledger,
+        inputs=_prov_inputs(),
+        fixture_execution=False,
+    )
+    # from the ledger (run-identity path):
+    assert prov.data_card_sha256 == "dc-sha"
+    assert prov.raw_or_source_sha256 == "raw-sha"
+    assert prov.sequence_mapping_sha256 == "seq-sha"
+    # from the inputs object (evidence-sourced digests):
+    assert prov.processed_sha256 == "proc-sha"
+    assert prov.feature_bank_sha256 == "fb-sha"
+    assert prov.dependency_lock_sha256 == "lock-sha"
+    assert prov.gears_revision == "gears-9"
+    assert prov.cpa_revision == "cpa-9"
+    assert prov.device == "cuda"
+    assert prov.precision == "float32"
+    assert prov.git_commit == "f" * 40
