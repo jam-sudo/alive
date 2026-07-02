@@ -338,6 +338,10 @@ class Phase2bProvenance:
         return sha256_json(self.pre_access_digest_subset())
 
 
+#: Canonical write-once artifact name for the pre-access provenance subset
+#: checksum (Change C). Recorded BEFORE seal access; re-checked afterwards.
+PRE_ACCESS_PROVENANCE_ARTIFACT = "phase2b_pre_access_provenance"
+
 #: Canonical write-once artifact names → the :class:`Phase2bProvenance` field
 #: whose value is recorded directly (already a SHA-256 hex digest).
 _DIGEST_ARTIFACTS: tuple[tuple[str, str], ...] = (
@@ -445,6 +449,43 @@ def record_phase2b_provenance(
     _record("phase2b_provenance", provenance.self_checksum)
 
     return ledger
+
+
+def record_pre_access_provenance(*, ledger: RunLedger, provenance: Phase2bProvenance) -> str:
+    """Record the pre-access digest-subset checksum into the ledger BEFORE access.
+
+    Persists :attr:`Phase2bProvenance.pre_access_checksum` under
+    :data:`PRE_ACCESS_PROVENANCE_ARTIFACT` in the write-once ledger, so the
+    post-access consistency check (Change C) can cross-verify against a PERSISTED
+    value rather than the in-memory record (CLAUDE.md §11). Called before the
+    seal opens; the seal stays closed if this raises.
+
+    Parameters
+    ----------
+    ledger : RunLedger
+        The write-once run ledger to record into.
+    provenance : Phase2bProvenance
+        The provenance record whose pre-access subset checksum is persisted.
+
+    Returns
+    -------
+    str
+        The recorded pre-access subset checksum.
+
+    Raises
+    ------
+    ProvenanceError
+        If the artifact name is already recorded (write-once violation).
+    """
+    checksum = provenance.pre_access_checksum
+    try:
+        ledger.record_artifact(PRE_ACCESS_PROVENANCE_ARTIFACT, checksum)
+    except DuplicateArtifactError as exc:
+        raise ProvenanceError(
+            "write-once violation recording the pre-access provenance subset "
+            f"{PRE_ACCESS_PROVENANCE_ARTIFACT!r}: {exc}"
+        ) from exc
+    return checksum
 
 
 def verify_upstream_before_access(

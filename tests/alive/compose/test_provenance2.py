@@ -29,12 +29,14 @@ import inspect
 import pytest
 
 from alive.compose.provenance2 import (
+    PRE_ACCESS_PROVENANCE_ARTIFACT,
     Phase2bProvenance,
     PostAccessStatus,
     ProvenanceError,
     check_post_access_consistency,
     recompute_run_id,
     record_phase2b_provenance,
+    record_pre_access_provenance,
     verify_upstream_before_access,
 )
 from alive.provenance import (
@@ -608,3 +610,30 @@ def test_pre_access_checksum_moves_on_a_pre_access_field():
 def test_pre_access_checksum_is_64_hex():
     c = _provenance().pre_access_checksum
     assert len(c) == 64 and all(ch in "0123456789abcdef" for ch in c)
+
+
+# ---------------------------------------------------------------------------
+# Change C infra: record_pre_access_provenance (write-once, before access)
+# ---------------------------------------------------------------------------
+
+
+def test_record_pre_access_provenance_records_subset_checksum():
+    ledger = RunLedger(
+        run_id=_expected_run_id(), config_sha256=_CONFIG_DIGEST, environment=_environment()
+    )
+    prov = _provenance()
+    returned = record_pre_access_provenance(ledger=ledger, provenance=prov)
+    assert returned == prov.pre_access_checksum
+    assert ledger.artifact_sha(PRE_ACCESS_PROVENANCE_ARTIFACT) == prov.pre_access_checksum
+
+
+def test_record_pre_access_provenance_is_write_once():
+    ledger = RunLedger(
+        run_id=_expected_run_id(), config_sha256=_CONFIG_DIGEST, environment=_environment()
+    )
+    record_pre_access_provenance(ledger=ledger, provenance=_provenance())
+    # A second record under the same name (even a different value) is refused.
+    with pytest.raises(ProvenanceError):
+        record_pre_access_provenance(
+            ledger=ledger, provenance=_provenance(processed_sha256="different")
+        )
