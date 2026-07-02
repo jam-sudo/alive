@@ -572,7 +572,7 @@ def check_post_access_consistency(
     seal_audit_request_checksum: str,
     observed_request_checksum: str,
     provenance: Phase2bProvenance,
-    expected_provenance_checksum: str,
+    persisted_pre_access_checksum: str,
     result_checksums: Mapping[str, str],
     expected_result_checksums: Mapping[str, str],
 ) -> PostAccessStatus:
@@ -589,7 +589,8 @@ def check_post_access_consistency(
 
     * the seal-audit's recorded run id != the recomputed run id;
     * the observed request checksum != the seal-audit's request checksum;
-    * the provenance record's self-checksum != the expected provenance checksum;
+    * the provenance record's pre-access subset checksum != the PERSISTED
+      pre-access checksum (a real cross-check against the write-once ledger);
     * any regime result checksum != its expected value, or the result-checksum
       key sets differ.
 
@@ -605,8 +606,11 @@ def check_post_access_consistency(
         The request checksum observed for the sealed access.
     provenance : Phase2bProvenance
         The COMPLETE provenance record for this run.
-    expected_provenance_checksum : str
-        The provenance self-checksum the run was registered under.
+    persisted_pre_access_checksum : str
+        The pre-access digest-subset checksum PERSISTED into the write-once
+        ledger before access (:func:`record_pre_access_provenance`). The
+        provenance leg cross-checks the recomputed subset checksum against this
+        persisted value — a real tamper detector, not a self-reference.
     result_checksums : Mapping of str to str
         Observed regime result checksums (e.g. ``{"double", "single"}``).
     expected_result_checksums : Mapping of str to str
@@ -624,7 +628,7 @@ def check_post_access_consistency(
     if observed_request_checksum != seal_audit_request_checksum:
         return PostAccessStatus.INVALID
 
-    if provenance.self_checksum != expected_provenance_checksum:
+    if provenance.pre_access_checksum != persisted_pre_access_checksum:
         return PostAccessStatus.INVALID
 
     if set(result_checksums) != set(expected_result_checksums):

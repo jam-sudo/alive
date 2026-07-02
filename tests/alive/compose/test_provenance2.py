@@ -497,7 +497,7 @@ def _consistent_post_access():
         seal_audit_request_checksum="req-sha",
         observed_request_checksum="req-sha",
         provenance=_provenance(),
-        expected_provenance_checksum=_provenance().self_checksum,
+        persisted_pre_access_checksum=_provenance().pre_access_checksum,
         result_checksums={"double": "regime-double-sha", "single": "regime-single-sha"},
         expected_result_checksums={"double": "regime-double-sha", "single": "regime-single-sha"},
     )
@@ -531,7 +531,7 @@ def test_post_access_result_checksum_mismatch_returns_invalid():
 
 def test_post_access_provenance_checksum_mismatch_returns_invalid():
     kwargs = _consistent_post_access()
-    kwargs["expected_provenance_checksum"] = "DIFFERENT-provenance-checksum"
+    kwargs["persisted_pre_access_checksum"] = "DIFFERENT-provenance-checksum"
     status = check_post_access_consistency(**kwargs)
     assert status is PostAccessStatus.INVALID
 
@@ -542,7 +542,7 @@ def test_post_access_never_raises_on_detected_inconsistency():
     kwargs["seal_audit_run_id"] = "X"
     kwargs["observed_request_checksum"] = "Y"
     kwargs["result_checksums"] = {"double": "Z", "single": "W"}
-    kwargs["expected_provenance_checksum"] = "V"
+    kwargs["persisted_pre_access_checksum"] = "V"
     # No exception type expected; a raise here is a contract violation.
     status = check_post_access_consistency(**kwargs)
     assert status is PostAccessStatus.INVALID

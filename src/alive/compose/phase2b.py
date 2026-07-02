@@ -63,10 +63,12 @@ from alive.compose.freeze import FrozenPredictionBundle
 from alive.compose.outcome_store import ComposeOutcomeStore, ObservedPair
 from alive.compose.preflight import EvaluationLock, run_preflight
 from alive.compose.provenance2 import (
+    PRE_ACCESS_PROVENANCE_ARTIFACT,
     Phase2bProvenance,
     PostAccessStatus,
     check_post_access_consistency,
     recompute_run_id,
+    record_pre_access_provenance,
     verify_upstream_before_access,
 )
 from alive.compose.response import ResponseSpace, verify_response_artifact
@@ -773,6 +775,25 @@ def _run_phase2b_core(
         "run_id": lock.run_id,
     }
 
+    # --- Change C: persist the pre-access provenance subset BEFORE the seal opens.
+    # The subset excludes post-access result/terminal checksums, so it is fully
+    # computable here; recording it write-once lets the post-access check
+    # cross-verify a PERSISTED value instead of a self-reference (CLAUDE.md §11).
+    audit_reference = str(audit_path) if audit_path is not None else "in-memory"
+    pre_access_provenance = _build_provenance(
+        bundle=frozen_bundle,
+        pair_manifest=pair_manifest,
+        config=config,
+        audit_reference=audit_reference,
+        regime_double=None,
+        regime_single=None,
+        git_clean=git_clean,
+        ledger=ledger,
+        inputs=provenance_inputs,
+        fixture_execution=fixture_execution,
+    )
+    record_pre_access_provenance(ledger=ledger, provenance=pre_access_provenance)
+
     # --- Step 5: claim access, then enter the protection boundary. ------------
     terminal.claim_access()
     result_box: dict[str, object] = {}
@@ -787,7 +808,7 @@ def _run_phase2b_core(
             response_space=response_space,
             control_mean=control_mean,
             recomputed_run_id=recomputed_run_id,
-            audit_reference=str(audit_path) if audit_path is not None else "in-memory",
+            audit_reference=audit_reference,
             git_clean=git_clean,
             provenance_tamper=provenance_tamper,
             provenance_inputs=provenance_inputs,
@@ -894,6 +915,10 @@ def _evaluate_inside_boundary(
     )
     expected_provenance_checksum = provenance.self_checksum
 
+    # Change C: cross-check against the PERSISTED pre-access subset (recorded
+    # write-once before access), not the in-memory record.
+    persisted_pre_access_checksum = terminal.ledger.artifact_sha(PRE_ACCESS_PROVENANCE_ARTIFACT)
+
     # Recompute the observed request checksum exactly as the store recorded it.
     # The lock pairs are already canonical (preflight enforces it); canonicalize
     # defensively without depending on the store's private method.
@@ -906,18 +931,13 @@ def _evaluate_inside_boundary(
     # TEST-ONLY: a tampered provenance (registered before access, mismatched now)
     # forces the post-access INVALID path. It is a checksum/identity record only.
     consistency_provenance = provenance_tamper if provenance_tamper is not None else provenance
-    # TODO(activation): bind post-access provenance/result consistency against a
-    # PERSISTED registered value (recorded into the ledger BEFORE access), not the
-    # in-memory provenance object — otherwise the provenance/result legs are
-    # self-referential and can never fail in production; only the run-id/
-    # request-checksum legs cross-check today.
     post_status = check_post_access_consistency(
         recomputed_run_id=recomputed_run_id,
         seal_audit_run_id=seal_audit_run_id,
         seal_audit_request_checksum=seal_audit_request_checksum,
         observed_request_checksum=observed_request_checksum,
         provenance=consistency_provenance,
-        expected_provenance_checksum=expected_provenance_checksum,
+        persisted_pre_access_checksum=persisted_pre_access_checksum,
         result_checksums={
             "double": regime_double.checksum,
             "single": regime_single.checksum,

@@ -46,7 +46,10 @@ from alive.compose.datacard import compute_compose_run_id
 from alive.compose.freeze import FrozenPredictionBundle
 from alive.compose.outcome_store import ComposeOutcomeStore, ComposeSealingError
 from alive.compose.preflight import PreflightError
-from alive.compose.provenance2 import Phase2bProvenance
+from alive.compose.provenance2 import (
+    PRE_ACCESS_PROVENANCE_ARTIFACT,
+    Phase2bProvenance,
+)
 from alive.compose.response import fit_response_space
 from alive.compose.scoring2 import RegimeScore
 from alive.compose.split import build_split_manifest
@@ -1027,3 +1030,17 @@ def test_build_provenance_scientific_populates_from_ledger_and_inputs(tmp_path):
     assert prov.device == "cuda"
     assert prov.precision == "float32"
     assert prov.git_commit == "f" * 40
+
+
+# ===========================================================================
+# Change C: pre-access provenance subset is PERSISTED write-once before access
+# ===========================================================================
+
+
+def test_pre_access_provenance_persisted_in_ledger(tmp_path):
+    kit = _make_run(tmp_path)
+    res = run_phase2b_fixture(**_fixture_kwargs(kit))
+    # The pre-access digest-subset checksum is recorded write-once BEFORE the seal
+    # opens, so the post-access provenance leg cross-checks a PERSISTED value.
+    persisted = res.ledger.artifact_sha(PRE_ACCESS_PROVENANCE_ARTIFACT)
+    assert isinstance(persisted, str) and len(persisted) == 64
