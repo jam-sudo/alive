@@ -48,13 +48,17 @@
 GEARS/CPA 학습에는 cell-level expression, perturbation label, control population 등 추가 입력이
 필요하므로 현재 schema만으로 published baseline을 구현했다고 주장할 수 없다.
 
-다음 중 하나를 사전에 설계·등록해야 한다.
+`GI_LEARNABLE_WIN`(§0)은 real-input published GEARS/CPA를 이긴 경우에만 성립한다. 따라서 다음
+real-input fit-data 계약을 반드시 구현·등록한다. 이는 선택지가 아니라 headline verdict의 전제다.
 
-- 권장: payload v2가 immutable fit-role AnnData artifact의 경로와 SHA-256, 허용 obs role,
+- payload v2가 immutable fit-role AnnData artifact의 경로와 SHA-256, 허용 obs role,
   feature/gene order를 전달한다. worker는 SHA-256을 재검증하고 `{control, singles,
   combo_calibration}` 이외의 row가 있으면 중단한다. sealed roles/outcomes는 artifact에 존재하지 않아야 한다.
-- 대안: aggregate 입력 전용 재구현을 별도 method 이름으로 등록한다. 이 경우 published
-  GEARS/CPA comparator라고 부르지 않으며 spec/config/verdict family를 seal 전에 새로 승인한다.
+
+aggregate 입력 전용 재구현은 verdict comparator family의 published GEARS/CPA를 대체하지 못한다.
+집계 schema만으로 얻은 우위는 `GI_LEARNABLE_WIN`이 아니며, real-input 계약을 구현하지 못하면 해당
+comparator에 대해 `NO_DISTINCT_WIN` 또는 `NOT_EVALUABLE`로 보고한다. 이 milestone은 real GEARS/CPA에
+대한 정직한 negative를 견디도록 설계됐으므로 strawman 우위로 대체하지 않는다.
 
 fit-role artifact의 생성 코드, schema validator, negative leakage tests와 checksum이 commit돼야 한다.
 
@@ -93,8 +97,14 @@ frozen bundle checksum, clean tree와 confirmation token을 재검증해야 한�
   sample counts, integrity clauses, audit/checksums다.
 - 현재 등록 추론은 pair-resampled **aggregate simultaneous bound**다. 등록되지 않은 “per-pair CI”를
   사후 생성하거나 verdict 근거로 사용하지 않는다.
-- `registered_seeds`를 단순 기록하는 것과 실제 seed-variability 분석은 다르다. seed별 model fit/ensemble
-  계약이 구현되지 않았다면 seed variability를 산출했다고 보고하지 않는다.
+- seed-variability 계약을 명시적으로 해결한다. CLAUDE.md §10은 seed variability 보고를 요구하고,
+  stochastic learned comparator(`gears`, `cpa`, `l3_hypernetwork`)의 seed 민감도는 non-sealed
+  development role에서 실제로 평가 가능하므로 이를 `gi_structure_recovery`처럼 `NOT_EVALUABLE`로 처리하지
+  않는다. seed별 재적합으로 development-phase seed-variability 요약(comparator별 error spread)을 산출·보고하는
+  구현이 **§2 release blocker**다. 이 분석은 non-sealed role에서만 수행하며 seal을 다시 열지 않는다.
+- deterministic component는 단일 실행으로 충분함을 명시한다. identifiable L1 headline operator와 `additive`,
+  `id_only` baseline은 구성상 seed-불변이고, 일회성 sealed open은 method별 단일 seed로 적합한다. 이 single-shot
+  성격을 결과에 명시하되, stochastic comparator의 development seed-variability 보고를 대체하는 근거로 쓰지 않는다.
 - `gi_structure_recovery`는 현재 `NOT_EVALUABLE`이며 그대로 보고한다.
 
 ### 2.5 Release gate
@@ -205,7 +215,8 @@ production driver가 내부적으로 다음 순서를 강제해야 한다.
   object storage에 업로드한다.
 - 각 파일의 SHA-256 manifest를 별도로 저장하고 fresh download로 검증한다.
 - 보고에는 primary 방향, theta와 simultaneous bounds, registered secondary, sample counts,
-  `gi_structure_recovery=NOT_EVALUABLE`, integrity clauses, failed/invalid state와 noise ceiling을 포함한다.
+  stochastic comparator development seed-variability 요약(§2.4), `gi_structure_recovery=NOT_EVALUABLE`,
+  integrity clauses, failed/invalid state와 noise ceiling을 포함한다.
 - 사후 threshold 변경, comparator 제외, pair 제외, 재개봉은 금지한다.
 - negative/PARTIAL/INVALID 결과도 보존하고 원인과 함께 등록한다.
 - 업로드·재검증 완료 후에만 pod를 teardown하고 instance/image/cost/wall time을 기록한다.
