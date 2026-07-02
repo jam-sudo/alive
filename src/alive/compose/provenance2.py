@@ -60,12 +60,15 @@ check_post_access_consistency(...)
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum
 from functools import cached_property
+from pathlib import Path
 
 from alive.compose.datacard import compute_compose_run_id
+from alive.io import atomic_write_once
 from alive.provenance import (
     DuplicateArtifactError,
     EnvironmentInfo,
@@ -150,6 +153,15 @@ def recompute_run_id(
         sequence_mapping_digest=sequence_mapping_sha256,
         length=length,
     )
+
+
+#: Fields knowable only AFTER the single sealed opening; excluded from the
+#: pre-access digest subset (Change C). Fixed set — do not extend.
+_POST_ACCESS_FIELDS: tuple[str, ...] = (
+    "regime_result_double_sha256",
+    "regime_result_single_sha256",
+    "terminal_report_sha256",
+)
 
 
 @dataclass(frozen=True)
@@ -293,6 +305,48 @@ class Phase2bProvenance:
         """
         return sha256_json(self.to_dict())
 
+    def pre_access_digest_subset(self) -> dict:
+        """Return the pre-access digest subset (``to_dict`` minus post-access fields).
+
+        The subset is everything computable BEFORE the seal opens: it drops the
+        regime-result and terminal-report checksums (:data:`_POST_ACCESS_FIELDS`),
+        which are known only after the single sealed access. Recording this
+        subset's checksum before access (Change C) turns the post-access
+        provenance consistency check into a real tamper detector rather than a
+        self-reference (CLAUDE.md §11).
+
+        Returns
+        -------
+        dict
+            The content dict with the post-access keys removed.
+        """
+        subset = self.to_dict()
+        for key in _POST_ACCESS_FIELDS:
+            subset.pop(key)
+        return subset
+
+    @cached_property
+    def pre_access_checksum(self) -> str:
+        """Canonical-JSON SHA-256 of :meth:`pre_access_digest_subset`.
+
+        Stable across changes to post-access-only fields; moves on any change to
+        a pre-access field. This is the value persisted into the write-once
+        ledger before seal access and re-checked afterwards (Change C).
+
+        Returns
+        -------
+        str
+            64-character lowercase hex SHA-256 of the pre-access subset.
+        """
+        return sha256_json(self.pre_access_digest_subset())
+
+
+#: Canonical write-once artifact name for the pre-access provenance subset
+#: checksum (Change C). Recorded BEFORE seal access; re-checked afterwards.
+PRE_ACCESS_PROVENANCE_ARTIFACT = "phase2b_pre_access_provenance"
+
+#: Durable write-once snapshot of the ledger immediately before seal access.
+PRE_ACCESS_LEDGER_FILENAME = "phase2b_pre_access_ledger.json"
 
 #: Canonical write-once artifact names → the :class:`Phase2bProvenance` field
 #: whose value is recorded directly (already a SHA-256 hex digest).
@@ -403,6 +457,66 @@ def record_phase2b_provenance(
     return ledger
 
 
+def record_pre_access_provenance(*, ledger: RunLedger, provenance: Phase2bProvenance) -> str:
+    """Record the pre-access digest-subset checksum into the ledger BEFORE access.
+
+    Persists :attr:`Phase2bProvenance.pre_access_checksum` under
+    :data:`PRE_ACCESS_PROVENANCE_ARTIFACT` in the write-once ledger, so the
+    post-access consistency check (Change C) can cross-verify against a PERSISTED
+    value rather than the in-memory record (CLAUDE.md §11). Called before the
+    seal opens; the seal stays closed if this raises.
+
+    Parameters
+    ----------
+    ledger : RunLedger
+        The write-once run ledger to record into.
+    provenance : Phase2bProvenance
+        The provenance record whose pre-access subset checksum is persisted.
+
+    Returns
+    -------
+    str
+        The recorded pre-access subset checksum.
+
+    Raises
+    ------
+    ProvenanceError
+        If the artifact name is already recorded (write-once violation).
+    """
+    checksum = provenance.pre_access_checksum
+    try:
+        ledger.record_artifact(PRE_ACCESS_PROVENANCE_ARTIFACT, checksum)
+    except DuplicateArtifactError as exc:
+        raise ProvenanceError(
+            "write-once violation recording the pre-access provenance subset "
+            f"{PRE_ACCESS_PROVENANCE_ARTIFACT!r}: {exc}"
+        ) from exc
+    return checksum
+
+
+def persist_pre_access_ledger(*, run_dir: str | Path, ledger: RunLedger) -> Path:
+    """Atomically persist and verify the pre-access ledger before seal opening."""
+    ledger.artifact_sha(PRE_ACCESS_PROVENANCE_ARTIFACT)
+    destination = Path(run_dir) / PRE_ACCESS_LEDGER_FILENAME
+    text = json.dumps(ledger.to_dict(), sort_keys=True, separators=(",", ":"))
+    try:
+        atomic_write_once(destination, text)
+    except FileExistsError as exc:
+        raise ProvenanceError(
+            f"pre-access ledger snapshot already exists at {str(destination)!r}; "
+            "the seal lifecycle is write-once"
+        ) from exc
+    try:
+        installed = RunLedger.read(destination)
+    except Exception as exc:
+        raise ProvenanceError(
+            f"failed to read back pre-access ledger snapshot {str(destination)!r}: {exc}"
+        ) from exc
+    if installed != ledger:
+        raise ProvenanceError("pre-access ledger snapshot failed post-install verification")
+    return destination
+
+
 def verify_upstream_before_access(
     *,
     expected_run_id: str,
@@ -487,7 +601,7 @@ def check_post_access_consistency(
     seal_audit_request_checksum: str,
     observed_request_checksum: str,
     provenance: Phase2bProvenance,
-    expected_provenance_checksum: str,
+    persisted_pre_access_checksum: str,
     result_checksums: Mapping[str, str],
     expected_result_checksums: Mapping[str, str],
 ) -> PostAccessStatus:
@@ -504,7 +618,8 @@ def check_post_access_consistency(
 
     * the seal-audit's recorded run id != the recomputed run id;
     * the observed request checksum != the seal-audit's request checksum;
-    * the provenance record's self-checksum != the expected provenance checksum;
+    * the provenance record's pre-access subset checksum != the PERSISTED
+      pre-access checksum (a real cross-check against the write-once ledger);
     * any regime result checksum != its expected value, or the result-checksum
       key sets differ.
 
@@ -520,8 +635,11 @@ def check_post_access_consistency(
         The request checksum observed for the sealed access.
     provenance : Phase2bProvenance
         The COMPLETE provenance record for this run.
-    expected_provenance_checksum : str
-        The provenance self-checksum the run was registered under.
+    persisted_pre_access_checksum : str
+        The pre-access digest-subset checksum PERSISTED into the write-once
+        ledger before access (:func:`record_pre_access_provenance`). The
+        provenance leg cross-checks the recomputed subset checksum against this
+        persisted value — a real tamper detector, not a self-reference.
     result_checksums : Mapping of str to str
         Observed regime result checksums (e.g. ``{"double", "single"}``).
     expected_result_checksums : Mapping of str to str
@@ -539,7 +657,7 @@ def check_post_access_consistency(
     if observed_request_checksum != seal_audit_request_checksum:
         return PostAccessStatus.INVALID
 
-    if provenance.self_checksum != expected_provenance_checksum:
+    if provenance.pre_access_checksum != persisted_pre_access_checksum:
         return PostAccessStatus.INVALID
 
     if set(result_checksums) != set(expected_result_checksums):

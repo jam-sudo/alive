@@ -354,12 +354,16 @@ class ActivationRecord:
     evidence_hashes
         Mapping from each activation requirement to its evidence hash. Scientific
         mode requires a present hash for every requirement the config declares.
+    evidence_files
+        Mapping from each activation requirement to the local evidence file whose
+        bytes must match ``evidence_hashes`` at the scientific boundary.
     """
 
     owner: str
     approved_protocol: str
     approved_phase: int
     evidence_hashes: dict[str, str] = field(default_factory=dict)
+    evidence_files: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -1057,6 +1061,9 @@ def assert_scientific_mode_allowed(
     if activation_record is None:
         raise ScientificModeError("scientific mode blocked: no owner activation record provided")
 
+    if not isinstance(activation_record.owner, str) or not activation_record.owner.strip():
+        raise ScientificModeError("scientific mode blocked: activation record owner is empty")
+
     if activation_record.approved_protocol != config.protocol:
         raise ScientificModeError(
             "scientific mode blocked: activation record protocol "
@@ -1074,12 +1081,55 @@ def assert_scientific_mode_allowed(
             f"(git_is_clean={git_is_clean!r})"
         )
 
-    missing = [
-        req
-        for req in config.activation_requirements
-        if not activation_record.evidence_hashes.get(req)
-    ]
-    if missing:
+    expected_requirements = set(config.activation_requirements)
+    supplied_requirements = set(activation_record.evidence_hashes)
+    if supplied_requirements != expected_requirements:
+        missing = sorted(expected_requirements - supplied_requirements)
+        extra = sorted(supplied_requirements - expected_requirements)
         raise ScientificModeError(
-            f"scientific mode blocked: missing activation evidence hashes for {missing}"
+            "scientific mode blocked: activation evidence roster mismatch "
+            f"(missing={missing}, extra={extra})"
+        )
+    import re
+
+    malformed = [
+        req
+        for req, digest in activation_record.evidence_hashes.items()
+        if not isinstance(digest, str) or re.fullmatch(r"sha256:[0-9a-f]{64}", digest) is None
+    ]
+    if malformed:
+        raise ScientificModeError(
+            "scientific mode blocked: activation evidence hashes must use "
+            f"'sha256:<64 lowercase hex>' for {sorted(malformed)}"
+        )
+
+    supplied_files = set(activation_record.evidence_files)
+    if supplied_files != expected_requirements:
+        missing = sorted(expected_requirements - supplied_files)
+        extra = sorted(supplied_files - expected_requirements)
+        raise ScientificModeError(
+            "scientific mode blocked: activation evidence file roster mismatch "
+            f"(missing={missing}, extra={extra})"
+        )
+
+    import hashlib
+    from pathlib import Path
+
+    mismatched_files: list[str] = []
+    for requirement in config.activation_requirements:
+        path = Path(activation_record.evidence_files[requirement])
+        try:
+            observed = hashlib.sha256(path.read_bytes()).hexdigest()
+        except OSError as exc:
+            raise ScientificModeError(
+                f"scientific mode blocked: cannot read activation evidence "
+                f"{requirement!r} at {str(path)!r}: {exc}"
+            ) from exc
+        expected_digest = activation_record.evidence_hashes[requirement].removeprefix("sha256:")
+        if observed != expected_digest:
+            mismatched_files.append(requirement)
+    if mismatched_files:
+        raise ScientificModeError(
+            "scientific mode blocked: activation evidence file hash mismatch for "
+            f"{sorted(mismatched_files)}"
         )

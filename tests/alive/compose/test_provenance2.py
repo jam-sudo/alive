@@ -29,12 +29,16 @@ import inspect
 import pytest
 
 from alive.compose.provenance2 import (
+    PRE_ACCESS_LEDGER_FILENAME,
+    PRE_ACCESS_PROVENANCE_ARTIFACT,
     Phase2bProvenance,
     PostAccessStatus,
     ProvenanceError,
     check_post_access_consistency,
+    persist_pre_access_ledger,
     recompute_run_id,
     record_phase2b_provenance,
+    record_pre_access_provenance,
     verify_upstream_before_access,
 )
 from alive.provenance import (
@@ -495,7 +499,7 @@ def _consistent_post_access():
         seal_audit_request_checksum="req-sha",
         observed_request_checksum="req-sha",
         provenance=_provenance(),
-        expected_provenance_checksum=_provenance().self_checksum,
+        persisted_pre_access_checksum=_provenance().pre_access_checksum,
         result_checksums={"double": "regime-double-sha", "single": "regime-single-sha"},
         expected_result_checksums={"double": "regime-double-sha", "single": "regime-single-sha"},
     )
@@ -529,7 +533,7 @@ def test_post_access_result_checksum_mismatch_returns_invalid():
 
 def test_post_access_provenance_checksum_mismatch_returns_invalid():
     kwargs = _consistent_post_access()
-    kwargs["expected_provenance_checksum"] = "DIFFERENT-provenance-checksum"
+    kwargs["persisted_pre_access_checksum"] = "DIFFERENT-provenance-checksum"
     status = check_post_access_consistency(**kwargs)
     assert status is PostAccessStatus.INVALID
 
@@ -540,7 +544,7 @@ def test_post_access_never_raises_on_detected_inconsistency():
     kwargs["seal_audit_run_id"] = "X"
     kwargs["observed_request_checksum"] = "Y"
     kwargs["result_checksums"] = {"double": "Z", "single": "W"}
-    kwargs["expected_provenance_checksum"] = "V"
+    kwargs["persisted_pre_access_checksum"] = "V"
     # No exception type expected; a raise here is a contract violation.
     status = check_post_access_consistency(**kwargs)
     assert status is PostAccessStatus.INVALID
@@ -565,3 +569,85 @@ def test_provenance_error_and_ledger_error_are_distinct():
     """ProvenanceError is the gate's abort type; LedgerError is the ledger's."""
     assert issubclass(ProvenanceError, Exception)
     assert ProvenanceError is not LedgerError
+
+
+# ---------------------------------------------------------------------------
+# Change C infra: pre-access digest subset (excludes post-access fields)
+# ---------------------------------------------------------------------------
+
+_POST_ACCESS_KEYS = (
+    "regime_result_double_sha256",
+    "regime_result_single_sha256",
+    "terminal_report_sha256",
+)
+
+
+def test_pre_access_subset_excludes_post_access_fields():
+    sub = _provenance().pre_access_digest_subset()
+    for key in _POST_ACCESS_KEYS:
+        assert key not in sub
+    # a pre-access field survives in the subset.
+    assert sub["data_card_sha256"] == _DATA_CARD_DIGEST
+
+
+def test_pre_access_checksum_ignores_post_access_fields():
+    a = _provenance()
+    b = _provenance(
+        regime_result_double_sha256="X",
+        regime_result_single_sha256="Y",
+        terminal_report_sha256="Z",
+    )
+    # The subset checksum is stable across post-access-only changes ...
+    assert a.pre_access_checksum == b.pre_access_checksum
+    # ... while the FULL self-checksum still moves (post-access fields are in it).
+    assert a.self_checksum != b.self_checksum
+
+
+def test_pre_access_checksum_moves_on_a_pre_access_field():
+    a = _provenance()
+    b = _provenance(processed_sha256="TAMPERED")
+    assert a.pre_access_checksum != b.pre_access_checksum
+
+
+def test_pre_access_checksum_is_64_hex():
+    c = _provenance().pre_access_checksum
+    assert len(c) == 64 and all(ch in "0123456789abcdef" for ch in c)
+
+
+# ---------------------------------------------------------------------------
+# Change C infra: record_pre_access_provenance (write-once, before access)
+# ---------------------------------------------------------------------------
+
+
+def test_record_pre_access_provenance_records_subset_checksum():
+    ledger = RunLedger(
+        run_id=_expected_run_id(), config_sha256=_CONFIG_DIGEST, environment=_environment()
+    )
+    prov = _provenance()
+    returned = record_pre_access_provenance(ledger=ledger, provenance=prov)
+    assert returned == prov.pre_access_checksum
+    assert ledger.artifact_sha(PRE_ACCESS_PROVENANCE_ARTIFACT) == prov.pre_access_checksum
+
+
+def test_record_pre_access_provenance_is_write_once():
+    ledger = RunLedger(
+        run_id=_expected_run_id(), config_sha256=_CONFIG_DIGEST, environment=_environment()
+    )
+    record_pre_access_provenance(ledger=ledger, provenance=_provenance())
+    # A second record under the same name (even a different value) is refused.
+    with pytest.raises(ProvenanceError):
+        record_pre_access_provenance(
+            ledger=ledger, provenance=_provenance(processed_sha256="different")
+        )
+
+
+def test_persist_pre_access_ledger_round_trip(tmp_path):
+    ledger = RunLedger(
+        run_id=_expected_run_id(), config_sha256=_CONFIG_DIGEST, environment=_environment()
+    )
+    record_pre_access_provenance(ledger=ledger, provenance=_provenance())
+    path = persist_pre_access_ledger(run_dir=tmp_path, ledger=ledger)
+    assert path.name == PRE_ACCESS_LEDGER_FILENAME
+    assert RunLedger.read(path) == ledger
+    with pytest.raises(ProvenanceError):
+        persist_pre_access_ledger(run_dir=tmp_path, ledger=ledger)

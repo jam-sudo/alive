@@ -39,7 +39,13 @@ from pathlib import Path
 
 import numpy as np
 
-from alive.compose.baselines_combo import additive, no_change, perturbation_mean
+from alive.compose.baselines_combo import (
+    BaselineAdapter,
+    BaselineTrainingContext,
+    additive,
+    no_change,
+    perturbation_mean,
+)
 from alive.compose.config2 import (
     ActivationRecord,
     ComposePhase2Config,
@@ -62,6 +68,7 @@ from alive.provenance import RunLedger, sha256_bytes, sha256_file, sha256_json
 
 #: Default Phase-2 config consulted by the execution-mode guard.
 _DEFAULT_CONFIG_PATH = "configs/compose_k562_v1_phase2.yaml"
+_DEEP_BASELINE_NAMES = frozenset({"gears", "cpa"})
 
 #: A zero-arg factory returning a fresh symmetric model (``fit`` / ``predict_eps``).
 ModelFactory = Callable[[], object]
@@ -321,6 +328,49 @@ class Phase2aResult:
     method_lock: dict | None = field(default=None)
 
 
+def build_subprocess_fit_payload(
+    *,
+    inputs: Phase2aInputs,
+    outcome_store: DevelopmentOutcomeStore,
+    response_artifact: Mapping,
+    oof_folds: Sequence[int],
+) -> dict[str, object]:
+    """Assemble the canonical fit-role-only payload for GEARS/CPA workers."""
+    if set(response_artifact) != {"response_space", "control_mean"}:
+        raise ValueError("response_artifact must contain exactly response_space + control_mean")
+    response_space = response_artifact["response_space"]
+    components = np.asarray(getattr(response_space, "pca_components", None), dtype=float)
+    control_mean = np.asarray(response_artifact["control_mean"], dtype=float)
+    if components.ndim != 2 or components.shape[0] != inputs.response_dim:
+        raise ValueError("response-space PCA components are not response_dim aligned")
+    if control_mean.shape != (inputs.response_dim,):
+        raise ValueError("response artifact control_mean is not response_dim aligned")
+    if len(oof_folds) != len(inputs.cal_pair_ids):
+        raise ValueError("oof_folds must align one-to-one with calibration pairs")
+    if outcome_store.combo_calibration_pair_ids != tuple(tuple(p) for p in inputs.cal_pair_ids):
+        raise ValueError("development outcomes are not aligned with calibration pair IDs")
+    genes = tuple(sorted(inputs.delta_by_gene, key=lambda gene: gene.encode("utf-8")))
+    calibration_delta = np.asarray(inputs.additive_cal, dtype=float) + np.asarray(
+        outcome_store.combo_calibration_eps, dtype=float
+    )
+    return {
+        "schema_version": 1,
+        "response_dim": int(inputs.response_dim),
+        "seed": int(inputs.seed),
+        "allowed_roles": ["singles", "combo_calibration"],
+        "pair_ids": [],
+        "single_gene_ids": list(genes),
+        "singles_response": [
+            np.asarray(inputs.delta_by_gene[gene], dtype=float).tolist() for gene in genes
+        ],
+        "control_mean": control_mean.tolist(),
+        "calibration_pair_ids": [list(pair) for pair in inputs.cal_pair_ids],
+        "calibration_delta": calibration_delta.tolist(),
+        "pca_components": components.tolist(),
+        "oof_folds": [int(fold) for fold in oof_folds],
+    }
+
+
 # --------------------------------------------------------------------------- #
 # helpers
 # --------------------------------------------------------------------------- #
@@ -523,6 +573,7 @@ def _verify_scientific_response_artifact(
 def _validate_config_contract(
     inputs: Phase2aInputs,
     config: ComposePhase2Config,
+    baseline_adapter_names: Sequence[str] = (),
 ) -> None:
     """Require runtime selection and roster values to equal the preregistration."""
     mismatches: list[str] = []
@@ -543,7 +594,14 @@ def _validate_config_contract(
         for name in config.method_roster
         if name not in {"additive", "no_change", "perturbation_mean"}
     )
-    if tuple(inputs.model_factories) != learned_roster:
+    # Order the deep-baseline adapter segment by the registered roster (not the
+    # caller's mapping order) so the contract agrees with the set-based adapter
+    # validation: {gears, cpa} supplied in any order must not spuriously mismatch.
+    adapter_name_set = set(baseline_adapter_names)
+    runtime_learned = tuple(inputs.model_factories) + tuple(
+        name for name in learned_roster if name in adapter_name_set
+    )
+    if runtime_learned != learned_roster:
         mismatches.append("model_roster")
     if mismatches:
         raise ValueError(
@@ -824,6 +882,7 @@ def _predict_role(
     fitted_models: Mapping[str, object],
     selected_Z: np.ndarray,
     perturbation_mean_prediction: np.ndarray,
+    baseline_adapters: Mapping[str, BaselineAdapter] | None = None,
 ) -> dict[str, dict[tuple[str, str], np.ndarray]]:
     """Predict every roster method for a sealed role using identities/features only.
 
@@ -876,7 +935,51 @@ def _predict_role(
     out["perturbation_mean"] = {
         (g, h): np.asarray(perturbation_mean_prediction, dtype=float).copy() for g, h in pair_ids
     }
+    if baseline_adapters:
+        context = BaselineTrainingContext(
+            allowed_roles=frozenset({"singles", "combo_calibration"}),
+            pair_manifest_checksum=inputs.manifest_checksum,
+            response_space_checksum=inputs.response_space_checksum,
+            training_pair_ids=tuple(tuple(p) for p in inputs.cal_pair_ids),
+            single_gene_ids=tuple(
+                sorted(inputs.delta_by_gene, key=lambda gene: str(gene).encode("utf-8"))
+            ),
+        )
+        for name, adapter in baseline_adapters.items():
+            out[name] = adapter.predict(context, list(pair_ids), inputs.response_dim)
     return out
+
+
+def _validate_baseline_adapters(
+    *,
+    model_factories: Mapping[str, ModelFactory],
+    baseline_adapters: Mapping[str, BaselineAdapter] | None,
+    required: bool,
+) -> dict[str, BaselineAdapter]:
+    """Validate the activation-time GEARS/CPA assembly before model fitting."""
+    adapters = dict(baseline_adapters or {})
+    if required or adapters:
+        if set(adapters) != _DEEP_BASELINE_NAMES:
+            raise ScientificModeError(
+                "activation-time baseline adapters must be exactly {'gears', 'cpa'}; "
+                f"got {sorted(adapters)}"
+            )
+        overlap = set(model_factories) & _DEEP_BASELINE_NAMES
+        if overlap:
+            raise ScientificModeError(
+                "GEARS/CPA cannot be supplied as local model_factory stand-ins when "
+                f"subprocess adapters are active: {sorted(overlap)}"
+            )
+        for name, adapter in adapters.items():
+            if not isinstance(adapter, BaselineAdapter) or adapter.name != name:
+                raise ScientificModeError(f"invalid activation-time adapter for {name!r}")
+            backend = adapter.backend
+            if backend is None or not getattr(backend, "is_available", False):
+                raise ScientificModeError(f"activation-time backend {name!r} is unavailable")
+            # Accessing the manifest fails closed on an absent payload/worker and
+            # binds the exact runtime identity used below.
+            getattr(backend, "provenance_manifest")
+    return adapters
 
 
 def _build_method_lock(
@@ -927,6 +1030,7 @@ def run_phase2a(
     data_card_path: str | Path | None = None,
     raw_asset_path: str | Path | None = None,
     response_artifact: Mapping | None = None,
+    baseline_adapters: Mapping[str, BaselineAdapter] | None = None,
 ) -> Phase2aResult:
     """Run scientific Phase-2a after all activation conditions are satisfied.
 
@@ -953,6 +1057,7 @@ def run_phase2a(
         data_card_path=data_card_path,
         raw_asset_path=raw_asset_path,
         response_artifact=response_artifact,
+        baseline_adapters=baseline_adapters,
     )
 
 
@@ -965,6 +1070,7 @@ def run_phase2a_fixture(
     config_path: str | Path = _DEFAULT_CONFIG_PATH,
     bundle_path: str | Path | None = None,
     environment=None,
+    baseline_adapters: Mapping[str, BaselineAdapter] | None = None,
 ) -> Phase2aResult:
     """Run the bounded synthetic/tiny-fixture Phase-2a path."""
     _assert_fixture_payload(inputs, outcome_store)
@@ -982,6 +1088,7 @@ def run_phase2a_fixture(
         data_card_path=None,
         raw_asset_path=None,
         response_artifact=None,
+        baseline_adapters=baseline_adapters,
     )
 
 
@@ -1000,6 +1107,7 @@ def _run_phase2a_core(
     data_card_path: str | Path | None,
     raw_asset_path: str | Path | None,
     response_artifact: Mapping | None,
+    baseline_adapters: Mapping[str, BaselineAdapter] | None,
 ) -> Phase2aResult:
     """Shared implementation after the public execution boundary is resolved.
 
@@ -1067,8 +1175,14 @@ def _run_phase2a_core(
         )
         _verify_scientific_response_artifact(inputs, response_artifact)
 
+    adapters = _validate_baseline_adapters(
+        model_factories=inputs.model_factories,
+        baseline_adapters=baseline_adapters,
+        required=not fixture_execution,
+    )
+
     # Step 2: bind runtime values, in-memory contents, role provenance and run ID.
-    _validate_config_contract(inputs, cfg)
+    _validate_config_contract(inputs, cfg, tuple(adapters))
     _verify_hashes(inputs, outcome_store, expected_hashes)
     _validate_pair_alignment(inputs, outcome_store)
     _verify_factor_banks(inputs, require_banks=not fixture_execution)
@@ -1126,6 +1240,8 @@ def _run_phase2a_core(
     model_artifact_checksums = {
         name: fitted_model_checksum(model) for name, model in sorted(fitted.items())
     }
+    for name, adapter in sorted(adapters.items()):
+        model_artifact_checksums[name] = sha256_json(adapter.backend.provenance_manifest)
     effective_model_checksum = sha256_json(
         {
             "schema": "compose_model_set_v1",
@@ -1143,6 +1259,7 @@ def _run_phase2a_core(
         fitted,
         selected_Z,
         mean_prediction,
+        adapters,
     )
     single_preds = _predict_role(
         inputs,
@@ -1150,6 +1267,7 @@ def _run_phase2a_core(
         fitted,
         selected_Z,
         mean_prediction,
+        adapters,
     )
 
     roster = cfg.method_roster

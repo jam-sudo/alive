@@ -10,6 +10,9 @@ blocked config, and the activated canonical config is checked to pass the gate.
 
 from __future__ import annotations
 
+import hashlib
+from pathlib import Path
+
 import pytest
 import yaml
 
@@ -24,6 +27,20 @@ from alive.compose.config2 import (
 )
 
 CANON = "configs/compose_k562_v1_phase2.yaml"
+_EVIDENCE_FILES = {
+    "real_norman_phi_rank_and_condition_report": (
+        "docs/activation-evidence/compose/real_norman_phi_rank_report.json"
+    ),
+    "regime_specific_detectable_effect_analysis": (
+        "docs/activation-evidence/compose/real_norman_detectable_effect_report.json"
+    ),
+    "finalized_norman_data_card_and_sha256": "docs/data-cards/norman_compose_k562_v1.json",
+    "gears_cpa_reproducible_dependency_lock": (
+        "docs/activation-evidence/compose/gears_cpa_dependency_lock.json"
+    ),
+    "independent_compose_outcome_store_and_access_audit": "src/alive/compose/outcome_store.py",
+    "phase2_plan_metric_leakage_and_seal_integration_tests": "tests/alive/compose/test_phase2b.py",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -49,8 +66,10 @@ def _activation_record() -> ActivationRecord:
         approved_protocol="COMPOSE-K562-v1",
         approved_phase=2,
         evidence_hashes={
-            req: f"sha256:{i:064x}" for i, req in enumerate(cfg.activation_requirements)
+            req: "sha256:" + hashlib.sha256(Path(_EVIDENCE_FILES[req]).read_bytes()).hexdigest()
+            for req in cfg.activation_requirements
         },
+        evidence_files=dict(_EVIDENCE_FILES),
     )
 
 
@@ -576,6 +595,7 @@ def test_scientific_mode_requires_all_evidence_hashes(tmp_path):
         approved_protocol=rec.approved_protocol,
         approved_phase=rec.approved_phase,
         evidence_hashes=dict(list(rec.evidence_hashes.items())[:-1]),  # drop one
+        evidence_files=rec.evidence_files,
     )
     with pytest.raises(ScientificModeError):
         assert_scientific_mode_allowed(
@@ -596,6 +616,7 @@ def test_scientific_mode_requires_matching_protocol(tmp_path):
         approved_protocol="TG-K562-v1",  # mismatched protocol
         approved_phase=2,
         evidence_hashes=rec.evidence_hashes,
+        evidence_files=rec.evidence_files,
     )
     with pytest.raises(ScientificModeError):
         assert_scientific_mode_allowed(
@@ -628,12 +649,51 @@ def test_empty_evidence_hashes_blocks_scientific_mode(tmp_path):
         approved_protocol="COMPOSE-K562-v1",
         approved_phase=2,
         evidence_hashes={},
+        evidence_files={},
     )
     with pytest.raises(ScientificModeError):
         assert_scientific_mode_allowed(
             cfg,
             fixture_mode=False,
             activation_record=rec,
+            git_is_clean=True,
+        )
+
+
+def test_malformed_evidence_hash_blocks_scientific_mode():
+    cfg = load_compose_phase2_config(CANON)
+    rec = _activation_record()
+    malformed = dict(rec.evidence_hashes)
+    malformed[cfg.activation_requirements[0]] = "present-but-not-a-sha256"
+    with pytest.raises(ScientificModeError, match="64 lowercase hex"):
+        assert_scientific_mode_allowed(
+            cfg,
+            activation_record=ActivationRecord(
+                owner=rec.owner,
+                approved_protocol=rec.approved_protocol,
+                approved_phase=rec.approved_phase,
+                evidence_hashes=malformed,
+                evidence_files=rec.evidence_files,
+            ),
+            git_is_clean=True,
+        )
+
+
+def test_extra_evidence_requirement_blocks_scientific_mode():
+    cfg = load_compose_phase2_config(CANON)
+    rec = _activation_record()
+    extra = dict(rec.evidence_hashes)
+    extra["unregistered_requirement"] = "sha256:" + "a" * 64
+    with pytest.raises(ScientificModeError, match="roster mismatch"):
+        assert_scientific_mode_allowed(
+            cfg,
+            activation_record=ActivationRecord(
+                owner=rec.owner,
+                approved_protocol=rec.approved_protocol,
+                approved_phase=rec.approved_phase,
+                evidence_hashes=extra,
+                evidence_files={**rec.evidence_files, "unregistered_requirement": CANON},
+            ),
             git_is_clean=True,
         )
 
