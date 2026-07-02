@@ -29,11 +29,13 @@ import inspect
 import pytest
 
 from alive.compose.provenance2 import (
+    PRE_ACCESS_LEDGER_FILENAME,
     PRE_ACCESS_PROVENANCE_ARTIFACT,
     Phase2bProvenance,
     PostAccessStatus,
     ProvenanceError,
     check_post_access_consistency,
+    persist_pre_access_ledger,
     recompute_run_id,
     record_phase2b_provenance,
     record_pre_access_provenance,
@@ -637,3 +639,15 @@ def test_record_pre_access_provenance_is_write_once():
         record_pre_access_provenance(
             ledger=ledger, provenance=_provenance(processed_sha256="different")
         )
+
+
+def test_persist_pre_access_ledger_round_trip(tmp_path):
+    ledger = RunLedger(
+        run_id=_expected_run_id(), config_sha256=_CONFIG_DIGEST, environment=_environment()
+    )
+    record_pre_access_provenance(ledger=ledger, provenance=_provenance())
+    path = persist_pre_access_ledger(run_dir=tmp_path, ledger=ledger)
+    assert path.name == PRE_ACCESS_LEDGER_FILENAME
+    assert RunLedger.read(path) == ledger
+    with pytest.raises(ProvenanceError):
+        persist_pre_access_ledger(run_dir=tmp_path, ledger=ledger)

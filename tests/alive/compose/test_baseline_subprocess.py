@@ -63,6 +63,20 @@ def test_unknown_key_rejected(tmp_path) -> None:
         write_payload(str(tmp_path), p)
 
 
+def test_duplicate_prediction_request_pair_rejected(tmp_path) -> None:
+    p = _payload()
+    p["pair_ids"] = [["A", "B"], ["A", "B"]]
+    with pytest.raises(PayloadError, match="duplicate"):
+        write_payload(str(tmp_path), p)
+
+
+def test_misaligned_singles_response_rejected(tmp_path) -> None:
+    p = _payload()
+    p["singles_response"] = p["singles_response"][:-1]
+    with pytest.raises(PayloadError, match="aligned"):
+        write_payload(str(tmp_path), p)
+
+
 def test_prediction_round_trip(tmp_path) -> None:
     preds = {("A", "B"): np.array([1.0, 2.0, 3.0]), ("A", "C"): np.array([4.0, 5.0, 6.0])}
     path = str(tmp_path / "preds")
@@ -118,7 +132,7 @@ def _backend() -> SubprocessBaselineBackend:
 
 def test_predict_end_to_end_through_adapter() -> None:
     be = _backend()
-    be._payload = _payload()  # test injects the fit-role payload (see Step 3 note)
+    be.configure_payload(_payload())
     adapter = BaselineAdapter(name="stub", backend=be)
     out = adapter.predict(_context(), [("A", "B"), ("A", "C")], 3)
     assert set(out) == {("A", "B"), ("A", "C")}
@@ -128,8 +142,8 @@ def test_predict_end_to_end_through_adapter() -> None:
 
 def test_predict_is_deterministic() -> None:
     be1, be2 = _backend(), _backend()
-    be1._payload = _payload()
-    be2._payload = _payload()
+    be1.configure_payload(_payload())
+    be2.configure_payload(_payload())
     a = BaselineAdapter(name="stub", backend=be1).predict(_context(), [("A", "B")], 3)
     b = BaselineAdapter(name="stub", backend=be2).predict(_context(), [("A", "B")], 3)
     np.testing.assert_allclose(a[("A", "B")], b[("A", "B")])
@@ -139,6 +153,5 @@ def test_payload_with_sealed_token_is_refused() -> None:
     be = _backend()
     bad = _payload()
     bad["single_gene_ids"] = ["A", "sealed_double_unseen", "C"]
-    be._payload = bad
     with pytest.raises(ValueError, match="sealed"):
-        be.predict(_context(), [("A", "B")], 3)
+        be.configure_payload(bad)

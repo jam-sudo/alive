@@ -25,11 +25,15 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import sys
+from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
 
-from alive.compose.baselines_combo import additive
+from alive.compose.baseline_subprocess import SubprocessBaselineBackend
+from alive.compose.baselines_combo import BaselineAdapter, additive
 from alive.compose.config2 import ScientificModeError, load_compose_phase2_config
 from alive.compose.datacard import compute_compose_run_id
 from alive.compose.freeze import FrozenPredictionBundle, OutcomeLeakageError
@@ -44,6 +48,7 @@ from alive.compose.phase2a import (
     _verify_factor_banks,
     _verify_scientific_data_assets,
     _verify_scientific_response_artifact,
+    build_subprocess_fit_payload,
     run_phase2a,
     run_phase2a_fixture,
 )
@@ -153,6 +158,31 @@ def _model_factories():
         "gears": L1Model,
         "cpa": L1Model,
     }
+
+
+def _subprocess_adapters(inputs: Phase2aInputs, store: DevelopmentOutcomeStore):
+    payload = build_subprocess_fit_payload(
+        inputs=inputs,
+        outcome_store=store,
+        response_artifact={
+            "response_space": SimpleNamespace(pca_components=np.eye(inputs.response_dim)),
+            "control_mean": np.zeros(inputs.response_dim),
+        },
+        oof_folds=[0] * len(inputs.cal_pair_ids),
+    )
+    worker = Path(__file__).parents[3] / "scripts" / "baselines" / "stub_worker.py"
+    adapters = {}
+    for name in ("gears", "cpa"):
+        backend = SubprocessBaselineBackend(
+            name=name,
+            env_python=sys.executable,
+            worker_script=str(worker),
+            import_name="json",
+            seed=inputs.seed,
+        )
+        backend.configure_payload(payload)
+        adapters[name] = BaselineAdapter(name=name, backend=backend)
+    return adapters
 
 
 def _inputs(inst, **overrides) -> Phase2aInputs:
@@ -273,6 +303,30 @@ def test_continue_produces_a_verified_bundle_no_outcomes():
     # predictions exist for exactly the registered sealed pairs
     assert set(res.bundle.predictions_double_unseen["additive"]) == set(inst["sealed_double_id"])
     assert set(res.bundle.predictions_single_unseen["additive"]) == set(inst["sealed_single_id"])
+
+
+def test_subprocess_baselines_are_wired_into_phase2a_freeze():
+    inst = _build_instance(np.random.default_rng(31))
+    local_factories = {
+        name: factory
+        for name, factory in _model_factories().items()
+        if name not in {"gears", "cpa"}
+    }
+    inputs = _inputs(inst, model_factories=local_factories)
+    store = _store(inst)
+    adapters = _subprocess_adapters(inputs, store)
+    res = run_phase2a_fixture(
+        inputs,
+        store,
+        expected_hashes=_HASHES,
+        baseline_adapters=adapters,
+    )
+    assert res.bundle is not None
+    for method in ("gears", "cpa"):
+        assert set(res.bundle.predictions_double_unseen[method]) == set(inst["sealed_double_id"])
+        assert set(res.bundle.predictions_single_unseen[method]) == set(inst["sealed_single_id"])
+    assert res.method_lock is not None
+    assert len(res.method_lock["method_roster"]) == 9
 
 
 def test_l1_prediction_equals_identity_only_path():

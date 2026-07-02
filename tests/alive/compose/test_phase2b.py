@@ -31,6 +31,7 @@ NO seal open beyond the synthetic in-memory store, NO real sealed-outcome read.
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import inspect
 import json
 from pathlib import Path
@@ -47,6 +48,7 @@ from alive.compose.freeze import FrozenPredictionBundle
 from alive.compose.outcome_store import ComposeOutcomeStore, ComposeSealingError
 from alive.compose.preflight import PreflightError
 from alive.compose.provenance2 import (
+    PRE_ACCESS_LEDGER_FILENAME,
     PRE_ACCESS_PROVENANCE_ARTIFACT,
     Phase2bProvenance,
 )
@@ -62,11 +64,26 @@ from alive.compose.phase2b import (  # isort: skip
     Phase2bError,
     Phase2bResult,
     _build_provenance,
+    build_activation_provenance_inputs,
     run_phase2b,
     run_phase2b_fixture,
 )
 
 _CONFIG_PATH = "configs/compose_k562_v1_phase2.yaml"
+_ACTIVATION_EVIDENCE_FILES = {
+    "real_norman_phi_rank_and_condition_report": (
+        "docs/activation-evidence/compose/real_norman_phi_rank_report.json"
+    ),
+    "regime_specific_detectable_effect_analysis": (
+        "docs/activation-evidence/compose/real_norman_detectable_effect_report.json"
+    ),
+    "finalized_norman_data_card_and_sha256": "docs/data-cards/norman_compose_k562_v1.json",
+    "gears_cpa_reproducible_dependency_lock": (
+        "docs/activation-evidence/compose/gears_cpa_dependency_lock.json"
+    ),
+    "independent_compose_outcome_store_and_access_audit": "src/alive/compose/outcome_store.py",
+    "phase2_plan_metric_leakage_and_seal_integration_tests": "tests/alive/compose/test_phase2b.py",
+}
 
 # Provenance digests bound into the composite run id (synthetic).
 _DATA_CARD = "data-card-checksum"
@@ -892,7 +909,12 @@ def _activation_record(cfg):
         owner="owner",
         approved_protocol=cfg.protocol,
         approved_phase=cfg.phase,
-        evidence_hashes={req: "h" for req in cfg.activation_requirements},
+        evidence_hashes={
+            req: "sha256:"
+            + hashlib.sha256(Path(_ACTIVATION_EVIDENCE_FILES[req]).read_bytes()).hexdigest()
+            for req in cfg.activation_requirements
+        },
+        evidence_files=dict(_ACTIVATION_EVIDENCE_FILES),
     )
 
 
@@ -946,16 +968,16 @@ def test_scientific_entry_rejects_fixture_store(tmp_path):
 
 def _prov_inputs() -> ActivationProvenanceInputs:
     return ActivationProvenanceInputs(
-        processed_sha256="proc-sha",
-        feature_bank_sha256="fb-sha",
-        dependency_lock_sha256="lock-sha",
+        processed_sha256="1" * 64,
+        feature_bank_sha256="2" * 64,
+        dependency_lock_sha256="3" * 64,
         gears_revision="gears-9",
         cpa_revision="cpa-9",
-        python_version="3.12.3",
-        platform="linux-x86_64",
+        python_version="fixture",
+        platform="fixture",
         device="cuda",
         precision="float32",
-        git_commit="f" * 40,
+        git_commit="0" * 40,
     )
 
 
@@ -1022,14 +1044,14 @@ def test_build_provenance_scientific_populates_from_ledger_and_inputs(tmp_path):
     assert prov.raw_or_source_sha256 == "raw-sha"
     assert prov.sequence_mapping_sha256 == "seq-sha"
     # from the inputs object (evidence-sourced digests):
-    assert prov.processed_sha256 == "proc-sha"
-    assert prov.feature_bank_sha256 == "fb-sha"
-    assert prov.dependency_lock_sha256 == "lock-sha"
+    assert prov.processed_sha256 == "1" * 64
+    assert prov.feature_bank_sha256 == "2" * 64
+    assert prov.dependency_lock_sha256 == "3" * 64
     assert prov.gears_revision == "gears-9"
     assert prov.cpa_revision == "cpa-9"
     assert prov.device == "cuda"
     assert prov.precision == "float32"
-    assert prov.git_commit == "f" * 40
+    assert prov.git_commit == "0" * 40
 
 
 # ===========================================================================
@@ -1044,3 +1066,74 @@ def test_pre_access_provenance_persisted_in_ledger(tmp_path):
     # opens, so the post-access provenance leg cross-checks a PERSISTED value.
     persisted = res.ledger.artifact_sha(PRE_ACCESS_PROVENANCE_ARTIFACT)
     assert isinstance(persisted, str) and len(persisted) == 64
+    snapshot = RunLedger.read(kit["run_dir"] / PRE_ACCESS_LEDGER_FILENAME)
+    assert snapshot.artifact_sha(PRE_ACCESS_PROVENANCE_ARTIFACT) == persisted
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("processed_sha256", "not-a-digest"),
+        ("feature_bank_sha256", ""),
+        ("dependency_lock_sha256", "A" * 64),
+        ("gears_revision", ""),
+        ("git_commit", "short"),
+    ],
+)
+def test_activation_provenance_inputs_reject_malformed_values(field, value):
+    values = dataclasses.asdict(_prov_inputs())
+    values[field] = value
+    with pytest.raises(ValueError):
+        ActivationProvenanceInputs(**values)
+
+
+def test_build_provenance_rejects_environment_mismatch(tmp_path):
+    kit = _make_run(tmp_path)
+    ledger = kit["ledger"]
+    ledger.record_artifact("data_card", "dc-sha")
+    ledger.record_artifact("raw_data", "raw-sha")
+    ledger.record_artifact("sequence_mapping", "seq-sha")
+    values = dataclasses.asdict(_prov_inputs())
+    values["git_commit"] = "f" * 40
+    with pytest.raises(Phase2bError, match="ledger environment"):
+        _build_provenance(
+            bundle=kit["bundle"],
+            pair_manifest=kit["manifest"],
+            config=kit["cfg"],
+            audit_reference="ref",
+            regime_double=None,
+            regime_single=None,
+            git_clean=True,
+            ledger=ledger,
+            inputs=ActivationProvenanceInputs(**values),
+            fixture_execution=False,
+        )
+
+
+def test_build_activation_provenance_inputs_hashes_real_files(tmp_path):
+    processed = tmp_path / "processed.h5ad"
+    feature_bank = tmp_path / "features.json"
+    dependency = tmp_path / "dependency.json"
+    gears = tmp_path / "gears.lock"
+    cpa = tmp_path / "cpa.lock"
+    processed.write_bytes(b"processed")
+    feature_bank.write_bytes(b"features")
+    dependency.write_text("{}", encoding="utf-8")
+    gears.write_text("cell-gears==0.1.2\n", encoding="utf-8")
+    cpa.write_text("cpa-tools==0.7.2\n", encoding="utf-8")
+    inputs = build_activation_provenance_inputs(
+        processed_path=processed,
+        feature_bank_path=feature_bank,
+        dependency_lock_path=dependency,
+        gears_requirements_path=gears,
+        cpa_requirements_path=cpa,
+        environment=_environment(),
+        device="cuda:0",
+        precision="float32",
+    )
+    assert inputs.processed_sha256 == hashlib.sha256(b"processed").hexdigest()
+    assert inputs.feature_bank_sha256 == hashlib.sha256(b"features").hexdigest()
+    assert inputs.gears_revision == "0.1.2"
+    assert inputs.cpa_revision == "0.7.2"
+    assert len(inputs.dependency_lock_sha256) == 64
+    assert inputs.git_commit == _environment().git_commit

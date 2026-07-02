@@ -63,10 +63,12 @@ from alive.compose.freeze import FrozenPredictionBundle
 from alive.compose.outcome_store import ComposeOutcomeStore, ObservedPair
 from alive.compose.preflight import EvaluationLock, run_preflight
 from alive.compose.provenance2 import (
+    PRE_ACCESS_LEDGER_FILENAME,
     PRE_ACCESS_PROVENANCE_ARTIFACT,
     Phase2bProvenance,
     PostAccessStatus,
     check_post_access_consistency,
+    persist_pre_access_ledger,
     recompute_run_id,
     record_pre_access_provenance,
     verify_upstream_before_access,
@@ -82,7 +84,7 @@ from alive.compose.verdict2 import (
     SealedAxis,
     sealed_verdict,
 )
-from alive.provenance import RunLedger, sha256_json
+from alive.provenance import EnvironmentInfo, RunLedger, sha256_file, sha256_json
 
 #: The two sealed regime role labels (manifest order).
 _DOUBLE_ROLE = "sealed_double_unseen"
@@ -315,6 +317,110 @@ class ActivationProvenanceInputs:
     precision: str
     git_commit: str
 
+    def __post_init__(self) -> None:
+        """Reject placeholder, malformed, or ambiguous scientific provenance."""
+        import re
+
+        for name in (
+            "processed_sha256",
+            "feature_bank_sha256",
+            "dependency_lock_sha256",
+        ):
+            value = getattr(self, name)
+            if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None:
+                raise ValueError(f"{name} must be a 64-character lowercase SHA-256 hex digest")
+        for name in (
+            "gears_revision",
+            "cpa_revision",
+            "python_version",
+            "platform",
+            "device",
+            "precision",
+        ):
+            value = getattr(self, name)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"{name} must be a non-empty activation value")
+        if re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", self.git_commit) is None:
+            raise ValueError("git_commit must be a full 40- or 64-character lowercase hex digest")
+
+
+def build_activation_provenance_inputs(
+    *,
+    processed_path: str | Path,
+    feature_bank_path: str | Path,
+    dependency_lock_path: str | Path,
+    gears_requirements_path: str | Path,
+    cpa_requirements_path: str | Path,
+    environment: EnvironmentInfo,
+    device: str,
+    precision: str,
+) -> ActivationProvenanceInputs:
+    """Build activation provenance from actual files and the captured environment."""
+
+    def _pinned_revision(path: str | Path, package: str) -> str:
+        prefix = package.casefold() + "=="
+        try:
+            lines = Path(path).read_text(encoding="utf-8").splitlines()
+        except OSError as exc:
+            raise Phase2bError(
+                f"failed to read dependency requirements {str(path)!r}: {exc}"
+            ) from exc
+        matches = [line.strip() for line in lines if line.strip().casefold().startswith(prefix)]
+        if len(matches) != 1:
+            raise Phase2bError(
+                f"dependency requirements {str(path)!r} must pin exactly one {package} revision"
+            )
+        return matches[0].split("==", 1)[1]
+
+    paths = {
+        "dependency_manifest": dependency_lock_path,
+        "gears_requirements": gears_requirements_path,
+        "cpa_requirements": cpa_requirements_path,
+    }
+    try:
+        dependency_digest = sha256_json(
+            {name: sha256_file(path) for name, path in sorted(paths.items())}
+        )
+        processed_digest = sha256_file(processed_path)
+        feature_digest = sha256_file(feature_bank_path)
+    except OSError as exc:
+        raise Phase2bError(f"failed to hash activation provenance input: {exc}") from exc
+
+    return ActivationProvenanceInputs(
+        processed_sha256=processed_digest,
+        feature_bank_sha256=feature_digest,
+        dependency_lock_sha256=dependency_digest,
+        gears_revision=_pinned_revision(gears_requirements_path, "cell-gears"),
+        cpa_revision=_pinned_revision(cpa_requirements_path, "cpa-tools"),
+        python_version=environment.python_version,
+        platform=environment.platform,
+        device=device,
+        precision=precision,
+        git_commit=environment.git_commit,
+    )
+
+
+def _validate_activation_provenance_environment(
+    *, ledger: RunLedger, inputs: ActivationProvenanceInputs
+) -> None:
+    """Cross-check caller-supplied environment tags against the bound ledger."""
+    environment = ledger.to_dict()["environment"]
+    expected = {
+        "python_version": environment["python_version"],
+        "platform": environment["platform"],
+        "git_commit": environment["git_commit"],
+    }
+    mismatches = {
+        name: (expected_value, getattr(inputs, name))
+        for name, expected_value in expected.items()
+        if getattr(inputs, name) != expected_value
+    }
+    if mismatches:
+        raise Phase2bError(
+            "ActivationProvenanceInputs disagree with the upstream ledger environment: "
+            f"{mismatches}"
+        )
+
 
 def _build_provenance(
     *,
@@ -368,6 +474,7 @@ def _build_provenance(
                 "provenance digests; refusing to assemble a provenance record with empty "
                 "scientific evidence on an activated run"
             )
+        _validate_activation_provenance_environment(ledger=ledger, inputs=inputs)
         # Single source of truth: run-identity digests from the upstream ledger.
         data_card_sha256 = _required_digest(ledger, "data_card")
         raw_or_source_sha256 = _required_digest(ledger, "raw_data")
@@ -793,6 +900,7 @@ def _run_phase2b_core(
         fixture_execution=fixture_execution,
     )
     record_pre_access_provenance(ledger=ledger, provenance=pre_access_provenance)
+    persist_pre_access_ledger(run_dir=run_dir, ledger=ledger)
 
     # --- Step 5: claim access, then enter the protection boundary. ------------
     terminal.claim_access()
@@ -917,7 +1025,8 @@ def _evaluate_inside_boundary(
 
     # Change C: cross-check against the PERSISTED pre-access subset (recorded
     # write-once before access), not the in-memory record.
-    persisted_pre_access_checksum = terminal.ledger.artifact_sha(PRE_ACCESS_PROVENANCE_ARTIFACT)
+    persisted_ledger = RunLedger.read(terminal.run_dir / PRE_ACCESS_LEDGER_FILENAME)
+    persisted_pre_access_checksum = persisted_ledger.artifact_sha(PRE_ACCESS_PROVENANCE_ARTIFACT)
 
     # Recompute the observed request checksum exactly as the store recorded it.
     # The lock pairs are already canonical (preflight enforces it); canonicalize

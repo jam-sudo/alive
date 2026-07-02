@@ -60,12 +60,15 @@ check_post_access_consistency(...)
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum
 from functools import cached_property
+from pathlib import Path
 
 from alive.compose.datacard import compute_compose_run_id
+from alive.io import atomic_write_once
 from alive.provenance import (
     DuplicateArtifactError,
     EnvironmentInfo,
@@ -342,6 +345,9 @@ class Phase2bProvenance:
 #: checksum (Change C). Recorded BEFORE seal access; re-checked afterwards.
 PRE_ACCESS_PROVENANCE_ARTIFACT = "phase2b_pre_access_provenance"
 
+#: Durable write-once snapshot of the ledger immediately before seal access.
+PRE_ACCESS_LEDGER_FILENAME = "phase2b_pre_access_ledger.json"
+
 #: Canonical write-once artifact names → the :class:`Phase2bProvenance` field
 #: whose value is recorded directly (already a SHA-256 hex digest).
 _DIGEST_ARTIFACTS: tuple[tuple[str, str], ...] = (
@@ -486,6 +492,29 @@ def record_pre_access_provenance(*, ledger: RunLedger, provenance: Phase2bProven
             f"{PRE_ACCESS_PROVENANCE_ARTIFACT!r}: {exc}"
         ) from exc
     return checksum
+
+
+def persist_pre_access_ledger(*, run_dir: str | Path, ledger: RunLedger) -> Path:
+    """Atomically persist and verify the pre-access ledger before seal opening."""
+    ledger.artifact_sha(PRE_ACCESS_PROVENANCE_ARTIFACT)
+    destination = Path(run_dir) / PRE_ACCESS_LEDGER_FILENAME
+    text = json.dumps(ledger.to_dict(), sort_keys=True, separators=(",", ":"))
+    try:
+        atomic_write_once(destination, text)
+    except FileExistsError as exc:
+        raise ProvenanceError(
+            f"pre-access ledger snapshot already exists at {str(destination)!r}; "
+            "the seal lifecycle is write-once"
+        ) from exc
+    try:
+        installed = RunLedger.read(destination)
+    except Exception as exc:
+        raise ProvenanceError(
+            f"failed to read back pre-access ledger snapshot {str(destination)!r}: {exc}"
+        ) from exc
+    if installed != ledger:
+        raise ProvenanceError("pre-access ledger snapshot failed post-install verification")
+    return destination
 
 
 def verify_upstream_before_access(
