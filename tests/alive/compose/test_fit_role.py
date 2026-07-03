@@ -8,7 +8,6 @@ from scipy import sparse
 from alive.compose.fit_role import (
     ComposeFitRoleExtractor,
     FitRoleArtifactError,
-    FitRoleExtraction,
     canonical_gene_order_sha256,
     content_manifest_sha256,
     extract_fit_roles,
@@ -72,13 +71,16 @@ def test_row_identity_digest_is_row_order_sensitive():
 
 
 def _extractor(**overrides):
-    # 6 rows: 0 control, 1-2 singles, 3 combo_calibration, 4-5 sealed (double-unseen)
-    obs_role = ["control", "singles", "singles", "combo_calibration", "singles", "singles"]
-    obs_src = [f"r{i}" for i in range(6)]
-    obs_pert = ["control", "KLF1", "CEBPE", "CEBPE_KLF1", "AAA", "BBB"]
+    # 7 rows. Role is DERIVED from the perturbation token (no obs_role input):
+    #   r0 control; r1 KLF1, r2 CEBPE -> singles; r3 CEBPE_KLF1 -> calibration combo;
+    #   r4 AAA, r5 BBB -> singles, RETAINED even though (AAA,BBB) is a sealed pair
+    #     (double-unseen means both singles ARE seen and needed);
+    #   r6 AAA_BBB -> sealed double-unseen COMBO cell, EXCLUDED and never read.
+    obs_src = [f"r{i}" for i in range(7)]
+    obs_pert = ["control", "KLF1", "CEBPE", "CEBPE_KLF1", "AAA", "BBB", "AAA_BBB"]
     var_names = ["G1", "G2", "G3"]
-    full = sparse.csr_matrix(np.arange(1, 19, dtype=np.float64).reshape(6, 3))
-    sealed_rows = {4, 5}
+    full = sparse.csr_matrix(np.arange(1, 22, dtype=np.float64).reshape(7, 3))
+    sealed_rows = {6}  # only the AAA_BBB combo cell is sealed
 
     def row_reader(idx: list[int]) -> sparse.csr_matrix:
         if any(i in sealed_rows for i in idx):
@@ -86,12 +88,12 @@ def _extractor(**overrides):
         return full[idx]
 
     kw = dict(
-        obs_role=obs_role,
         obs_source_row_id=obs_src,
         obs_perturbation=obs_pert,
         var_names=var_names,
         calibration_pair_ids=[("CEBPE", "KLF1")],
         sealed_pair_ids=[("AAA", "BBB")],
+        control_token="control",
         raw_data_sha256="raw",
         pair_manifest_sha256="pm",
         eligibility_hash="elig",
@@ -101,26 +103,29 @@ def _extractor(**overrides):
     return ComposeFitRoleExtractor(**kw)
 
 
-def test_extract_selects_only_allowed_rows_and_never_reads_sealed():
+def test_extract_retains_all_singles_and_excludes_only_sealed_combo():
     ex = _extractor()
-    assert ex.select_row_ids() == [0, 1, 2, 3]  # sealed rows 4,5 excluded
-    extraction = extract_fit_roles(extractor=ex)  # row_reader raises if sealed touched
-    assert isinstance(extraction, FitRoleExtraction)
-    assert extraction.X.shape == (4, 3)
-    assert extraction.role_counts == {"control": 1, "singles": 2, "combo_calibration": 1}
+    # singles AAA,BBB (r4,r5) are retained though (AAA,BBB) is sealed; only the
+    # sealed COMBO cell r6 is excluded and never read (row_reader raises if it is).
+    assert ex.select_row_ids() == [0, 1, 2, 3, 4, 5]
+    extraction = extract_fit_roles(extractor=ex)
+    assert extraction.X.shape == (6, 3)
+    assert extraction.role_counts == {"control": 1, "singles": 4, "combo_calibration": 1}
+    assert extraction.rows[4] == ("r4", "singles", "AAA")
     assert extraction.rows[3] == ("r3", "combo_calibration", "CEBPE_KLF1")
 
 
-def test_extract_rejects_combo_calibration_pair_not_in_calibration_set():
-    # r3 relabeled to a pair that is NOT a registered calibration pair -> abort
-    ex = _extractor(obs_perturbation=["control", "KLF1", "CEBPE", "AAA_BBB", "AAA", "BBB"])
+def test_extract_aborts_on_unregistered_combo_pair():
+    # r6 combo pair (XXX,YYY) is neither a calibration nor a sealed pair -> abort
+    ex = _extractor(
+        obs_perturbation=["control", "KLF1", "CEBPE", "CEBPE_KLF1", "AAA", "BBB", "XXX_YYY"]
+    )
     with pytest.raises(FitRoleArtifactError):
         ex.select_row_ids()
 
 
-def test_extract_rejects_unknown_role_before_reading_x():
-    ex = _extractor(
-        obs_role=["control", "singles", "singles", "sealed_double_unseen", "singles", "singles"]
-    )
+def test_extract_aborts_on_pair_in_both_calibration_and_sealed():
+    # (AAA,BBB) declared in BOTH sets -> ambiguous -> abort
+    ex = _extractor(calibration_pair_ids=[("CEBPE", "KLF1"), ("AAA", "BBB")])
     with pytest.raises(FitRoleArtifactError):
         ex.select_row_ids()

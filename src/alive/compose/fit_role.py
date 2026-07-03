@@ -87,9 +87,23 @@ def content_manifest_sha256(
     return sha256_json(manifest)
 
 
-def _canonical_pair(perturbation: str) -> tuple[str, str]:
-    """Return the UTF-8 byte-ordered gene pair from a ``GENEA_GENEB`` token."""
-    a, b = perturbation.split("_", 1)
+def _canonical_pair(perturbation: str, combo_sep: str = "_") -> tuple[str, str]:
+    """Return the UTF-8 byte-ordered gene pair from a ``GENEA<sep>GENEB`` token.
+
+    Parameters
+    ----------
+    perturbation : str
+        A combo perturbation token containing exactly one ``combo_sep``.
+    combo_sep : str, default ``"_"``
+        Separator between the two single-gene tokens.
+
+    Returns
+    -------
+    tuple of str
+        ``(gene_a, gene_b)`` ordered by UTF-8 byte comparison so the pair is
+        canonical regardless of the order the genes appear in the token.
+    """
+    a, b = perturbation.split(combo_sep, 1)
     return (a, b) if a.encode("utf-8") < b.encode("utf-8") else (b, a)
 
 
@@ -126,44 +140,42 @@ class FitRoleExtraction:
 
 
 class ComposeFitRoleExtractor:
-    """Select fit roles from obs metadata and read ONLY the allowed rows.
+    """Derive fit roles from obs perturbation metadata and read ONLY allowed rows.
 
-    ``select_row_ids`` inspects role/perturbation metadata and asserts
-    sealed-disjointness + label consistency BEFORE any expression is read;
+    ``select_row_ids`` derives each row's role from its perturbation token + the
+    calibration/sealed pair sets (spec §7.1) BEFORE any expression is read;
     ``extract`` then reads only the selected rows via ``row_reader`` (backed
-    slicing in production). Sealed expression is never materialized (spec §4).
-
-    A ``singles`` row whose gene participates in a sealed pair is a sealed
-    double-unseen single: it is dropped from the selection and never read, so
-    its expression cannot leak into the fit (spec §4 step 2, §5). A sealed pair
-    appearing under the ``combo_calibration`` role is a mislabel/leakage attempt
-    and fails closed.
+    slicing in production). Sealed COMBO cells are excluded and never read, so
+    sealed expression is never materialized (spec §4). Singles are ALWAYS
+    retained — a double/single-unseen pair still needs its single signatures
+    ``z_g``, ``z_h``, and singles are never sealed.
     """
 
     def __init__(
         self,
         *,
-        obs_role: Sequence[str],
         obs_source_row_id: Sequence[str],
         obs_perturbation: Sequence[str],
         var_names: Sequence[str],
         calibration_pair_ids: Sequence[tuple[str, str]],
         sealed_pair_ids: Sequence[tuple[str, str]],
+        control_token: str,
         raw_data_sha256: str,
         pair_manifest_sha256: str,
         eligibility_hash: str,
         row_reader: Callable[[list[int]], sparse.csr_matrix],
+        combo_sep: str = "_",
     ) -> None:
-        n = len(obs_role)
-        if not (len(obs_source_row_id) == len(obs_perturbation) == n):
+        n = len(obs_perturbation)
+        if len(obs_source_row_id) != n:
             raise FitRoleArtifactError("obs columns must be equal length")
-        self._role = [str(r) for r in obs_role]
         self._src = [str(s) for s in obs_source_row_id]
         self._pert = [str(p) for p in obs_perturbation]
         self._var_names = _check_gene_ids(var_names)
         self._calib = {tuple(p) for p in calibration_pair_ids}
         self._sealed = {tuple(p) for p in sealed_pair_ids}
-        self._sealed_genes = {g for pair in self._sealed for g in pair}
+        self._control_token = str(control_token)
+        self._combo_sep = str(combo_sep)
         self._raw_data_sha256 = str(raw_data_sha256)
         self._pair_manifest_sha256 = str(pair_manifest_sha256)
         self._eligibility_hash = str(eligibility_hash)
@@ -171,13 +183,49 @@ class ComposeFitRoleExtractor:
         if len(set(self._src)) != n:
             raise FitRoleArtifactError("source_row_id must be unique")
 
-    def select_row_ids(self) -> list[int]:
-        """Return the row indices of the allowed fit roles, sealed rows excluded.
+    def _role_of(self, pert: str) -> str | None:
+        """Derive a perturbation token's fit role.
 
-        Uses ``obs`` metadata only; never calls ``row_reader``. Fails closed on
-        any non-whitelisted role or inconsistent role/perturbation label, and
-        drops every sealed double-unseen single so its expression is never read
-        (spec §4/§5).
+        Parameters
+        ----------
+        pert : str
+            A single obs perturbation token.
+
+        Returns
+        -------
+        str or None
+            The allowed fit role (``control`` / ``singles`` / ``combo_calibration``),
+            or ``None`` when the row is a sealed combo cell to exclude (never read).
+
+        Raises
+        ------
+        FitRoleArtifactError
+            When a combo pair is in both the calibration and sealed sets, or in
+            neither (unregistered/ambiguous) — fail closed.
+        """
+        if pert == self._control_token:
+            return "control"
+        if self._combo_sep in pert:
+            pair = _canonical_pair(pert, self._combo_sep)
+            in_calib = pair in self._calib
+            in_sealed = pair in self._sealed
+            if in_calib and in_sealed:
+                raise FitRoleArtifactError(
+                    f"combo pair {pair!r} is in both calibration and sealed sets"
+                )
+            if in_sealed:
+                return None  # sealed combo cell: excluded, never read
+            if in_calib:
+                return "combo_calibration"
+            raise FitRoleArtifactError(
+                f"combo pair {pair!r} is neither a calibration nor a sealed pair"
+            )
+        return "singles"  # single-gene perturbation is always a retained fit role
+
+    def select_row_ids(self) -> list[int]:
+        """Return the row indices of the derived fit roles, sealed combos excluded.
+
+        Uses ``obs`` metadata only; never calls ``row_reader`` (spec §4/§5).
 
         Returns
         -------
@@ -188,41 +236,14 @@ class ComposeFitRoleExtractor:
         Raises
         ------
         FitRoleArtifactError
-            On a non-whitelisted role, a sealed pair under a calibration role,
-            a combo pair absent from the calibration set, or a label that does
-            not match its declared role.
+            On a combo pair that is unregistered or in both pair sets.
         """
-        selected: list[int] = []
-        for i, role in enumerate(self._role):
-            if role not in _ALLOWED_ROLES:
-                raise FitRoleArtifactError(f"row {i}: non-whitelisted role {role!r}")
-            pert = self._pert[i]
-            if role == "combo_calibration":
-                pair = _canonical_pair(pert)
-                if pair in self._sealed:
-                    raise FitRoleArtifactError(f"row {i}: sealed pair {pair!r} in calibration role")
-                if pair not in self._calib:
-                    raise FitRoleArtifactError(
-                        f"row {i}: pair {pair!r} not a registered calibration pair"
-                    )
-            elif role == "singles":
-                if "_" in pert or pert == "control":
-                    raise FitRoleArtifactError(
-                        f"row {i}: singles label {pert!r} is not a single gene"
-                    )
-                if pert in self._sealed_genes:
-                    # Sealed double-unseen single: never selected, never read, so
-                    # its expression cannot leak into the fit (spec §4/§5).
-                    continue
-            elif role == "control" and pert != "control":
-                raise FitRoleArtifactError(f"row {i}: control label {pert!r} is not 'control'")
-            selected.append(i)
-        return selected
+        return [i for i, pert in enumerate(self._pert) if self._role_of(pert) is not None]
 
     def extract(self) -> FitRoleExtraction:
         """Read only the selected rows and assemble the extraction.
 
-        ``select_row_ids`` runs first, so ``row_reader`` is only ever handed
+        Roles are derived first, so ``row_reader`` is only ever handed
         non-sealed indices.
 
         Returns
@@ -233,13 +254,14 @@ class ComposeFitRoleExtractor:
         Raises
         ------
         FitRoleArtifactError
-            If selection fails or ``row_reader`` returns the wrong row count.
+            If role derivation fails or ``row_reader`` returns the wrong row count.
         """
-        idx = self.select_row_ids()
+        roles = [self._role_of(p) for p in self._pert]
+        idx = [i for i, role in enumerate(roles) if role is not None]
         X = sparse.csr_matrix(self._row_reader(idx))
         if X.shape[0] != len(idx):
             raise FitRoleArtifactError("row_reader returned the wrong number of rows")
-        rows = tuple((self._src[i], self._role[i], self._pert[i]) for i in idx)
+        rows = tuple((self._src[i], roles[i], self._pert[i]) for i in idx)
         counts = {r: sum(1 for _, rr, _ in rows if rr == r) for r in sorted(_ALLOWED_ROLES)}
         return FitRoleExtraction(
             X=X,
