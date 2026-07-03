@@ -520,3 +520,114 @@ def generate_fit_role_artifact(
         n_genes=X.shape[1],
         role_counts=dict(extraction.role_counts),
     )
+
+
+def _assert_canonical_path(path: str, approved_root: str) -> str:
+    """Assert ``path`` is a safe, in-scope regular file and return its real path.
+
+    The path must be absolute + normalized, a regular file (not a symlink), and
+    resolve to a location inside ``approved_root`` (spec §5). Fail closed.
+
+    Parameters
+    ----------
+    path : str
+        Candidate artifact path to validate.
+    approved_root : str
+        Directory the artifact must live inside.
+
+    Returns
+    -------
+    str
+        The canonical (``realpath``) absolute path of the artifact.
+
+    Raises
+    ------
+    FitRoleArtifactError
+        If ``path`` is a symlink, is not a regular file, or escapes
+        ``approved_root``.
+    """
+    ap = os.path.realpath(os.path.abspath(path))
+    root = os.path.realpath(os.path.abspath(approved_root))
+    if os.path.islink(path):
+        raise FitRoleArtifactError(f"artifact path is a symlink: {path}")
+    if not os.path.isfile(ap):
+        raise FitRoleArtifactError(f"artifact path is not a regular file: {path}")
+    if os.path.commonpath([ap, root]) != root:
+        raise FitRoleArtifactError(f"artifact path escapes approved_root: {path}")
+    return ap
+
+
+def validate_fit_role_artifact(
+    path: str,
+    *,
+    spec: FitRoleArtifactSpec,
+    approved_root: str,
+    calibration_pair_ids: Sequence[tuple[str, str]],
+    sealed_pair_ids: Sequence[tuple[str, str]],
+) -> None:
+    """Re-validate a fit-role artifact against its spec before fitting (spec §5).
+
+    Re-reads the artifact from disk and re-checks path policy, the file byte
+    digest, every logical-content identity digest, the role closure, and the
+    absence of any sealed combo pair. This is the exact guard a worker runs
+    before fit; it fails closed on any mismatch.
+
+    Parameters
+    ----------
+    path : str
+        Filesystem path to the artifact to validate.
+    spec : FitRoleArtifactSpec
+        The immutable identity the artifact must match.
+    approved_root : str
+        Directory the artifact must live inside.
+    calibration_pair_ids : Sequence of tuple of str
+        Registered calibration combo pairs; every ``combo_calibration`` cell
+        must belong to this set.
+    sealed_pair_ids : Sequence of tuple of str
+        Sealed combo pairs; no ``combo_calibration`` cell may belong to this
+        set (a sealed pair present in obs is a leak → reject).
+
+    Raises
+    ------
+    FitRoleArtifactError
+        On any path, digest, role-closure, or sealed-pair violation.
+    """
+    import anndata as ad
+
+    resolved = _assert_canonical_path(path, approved_root)
+    if _file_sha256(resolved) != spec.sha256:
+        raise FitRoleArtifactError("artifact file SHA mismatch")
+
+    adata = ad.read_h5ad(resolved)
+    roles = [str(r) for r in adata.obs["role"]]
+    if not set(roles) <= _ALLOWED_ROLES:
+        raise FitRoleArtifactError(f"non-whitelisted roles: {set(roles) - _ALLOWED_ROLES}")
+
+    calib = {tuple(p) for p in calibration_pair_ids}
+    sealed = {tuple(p) for p in sealed_pair_ids}
+    perts = [str(p) for p in adata.obs["perturbation"]]
+    for role, pert in zip(roles, perts):
+        if role == "combo_calibration":
+            pair = _canonical_pair(pert)
+            if pair in sealed:
+                raise FitRoleArtifactError(f"sealed pair present in artifact obs: {pair!r}")
+            if pair not in calib:
+                raise FitRoleArtifactError(f"combo pair not in calibration set: {pair!r}")
+
+    var_names = [str(v) for v in adata.var_names]
+    rows = tuple((str(s), r, p) for s, r, p in zip(adata.obs["source_row_id"], roles, perts))
+    role_counts = {r: sum(1 for _, rr, _ in rows if rr == r) for r in sorted(_ALLOWED_ROLES)}
+    if canonical_gene_order_sha256(var_names) != spec.gene_order_sha256:
+        raise FitRoleArtifactError("gene_order digest mismatch")
+    if row_identity_sha256(rows) != spec.row_identity_sha256:
+        raise FitRoleArtifactError("row_identity digest mismatch")
+    recomputed = content_manifest_sha256(
+        schema_version=_ARTIFACT_SCHEMA_VERSION,
+        X=sparse.csr_matrix(adata.X),
+        var_names=var_names,
+        rows=rows,
+        provenance=dict(adata.uns["provenance"]),
+        role_counts=role_counts,
+    )
+    if recomputed != spec.content_manifest_sha256:
+        raise FitRoleArtifactError("content_manifest digest mismatch")

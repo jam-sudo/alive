@@ -1,6 +1,7 @@
 # tests/alive/compose/test_fit_role.py
 from __future__ import annotations
 
+import os as _os
 from pathlib import Path
 
 import numpy as np
@@ -16,6 +17,7 @@ from alive.compose.fit_role import (
     extract_fit_roles,
     generate_fit_role_artifact,
     row_identity_sha256,
+    validate_fit_role_artifact,
 )
 
 
@@ -174,3 +176,77 @@ def test_generate_is_write_once(tmp_path):
     _gen(tmp_path, "once.h5ad")
     with pytest.raises(FitRoleArtifactError):
         _gen(tmp_path, "once.h5ad")  # refuse to overwrite
+
+
+_CALIB = [("CEBPE", "KLF1")]
+_SEALED = [("AAA", "BBB")]
+
+
+def _validate(spec, approved_root, **over):
+    kw = dict(
+        spec=spec, approved_root=approved_root, calibration_pair_ids=_CALIB, sealed_pair_ids=_SEALED
+    )
+    kw.update(over)
+    validate_fit_role_artifact(spec.path, **kw)
+
+
+def test_validate_happy_path(tmp_path):
+    spec = _gen(tmp_path)
+    _validate(spec, str(tmp_path))  # no raise
+
+
+def test_validate_rejects_file_sha_mismatch(tmp_path):
+    spec = _gen(tmp_path)
+    tampered = FitRoleArtifactSpec(**{**spec.__dict__, "sha256": "sha256:" + "0" * 64})
+    with pytest.raises(FitRoleArtifactError):
+        _validate(tampered, str(tmp_path))
+
+
+def test_validate_rejects_content_manifest_mismatch(tmp_path):
+    spec = _gen(tmp_path)
+    tampered = FitRoleArtifactSpec(**{**spec.__dict__, "content_manifest_sha256": "deadbeef"})
+    with pytest.raises(FitRoleArtifactError):
+        _validate(tampered, str(tmp_path))
+
+
+def test_validate_rejects_path_outside_approved_root(tmp_path):
+    spec = _gen(tmp_path)
+    with pytest.raises(FitRoleArtifactError):
+        _validate(spec, str(tmp_path / "other_root"))
+
+
+def test_validate_rejects_symlink(tmp_path):
+    spec = _gen(tmp_path)
+    link = tmp_path / "link.h5ad"
+    _os.symlink(spec.path, link)
+    linked = FitRoleArtifactSpec(**{**spec.__dict__, "path": str(link)})
+    with pytest.raises(FitRoleArtifactError):
+        _validate(linked, str(tmp_path))
+
+
+def test_validate_rejects_sealed_pair_in_obs(tmp_path):
+    # generate an artifact whose sole calibration pair IS a sealed pair, bypassing
+    # the extractor, then validate against the real sealed set -> reject.
+    ex = _extractor(
+        obs_source_row_id=["r0", "r1"],
+        obs_perturbation=["control", "AAA_BBB"],
+        calibration_pair_ids=[("AAA", "BBB")],
+        sealed_pair_ids=[],  # bypass extractor guard to forge the artifact
+    )
+    extraction = extract_fit_roles(extractor=ex)
+    spec = generate_fit_role_artifact(
+        extraction=extraction,
+        out_path=str(tmp_path / "forged.h5ad"),
+        config_sha256="c",
+        data_card_sha256="d",
+        calibration_gene_set_hash="g",
+        generator_code_sha256="x",
+        writer_environment_sha256="e",
+    )
+    with pytest.raises(FitRoleArtifactError):  # validated against the REAL sealed set
+        _validate(
+            spec,
+            str(tmp_path),
+            calibration_pair_ids=[("AAA", "BBB")],
+            sealed_pair_ids=[("AAA", "BBB")],
+        )
