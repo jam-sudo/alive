@@ -1,6 +1,8 @@
 # tests/alive/compose/test_fit_role.py
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import pytest
 from scipy import sparse
@@ -8,9 +10,11 @@ from scipy import sparse
 from alive.compose.fit_role import (
     ComposeFitRoleExtractor,
     FitRoleArtifactError,
+    FitRoleArtifactSpec,
     canonical_gene_order_sha256,
     content_manifest_sha256,
     extract_fit_roles,
+    generate_fit_role_artifact,
     row_identity_sha256,
 )
 
@@ -129,3 +133,44 @@ def test_extract_aborts_on_pair_in_both_calibration_and_sealed():
     ex = _extractor(calibration_pair_ids=[("CEBPE", "KLF1"), ("AAA", "BBB")])
     with pytest.raises(FitRoleArtifactError):
         ex.select_row_ids()
+
+
+def _gen(tmp_path: Path, name: str = "art.h5ad", **prov) -> FitRoleArtifactSpec:
+    extraction = extract_fit_roles(extractor=_extractor())
+    p = dict(
+        config_sha256="cfg",
+        data_card_sha256="dc",
+        calibration_gene_set_hash="cg",
+        generator_code_sha256="gen",
+        writer_environment_sha256="env",
+    )
+    p.update(prov)
+    return generate_fit_role_artifact(extraction=extraction, out_path=str(tmp_path / name), **p)
+
+
+def test_generate_writes_valid_h5ad_and_spec(tmp_path):
+    import anndata as ad
+
+    spec = _gen(tmp_path)
+    assert spec.sha256.startswith("sha256:")
+    assert spec.n_cells == 6 and spec.n_genes == 3
+    assert spec.role_counts == {"control": 1, "singles": 4, "combo_calibration": 1}
+    adata = ad.read_h5ad(spec.path)
+    assert set(map(str, adata.obs["role"].unique())) <= {"control", "singles", "combo_calibration"}
+    assert "source_row_id" in adata.obs
+    block = spec.to_payload_block()
+    assert block["allowed_obs_roles"] == ["control", "singles", "combo_calibration"]
+    assert block["counts_location"] == "X"
+
+
+def test_generate_is_content_deterministic(tmp_path):
+    a = _gen(tmp_path, "a.h5ad")
+    b = _gen(tmp_path, "b.h5ad")
+    assert a.content_manifest_sha256 == b.content_manifest_sha256  # logical identity stable
+    assert a.gene_order_sha256 == b.gene_order_sha256
+
+
+def test_generate_is_write_once(tmp_path):
+    _gen(tmp_path, "once.h5ad")
+    with pytest.raises(FitRoleArtifactError):
+        _gen(tmp_path, "once.h5ad")  # refuse to overwrite

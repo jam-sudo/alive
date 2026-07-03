@@ -8,6 +8,8 @@ docs/superpowers/specs/2026-07-02-compose-fit-data-contract-design.md
 
 from __future__ import annotations
 
+import hashlib
+import os
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 
@@ -18,6 +20,7 @@ from alive.provenance import sha256_json
 
 _ALLOWED_ROLES: frozenset[str] = frozenset({"control", "singles", "combo_calibration"})
 _CSR_DTYPE = np.float64
+_ARTIFACT_SCHEMA_VERSION = 1
 
 
 class FitRoleArtifactError(ValueError):
@@ -288,3 +291,232 @@ def extract_fit_roles(*, extractor: ComposeFitRoleExtractor) -> FitRoleExtractio
         The allowed-row-only extraction (sealed rows never materialized).
     """
     return extractor.extract()
+
+
+def _file_sha256(path: str) -> str:
+    """Return the ``"sha256:"``-prefixed hex digest of a file's bytes.
+
+    Parameters
+    ----------
+    path : str
+        Path to the file whose byte content is digested.
+
+    Returns
+    -------
+    str
+        ``"sha256:" + hexdigest`` of the file contents.
+    """
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return "sha256:" + h.hexdigest()
+
+
+@dataclass(frozen=True)
+class FitRoleArtifactSpec:
+    """Immutable identity of a written fit-role artifact (spec §2.1).
+
+    Attributes
+    ----------
+    path : str
+        Filesystem path the artifact was written to.
+    sha256 : str
+        ``"sha256:"``-prefixed hex digest of the written ``.h5ad`` file bytes.
+    content_manifest_sha256 : str
+        Storage-layout-invariant logical-content digest (bare hex).
+    raw_data_sha256 : str
+        Raw-data digest carried from the committed split manifest.
+    pair_manifest_sha256 : str
+        Verified committed split-manifest checksum.
+    eligibility_hash : str
+        Outcome-independent eligibility hash from the split manifest.
+    row_identity_sha256 : str
+        Canonical row-identity digest (bare hex).
+    gene_order_sha256 : str
+        Canonical gene-order digest (bare hex).
+    n_cells : int
+        Number of retained (non-sealed) rows written.
+    n_genes : int
+        Number of genes in the full gene universe.
+    role_counts : dict of str to int
+        Count of written rows per allowed role.
+    """
+
+    path: str
+    sha256: str
+    content_manifest_sha256: str
+    raw_data_sha256: str
+    pair_manifest_sha256: str
+    eligibility_hash: str
+    row_identity_sha256: str
+    gene_order_sha256: str
+    n_cells: int
+    n_genes: int
+    role_counts: dict[str, int]
+
+    def to_payload_block(self) -> dict:
+        """The spec §2.1 ``fit_role_artifact`` payload block.
+
+        Returns
+        -------
+        dict
+            The serialisable ``fit_role_artifact`` provenance block describing
+            this artifact's format, schema version, digests and shape.
+        """
+        return {
+            "format": "anndata_h5ad",
+            "artifact_schema_version": _ARTIFACT_SCHEMA_VERSION,
+            "path": self.path,
+            "sha256": self.sha256,
+            "content_manifest_sha256": self.content_manifest_sha256,
+            "raw_data_sha256": self.raw_data_sha256,
+            "pair_manifest_sha256": self.pair_manifest_sha256,
+            "eligibility_hash": self.eligibility_hash,
+            "row_identity_sha256": self.row_identity_sha256,
+            "role_obs_key": "role",
+            "perturbation_obs_key": "perturbation",
+            "allowed_obs_roles": ["control", "singles", "combo_calibration"],
+            "gene_order_sha256": self.gene_order_sha256,
+            "n_cells": int(self.n_cells),
+            "n_genes": int(self.n_genes),
+            "role_counts": dict(self.role_counts),
+            "counts_location": "X",
+        }
+
+
+def generate_fit_role_artifact(
+    *,
+    extraction: FitRoleExtraction,
+    out_path: str,
+    config_sha256: str,
+    data_card_sha256: str,
+    calibration_gene_set_hash: str,
+    generator_code_sha256: str,
+    writer_environment_sha256: str,
+) -> FitRoleArtifactSpec:
+    """Write an immutable fit-role ``.h5ad`` and bind its canonical identity.
+
+    The artifact is write-once: the call fails closed if ``out_path`` already
+    exists. ``X`` is stored as raw CSR counts (finite, non-negative,
+    integer-valued) over the full gene universe; ``obs`` carries
+    ``role``/``perturbation``/``source_row_id``; ``uns.provenance`` carries all
+    lineage digests and ``uns.content_manifest_sha256`` the logical-content
+    digest. After writing, the file is reloaded and its recomputed content
+    manifest is checked against the pre-write value (spec §2.1/§3.2/§4).
+
+    Parameters
+    ----------
+    extraction : FitRoleExtraction
+        The allowed-row-only extraction (sealed rows never materialized).
+    out_path : str
+        Destination ``.h5ad`` path; must not already exist.
+    config_sha256 : str
+        Resolved-config digest to record in provenance.
+    data_card_sha256 : str
+        Data-card digest to record in provenance.
+    calibration_gene_set_hash : str
+        Calibration gene-set hash to record in provenance.
+    generator_code_sha256 : str
+        Digest of the generator code to record in provenance.
+    writer_environment_sha256 : str
+        Digest of the writer environment to record in provenance.
+
+    Returns
+    -------
+    FitRoleArtifactSpec
+        The immutable identity of the written artifact.
+
+    Raises
+    ------
+    FitRoleArtifactError
+        If ``out_path`` exists, if ``X`` is not finite/non-negative/integer,
+        if a non-whitelisted role is present, or if the read-back content
+        manifest does not match the pre-write value.
+    """
+    import anndata as ad
+    import pandas as pd
+
+    if os.path.exists(out_path):
+        raise FitRoleArtifactError(f"refusing to overwrite existing artifact: {out_path}")
+
+    X = sparse.csr_matrix(extraction.X)
+    data = X.data
+    if data.size and (
+        not np.all(np.isfinite(data)) or np.any(data < 0) or np.any(data != np.floor(data))
+    ):
+        raise FitRoleArtifactError("X must be finite, non-negative, integer-valued counts")
+    roles = [r for _, r, _ in extraction.rows]
+    if not set(roles) <= _ALLOWED_ROLES:
+        raise FitRoleArtifactError("extraction carries a non-whitelisted role")
+
+    gene_order_sha256 = canonical_gene_order_sha256(extraction.var_names)
+    row_identity = row_identity_sha256(extraction.rows)
+    provenance = {
+        "data_card_sha256": str(data_card_sha256),
+        "raw_data_sha256": extraction.raw_data_sha256,
+        "pair_manifest_sha256": extraction.pair_manifest_sha256,
+        "eligibility_hash": extraction.eligibility_hash,
+        "calibration_gene_set_hash": str(calibration_gene_set_hash),
+        "row_identity_sha256": row_identity,
+        "gene_order_sha256": gene_order_sha256,
+        "generator_code_sha256": str(generator_code_sha256),
+        "writer_environment_sha256": str(writer_environment_sha256),
+        "config_sha256": str(config_sha256),
+    }
+    content_manifest = content_manifest_sha256(
+        schema_version=_ARTIFACT_SCHEMA_VERSION,
+        X=X,
+        var_names=extraction.var_names,
+        rows=extraction.rows,
+        provenance=provenance,
+        role_counts=extraction.role_counts,
+    )
+
+    obs = pd.DataFrame(
+        {
+            "role": pd.Categorical(roles, categories=sorted(_ALLOWED_ROLES)),
+            "perturbation": [p for _, _, p in extraction.rows],
+            "source_row_id": [s for s, _, _ in extraction.rows],
+        }
+    )
+    var = pd.DataFrame(index=list(extraction.var_names))
+    adata = ad.AnnData(X=X, obs=obs, var=var)
+    adata.uns["provenance"] = provenance
+    adata.uns["content_manifest_sha256"] = content_manifest
+    adata.write_h5ad(out_path)
+
+    # read-back verification: logical identity must survive the write
+    reloaded = ad.read_h5ad(out_path)
+    rb_rows = tuple(
+        (str(s), str(r), str(p))
+        for s, r, p in zip(
+            reloaded.obs["source_row_id"],
+            reloaded.obs["role"],
+            reloaded.obs["perturbation"],
+        )
+    )
+    rb_manifest = content_manifest_sha256(
+        schema_version=_ARTIFACT_SCHEMA_VERSION,
+        X=sparse.csr_matrix(reloaded.X),
+        var_names=[str(v) for v in reloaded.var_names],
+        rows=rb_rows,
+        provenance=dict(reloaded.uns["provenance"]),
+        role_counts=extraction.role_counts,
+    )
+    if rb_manifest != content_manifest:
+        raise FitRoleArtifactError("read-back content manifest mismatch after write")
+
+    return FitRoleArtifactSpec(
+        path=out_path,
+        sha256=_file_sha256(out_path),
+        content_manifest_sha256=content_manifest,
+        raw_data_sha256=extraction.raw_data_sha256,
+        pair_manifest_sha256=extraction.pair_manifest_sha256,
+        eligibility_hash=extraction.eligibility_hash,
+        row_identity_sha256=row_identity,
+        gene_order_sha256=gene_order_sha256,
+        n_cells=X.shape[0],
+        n_genes=X.shape[1],
+        role_counts=dict(extraction.role_counts),
+    )
