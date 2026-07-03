@@ -219,9 +219,10 @@ git commit -m "feat(compose): canonical fit-role content-identity hashing (A1 ta
 - Consumes: `_ALLOWED_ROLES`, `FitRoleArtifactError` (Task 1).
 - Produces:
   - `@dataclass(frozen=True) class FitRoleExtraction` with fields: `X: sparse.csr_matrix`, `var_names: tuple[str, ...]`, `rows: tuple[tuple[str, str, str], ...]` (source_row_id, role, canonical_perturbation), `role_counts: dict[str, int]`, `raw_data_sha256: str`, `pair_manifest_sha256: str`, `eligibility_hash: str`.
-  - `class ComposeFitRoleExtractor` — `__init__(self, *, obs_role: Sequence[str], obs_source_row_id: Sequence[str], obs_perturbation: Sequence[str], var_names: Sequence[str], calibration_pair_ids: Sequence[tuple[str, str]], sealed_pair_ids: Sequence[tuple[str, str]], raw_data_sha256: str, pair_manifest_sha256: str, eligibility_hash: str, row_reader: Callable[[list[int]], sparse.csr_matrix])`; methods `select_row_ids() -> list[int]` and `extract() -> FitRoleExtraction`.
+  - `class ComposeFitRoleExtractor` — `__init__(self, *, obs_source_row_id: Sequence[str], obs_perturbation: Sequence[str], var_names: Sequence[str], calibration_pair_ids: Sequence[tuple[str, str]], sealed_pair_ids: Sequence[tuple[str, str]], control_token: str, raw_data_sha256: str, pair_manifest_sha256: str, eligibility_hash: str, row_reader: Callable[[list[int]], sparse.csr_matrix], combo_sep: str = "_")`; methods `select_row_ids() -> list[int]` and `extract() -> FitRoleExtraction`.
   - `extract_fit_roles(*, extractor: ComposeFitRoleExtractor) -> FitRoleExtraction`
-- Note: `row_reader(idx)` reads **only** the given rows (backed slicing in production; an injected spy in tests). `select_row_ids()` uses obs metadata only and never calls `row_reader`.
+- **Role is DERIVED from the perturbation token (spec §7.1) — there is NO `obs_role` input.** `control_token` → `control`; a single-gene token (no `combo_sep`) → `singles` (**always retained** — a double/single-unseen pair still needs its single signatures `z_g`, `z_h`; singles are never sealed); a combo token `g{sep}h` → canonical pair → in the sealed set → **excluded** (never read), in the calibration set → `combo_calibration`, in **both** → abort, in **neither** → abort.
+- Note: `row_reader(idx)` reads **only** the given rows (backed slicing in production; an injected spy in tests). `select_row_ids()` uses obs metadata only and never calls `row_reader`. The sealed exclusion is on **combo cells**, never on singles.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -231,13 +232,16 @@ from alive.compose.fit_role import ComposeFitRoleExtractor, FitRoleExtraction, e
 
 
 def _extractor(**overrides):
-    # 6 rows: 0 control, 1-2 singles, 3 combo_calibration, 4-5 sealed (double-unseen)
-    obs_role = ["control", "singles", "singles", "combo_calibration", "singles", "singles"]
-    obs_src = [f"r{i}" for i in range(6)]
-    obs_pert = ["control", "KLF1", "CEBPE", "CEBPE_KLF1", "AAA", "BBB"]
+    # 7 rows. Role is DERIVED from the perturbation token (no obs_role input):
+    #   r0 control; r1 KLF1, r2 CEBPE -> singles; r3 CEBPE_KLF1 -> calibration combo;
+    #   r4 AAA, r5 BBB -> singles, RETAINED even though (AAA,BBB) is a sealed pair
+    #     (double-unseen means both singles ARE seen and needed);
+    #   r6 AAA_BBB -> sealed double-unseen COMBO cell, EXCLUDED and never read.
+    obs_src = [f"r{i}" for i in range(7)]
+    obs_pert = ["control", "KLF1", "CEBPE", "CEBPE_KLF1", "AAA", "BBB", "AAA_BBB"]
     var_names = ["G1", "G2", "G3"]
-    full = sparse.csr_matrix(np.arange(1, 19, dtype=np.float64).reshape(6, 3))
-    sealed_rows = {4, 5}
+    full = sparse.csr_matrix(np.arange(1, 22, dtype=np.float64).reshape(7, 3))
+    sealed_rows = {6}  # only the AAA_BBB combo cell is sealed
 
     def row_reader(idx: list[int]) -> sparse.csr_matrix:
         if any(i in sealed_rows for i in idx):
@@ -245,33 +249,39 @@ def _extractor(**overrides):
         return full[idx]
 
     kw = dict(
-        obs_role=obs_role, obs_source_row_id=obs_src, obs_perturbation=obs_pert,
-        var_names=var_names, calibration_pair_ids=[("CEBPE", "KLF1")],
-        sealed_pair_ids=[("AAA", "BBB")], raw_data_sha256="raw", pair_manifest_sha256="pm",
+        obs_source_row_id=obs_src, obs_perturbation=obs_pert, var_names=var_names,
+        calibration_pair_ids=[("CEBPE", "KLF1")], sealed_pair_ids=[("AAA", "BBB")],
+        control_token="control", raw_data_sha256="raw", pair_manifest_sha256="pm",
         eligibility_hash="elig", row_reader=row_reader,
     )
     kw.update(overrides)
     return ComposeFitRoleExtractor(**kw)
 
 
-def test_extract_selects_only_allowed_rows_and_never_reads_sealed():
+def test_extract_retains_all_singles_and_excludes_only_sealed_combo():
     ex = _extractor()
-    assert ex.select_row_ids() == [0, 1, 2, 3]  # sealed rows 4,5 excluded
-    extraction = extract_fit_roles(extractor=ex)  # row_reader raises if sealed touched
-    assert extraction.X.shape == (4, 3)
-    assert extraction.role_counts == {"control": 1, "singles": 2, "combo_calibration": 1}
+    # singles AAA,BBB (r4,r5) are retained though (AAA,BBB) is sealed; only the
+    # sealed COMBO cell r6 is excluded and never read (row_reader raises if it is).
+    assert ex.select_row_ids() == [0, 1, 2, 3, 4, 5]
+    extraction = extract_fit_roles(extractor=ex)
+    assert extraction.X.shape == (6, 3)
+    assert extraction.role_counts == {"control": 1, "singles": 4, "combo_calibration": 1}
+    assert extraction.rows[4] == ("r4", "singles", "AAA")
     assert extraction.rows[3] == ("r3", "combo_calibration", "CEBPE_KLF1")
 
 
-def test_extract_rejects_combo_calibration_pair_not_in_calibration_set():
-    # r3 relabeled to a pair that is NOT a registered calibration pair -> abort
-    ex = _extractor(obs_perturbation=["control", "KLF1", "CEBPE", "AAA_BBB", "AAA", "BBB"])
+def test_extract_aborts_on_unregistered_combo_pair():
+    # r6 combo pair (XXX,YYY) is neither a calibration nor a sealed pair -> abort
+    ex = _extractor(
+        obs_perturbation=["control", "KLF1", "CEBPE", "CEBPE_KLF1", "AAA", "BBB", "XXX_YYY"]
+    )
     with pytest.raises(FitRoleArtifactError):
         ex.select_row_ids()
 
 
-def test_extract_rejects_unknown_role_before_reading_x():
-    ex = _extractor(obs_role=["control", "singles", "singles", "sealed_double_unseen", "singles", "singles"])
+def test_extract_aborts_on_pair_in_both_calibration_and_sealed():
+    # (AAA,BBB) declared in BOTH sets -> ambiguous -> abort
+    ex = _extractor(calibration_pair_ids=[("CEBPE", "KLF1"), ("AAA", "BBB")])
     with pytest.raises(FitRoleArtifactError):
         ex.select_row_ids()
 ```
@@ -289,8 +299,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 
-def _canonical_pair(perturbation: str) -> tuple[str, str]:
-    a, b = perturbation.split("_", 1)
+def _canonical_pair(perturbation: str, combo_sep: str = "_") -> tuple[str, str]:
+    a, b = perturbation.split(combo_sep, 1)
     return (a, b) if a.encode("utf-8") < b.encode("utf-8") else (b, a)
 
 
@@ -308,37 +318,41 @@ class FitRoleExtraction:
 
 
 class ComposeFitRoleExtractor:
-    """Select fit roles from obs metadata and read ONLY the allowed rows.
+    """Derive fit roles from obs perturbation metadata and read ONLY allowed rows.
 
-    ``select_row_ids`` inspects role/perturbation metadata and asserts
-    sealed-disjointness + label consistency BEFORE any expression is read;
+    ``select_row_ids`` derives each row's role from its perturbation token + the
+    calibration/sealed pair sets (spec §7.1) BEFORE any expression is read;
     ``extract`` then reads only the selected rows via ``row_reader`` (backed
-    slicing in production). Sealed expression is never materialized (spec §4).
+    slicing in production). Sealed COMBO cells are excluded and never read, so
+    sealed expression is never materialized (spec §4). Singles are ALWAYS
+    retained — a double/single-unseen pair still needs its single signatures.
     """
 
     def __init__(
         self,
         *,
-        obs_role: Sequence[str],
         obs_source_row_id: Sequence[str],
         obs_perturbation: Sequence[str],
         var_names: Sequence[str],
         calibration_pair_ids: Sequence[tuple[str, str]],
         sealed_pair_ids: Sequence[tuple[str, str]],
+        control_token: str,
         raw_data_sha256: str,
         pair_manifest_sha256: str,
         eligibility_hash: str,
         row_reader: Callable[[list[int]], sparse.csr_matrix],
+        combo_sep: str = "_",
     ) -> None:
-        n = len(obs_role)
-        if not (len(obs_source_row_id) == len(obs_perturbation) == n):
+        n = len(obs_perturbation)
+        if len(obs_source_row_id) != n:
             raise FitRoleArtifactError("obs columns must be equal length")
-        self._role = [str(r) for r in obs_role]
         self._src = [str(s) for s in obs_source_row_id]
         self._pert = [str(p) for p in obs_perturbation]
         self._var_names = _check_gene_ids(var_names)
         self._calib = {tuple(p) for p in calibration_pair_ids}
         self._sealed = {tuple(p) for p in sealed_pair_ids}
+        self._control_token = str(control_token)
+        self._combo_sep = str(combo_sep)
         self._raw_data_sha256 = str(raw_data_sha256)
         self._pair_manifest_sha256 = str(pair_manifest_sha256)
         self._eligibility_hash = str(eligibility_hash)
@@ -346,31 +360,41 @@ class ComposeFitRoleExtractor:
         if len(set(self._src)) != n:
             raise FitRoleArtifactError("source_row_id must be unique")
 
+    def _role_of(self, pert: str) -> str | None:
+        """Derive a perturbation token's fit role, or ``None`` if the row is a
+        sealed combo cell to exclude. Raise on an unregistered/ambiguous pair."""
+        if pert == self._control_token:
+            return "control"
+        if self._combo_sep in pert:
+            pair = _canonical_pair(pert, self._combo_sep)
+            in_calib = pair in self._calib
+            in_sealed = pair in self._sealed
+            if in_calib and in_sealed:
+                raise FitRoleArtifactError(
+                    f"combo pair {pair!r} is in both calibration and sealed sets"
+                )
+            if in_sealed:
+                return None  # sealed combo cell: excluded, never read
+            if in_calib:
+                return "combo_calibration"
+            raise FitRoleArtifactError(
+                f"combo pair {pair!r} is neither a calibration nor a sealed pair"
+            )
+        return "singles"  # single-gene perturbation is always a retained fit role
+
     def select_row_ids(self) -> list[int]:
-        selected: list[int] = []
-        for i, role in enumerate(self._role):
-            if role not in _ALLOWED_ROLES:
-                raise FitRoleArtifactError(f"row {i}: non-whitelisted role {role!r}")
-            pert = self._pert[i]
-            if role == "combo_calibration":
-                pair = _canonical_pair(pert)
-                if pair in self._sealed:
-                    raise FitRoleArtifactError(f"row {i}: sealed pair {pair!r} in calibration role")
-                if pair not in self._calib:
-                    raise FitRoleArtifactError(f"row {i}: pair {pair!r} not a registered calibration pair")
-            elif role == "singles" and ("_" in pert or pert == "control"):
-                raise FitRoleArtifactError(f"row {i}: singles label {pert!r} is not a single gene")
-            elif role == "control" and pert != "control":
-                raise FitRoleArtifactError(f"row {i}: control label {pert!r} is not 'control'")
-            selected.append(i)
-        return selected
+        """Row indices of the derived fit roles, sealed combo cells excluded.
+
+        Uses obs metadata only; never calls ``row_reader`` (spec §4/§5)."""
+        return [i for i, pert in enumerate(self._pert) if self._role_of(pert) is not None]
 
     def extract(self) -> FitRoleExtraction:
-        idx = self.select_row_ids()
+        roles = [self._role_of(p) for p in self._pert]
+        idx = [i for i, role in enumerate(roles) if role is not None]
         X = sparse.csr_matrix(self._row_reader(idx))
         if X.shape[0] != len(idx):
             raise FitRoleArtifactError("row_reader returned the wrong number of rows")
-        rows = tuple((self._src[i], self._role[i], self._pert[i]) for i in idx)
+        rows = tuple((self._src[i], roles[i], self._pert[i]) for i in idx)
         counts = {r: sum(1 for _, rr, _ in rows if rr == r) for r in sorted(_ALLOWED_ROLES)}
         return FitRoleExtraction(
             X=X,
@@ -437,8 +461,8 @@ def test_generate_writes_valid_h5ad_and_spec(tmp_path):
 
     spec = _gen(tmp_path)
     assert spec.sha256.startswith("sha256:")
-    assert spec.n_cells == 4 and spec.n_genes == 3
-    assert spec.role_counts == {"control": 1, "singles": 2, "combo_calibration": 1}
+    assert spec.n_cells == 6 and spec.n_genes == 3
+    assert spec.role_counts == {"control": 1, "singles": 4, "combo_calibration": 1}
     adata = ad.read_h5ad(spec.path)
     assert set(map(str, adata.obs["role"].unique())) <= {"control", "singles", "combo_calibration"}
     assert "source_row_id" in adata.obs
@@ -689,7 +713,7 @@ def test_validate_rejects_sealed_pair_in_obs(tmp_path):
     # generate an artifact whose sole calibration pair IS a sealed pair, bypassing
     # the extractor, then validate against the real sealed set -> reject.
     ex = _extractor(
-        obs_role=["control", "combo_calibration"], obs_source_row_id=["r0", "r1"],
+        obs_source_row_id=["r0", "r1"],
         obs_perturbation=["control", "AAA_BBB"], calibration_pair_ids=[("AAA", "BBB")],
         sealed_pair_ids=[],  # bypass extractor guard to forge the artifact
     )
