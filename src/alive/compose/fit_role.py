@@ -225,6 +225,33 @@ class ComposeFitRoleExtractor:
             )
         return "singles"  # single-gene perturbation is always a retained fit role
 
+    def _canonical_token(self, pert: str, role: str) -> str:
+        """Return the canonical perturbation token to store for a selected row.
+
+        Combo (``combo_calibration``) tokens are rewritten to their byte-canonical
+        ``GENEA<sep>GENEB`` form so a non-canonically ordered raw token (e.g.
+        ``KLF1_CEBPE``) is stored, hashed, and validated identically to its
+        canonical form (spec §3/§3.2/§4). ``control`` and ``singles`` tokens are
+        already canonical (the control token / a single gene) and pass through
+        unchanged.
+
+        Parameters
+        ----------
+        pert : str
+            The raw obs perturbation token for the row.
+        role : str
+            The derived fit role of the row.
+
+        Returns
+        -------
+        str
+            The canonical perturbation token to store in the artifact.
+        """
+        if role == "combo_calibration":
+            a, b = _canonical_pair(pert, self._combo_sep)
+            return f"{a}{self._combo_sep}{b}"
+        return pert
+
     def select_row_ids(self) -> list[int]:
         """Return the row indices of the derived fit roles, sealed combos excluded.
 
@@ -264,7 +291,9 @@ class ComposeFitRoleExtractor:
         X = sparse.csr_matrix(self._row_reader(idx))
         if X.shape[0] != len(idx):
             raise FitRoleArtifactError("row_reader returned the wrong number of rows")
-        rows = tuple((self._src[i], roles[i], self._pert[i]) for i in idx)
+        rows = tuple(
+            (self._src[i], roles[i], self._canonical_token(self._pert[i], roles[i])) for i in idx
+        )
         counts = {r: sum(1 for _, rr, _ in rows if rr == r) for r in sorted(_ALLOWED_ROLES)}
         return FitRoleExtraction(
             X=X,
@@ -590,7 +619,38 @@ def validate_fit_role_artifact(
     Raises
     ------
     FitRoleArtifactError
-        On any path, digest, role-closure, or sealed-pair violation.
+        On any path, digest, role-closure, or sealed-pair violation, and on any
+        otherwise-unexpected failure from a malformed/forged artifact (every
+        failure surfaces as ``FitRoleArtifactError`` — fail closed).
+    """
+    try:
+        _validate_fit_role_artifact_checks(
+            path,
+            spec=spec,
+            approved_root=approved_root,
+            calibration_pair_ids=calibration_pair_ids,
+            sealed_pair_ids=sealed_pair_ids,
+        )
+    except FitRoleArtifactError:
+        raise
+    except Exception as exc:  # fail closed: any malformed/forged artifact
+        raise FitRoleArtifactError(f"malformed fit-role artifact: {exc!r}") from exc
+
+
+def _validate_fit_role_artifact_checks(
+    path: str,
+    *,
+    spec: FitRoleArtifactSpec,
+    approved_root: str,
+    calibration_pair_ids: Sequence[tuple[str, str]],
+    sealed_pair_ids: Sequence[tuple[str, str]],
+) -> None:
+    """Run every fit-role validation check; raise on the first violation.
+
+    Extracted from :func:`validate_fit_role_artifact` so the public entry point
+    can uniformly re-raise any non-:class:`FitRoleArtifactError` failure (e.g. a
+    ``KeyError``/``ValueError`` from a malformed or forged ``.h5ad``) as a
+    :class:`FitRoleArtifactError` — everything fails closed (spec §5).
     """
     import anndata as ad
 

@@ -12,6 +12,7 @@ from alive.compose.fit_role import (
     ComposeFitRoleExtractor,
     FitRoleArtifactError,
     FitRoleArtifactSpec,
+    _file_sha256,
     canonical_gene_order_sha256,
     content_manifest_sha256,
     extract_fit_roles,
@@ -250,3 +251,74 @@ def test_validate_rejects_sealed_pair_in_obs(tmp_path):
             calibration_pair_ids=[("AAA", "BBB")],
             sealed_pair_ids=[("AAA", "BBB")],
         )
+
+
+def test_extract_stores_combo_token_canonically():
+    # A NON-canonical raw combo token (KLF1_CEBPE, since CEBPE < KLF1) must be
+    # stored canonically (CEBPE_KLF1), and its identity digests must be
+    # order-invariant vs. the already-canonical CEBPE_KLF1 input. Singles and the
+    # control token pass through unchanged.
+    def _rows_for(combo_token: str):
+        ex = _extractor(
+            obs_source_row_id=["r0", "r1", "r2", "r3"],
+            obs_perturbation=["control", "KLF1", "CEBPE", combo_token],
+            calibration_pair_ids=[("CEBPE", "KLF1")],
+            sealed_pair_ids=[],
+        )
+        return extract_fit_roles(extractor=ex)
+
+    noncanon = _rows_for("KLF1_CEBPE")  # raw token reversed vs. byte-canonical order
+    canon = _rows_for("CEBPE_KLF1")
+
+    # combo cell (r3) is stored canonically regardless of raw token order
+    assert noncanon.rows[3] == ("r3", "combo_calibration", "CEBPE_KLF1")
+    assert canon.rows[3] == ("r3", "combo_calibration", "CEBPE_KLF1")
+    # control + singles tokens pass through unchanged
+    assert noncanon.rows[0] == ("r0", "control", "control")
+    assert noncanon.rows[1] == ("r1", "singles", "KLF1")
+    assert noncanon.rows[2] == ("r2", "singles", "CEBPE")
+    # order-invariant identity: the digests match the canonical-input digests
+    assert row_identity_sha256(noncanon.rows) == row_identity_sha256(canon.rows)
+    kw = dict(
+        schema_version=1,
+        var_names=list(noncanon.var_names),
+        provenance={"raw_data_sha256": noncanon.raw_data_sha256},
+        role_counts=noncanon.role_counts,
+    )
+    assert content_manifest_sha256(
+        X=noncanon.X, rows=noncanon.rows, **kw
+    ) == content_manifest_sha256(X=canon.X, rows=canon.rows, **kw)
+
+
+def test_validate_wraps_malformed_artifact_as_fit_role_error(tmp_path):
+    import anndata as ad
+
+    # Forge an artifact whose combo_calibration obs row has a perturbation token
+    # WITHOUT the combo separator. On validation, _canonical_pair(...).split -> a
+    # single-element unpack would raise a bare ValueError; the guard must surface
+    # it as FitRoleArtifactError (fail closed), not ValueError.
+    spec = _gen(tmp_path, "malformed.h5ad")
+    adata = ad.read_h5ad(spec.path)
+    perts = [str(p) for p in adata.obs["perturbation"]]
+    # r3 is the combo_calibration cell (CEBPE_KLF1); strip its separator
+    perts = [p.replace("_", "") if "_" in p else p for p in perts]
+    adata.obs["perturbation"] = perts
+    corrupt = tmp_path / "corrupt.h5ad"
+    adata.write_h5ad(corrupt)
+    corrupt_spec = FitRoleArtifactSpec(
+        **{**spec.__dict__, "path": str(corrupt), "sha256": _file_sha256(str(corrupt))}
+    )
+    with pytest.raises(FitRoleArtifactError):
+        _validate(corrupt_spec, str(tmp_path))
+
+    # A malformed artifact missing an obs column also fails closed as
+    # FitRoleArtifactError (KeyError -> FitRoleArtifactError), not KeyError.
+    adata2 = ad.read_h5ad(spec.path)
+    del adata2.obs["source_row_id"]
+    missing = tmp_path / "missing_col.h5ad"
+    adata2.write_h5ad(missing)
+    missing_spec = FitRoleArtifactSpec(
+        **{**spec.__dict__, "path": str(missing), "sha256": _file_sha256(str(missing))}
+    )
+    with pytest.raises(FitRoleArtifactError):
+        _validate(missing_spec, str(tmp_path))
