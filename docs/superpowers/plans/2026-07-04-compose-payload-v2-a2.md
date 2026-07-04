@@ -34,7 +34,7 @@ These refine the spec's illustrative signatures within the approved contract. **
 0. **A1 hardening is a blocking prerequisite.** A2 may not proceed until `validate_fit_role_artifact` rejects a combo token under any non-combo role and compares `raw_data_sha256`, `pair_manifest_sha256`, `eligibility_hash`, row/gene digests and counts between the trusted `FitRoleArtifactSpec` and `.h5ad` provenance/content. The negative reproductions from the independent review become regression tests in Task 0.
 1. **Operator lives in `fit_role.py`.** Both `build_response_projection` (serialize) and `apply_response_projection` (reconstruct, pure numpy) go in `src/alive/compose/fit_role.py`, matching spec §7.1 which places `build_response_projection` there, so the stub and (later) GEARS/CPA workers import the projection contract from one module.
 2. **`build_response_projection` signature is extended** from the §7.1 sketch `(response_space, *, gene_order)` to `(response_space, *, gene_order, control_mean, raw_data_sha256)`, because the §2.2 block requires the z-space `control_mean` (which is `None` on a verified `ResponseSpace`) and `raw_data_sha256`. It calls `verify_response_artifact` internally to obtain validated arrays + the combined `response_artifact_sha256`.
-3. **A2's `phase2a` change is TWO focused pieces (both required by spec §7.2):** (a) `build_subprocess_fit_payload` emits `schema_version:2`, attaches both blocks, enforces cross-source digest equality (Task 6); and (b) `run_phase2a` calls each subprocess adapter **once with the combined double∪single pair union** and splits the result by role — honoring the §2.5 single-fit rule and §10 completion criterion (Task 8). In-process `fitted_models` (`predict_eps`, no re-fit) are unchanged and may still be evaluated per-role. **Deferred to later sub-projects (NOT A2):** the durable final-ledger + development seed-variability (sub-project **D**), and the production driver that assembles real raw/split/gene identity + approved artifacts root (sub-project **C**, spec §10.1). So A2 rewires the subprocess *invocation cardinality* but not the ledger/driver.
+3. **A2's `phase2a` change is TWO focused pieces (both required by spec §7.2):** (a) `build_subprocess_fit_payload` emits `schema_version:2`, attaches both blocks, and enforces cross-source digest equality (migrated in **Task 4**, atomic with the validator flip) plus the independent `response_artifact_sha256`↔`response_space_checksum` binding (**Task 6**); and (b) `run_phase2a` calls each subprocess adapter **once with the combined double∪single pair union** and splits the result by role — honoring the §2.5 single-fit rule and §10 completion criterion (Task 8). In-process `fitted_models` (`predict_eps`, no re-fit) are unchanged and may still be evaluated per-role. **Deferred to later sub-projects (NOT A2):** the durable final-ledger + development seed-variability (sub-project **D**), and the production driver that assembles real raw/split/gene identity + approved artifacts root (sub-project **C**, spec §10.1). So A2 rewires the subprocess *invocation cardinality* but not the ledger/driver.
 4. **Reference stub strategy (spec §1.2, §5, §7.2):** the v2 stub reads + validates the fit-role `.h5ad`, loads its **`combo_calibration`** cells (non-sealed, present in the artifact), treats their raw counts as the per-pair native full-gene prediction, declares `prediction_representation = "cell_raw_counts"`, applies the §2.3 operator, and returns δ̂ + a real manifest. This yields observable non-zero δ̂ and exercises the whole operator path — it is a **protocol reference, not a baseline** (its numbers are not scientific claims).
 
 ---
@@ -45,12 +45,12 @@ These refine the spec's illustrative signatures within the approved contract. **
 - `src/alive/compose/response.py` — **add** `bind_response_source`. (existing fitting/projection unchanged.)
 - `src/alive/compose/baseline_subprocess.py` — **modify** `_SCHEMA_VERSION`, `_REQUIRED_KEYS`, `_validate_payload`, `write_predictions`, `read_predictions`, `SubprocessBaselineBackend.predict`, `provenance_manifest`; **add** `_validate_response_projection`, `_validate_fit_role_block`, `_validate_execution_manifest`, `_float_hex`, `_float_hex_equal`, `EXECUTION_MANIFEST_KEYS`, `PREDICTION_REPRESENTATIONS`.
 - `src/alive/compose/config2.py`, `configs/compose_k562_v1_phase2.yaml` — register the expected native prediction representation per GEARS/CPA method and require a bias-report digest for pseudobulk.
-- `src/alive/compose/phase2a.py` — **modify** `build_subprocess_fit_payload` (Task 6); **modify** `_predict_role` + `run_phase2a` and **add** `_predict_combined_adapters` (Task 8).
+- `src/alive/compose/phase2a.py` — **migrate** `build_subprocess_fit_payload` → v2 emission (Task 4, atomic with the validator flip) then **bind** it to `inputs.response_space_checksum` (Task 6); **modify** `_predict_role` + `run_phase2a` and **add** `_predict_combined_adapters` (Task 8).
 - `scripts/baselines/stub_worker.py` — **rewrite** to the v2 operator path (Task 5 envelope shell → Task 7 operator).
 - `tests/alive/compose/test_fit_role.py` — **add** projection unit + known-answer tests.
 - `tests/alive/compose/test_response.py` — **add** `bind_response_source` tests.
 - `tests/alive/compose/test_baseline_subprocess.py` — **migrate** payload/prediction helpers to v2; **add** schema + envelope + leakage tests (Task 4/5); **remove** the two additive predict-through-adapter tests superseded by the integration test (Task 7).
-- `tests/alive/compose/test_phase2a.py` — **migrate** `_subprocess_adapters` (thread `tmp_path`); **add** v2 payload + equality tests (Task 6) and the combined-invocation test (Task 8).
+- `tests/alive/compose/test_phase2a.py` — **migrate** `_subprocess_adapters` (real response space + fit-role artifact + `tmp_path`, Task 4; backend fields, Task 5); **add** the v2-consistency test (Task 4), the response-artifact divergence test (Task 6), and the combined-invocation test (Task 8).
 - `tests/alive/compose/test_payload_v2_integration.py` — **new** integration test (fixture builder + combined request through `SubprocessBaselineBackend`).
 
 Tasks are **sequential** (later tasks import earlier symbols). BASE for Task 0 = current `main` HEAD (`62a2bd4`). Each task ends with `uv run pytest tests/alive/compose -q` green. Task 1 cannot start until Task 0's two independent-review reproductions reject.
@@ -925,18 +925,108 @@ Change `_validate_payload` to accept the keyword-only trusted checksum and, befo
 
 Also reject `set(pair_ids) & set(calibration_pair_ids) != ∅`: in A2, `pair_ids` is the combined sealed request and must be disjoint from all calibration cells present in the fit artifact. Add a negative test for this overlap.
 
-(`response_dim` is already validated as a positive int earlier in `_validate_payload`.)
+(`response_dim` is already validated as a positive int earlier in `_validate_payload`. Keep the `expected_response_artifact_sha256` parameter defaulting to `None` here — Task 6 supplies it; Task 4 only makes the validator accept it.)
 
-- [ ] **Step 4: Run test to verify it passes**
+- [ ] **Step 3b: migrate the payload emitter and its test caller (same task — keeps `test_phase2a` green)**
 
-Run: `uv run pytest tests/alive/compose/test_baseline_subprocess.py -q`
-Expected: PASS — migrated v1 tests + new schema tests. (Prediction round-trip + predict e2e still pass: prediction format is unchanged in this task; the stub still reads only aggregate keys.)
+**Why in this task:** flipping `_validate_payload` to require the v2 key set immediately breaks `build_subprocess_fit_payload`'s only caller `_subprocess_adapters` (`test_phase2a.py`), which still emits a v1 payload and fails `configure_payload`. The validator flip and the emitter flip must land together. All helpers this needs already exist (`build_response_projection` Task 1, `bind_response_source` Task 3, `FitRoleArtifactSpec.to_payload_block` Task 0/A1).
+
+Add these imports at the top of `phase2a.py`:
+
+```python
+from alive.compose.fit_role import FitRoleArtifactSpec, build_response_projection
+from alive.compose.response import bind_response_source
+```
+
+Rewrite `build_subprocess_fit_payload` in `phase2a.py` to emit v2 (the `response_artifact_sha256`↔`response_space_checksum` binding is added in Task 6 — omit it here):
+
+```python
+def build_subprocess_fit_payload(
+    *,
+    inputs: Phase2aInputs,
+    outcome_store: DevelopmentOutcomeStore,
+    response_artifact: Mapping,
+    oof_folds: Sequence[int],
+    fit_role_spec: "FitRoleArtifactSpec",
+    gene_order: Sequence[str],
+    raw_data_sha256: str,
+) -> dict[str, object]:
+    """Assemble the canonical payload-v2 fit-role payload for GEARS/CPA workers."""
+    if set(response_artifact) != {"response_space", "control_mean"}:
+        raise ValueError("response_artifact must contain exactly response_space + control_mean")
+    response_space = response_artifact["response_space"]
+    control_mean = np.asarray(response_artifact["control_mean"], dtype=float)
+    if control_mean.shape != (inputs.response_dim,):
+        raise ValueError("response artifact control_mean is not response_dim aligned")
+    if len(oof_folds) != len(inputs.cal_pair_ids):
+        raise ValueError("oof_folds must align one-to-one with calibration pairs")
+    if outcome_store.combo_calibration_pair_ids != tuple(tuple(p) for p in inputs.cal_pair_ids):
+        raise ValueError("development outcomes are not aligned with calibration pair IDs")
+
+    projection = build_response_projection(
+        response_space, gene_order=gene_order, control_mean=control_mean,
+        raw_data_sha256=raw_data_sha256,
+    )
+    fit_role_block = fit_role_spec.to_payload_block()
+    bound = bind_response_source(gene_order=gene_order, raw_data_sha256=raw_data_sha256)
+    if fit_role_block["raw_data_sha256"] != bound["raw_data_sha256"]:
+        raise ValueError("fit-role artifact raw_data_sha256 does not match response source")
+    if fit_role_block["gene_order_sha256"] != bound["gene_order_sha256"]:
+        raise ValueError("fit-role artifact gene_order_sha256 does not match response source")
+
+    genes = tuple(sorted(inputs.delta_by_gene, key=lambda gene: gene.encode("utf-8")))
+    calibration_delta = np.asarray(inputs.additive_cal, dtype=float) + np.asarray(
+        outcome_store.combo_calibration_eps, dtype=float
+    )
+    return {
+        "schema_version": 2,
+        "response_dim": int(inputs.response_dim),
+        "seed": int(inputs.seed),
+        "allowed_roles": ["singles", "combo_calibration"],
+        "pair_ids": [],
+        "single_gene_ids": list(genes),
+        "singles_response": [
+            np.asarray(inputs.delta_by_gene[gene], dtype=float).tolist() for gene in genes
+        ],
+        # reuse the projection-serialized arrays so the cross-source equality holds
+        "control_mean": projection["control_mean"],
+        "calibration_pair_ids": [list(pair) for pair in inputs.cal_pair_ids],
+        "calibration_delta": calibration_delta.tolist(),
+        "pca_components": projection["pca_components"],
+        "oof_folds": [int(fold) for fold in oof_folds],
+        "fit_role_artifact": fit_role_block,
+        "response_projection": projection,
+    }
+```
+
+Update `_subprocess_adapters` in `test_phase2a.py` per the **Fixture contract**: replace the `SimpleNamespace(pca_components=…)` response artifact with a real `fit_response_space` result + z-space `control_mean`; set `inputs.response_space_checksum = verify_response_artifact(space, control_mean)[2]` (the combined checksum); write a real fit-role `.h5ad` via A1's `generate_fit_role_artifact` under `tmp_path` and get its `FitRoleArtifactSpec`; thread `tmp_path` into `_subprocess_adapters(inputs, store, tmp_path)`; and call `build_subprocess_fit_payload(..., fit_role_spec=spec, gene_order=var_names, raw_data_sha256=<shared>)`. Add the consistency test:
+
+```python
+def test_build_subprocess_payload_is_v2_with_consistent_blocks(tmp_path):
+    # assemble inputs/store + a real response_space, control_mean and fit_role_spec
+    # per the Fixture contract; gene_order == artifact var_names; one shared raw_data_sha256.
+    payload = build_subprocess_fit_payload(
+        inputs=inputs, outcome_store=store, response_artifact=response_artifact,
+        oof_folds=[0] * len(inputs.cal_pair_ids), fit_role_spec=fit_role_spec,
+        gene_order=gene_order, raw_data_sha256="shared_raw",
+    )
+    assert payload["schema_version"] == 2
+    assert payload["response_projection"]["raw_data_sha256"] == payload["fit_role_artifact"]["raw_data_sha256"]
+    assert payload["response_projection"]["response_artifact_sha256"] == inputs.response_space_checksum
+    from alive.compose.baseline_subprocess import _validate_payload
+    _validate_payload(payload, expected_response_artifact_sha256=inputs.response_space_checksum)
+```
+
+- [ ] **Step 4: Run the full compose suite to verify green**
+
+Run: `uv run pytest tests/alive/compose -q`
+Expected: PASS — migrated v1→v2 subprocess tests + new schema tests **and** `test_phase2a` (its `_subprocess_adapters` now emits a valid v2 payload). Prediction format is unchanged in this task; the stub still reads only aggregate keys.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/alive/compose/baseline_subprocess.py tests/alive/compose/test_baseline_subprocess.py
-git commit -m "feat(compose): payload-v2 schema with fit_role + projection blocks and cross-source equality (A2 task 4)"
+git add src/alive/compose/baseline_subprocess.py src/alive/compose/phase2a.py tests/alive/compose/test_baseline_subprocess.py tests/alive/compose/test_phase2a.py
+git commit -m "feat(compose): payload-v2 schema + emitter (atomic validator+emission flip) (A2 task 4)"
 ```
 
 ---
@@ -1209,7 +1299,9 @@ execution_identity_lock: ExecutionIdentityLock
 `_validate_payload(candidate, expected_response_artifact_sha256=self.expected_response_artifact_sha256)`.
 Before launching a worker, canonicalize `approved_artifacts_root`, require it to be an absolute existing directory,
 and pass it as `--approved-root <root>`. Do not read this value from the payload or infer it from
-`fit_role_artifact.path`.
+`fit_role_artifact.path`. (The directory is validated at predict time, not at construction.)
+
+**Update EVERY `SubprocessBaselineBackend(...)` construction site in this same task** — the three new fields are required (no defaults), so any un-updated construction is a `TypeError` and the task ends red. In `tests/alive/compose/test_baseline_subprocess.py`: `_backend()` and the three `test_is_available_*` constructions; in `tests/alive/compose/test_phase2a.py`: `_subprocess_adapters` (the backend it builds). Pass test-appropriate values — e.g. `approved_artifacts_root=str(tmp_path)` (or any string for the availability-only tests, which never predict), `expected_response_artifact_sha256="0" * 64`, and `execution_identity_lock=ExecutionIdentityLock(prediction_representation="cell_raw_counts", adapter_version="1", adapter_sha256="a"*64, config_sha256="e"*64, resource_sha256="f"*64, environment_lock_sha256="0"*64)`. `test_payload_with_sealed_token_is_refused` still passes because `configure_payload` runs `_assert_no_sealed_reference` **before** `_validate_payload`, so the dummy `expected_response_artifact_sha256` is never reached. (`_backend()` needs a `tmp_path` param or a module-level temp dir; the availability tests can pass a literal string since construction does not validate the root.)
 
 Update `predict` (bottom of the method) to unwrap + store:
 
@@ -1306,142 +1398,64 @@ Expected: PASS — envelope round-trip, rejection, and the migrated e2e/determin
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/alive/compose/baseline_subprocess.py scripts/baselines/stub_worker.py src/alive/compose/config2.py configs/compose_k562_v1_phase2.yaml tests/alive/compose/test_baseline_subprocess.py tests/alive/compose/test_config2.py
+git add src/alive/compose/baseline_subprocess.py scripts/baselines/stub_worker.py src/alive/compose/config2.py configs/compose_k562_v1_phase2.yaml tests/alive/compose/test_baseline_subprocess.py tests/alive/compose/test_config2.py tests/alive/compose/test_phase2a.py
 git commit -m "feat(compose): {predictions, execution_manifest} envelope + backend unwrap/binding (A2 task 5)"
 ```
 
 ---
 
-### Task 6: phase2a `build_subprocess_fit_payload` → v2 with equality enforcement
+### Task 6: bind the payload emitter to the independently verified response artifact
 
 **Files:**
 - Modify: `src/alive/compose/phase2a.py`
 - Test: `tests/alive/compose/test_phase2a.py`
 
 **Interfaces:**
-- Consumes: `FitRoleArtifactSpec.to_payload_block()` (A1), `build_response_projection` (Task 1), `bind_response_source` (Task 3).
-- Produces: `build_subprocess_fit_payload(*, inputs, outcome_store, response_artifact, oof_folds, fit_role_spec, gene_order, raw_data_sha256) -> dict` emitting `schema_version: 2` with both blocks attached and cross-source digest equality enforced.
+- Consumes: the v2 `build_subprocess_fit_payload` already migrated in **Task 4** (blocks + cross-source equality + source binding).
+- Produces: `build_subprocess_fit_payload` additionally raises `ValueError` when `projection["response_artifact_sha256"] != inputs.response_space_checksum`, closing the circular-equality gap (Global Constraint "Response artifact equality is not circular"; spec §2.2).
 
-**Note for the implementer:** the current signature and the current 2-key `response_artifact` requirement change. `response_artifact` still supplies `response_space` + `control_mean`; the new `fit_role_spec` (a `FitRoleArtifactSpec`), `gene_order` (full var_names), and `raw_data_sha256` are added params. The payload's `pca_components`/`control_mean` must be **identical objects** to those the projection block serializes, so build the projection block from the same `response_space`/`control_mean` and reuse its serialized arrays for the aggregate keys to guarantee the Task-4 equality check passes.
+**Note for the implementer:** Task 4 already emits v2 and passes `_subprocess_adapters` on the consistency test. This task adds only the **independent** binding: the projection's `response_artifact_sha256` must equal `Phase2aInputs.response_space_checksum` (the separately verified response-space checksum, see `phase2a._verify_scientific_response_artifact`), not merely be self-consistent inside the payload. The `configure_payload` side of this binding (`_validate_payload(..., expected_response_artifact_sha256=self.expected_response_artifact_sha256)`) is wired in Task 5; here we enforce it at emission.
 
 - [ ] **Step 1: Write the failing test**
 
-Update `_subprocess_adapters` in `tests/alive/compose/test_phase2a.py` to pass the new args and add an equality assertion. Because the fixture uses a `SimpleNamespace` for `response_space`, replace it with a real `fit_response_space` result (small) so `build_response_projection` works; and build a real `FitRoleArtifactSpec` via A1's generator into `tmp_path`. Add:
+Reuse the Task-4 fixture (`test_build_subprocess_payload_is_v2_with_consistent_blocks`) but with a mismatched checksum; `build_subprocess_fit_payload` must raise before returning a payload:
 
 ```python
-def test_build_subprocess_payload_is_v2_with_consistent_blocks(tmp_path):
-    # ... assemble inputs, store, a real response_space + control_mean,
-    #     a real fit_role_spec via generate_fit_role_artifact into tmp_path,
-    #     gene_order = full var_names, raw_data_sha256 shared everywhere ...
-    payload = build_subprocess_fit_payload(
-        inputs=inputs, outcome_store=store, response_artifact=response_artifact,
-        oof_folds=[0] * len(inputs.cal_pair_ids), fit_role_spec=fit_role_spec,
-        gene_order=gene_order, raw_data_sha256="shared_raw",
-    )
-    assert payload["schema_version"] == 2
-    assert set(payload["fit_role_artifact"]) and set(payload["response_projection"])
-    assert payload["response_projection"]["raw_data_sha256"] == payload["fit_role_artifact"]["raw_data_sha256"]
-    assert payload["response_projection"]["response_artifact_sha256"] == inputs.response_space_checksum
-    # the whole payload must pass v2 validation (cross-source equality holds)
-    from alive.compose.baseline_subprocess import _validate_payload
-    _validate_payload(
-        payload, expected_response_artifact_sha256=inputs.response_space_checksum
-    )  # raises PayloadError on any divergence
+def test_build_subprocess_payload_rejects_unverified_response_artifact(tmp_path):
+    # same Fixture-contract assembly as Task 4, then corrupt the bound checksum:
+    inputs = replace(inputs, response_space_checksum="f" * 64)  # != projection's combined checksum
+    with pytest.raises(ValueError, match="independently verified response artifact"):
+        build_subprocess_fit_payload(
+            inputs=inputs, outcome_store=store, response_artifact=response_artifact,
+            oof_folds=[0] * len(inputs.cal_pair_ids), fit_role_spec=fit_role_spec,
+            gene_order=gene_order, raw_data_sha256="shared_raw",
+        )
 ```
-
-(The implementer writes the full fixture assembly; it mirrors the existing `_subprocess_adapters` construction plus a real response space and fit-role artifact.) Add a second case using the same fixture with `inputs.response_space_checksum` replaced by a different 64-hex value; `build_subprocess_fit_payload` must raise `ValueError` before adapter configuration.
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `uv run pytest tests/alive/compose/test_phase2a.py -k subprocess -q`
-Expected: FAIL — signature mismatch / `schema_version` still 1.
+Run: `uv run pytest tests/alive/compose/test_phase2a.py -k unverified_response_artifact -q`
+Expected: FAIL — no guard yet; the payload is returned instead of raising.
 
 - [ ] **Step 3: Write minimal implementation**
 
-Rewrite `build_subprocess_fit_payload` in `phase2a.py`:
+In `build_subprocess_fit_payload` (Task 4), immediately after the `projection = build_response_projection(...)` call, add:
 
 ```python
-def build_subprocess_fit_payload(
-    *,
-    inputs: Phase2aInputs,
-    outcome_store: DevelopmentOutcomeStore,
-    response_artifact: Mapping,
-    oof_folds: Sequence[int],
-    fit_role_spec: "FitRoleArtifactSpec",
-    gene_order: Sequence[str],
-    raw_data_sha256: str,
-) -> dict[str, object]:
-    """Assemble the canonical payload-v2 fit-role payload for GEARS/CPA workers."""
-    if set(response_artifact) != {"response_space", "control_mean"}:
-        raise ValueError("response_artifact must contain exactly response_space + control_mean")
-    response_space = response_artifact["response_space"]
-    control_mean = np.asarray(response_artifact["control_mean"], dtype=float)
-    if control_mean.shape != (inputs.response_dim,):
-        raise ValueError("response artifact control_mean is not response_dim aligned")
-    if len(oof_folds) != len(inputs.cal_pair_ids):
-        raise ValueError("oof_folds must align one-to-one with calibration pairs")
-    if outcome_store.combo_calibration_pair_ids != tuple(tuple(p) for p in inputs.cal_pair_ids):
-        raise ValueError("development outcomes are not aligned with calibration pair IDs")
-
-    projection = build_response_projection(
-        response_space, gene_order=gene_order, control_mean=control_mean,
-        raw_data_sha256=raw_data_sha256,
-    )
     if projection["response_artifact_sha256"] != inputs.response_space_checksum:
         raise ValueError("projection does not match the independently verified response artifact")
-    fit_role_block = fit_role_spec.to_payload_block()
-    bound = bind_response_source(gene_order=gene_order, raw_data_sha256=raw_data_sha256)
-    # source binding: the fit-role artifact, the projection, and the response
-    # source must share one raw-data SHA and one gene order (spec §7.2, §2.2)
-    if fit_role_block["raw_data_sha256"] != bound["raw_data_sha256"]:
-        raise ValueError("fit-role artifact raw_data_sha256 does not match response source")
-    if fit_role_block["gene_order_sha256"] != bound["gene_order_sha256"]:
-        raise ValueError("fit-role artifact gene_order_sha256 does not match response source")
-
-    genes = tuple(sorted(inputs.delta_by_gene, key=lambda gene: gene.encode("utf-8")))
-    calibration_delta = np.asarray(inputs.additive_cal, dtype=float) + np.asarray(
-        outcome_store.combo_calibration_eps, dtype=float
-    )
-    return {
-        "schema_version": 2,
-        "response_dim": int(inputs.response_dim),
-        "seed": int(inputs.seed),
-        "allowed_roles": ["singles", "combo_calibration"],
-        "pair_ids": [],
-        "single_gene_ids": list(genes),
-        "singles_response": [
-            np.asarray(inputs.delta_by_gene[gene], dtype=float).tolist() for gene in genes
-        ],
-        # reuse the projection-serialized arrays so the cross-source equality holds
-        "control_mean": projection["control_mean"],
-        "calibration_pair_ids": [list(pair) for pair in inputs.cal_pair_ids],
-        "calibration_delta": calibration_delta.tolist(),
-        "pca_components": projection["pca_components"],
-        "oof_folds": [int(fold) for fold in oof_folds],
-        "fit_role_artifact": fit_role_block,
-        "response_projection": projection,
-    }
 ```
-
-Add imports at the top of `phase2a.py`:
-
-```python
-from alive.compose.fit_role import FitRoleArtifactSpec, build_response_projection
-from alive.compose.response import bind_response_source
-```
-
-(The old `components`/`pca_components` derivation and its `response_dim` alignment check are now covered by `build_response_projection`, which validates shapes against the space — keep that guarantee by relying on the projection block.)
 
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `uv run pytest tests/alive/compose/test_phase2a.py -q`
-Expected: PASS — the v2 payload validates and every other phase2a test still passes.
+Expected: PASS — the divergence test raises; the Task-4 consistency test and every other phase2a test still pass.
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add src/alive/compose/phase2a.py tests/alive/compose/test_phase2a.py
-git commit -m "feat(compose): emit payload-v2 with fit-role + projection blocks and source binding (A2 task 6)"
+git commit -m "feat(compose): bind payload emitter to the verified response artifact checksum (A2 task 6)"
 ```
 
 ---
@@ -1846,7 +1860,7 @@ git commit -m "feat(compose): subprocess adapters fit once on the combined pair 
 
 ## Self-Review (completed by plan author)
 
-**Spec coverage:** A1 dependency closure → Task 0. §2.1 fit_role block → Task 0 (semantic/lineage guard) + Task 4 (payload validation) + Task 6 (emission). §2.2 response_projection → Task 1 (serialize) + Task 4 (shape/digest validation) + Task 6 (independent equality to `Phase2aInputs.response_space_checksum`). §2.3 operator → Task 2. §2.4 representation → Task 2 (operator branches) + Task 5 (committed per-method lock and bias-report requirement). §2.5 single fit/checkpoint + manifest → Task 5 (controller verification) + Task 7 (write-once checkpoint and pair-associated reference predictions) + **Task 8 (combined single subprocess invocation in `run_phase2a`)**. §5.1 negative leakage includes outside-root, role-token disguise, source-lineage, shape and digest tamper. §6 known-answer → Task 2. §7.2 modified files → Tasks 4/5/6/8 + response.py Task 3 + stub Task 5/7 + config registration Task 5. §8 integration → Task 7. §9 fail-closed → controller and worker guards both reject. §10 completion → Task 6 source/response binding + Task 7 checkpoint + Task 8 single invocation + full-suite/ruff gate. **Deferred (NOT A2):** durable final ledger + seed variability (D), real-data driver assembly (C); the A2 interfaces needed by C are nevertheless explicit and fail closed.
+**Spec coverage:** A1 dependency closure → Task 0. §2.1 fit_role block → Task 0 (semantic/lineage guard) + Task 4 (payload validation + v2 emission). §2.2 response_projection → Task 1 (serialize) + Task 4 (shape/digest validation + v2 emission, atomic with the validator flip) + Task 6 (independent equality to `Phase2aInputs.response_space_checksum`). §2.3 operator → Task 2. §2.4 representation → Task 2 (operator branches) + Task 5 (committed per-method lock and bias-report requirement). §2.5 single fit/checkpoint + manifest → Task 5 (controller verification) + Task 7 (write-once checkpoint and pair-associated reference predictions) + **Task 8 (combined single subprocess invocation in `run_phase2a`)**. §5.1 negative leakage includes outside-root, role-token disguise, source-lineage, shape and digest tamper. §6 known-answer → Task 2. §7.2 modified files → Tasks 4/5/6/8 + response.py Task 3 + stub Task 5/7 + config registration Task 5. §8 integration → Task 7. §9 fail-closed → controller and worker guards both reject. §10 completion → Task 4 source binding + Task 6 response-artifact binding + Task 7 checkpoint + Task 8 single invocation + full-suite/ruff gate. **Deferred (NOT A2):** durable final ledger + seed variability (D), real-data driver assembly (C); the A2 interfaces needed by C are nevertheless explicit and fail closed.
 
 **Fixture-code scope:** T6/T7/T8 fixture assembly remains intentionally abbreviated because it reuses existing test factories, but its data, identity, root, representation and pair-alignment requirements are closed by the explicit **Fixture contract**. No production algorithm or trust decision is delegated to the implementer.
 
@@ -1857,6 +1871,8 @@ git commit -m "feat(compose): subprocess adapters fit once on the combined pair 
 **Iteration-1 gate fixes (spec-review loop, iteration 1 → NEEDS_IMPROVEMENT):** (a) `design_sound` NO — Task 7 now migrates/deletes the two additive predict-through-adapter tests broken by the operator stub (Step 4), so every task ends green; (b) §2.5 double-fit — added **Task 8** so subprocess adapters fit once on the combined union (was wrongly deferred by the old decision #3); (c) fixture ambiguity — added the **Fixture contract** and `_subprocess_adapters(…, tmp_path)` threading; (d) readability — replaced the stub's inline `__import__` with a top-level import.
 
 **Iteration-2 gate fix (iteration 2 → PASS, one med advisory resolved post-gate):** the verifier noted the §10 method-lock binding was overstated — `run_phase2a` read `provenance_manifest` at `phase2a.py:1243` *before* any predict, so the execution manifest never reached `effective_model_checksum`. **Task 8 Step 3 now orders the combined predict before that read**, and the Task 5 note is corrected to say `provenance_manifest` only *carries* the digests post-predict while Task 8 realizes the actual binding.
+
+**Iteration-3 gate fixes (iteration 3 → NEEDS_IMPROVEMENT on the owner's hardening pass; `internally_consistent` = no):** the loop caught two task-sequencing breakages of the "each task ends full-suite green" invariant. (1) The `_validate_payload` v2 flip (Task 4) and the `build_subprocess_fit_payload` emitter flip (was Task 6) were in separate tasks, so `_subprocess_adapters` failed `configure_payload` and `test_phase2a` was red at Tasks 4–5 → the emitter migration + `_subprocess_adapters` fixture upgrade + the v2-consistency test are now **atomic in Task 4** (Step 3b), and Task 6 narrows to the independent `response_artifact_sha256`↔`response_space_checksum` binding + its divergence test. (2) Task 5 added three *required* backend fields but updated only the integration test → Task 5 now explicitly updates **every** `SubprocessBaselineBackend(...)` site (`_backend()`, the three `test_is_available_*`, `_subprocess_adapters`) with test-appropriate values; `test_payload_with_sealed_token_is_refused` still passes because the sealed-token scan runs before the response-artifact check.
 
 **Post-implementation (not a code task):** run the **science-dev loop gate** (LOCAL harness) on the A2 increment — expected anchors `seal_access_zero`, `no_outcome_selected_test_set`, `fit_on_training_roles_only`, `protocol_versioned`/`baseline_registered` → yes/n-a (spec §10.2) — then `finishing-a-development-branch`.
 
