@@ -917,7 +917,7 @@ Update `predict` (bottom of the method) to unwrap + store:
             return preds
 ```
 
-Add the field to the dataclass: `_last_execution_manifest: dict | None = field(default=None, init=False, repr=False)`. In `provenance_manifest`, after the existing dict, if `self._last_execution_manifest is not None`, add `"execution_manifest": {k: self._last_execution_manifest[k] for k in ("checkpoint_sha256", "predictions_sha256", "prediction_representation", "fit_artifact_content_sha256")}` so the checkpoint + prediction digests bind into the Phase-2a method lock (spec §2.5, §10). (Keep `provenance_manifest` valid before any predict by guarding on `None`.)
+Add the field to the dataclass: `_last_execution_manifest: dict | None = field(default=None, init=False, repr=False)`. In `provenance_manifest`, after the existing dict, if `self._last_execution_manifest is not None`, add `"execution_manifest": {k: self._last_execution_manifest[k] for k in ("checkpoint_sha256", "predictions_sha256", "prediction_representation", "fit_artifact_content_sha256")}`. This makes `provenance_manifest` **carry** the checkpoint + prediction digests once a predict has run; the actual binding into the Phase-2a method lock (spec §2.5, §10) is realized in **Task 8**, which orders the combined predict before `run_phase2a` reads `provenance_manifest` into `effective_model_checksum` — without that ordering the manifest read (`phase2a.py:1243`) precedes any predict and the digests would not bind. (Keep `provenance_manifest` valid before any predict by guarding on `None`.)
 
 Rewrite `scripts/baselines/stub_worker.py` to emit the envelope (minimal, additive path retained for this task):
 
@@ -1401,15 +1401,29 @@ def _predict_role(
     return out
 ```
 
-Replace the inline context block that previously lived in `_predict_role` with a call to `_baseline_context(inputs)` (the extraction above). In `run_phase2a`, replace the two `_predict_role` calls (`phase2a.py:1256-1271`) with:
+Replace the inline context block that previously lived in `_predict_role` with a call to `_baseline_context(inputs)` (the extraction above).
+
+Then edit `run_phase2a` so the combined subprocess invocation happens **before** the method-lock checksum is computed. Currently `run_phase2a` reads each adapter's `provenance_manifest` (`phase2a.py:1243-1244`) into `model_artifact_checksums` and folds it into `effective_model_checksum` (`phase2a.py:1245`), and only *then* calls `_predict_role` (`phase2a.py:1256-1271`). Because `SubprocessBaselineBackend.provenance_manifest` only carries the `execution_manifest` (checkpoint + prediction digests) **after** a predict has run (Task 5), the checkpoint/prediction digests must be produced before that read to bind into the method lock (spec §2.5/§10). So insert the combined invocation immediately **before** the adapter `provenance_manifest` loop at `phase2a.py:1243`:
 
 ```python
+    # combined single-fit invocation BEFORE the adapter provenance read, so the
+    # execution manifest (checkpoint + prediction digests) is present in
+    # provenance_manifest and binds into effective_model_checksum (spec §2.5/§10)
     combined_pairs = _combined_pair_union(
         inputs.sealed_double_pair_ids, inputs.sealed_single_pair_ids
     )
     adapter_predictions = (
         _predict_combined_adapters(inputs, combined_pairs, adapters) if adapters else None
     )
+    # ... then the existing model_artifact_checksums block (phase2a.py:1240-1244):
+    #     for name, adapter in sorted(adapters.items()):
+    #         model_artifact_checksums[name] = sha256_json(adapter.backend.provenance_manifest)
+    #     effective_model_checksum = sha256_json({... "methods": model_artifact_checksums ...})
+```
+
+and replace the two `_predict_role` calls (`phase2a.py:1256-1271`) with role splits of the already-computed predictions (no re-invocation):
+
+```python
     double_preds = _predict_role(
         inputs, inputs.sealed_double_pair_ids, fitted, selected_Z, mean_prediction, adapters,
         adapter_predictions=adapter_predictions,
@@ -1419,6 +1433,8 @@ Replace the inline context block that previously lived in `_predict_role` with a
         adapter_predictions=adapter_predictions,
     )
 ```
+
+Verify the reorder does not change behavior for the in-process path: `model_artifact_checksums` for `fitted` models is computed at `phase2a.py:1240-1242` and is independent of `adapter_predictions`; only the adapter entries now reflect a post-predict `provenance_manifest`. If an existing phase2a test pins a literal `effective_model_checksum` for a subprocess adapter, update that expected value (the manifest legitimately now includes the execution digests); a structural assertion needs no change.
 
 - [ ] **Step 4: Run test to verify it passes**
 
@@ -1446,6 +1462,8 @@ git commit -m "feat(compose): subprocess adapters fit once on the combined pair 
 **Type consistency:** `read_predictions` returns `tuple[dict, dict]` from Task 5 onward; `predict` unpacks it (Task 5). `build_response_projection(response_space, *, gene_order, control_mean, raw_data_sha256)` is consistent across Tasks 1/6. `apply_response_projection(block, x, gene_order, *, representation)` consistent Tasks 2/7. `build_subprocess_fit_payload` new signature consistent Task 6 test + call. `_predict_role`'s new `adapter_predictions` kwarg (Task 8) defaults to `None`, preserving any existing direct caller; `run_phase2a` always passes the combined-once result.
 
 **Iteration-1 gate fixes (spec-review loop, iteration 1 → NEEDS_IMPROVEMENT):** (a) `design_sound` NO — Task 7 now migrates/deletes the two additive predict-through-adapter tests broken by the operator stub (Step 4), so every task ends green; (b) §2.5 double-fit — added **Task 8** so subprocess adapters fit once on the combined union (was wrongly deferred by the old decision #3); (c) fixture ambiguity — added the **Fixture contract** and `_subprocess_adapters(…, tmp_path)` threading; (d) readability — replaced the stub's inline `__import__` with a top-level import.
+
+**Iteration-2 gate fix (iteration 2 → PASS, one med advisory resolved post-gate):** the verifier noted the §10 method-lock binding was overstated — `run_phase2a` read `provenance_manifest` at `phase2a.py:1243` *before* any predict, so the execution manifest never reached `effective_model_checksum`. **Task 8 Step 3 now orders the combined predict before that read**, and the Task 5 note is corrected to say `provenance_manifest` only *carries* the digests post-predict while Task 8 realizes the actual binding.
 
 **Post-implementation (not a code task):** run the **science-dev loop gate** (LOCAL harness) on the A2 increment — expected anchors `seal_access_zero`, `no_outcome_selected_test_set`, `fit_on_training_roles_only`, `protocol_versioned`/`baseline_registered` → yes/n-a (spec §10.2) — then `finishing-a-development-branch`.
 
