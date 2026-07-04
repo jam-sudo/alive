@@ -51,6 +51,7 @@ These refine the spec's illustrative signatures within the approved contract. **
 - `tests/alive/compose/test_response.py` — **add** `bind_response_source` tests.
 - `tests/alive/compose/test_baseline_subprocess.py` — **migrate** payload/prediction helpers to v2; **add** schema + envelope + leakage tests (Task 4/5); **remove** the two additive predict-through-adapter tests superseded by the integration test (Task 7).
 - `tests/alive/compose/test_phase2a.py` — **migrate** `_subprocess_adapters` (real response space + fit-role artifact + `tmp_path`, Task 4; backend fields, Task 5); **add** the v2-consistency test (Task 4), the response-artifact divergence test (Task 6), and the combined-invocation test (Task 8).
+- `tests/alive/compose/test_baseline_failclosed.py` — **update** the `SubprocessBaselineBackend(...)` construction (Task 5) for the new required keyword-only fields.
 - `tests/alive/compose/test_payload_v2_integration.py` — **new** integration test (fixture builder + combined request through `SubprocessBaselineBackend`).
 
 Tasks are **sequential** (later tasks import earlier symbols). BASE for Task 0 = current `main` HEAD (`62a2bd4`). Each task ends with `uv run pytest tests/alive/compose -q` green. Task 1 cannot start until Task 0's two independent-review reproductions reject.
@@ -1287,12 +1288,19 @@ def read_predictions(path: str) -> tuple[dict[tuple[str, str], np.ndarray], dict
     return predictions, dict(manifest)
 ```
 
-Add these required, out-of-band fields to `SubprocessBaselineBackend`:
+Add these required, out-of-band fields to `SubprocessBaselineBackend`. **They MUST be keyword-only** — `SubprocessBaselineBackend` already has a defaulted field `seed: int = 11`, so a required (no-default) field placed after it raises `TypeError: non-default argument follows default argument` at class-definition time (breaking every import of the module). Insert a `dataclasses.KW_ONLY` sentinel so the required fields are keyword-only:
 
 ```python
-approved_artifacts_root: str
-expected_response_artifact_sha256: str
-execution_identity_lock: ExecutionIdentityLock
+from dataclasses import KW_ONLY  # add to the existing dataclasses import
+...
+    seed: int = 11
+    _: KW_ONLY
+    approved_artifacts_root: str
+    expected_response_artifact_sha256: str
+    execution_identity_lock: ExecutionIdentityLock
+    _available: bool | None = field(default=None, init=False, repr=False)
+    _payload: dict | None = field(default=None, init=False, repr=False)
+    _last_execution_manifest: dict | None = field(default=None, init=False, repr=False)
 ```
 
 `configure_payload` must call
@@ -1301,7 +1309,12 @@ Before launching a worker, canonicalize `approved_artifacts_root`, require it to
 and pass it as `--approved-root <root>`. Do not read this value from the payload or infer it from
 `fit_role_artifact.path`. (The directory is validated at predict time, not at construction.)
 
-**Update EVERY `SubprocessBaselineBackend(...)` construction site in this same task** — the three new fields are required (no defaults), so any un-updated construction is a `TypeError` and the task ends red. In `tests/alive/compose/test_baseline_subprocess.py`: `_backend()` and the three `test_is_available_*` constructions; in `tests/alive/compose/test_phase2a.py`: `_subprocess_adapters` (the backend it builds). Pass test-appropriate values — e.g. `approved_artifacts_root=str(tmp_path)` (or any string for the availability-only tests, which never predict), `expected_response_artifact_sha256="0" * 64`, and `execution_identity_lock=ExecutionIdentityLock(prediction_representation="cell_raw_counts", adapter_version="1", adapter_sha256="a"*64, config_sha256="e"*64, resource_sha256="f"*64, environment_lock_sha256="0"*64)`. `test_payload_with_sealed_token_is_refused` still passes because `configure_payload` runs `_assert_no_sealed_reference` **before** `_validate_payload`, so the dummy `expected_response_artifact_sha256` is never reached. (`_backend()` needs a `tmp_path` param or a module-level temp dir; the availability tests can pass a literal string since construction does not validate the root.)
+**Update EVERY `SubprocessBaselineBackend(...)` construction site in this same task** — the fields are required, so any un-updated construction is a `TypeError` and the task ends red. The definitive list (from `grep -rn 'SubprocessBaselineBackend(' tests/`) is **six** sites in **three** files, all keyword-constructed:
+- `tests/alive/compose/test_baseline_subprocess.py`: the three `test_is_available_*` constructions (lines ~91/98/108) and `_backend()` (~line 128).
+- `tests/alive/compose/test_phase2a.py`: `_subprocess_adapters` (~line 176).
+- `tests/alive/compose/test_baseline_failclosed.py`: `test_unavailable_backend_raises_baseline_unavailable` (~line 31).
+
+Pass test-appropriate values: `approved_artifacts_root=str(tmp_path)` (or any literal string for availability/fail-closed constructions, which never reach predict-time root validation), `expected_response_artifact_sha256="0" * 64`, and `execution_identity_lock=ExecutionIdentityLock(prediction_representation="cell_raw_counts", adapter_version="1", adapter_sha256="a"*64, config_sha256="e"*64, resource_sha256="f"*64, environment_lock_sha256="0"*64)`. Sites that never predict (the three availability tests and the fail-closed unavailable-backend test — the adapter raises `BaselineUnavailable`/short-circuits on `is_available` before predict) only need the fields to *construct*. `test_payload_with_sealed_token_is_refused` still passes because `configure_payload` runs `_assert_no_sealed_reference` **before** `_validate_payload`, so the dummy `expected_response_artifact_sha256` is never reached. (`_backend()` needs a `tmp_path` param or a module-level temp dir.)
 
 Update `predict` (bottom of the method) to unwrap + store:
 
@@ -1390,15 +1403,15 @@ Continue inside `main`:
     write_predictions(a.out, preds, execution_manifest=manifest)
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [ ] **Step 4: Run the FULL compose suite to verify it passes**
 
-Run: `uv run pytest tests/alive/compose/test_baseline_subprocess.py -q`
-Expected: PASS — envelope round-trip, rejection, and the migrated e2e/deterministic predict tests.
+Run: `uv run pytest tests/alive/compose -q`
+Expected: PASS — envelope round-trip, rejection, the migrated e2e/deterministic predict tests, **and** all six updated `SubprocessBaselineBackend(...)` construction sites across `test_baseline_subprocess.py`, `test_phase2a.py`, `test_baseline_failclosed.py` (the required keyword-only fields don't break construction anywhere). Running the whole compose dir — not a single file — is what catches a missed cross-file construction site.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/alive/compose/baseline_subprocess.py scripts/baselines/stub_worker.py src/alive/compose/config2.py configs/compose_k562_v1_phase2.yaml tests/alive/compose/test_baseline_subprocess.py tests/alive/compose/test_config2.py tests/alive/compose/test_phase2a.py
+git add src/alive/compose/baseline_subprocess.py scripts/baselines/stub_worker.py src/alive/compose/config2.py configs/compose_k562_v1_phase2.yaml tests/alive/compose/test_baseline_subprocess.py tests/alive/compose/test_config2.py tests/alive/compose/test_phase2a.py tests/alive/compose/test_baseline_failclosed.py
 git commit -m "feat(compose): {predictions, execution_manifest} envelope + backend unwrap/binding (A2 task 5)"
 ```
 
@@ -1873,6 +1886,8 @@ git commit -m "feat(compose): subprocess adapters fit once on the combined pair 
 **Iteration-2 gate fix (iteration 2 → PASS, one med advisory resolved post-gate):** the verifier noted the §10 method-lock binding was overstated — `run_phase2a` read `provenance_manifest` at `phase2a.py:1243` *before* any predict, so the execution manifest never reached `effective_model_checksum`. **Task 8 Step 3 now orders the combined predict before that read**, and the Task 5 note is corrected to say `provenance_manifest` only *carries* the digests post-predict while Task 8 realizes the actual binding.
 
 **Iteration-3 gate fixes (iteration 3 → NEEDS_IMPROVEMENT on the owner's hardening pass; `internally_consistent` = no):** the loop caught two task-sequencing breakages of the "each task ends full-suite green" invariant. (1) The `_validate_payload` v2 flip (Task 4) and the `build_subprocess_fit_payload` emitter flip (was Task 6) were in separate tasks, so `_subprocess_adapters` failed `configure_payload` and `test_phase2a` was red at Tasks 4–5 → the emitter migration + `_subprocess_adapters` fixture upgrade + the v2-consistency test are now **atomic in Task 4** (Step 3b), and Task 6 narrows to the independent `response_artifact_sha256`↔`response_space_checksum` binding + its divergence test. (2) Task 5 added three *required* backend fields but updated only the integration test → Task 5 now explicitly updates **every** `SubprocessBaselineBackend(...)` site (`_backend()`, the three `test_is_available_*`, `_subprocess_adapters`) with test-appropriate values; `test_payload_with_sealed_token_is_refused` still passes because the sealed-token scan runs before the response-artifact check.
+
+**Iteration-4 gate fixes (iteration 4 → NEEDS_IMPROVEMENT · MAX_ITER · human checkpoint):** the loop caught a residual instance of the same construction-site failure mode plus a hard bug. (a) A **sixth** `SubprocessBaselineBackend(...)` site — `tests/alive/compose/test_baseline_failclosed.py:31` — was not enumerated; Task 5's list is now grep-derived (six sites across three files) and Step 4 runs the **whole compose dir** (not one file) so a missed cross-file site can't hide. (b) **Dataclass ordering:** the three new required fields placed after the defaulted `seed: int = 11` would raise `non-default argument follows default argument` at class-definition time; Task 5 now marks them keyword-only via `dataclasses.KW_ONLY`. The spec-review profile's `max_iterations=3` tripped (MAX_ITER + NO_PROGRESS on `internally_consistent`) — the loop's signal to stop auto-iterating and hand to a human review; these fixes were applied post-gate and are pending the owner's final review (no further auto-gate).
 
 **Post-implementation (not a code task):** run the **science-dev loop gate** (LOCAL harness) on the A2 increment — expected anchors `seal_access_zero`, `no_outcome_selected_test_set`, `fit_on_training_roles_only`, `protocol_versioned`/`baseline_registered` → yes/n-a (spec §10.2) — then `finishing-a-development-branch`.
 
