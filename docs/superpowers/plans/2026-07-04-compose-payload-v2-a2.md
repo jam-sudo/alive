@@ -1,0 +1,1261 @@
+# COMPOSE payload-v2 Protocol (sub-project A2) Implementation Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** Extend the deep-baseline subprocess protocol to payload-v2 — carry the A1 fit-role artifact + a serialized native→PCA-50 response operator, wrap predictions in a `{predictions, execution_manifest}` envelope, and make the reference stub worker exercise the real operator path — so real GEARS/CPA (sub-project B, pod-only) can fit leakage-safe cell-level data and return predictions comparable to L1 in the same δ-space.
+
+**Architecture:** A1 already delivers the fit-role `.h5ad` library (`fit_role.py`). A2 adds the *projection operator* (serialize `ResponseSpace` → block; reconstruct it in pure numpy worker-side), bumps `baseline_subprocess._SCHEMA_VERSION` to 2 with the two new payload blocks and an envelope prediction format, binds source digests on the response artifact, wires `phase2a.build_subprocess_fit_payload` to emit v2 with cross-source digest equality, and rewrites the stub worker to read the artifact + apply the operator. No seal is opened; no real Norman is touched; all tests run on CPU with synthetic Norman-shaped fixtures.
+
+**Tech Stack:** Python 3, numpy, scipy.sparse (CSR), anndata/pandas (fixtures only), pytest, `uv run`. No `gears`/`cpa` import anywhere in `src/` or `tests/`.
+
+## Global Constraints
+
+- **No seal, no real data.** A2 opens no seal and never reads real Norman. Every test builds a synthetic Norman-shaped fixture in `tmp_path` (never a committed `.h5ad`; `*.h5ad` is gitignored). (spec §0, §8; `CLAUDE.md` §6.3, §14.)
+- **`_SCHEMA_VERSION = 2`** in `baseline_subprocess.py`. `_validate_payload` keeps enforcing `set(payload) == set(_REQUIRED_KEYS)` exact equality; v1 payloads must be rejected. (spec §2, §5.)
+- **Two new payload blocks, exact fields (spec §2.1 / §2.2).** `fit_role_artifact` is produced verbatim by `FitRoleArtifactSpec.to_payload_block()` (A1, already merged). `response_projection` has exactly these keys: `response_artifact_sha256, raw_data_sha256, gene_order_sha256, hvg_gene_ids, transform, median_library, pca_mean, pca_components, control_mean, delta_convention`.
+- **Digest formats.** File SHAs are `"sha256:" + hex`; content/gene/row/manifest digests are **bare** 64-char hex (`sha256_json`/`sha256_bytes` output). Do not prefix bare digests.
+- **Cross-source equality is mandatory (spec §2.2, §7.2, §10).** `response_projection.pca_components == payload["pca_components"]`, `response_projection.control_mean == payload["control_mean"]` (compared via canonical float64 `.hex()`), and `response_projection.raw_data_sha256 == fit_role_artifact.raw_data_sha256`, `response_projection.gene_order_sha256 == fit_role_artifact.gene_order_sha256`. Any mismatch → `PayloadError`.
+- **The projection operator is `ResponseSpace`, not a new formula (spec §0, §2.3, §6).** `build_response_projection` serializes `ResponseSpace` state + z-space `control_mean`; the worker-side operator reproduces `ResponseSpace.project` exactly. `transform` field == `alive.compose.response.RESPONSE_TRANSFORM`.
+- **Truth δ is invariant:** `δ = mean_i(z(x_i)) - control_mean` (`z_minus_control_mean`), regardless of `prediction_representation`. (spec §2.3, §2.4.)
+- **Prediction representation is a declared enum (spec §2.4):** `cell_raw_counts` | `cell_log_normalized` | `raw_pseudobulk_approximation`. The worker manifest declares one; the operator applies only the matching adapter. No silent scale choice.
+- **Envelope prediction format (spec §7.2, §2.5):** worker output is `{predictions, execution_manifest}`; both are validated together. `execution_manifest` carries `prediction_representation`, adapter version/sha, expected/observed gene-order digests, checkpoint sha, worker/config/resource/environment-lock sha, fit-artifact content sha, combined-request sha, predictions sha.
+- **Single fit/checkpoint (spec §0, §2.5):** the worker validates → fits once → writes one immutable checkpoint → predicts the combined pair union once. Never re-fit or re-invoke per double/single regime.
+- **Fail-closed, no silent skip (spec §9):** every artifact/payload/projection/worker validation failure raises (`PayloadError` / `FitRoleArtifactError` / `BaselineUnavailable`) and is a pre-seal abort — no comparator drop, no aggregate stand-in, no `verdict2 INVALID` (INVALID is post-seal only).
+- **`_assert_no_sealed_reference` still scans the whole v2 payload** including the two new blocks (`baselines_combo.py:203`). New blocks must never carry a sealed token.
+- **Style:** ruff line length 100; NumPy-style docstrings on public API; type hints. Run `uv run pytest` and `uv run ruff check` / `uv run ruff format`.
+
+## Design decisions & scope boundaries (read before Task 1)
+
+These refine the spec's illustrative signatures within the approved contract. **The owner reviews this plan before execution — flag any objection here.**
+
+1. **Operator lives in `fit_role.py`.** Both `build_response_projection` (serialize) and `apply_response_projection` (reconstruct, pure numpy) go in `src/alive/compose/fit_role.py`, matching spec §7.1 which places `build_response_projection` there, so the stub and (later) GEARS/CPA workers import the projection contract from one module.
+2. **`build_response_projection` signature is extended** from the §7.1 sketch `(response_space, *, gene_order)` to `(response_space, *, gene_order, control_mean, raw_data_sha256)`, because the §2.2 block requires the z-space `control_mean` (which is `None` on a verified `ResponseSpace`) and `raw_data_sha256`. It calls `verify_response_artifact` internally to obtain validated arrays + the combined `response_artifact_sha256`.
+3. **A2's `phase2a` change is scoped to `build_subprocess_fit_payload`** (emit `schema_version:2`, attach both blocks, enforce cross-source digest equality). The combined-request single call + role split + projection path are demonstrated end-to-end in the **integration test** driving `SubprocessBaselineBackend` directly (spec §8), and the checkpoint/prediction digests bind to the method lock via `SubprocessBaselineBackend.provenance_manifest`. Rewiring the full `run_phase2a` sealed-run orchestration is **not** in A2 (driver C / spec §10.1).
+4. **Reference stub strategy (spec §1.2, §5, §7.2):** the v2 stub reads + validates the fit-role `.h5ad`, loads its **`combo_calibration`** cells (non-sealed, present in the artifact), treats their raw counts as the per-pair native full-gene prediction, declares `prediction_representation = "cell_raw_counts"`, applies the §2.3 operator, and returns δ̂ + a real manifest. This yields observable non-zero δ̂ and exercises the whole operator path — it is a **protocol reference, not a baseline** (its numbers are not scientific claims).
+
+---
+
+## File Structure
+
+- `src/alive/compose/fit_role.py` — **add** `build_response_projection`, `apply_response_projection`, `_normalize_log1p_full` helper. (existing A1 code unchanged.)
+- `src/alive/compose/response.py` — **add** `bind_response_source`. (existing fitting/projection unchanged.)
+- `src/alive/compose/baseline_subprocess.py` — **modify** `_SCHEMA_VERSION`, `_REQUIRED_KEYS`, `_validate_payload`, `write_predictions`, `read_predictions`, `SubprocessBaselineBackend.predict`, `provenance_manifest`; **add** `_validate_response_projection`, `_validate_fit_role_block`, `_validate_execution_manifest`, `_float_hex`, `_float_hex_equal`, `EXECUTION_MANIFEST_KEYS`, `PREDICTION_REPRESENTATIONS`.
+- `src/alive/compose/phase2a.py` — **modify** `build_subprocess_fit_payload`.
+- `scripts/baselines/stub_worker.py` — **rewrite** to the v2 operator path.
+- `tests/alive/compose/test_fit_role.py` — **add** projection unit + known-answer tests.
+- `tests/alive/compose/test_response.py` — **add** `bind_response_source` tests.
+- `tests/alive/compose/test_baseline_subprocess.py` — **migrate** payload/prediction helpers to v2; **add** schema + envelope + leakage tests.
+- `tests/alive/compose/test_phase2a.py` — **migrate** `_subprocess_adapters`; **add** v2 payload + equality tests.
+- `tests/alive/compose/test_payload_v2_integration.py` — **new** integration test (fixture builder + combined request through `SubprocessBaselineBackend`).
+
+Tasks are **sequential** (later tasks import earlier symbols). BASE for Task 1 = current `main` HEAD (`62a2bd4`). Each task ends with `uv run pytest tests/alive/compose -q` green.
+
+---
+
+### Task 1: `build_response_projection` — serialize the ResponseSpace operator
+
+**Files:**
+- Modify: `src/alive/compose/fit_role.py`
+- Test: `tests/alive/compose/test_fit_role.py`
+
+**Interfaces:**
+- Consumes: `alive.compose.response.ResponseSpace`, `verify_response_artifact`, `RESPONSE_TRANSFORM`; A1's `canonical_gene_order_sha256`, `_check_gene_ids`, `FitRoleArtifactError`.
+- Produces: `build_response_projection(response_space, *, gene_order, control_mean, raw_data_sha256) -> dict` returning the spec §2.2 `response_projection` block.
+
+- [ ] **Step 1: Write the failing test**
+
+Add to `tests/alive/compose/test_fit_role.py`:
+
+```python
+import numpy as np
+from scipy import sparse
+
+from alive.compose.fit_role import build_response_projection
+from alive.compose.response import fit_response_space
+
+
+def _toy_space_and_counts(seed: int = 0):
+    rng = np.random.default_rng(seed)
+    # 20 control + 12 single cells, 8 genes, integer counts, positive library
+    counts = rng.integers(1, 40, size=(32, 8)).astype(np.float64)
+    X = sparse.csr_matrix(counts)
+    control_idx = np.arange(0, 20)
+    single_idx = np.arange(20, 32)
+    space = fit_response_space(
+        X, control_idx=control_idx, eligible_single_idx=single_idx,
+        n_hvg=5, pca_dim=3, seed=1,
+    )
+    control_mean = space.project(X, control_idx).mean(axis=0)  # z-space control centroid
+    gene_order = [f"G{i}" for i in range(8)]
+    return space, X, control_idx, control_mean, gene_order
+
+
+def test_build_response_projection_block_shape_and_fields():
+    space, X, _, control_mean, gene_order = _toy_space_and_counts()
+    block = build_response_projection(
+        space, gene_order=gene_order, control_mean=control_mean,
+        raw_data_sha256="rawdeadbeef",
+    )
+    assert set(block) == {
+        "response_artifact_sha256", "raw_data_sha256", "gene_order_sha256",
+        "hvg_gene_ids", "transform", "median_library", "pca_mean",
+        "pca_components", "control_mean", "delta_convention",
+    }
+    assert block["transform"] == ["normalize_total_median", "log1p"]
+    assert block["delta_convention"] == "z_minus_control_mean"
+    assert block["raw_data_sha256"] == "rawdeadbeef"
+    # hvg_gene_ids maps hvg_idx onto gene_order, order preserved
+    assert block["hvg_gene_ids"] == [gene_order[i] for i in space.hvg_idx]
+    assert len(block["pca_mean"]) == space.n_hvg
+    assert np.asarray(block["pca_components"]).shape == (space.pca_dim, space.n_hvg)
+    assert len(block["control_mean"]) == space.pca_dim
+    np.testing.assert_allclose(block["control_mean"], control_mean)
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `uv run pytest tests/alive/compose/test_fit_role.py::test_build_response_projection_block_shape_and_fields -q`
+Expected: FAIL — `ImportError: cannot import name 'build_response_projection'`.
+
+- [ ] **Step 3: Write minimal implementation**
+
+At the top of `src/alive/compose/fit_role.py`, extend the response import (A1 imports only `alive.provenance`):
+
+```python
+from alive.compose.response import RESPONSE_TRANSFORM, ResponseSpace, verify_response_artifact
+```
+
+Append to `src/alive/compose/fit_role.py`:
+
+```python
+def build_response_projection(
+    response_space: ResponseSpace,
+    *,
+    gene_order: Sequence[str],
+    control_mean: Sequence[float] | np.ndarray,
+    raw_data_sha256: str,
+) -> dict:
+    """Serialize a ``ResponseSpace`` into the spec §2.2 ``response_projection`` block.
+
+    The block is the single-source-of-truth native→PCA-50 operator a worker
+    applies to its full-gene predictions. ``verify_response_artifact`` re-checks
+    the space checksum and yields the combined (space + control_mean) digest used
+    as ``response_artifact_sha256``.
+
+    Parameters
+    ----------
+    response_space : ResponseSpace
+        The frozen, checksum-sealed response space (its ``_control_mean`` may be
+        ``None``; the z-space centroid is supplied separately).
+    gene_order : sequence of str
+        Canonical full gene-ID order the space was fit against; ``hvg_idx`` maps
+        into it to name the HVGs and to bind ``gene_order_sha256``.
+    control_mean : sequence of float
+        z-space control centroid, length ``pca_dim``.
+    raw_data_sha256 : str
+        Exact raw-data digest, embedded for cross-source equality (spec §2.2).
+
+    Returns
+    -------
+    dict
+        The ``response_projection`` block (spec §2.2).
+
+    Raises
+    ------
+    FitRoleArtifactError
+        On a checksum/shape/range/finiteness violation.
+    """
+    genes = _check_gene_ids(gene_order)
+    try:
+        snapshot, ctrl, combined = verify_response_artifact(response_space, control_mean)
+    except ValueError as exc:
+        raise FitRoleArtifactError(f"invalid response space: {exc}") from exc
+
+    n_hvg = int(snapshot.n_hvg)
+    pca_dim = int(snapshot.pca_dim)
+    hvg_idx = np.asarray(snapshot.hvg_idx, dtype=np.int64)
+    if hvg_idx.shape != (n_hvg,):
+        raise FitRoleArtifactError("hvg_idx does not match n_hvg")
+    if hvg_idx.min(initial=0) < 0 or (hvg_idx.size and int(hvg_idx.max()) >= len(genes)):
+        raise FitRoleArtifactError("hvg_idx out of range for the given gene_order")
+    pca_components = np.asarray(snapshot.pca_components, dtype=np.float64)
+    pca_mean = np.asarray(snapshot.pca_mean, dtype=np.float64)
+    if pca_components.shape != (pca_dim, n_hvg):
+        raise FitRoleArtifactError("pca_components shape does not match (pca_dim, n_hvg)")
+    if pca_mean.shape != (n_hvg,):
+        raise FitRoleArtifactError("pca_mean length does not match n_hvg")
+    if ctrl.shape != (pca_dim,):
+        raise FitRoleArtifactError("control_mean must be a pca_dim vector")
+    if not (
+        np.all(np.isfinite(pca_components))
+        and np.all(np.isfinite(pca_mean))
+        and np.all(np.isfinite(ctrl))
+    ):
+        raise FitRoleArtifactError("projection arrays must be finite")
+
+    return {
+        "response_artifact_sha256": str(combined),
+        "raw_data_sha256": str(raw_data_sha256),
+        "gene_order_sha256": canonical_gene_order_sha256(genes),
+        "hvg_gene_ids": [genes[int(i)] for i in hvg_idx],
+        "transform": list(RESPONSE_TRANSFORM),
+        "median_library": float(snapshot.median_library),
+        "pca_mean": pca_mean.tolist(),
+        "pca_components": pca_components.tolist(),
+        "control_mean": ctrl.tolist(),
+        "delta_convention": "z_minus_control_mean",
+    }
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `uv run pytest tests/alive/compose/test_fit_role.py::test_build_response_projection_block_shape_and_fields -q`
+Expected: PASS.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/alive/compose/fit_role.py tests/alive/compose/test_fit_role.py
+git commit -m "feat(compose): serialize ResponseSpace into response_projection block (A2 task 1)"
+```
+
+---
+
+### Task 2: `apply_response_projection` — worker-side operator + known-answer
+
+**Files:**
+- Modify: `src/alive/compose/fit_role.py`
+- Test: `tests/alive/compose/test_fit_role.py`
+
+**Interfaces:**
+- Consumes: the §2.2 block from Task 1; `ResponseSpace.project` as the ground truth.
+- Produces: `apply_response_projection(block, x_native, gene_order, *, representation) -> np.ndarray` returning per-row z-coordinates, shape `(n_rows, pca_dim)`; module constant `PREDICTION_REPRESENTATIONS`.
+
+- [ ] **Step 1: Write the failing test**
+
+Add to `tests/alive/compose/test_fit_role.py`:
+
+```python
+from alive.compose.fit_role import apply_response_projection
+
+
+def test_operator_matches_responsespace_project_raw_counts():
+    space, X, control_idx, control_mean, gene_order = _toy_space_and_counts(seed=3)
+    block = build_response_projection(
+        space, gene_order=gene_order, control_mean=control_mean, raw_data_sha256="r",
+    )
+    dense = np.asarray(X.todense(), dtype=np.float64)
+    # single-row round trip == ResponseSpace.project on the same row
+    for i in (0, 5, 25):
+        z = apply_response_projection(
+            block, dense[[i]], gene_order, representation="cell_raw_counts",
+        )
+        np.testing.assert_allclose(z[0], space.project(X, np.array([i]))[0], rtol=0, atol=1e-9)
+    # population mean matches too
+    idx = np.arange(20, 32)
+    z_mean = apply_response_projection(
+        block, dense[idx], gene_order, representation="cell_raw_counts",
+    ).mean(axis=0)
+    np.testing.assert_allclose(z_mean, space.project(X, idx).mean(axis=0), atol=1e-9)
+
+
+def test_pseudobulk_is_a_distinct_nonlinear_path():
+    space, X, control_idx, control_mean, gene_order = _toy_space_and_counts(seed=4)
+    block = build_response_projection(
+        space, gene_order=gene_order, control_mean=control_mean, raw_data_sha256="r",
+    )
+    dense = np.asarray(X.todense(), dtype=np.float64)
+    idx = np.arange(20, 32)
+    mean_of_project = apply_response_projection(
+        block, dense[idx], gene_order, representation="cell_raw_counts",
+    ).mean(axis=0)
+    pseudobulk = dense[idx].mean(axis=0, keepdims=True)
+    project_of_mean = apply_response_projection(
+        block, pseudobulk, gene_order, representation="raw_pseudobulk_approximation",
+    )[0]
+    # normalize/log1p nonlinearity => the two differ (guards against silent swap)
+    assert not np.allclose(mean_of_project, project_of_mean, atol=1e-6)
+
+
+def test_cell_log_normalized_skips_the_raw_transform():
+    space, X, control_idx, control_mean, gene_order = _toy_space_and_counts(seed=5)
+    block = build_response_projection(
+        space, gene_order=gene_order, control_mean=control_mean, raw_data_sha256="r",
+    )
+    dense = np.asarray(X.todense(), dtype=np.float64)
+    i = 7
+    # pre-apply the frozen normalize+log1p, then feed as log-normalized
+    lib = dense[i].sum()
+    normed = np.log1p(dense[i] * (block["median_library"] / lib))[None, :]
+    z_log = apply_response_projection(
+        block, normed, gene_order, representation="cell_log_normalized",
+    )
+    z_raw = apply_response_projection(
+        block, dense[[i]], gene_order, representation="cell_raw_counts",
+    )
+    np.testing.assert_allclose(z_log[0], z_raw[0], atol=1e-9)
+
+
+def test_operator_rejects_gene_order_mismatch():
+    space, X, control_idx, control_mean, gene_order = _toy_space_and_counts(seed=6)
+    block = build_response_projection(
+        space, gene_order=gene_order, control_mean=control_mean, raw_data_sha256="r",
+    )
+    dense = np.asarray(X.todense(), dtype=np.float64)
+    with pytest.raises(FitRoleArtifactError):
+        apply_response_projection(
+            block, dense[[0]], [f"X{i}" for i in range(8)],
+            representation="cell_raw_counts",
+        )
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `uv run pytest tests/alive/compose/test_fit_role.py -k operator -q`
+Expected: FAIL — `ImportError: cannot import name 'apply_response_projection'`.
+
+- [ ] **Step 3: Write minimal implementation**
+
+Append to `src/alive/compose/fit_role.py`:
+
+```python
+PREDICTION_REPRESENTATIONS: frozenset[str] = frozenset(
+    {"cell_raw_counts", "cell_log_normalized", "raw_pseudobulk_approximation"}
+)
+
+
+def _normalize_log1p_full(x: np.ndarray, median_library: float) -> np.ndarray:
+    """Frozen library-size normalize to ``median_library`` then ``log1p``.
+
+    Identical arithmetic to ``response._normalize_log1p`` so the worker-side
+    operator reproduces ``ResponseSpace.project`` exactly.
+    """
+    lib = x.sum(axis=1, keepdims=True)
+    safe = np.where(lib > 0, lib, 1.0)
+    return np.log1p(x * (median_library / safe))
+
+
+def apply_response_projection(
+    block: Mapping,
+    x_native: np.ndarray,
+    gene_order: Sequence[str],
+    *,
+    representation: str,
+) -> np.ndarray:
+    """Reconstruct the spec §2.3 operator ``z(x)`` for full-gene rows (pure numpy).
+
+    ``cell_raw_counts`` and ``raw_pseudobulk_approximation`` apply the full frozen
+    transform (normalize to ``median_library`` + ``log1p``) then HVG subset +
+    centering + PCA projection; ``cell_log_normalized`` skips the raw transform
+    because the caller already log-normalized at the same ``median_library``.
+    Truth δ (``mean(z) - control_mean``) is computed by the caller and is
+    invariant to ``representation`` (spec §2.4).
+
+    Parameters
+    ----------
+    block : Mapping
+        A ``response_projection`` block (spec §2.2).
+    x_native : numpy.ndarray
+        Rows over the full ``gene_order``: raw counts for ``cell_raw_counts`` /
+        ``raw_pseudobulk_approximation``; log-normalized values for
+        ``cell_log_normalized``. Shape ``(n_rows, n_genes)``.
+    gene_order : sequence of str
+        The full gene-ID order of ``x_native``; must match the block's
+        ``gene_order_sha256``.
+    representation : str
+        One of :data:`PREDICTION_REPRESENTATIONS`.
+
+    Returns
+    -------
+    numpy.ndarray
+        Projected z-coordinates, shape ``(n_rows, pca_dim)``.
+
+    Raises
+    ------
+    FitRoleArtifactError
+        On an unknown representation, a gene-order digest mismatch, or a shape
+        mismatch.
+    """
+    if representation not in PREDICTION_REPRESENTATIONS:
+        raise FitRoleArtifactError(f"unknown prediction representation: {representation!r}")
+    genes = [str(g) for g in gene_order]
+    if canonical_gene_order_sha256(genes) != block["gene_order_sha256"]:
+        raise FitRoleArtifactError("gene_order digest mismatch for projection")
+    X = np.asarray(x_native, dtype=np.float64)
+    if X.ndim != 2 or X.shape[1] != len(genes):
+        raise FitRoleArtifactError("x_native must be (n_rows, n_genes) over the full gene order")
+
+    if representation == "cell_log_normalized":
+        normed = X
+    else:
+        normed = _normalize_log1p_full(X, float(block["median_library"]))
+
+    name_to_col = {g: i for i, g in enumerate(genes)}
+    hvg_gene_ids = list(block["hvg_gene_ids"])
+    try:
+        hvg_cols = [name_to_col[g] for g in hvg_gene_ids]
+    except KeyError as exc:
+        raise FitRoleArtifactError(f"hvg gene {exc} absent from gene_order") from exc
+    sub = normed[:, hvg_cols]
+    pca_mean = np.asarray(block["pca_mean"], dtype=np.float64)
+    pca_components = np.asarray(block["pca_components"], dtype=np.float64)
+    return (sub - pca_mean) @ pca_components.T
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `uv run pytest tests/alive/compose/test_fit_role.py -k "operator or pseudobulk or log_normalized" -q`
+Expected: PASS (4 tests).
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/alive/compose/fit_role.py tests/alive/compose/test_fit_role.py
+git commit -m "feat(compose): pure-numpy response operator + known-answer vs ResponseSpace.project (A2 task 2)"
+```
+
+---
+
+### Task 3: `bind_response_source` — source digests on the response artifact
+
+**Files:**
+- Modify: `src/alive/compose/response.py`
+- Test: `tests/alive/compose/test_response.py`
+
+**Interfaces:**
+- Consumes: `alive.provenance.sha256_json`.
+- Produces: `bind_response_source(*, gene_order, raw_data_sha256) -> dict` returning `{"gene_order_sha256": <bare hex>, "raw_data_sha256": <str>}`, the digests phase2a enforces equal across the fit-role artifact and the projection block (spec §7.2).
+
+- [ ] **Step 1: Write the failing test**
+
+Add to `tests/alive/compose/test_response.py`:
+
+```python
+from alive.compose.response import bind_response_source
+from alive.provenance import sha256_json
+
+
+def test_bind_response_source_matches_canonical_gene_digest():
+    genes = ["G0", "G1", "G2"]
+    bound = bind_response_source(gene_order=genes, raw_data_sha256="rawbeef")
+    assert bound == {
+        "gene_order_sha256": sha256_json(["G0", "G1", "G2"]),
+        "raw_data_sha256": "rawbeef",
+    }
+
+
+def test_bind_response_source_rejects_empty_or_duplicate_genes():
+    import pytest
+
+    with pytest.raises(ValueError):
+        bind_response_source(gene_order=[], raw_data_sha256="r")
+    with pytest.raises(ValueError):
+        bind_response_source(gene_order=["G0", "G0"], raw_data_sha256="r")
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `uv run pytest tests/alive/compose/test_response.py -k bind_response_source -q`
+Expected: FAIL — `ImportError: cannot import name 'bind_response_source'`.
+
+- [ ] **Step 3: Write minimal implementation**
+
+Append to `src/alive/compose/response.py`:
+
+```python
+def bind_response_source(
+    *,
+    gene_order: "Sequence[str]",
+    raw_data_sha256: str,
+) -> dict:
+    """Bind the response artifact to its canonical gene order and raw-data digest.
+
+    Phase-2a/2b enforce that these digests equal the fit-role artifact's and the
+    projection block's, so the response space, the cell-level fit data, and the
+    outcome source share one raw-data SHA and one gene order (spec §7.2, §2.2).
+
+    Parameters
+    ----------
+    gene_order : sequence of str
+        Canonical full gene-ID order the response space was fit against. Must be
+        non-empty and unique.
+    raw_data_sha256 : str
+        Exact raw-data digest from the data card / RunSpec / ledger.
+
+    Returns
+    -------
+    dict
+        ``{"gene_order_sha256": <bare hex>, "raw_data_sha256": <str>}``.
+
+    Raises
+    ------
+    ValueError
+        If ``gene_order`` is empty or contains duplicate / empty IDs.
+    """
+    genes = [str(g) for g in gene_order]
+    if not genes:
+        raise ValueError("gene_order must be non-empty")
+    if any(g == "" for g in genes):
+        raise ValueError("gene_order must not contain empty IDs")
+    if len(set(genes)) != len(genes):
+        raise ValueError("gene_order must be unique")
+    return {
+        "gene_order_sha256": sha256_json(genes),
+        "raw_data_sha256": str(raw_data_sha256),
+    }
+```
+
+Add `Sequence` to the `collections.abc` import near the top of `response.py` (the module currently imports from `dataclasses`; add `from collections.abc import Sequence` with the other stdlib imports).
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `uv run pytest tests/alive/compose/test_response.py -k bind_response_source -q`
+Expected: PASS.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/alive/compose/response.py tests/alive/compose/test_response.py
+git commit -m "feat(compose): bind response artifact to gene-order + raw-data digest (A2 task 3)"
+```
+
+---
+
+### Task 4: payload-v2 schema — two blocks + cross-source equality
+
+**Files:**
+- Modify: `src/alive/compose/baseline_subprocess.py`
+- Test: `tests/alive/compose/test_baseline_subprocess.py`
+
+**Interfaces:**
+- Consumes: `fit_role.PREDICTION_REPRESENTATIONS`.
+- Produces: `_SCHEMA_VERSION == 2`; `_REQUIRED_KEYS` includes `fit_role_artifact`, `response_projection`; `_validate_payload` validates both blocks + cross-block equality; helpers `_float_hex`, `_float_hex_equal`, `_validate_fit_role_block`, `_validate_response_projection`. Prediction format is **unchanged** in this task (still `{schema_version, pairs}`) — the envelope migration is Task 5.
+
+**Note for the implementer:** `_validate_payload` still enforces exact key-set equality, so the `_payload()` test helper must be migrated to v2 (add both blocks) in this task or every subprocess test fails. Do it in Step 1's helper. The blocks are structurally validated only — **no file existence check here** (the worker validates the `.h5ad` at fit time, Task 7).
+
+- [ ] **Step 1: Write the failing test** (migrate the helper + add schema tests)
+
+Replace `_payload()` in `tests/alive/compose/test_baseline_subprocess.py` and add tests:
+
+```python
+from alive.provenance import sha256_json
+
+_GENES = ["A", "B", "C"]
+_GENE_ORDER_SHA = sha256_json(_GENES)
+
+
+def _fit_role_block() -> dict:
+    return {
+        "format": "anndata_h5ad",
+        "artifact_schema_version": 1,
+        "path": "/approved/artifacts/fit_role.h5ad",
+        "sha256": "sha256:" + "0" * 64,
+        "content_manifest_sha256": "1" * 64,
+        "raw_data_sha256": "raw123",
+        "pair_manifest_sha256": "pm123",
+        "eligibility_hash": "elig123",
+        "row_identity_sha256": "2" * 64,
+        "role_obs_key": "role",
+        "perturbation_obs_key": "perturbation",
+        "allowed_obs_roles": ["control", "singles", "combo_calibration"],
+        "gene_order_sha256": _GENE_ORDER_SHA,
+        "n_cells": 30,
+        "n_genes": 3,
+        "role_counts": {"control": 20, "singles": 6, "combo_calibration": 4},
+        "counts_location": "X",
+    }
+
+
+def _response_projection_block(pca_components, control_mean) -> dict:
+    return {
+        "response_artifact_sha256": "3" * 64,
+        "raw_data_sha256": "raw123",              # == fit_role_artifact.raw_data_sha256
+        "gene_order_sha256": _GENE_ORDER_SHA,     # == fit_role_artifact.gene_order_sha256
+        "hvg_gene_ids": ["A", "B"],
+        "transform": ["normalize_total_median", "log1p"],
+        "median_library": 1000.0,
+        "pca_mean": [0.0, 0.0],
+        "pca_components": pca_components,          # == payload["pca_components"]
+        "control_mean": control_mean,             # == payload["control_mean"]
+        "delta_convention": "z_minus_control_mean",
+    }
+
+
+def _payload() -> dict:
+    pca_components = [[1.0, 0.0], [0.0, 1.0], [0.0, 0.0]]
+    control_mean = [0.0, 0.0, 0.0]
+    return {
+        "schema_version": 2,
+        "response_dim": 3,
+        "seed": 11,
+        "allowed_roles": ["combo_calibration", "singles"],
+        "pair_ids": [["A", "B"], ["A", "C"]],
+        "single_gene_ids": ["A", "B", "C"],
+        "singles_response": [[0.1, 0.2, 0.3], [0.4, 0.5, 0.6], [0.7, 0.8, 0.9]],
+        "control_mean": control_mean,
+        "calibration_pair_ids": [["B", "C"]],
+        "calibration_delta": [[0.5, 0.5, 0.5]],
+        "pca_components": pca_components,
+        "oof_folds": [0],
+        "fit_role_artifact": _fit_role_block(),
+        "response_projection": _response_projection_block(pca_components, control_mean),
+    }
+
+
+def test_v1_schema_version_rejected(tmp_path):
+    p = _payload()
+    p["schema_version"] = 1
+    with pytest.raises(PayloadError):
+        write_payload(str(tmp_path), p)
+
+
+def test_projection_control_mean_divergence_rejected(tmp_path):
+    p = _payload()
+    p["response_projection"]["control_mean"] = [9.0, 9.0, 9.0]  # != payload control_mean
+    with pytest.raises(PayloadError, match="control_mean"):
+        write_payload(str(tmp_path), p)
+
+
+def test_projection_raw_data_divergence_rejected(tmp_path):
+    p = _payload()
+    p["response_projection"]["raw_data_sha256"] = "different"
+    with pytest.raises(PayloadError, match="raw_data"):
+        write_payload(str(tmp_path), p)
+
+
+def test_projection_bad_pca_mean_length_rejected(tmp_path):
+    p = _payload()
+    p["response_projection"]["pca_mean"] = [0.0, 0.0, 0.0]  # len 3 != 2 hvg
+    with pytest.raises(PayloadError, match="pca_mean"):
+        write_payload(str(tmp_path), p)
+
+
+def test_fit_role_disallowed_obs_role_rejected(tmp_path):
+    p = _payload()
+    p["fit_role_artifact"]["allowed_obs_roles"] = ["control", "sealed_double_unseen"]
+    with pytest.raises(ValueError):  # sealed-token scan or role-subset
+        write_payload(str(tmp_path), p)
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `uv run pytest tests/alive/compose/test_baseline_subprocess.py -q`
+Expected: FAIL — existing tests + new ones fail because `_validate_payload` rejects the two extra keys / `schema_version 2`.
+
+- [ ] **Step 3: Write minimal implementation**
+
+In `src/alive/compose/baseline_subprocess.py`:
+
+```python
+from alive.compose.fit_role import PREDICTION_REPRESENTATIONS
+
+_SCHEMA_VERSION = 2
+_REQUIRED_KEYS: frozenset[str] = frozenset(
+    {
+        "schema_version", "response_dim", "seed", "allowed_roles", "pair_ids",
+        "single_gene_ids", "singles_response", "control_mean", "calibration_pair_ids",
+        "calibration_delta", "pca_components", "oof_folds",
+        "fit_role_artifact", "response_projection",
+    }
+)
+
+_FIT_ROLE_KEYS: frozenset[str] = frozenset({
+    "format", "artifact_schema_version", "path", "sha256", "content_manifest_sha256",
+    "raw_data_sha256", "pair_manifest_sha256", "eligibility_hash", "row_identity_sha256",
+    "role_obs_key", "perturbation_obs_key", "allowed_obs_roles", "gene_order_sha256",
+    "n_cells", "n_genes", "role_counts", "counts_location",
+})
+_ALLOWED_OBS_ROLES: frozenset[str] = frozenset({"control", "singles", "combo_calibration"})
+
+_RESPONSE_PROJECTION_KEYS: frozenset[str] = frozenset({
+    "response_artifact_sha256", "raw_data_sha256", "gene_order_sha256", "hvg_gene_ids",
+    "transform", "median_library", "pca_mean", "pca_components", "control_mean",
+    "delta_convention",
+})
+
+
+def _float_hex(arr) -> list:
+    """Canonical float64 ``.hex()`` list for exact cross-block float equality."""
+    flat = np.asarray(arr, dtype=np.float64).ravel(order="C")
+    return [float(v).hex() for v in flat]
+
+
+def _float_hex_equal(a, b) -> bool:
+    aa, bb = np.asarray(a, dtype=np.float64), np.asarray(b, dtype=np.float64)
+    return aa.shape == bb.shape and _float_hex(aa) == _float_hex(bb)
+
+
+def _validate_fit_role_block(block: object) -> None:
+    if not isinstance(block, dict) or set(block) != set(_FIT_ROLE_KEYS):
+        raise PayloadError("fit_role_artifact has an unexpected key set")
+    if block["format"] != "anndata_h5ad" or block["counts_location"] != "X":
+        raise PayloadError("fit_role_artifact format/counts_location invalid")
+    roles = block["allowed_obs_roles"]
+    if not isinstance(roles, list) or not set(roles) <= _ALLOWED_OBS_ROLES:
+        raise PayloadError("fit_role_artifact allowed_obs_roles out of whitelist")
+    if not (isinstance(block["sha256"], str) and block["sha256"].startswith("sha256:")):
+        raise PayloadError("fit_role_artifact file sha must be 'sha256:'-prefixed")
+    for key in ("content_manifest_sha256", "gene_order_sha256", "row_identity_sha256"):
+        if not (isinstance(block[key], str) and block[key]):
+            raise PayloadError(f"fit_role_artifact {key} must be a non-empty string")
+
+
+def _validate_response_projection(block: object, payload: dict, response_dim: int) -> None:
+    if not isinstance(block, dict) or set(block) != set(_RESPONSE_PROJECTION_KEYS):
+        raise PayloadError("response_projection has an unexpected key set")
+    if block["transform"] != ["normalize_total_median", "log1p"]:
+        raise PayloadError("response_projection transform is not the frozen transform")
+    if block["delta_convention"] != "z_minus_control_mean":
+        raise PayloadError("response_projection delta_convention invalid")
+    hvg = block["hvg_gene_ids"]
+    if (
+        not isinstance(hvg, list) or not hvg
+        or not all(isinstance(g, str) and g for g in hvg)
+        or len(set(hvg)) != len(hvg)
+    ):
+        raise PayloadError("hvg_gene_ids must be a non-empty unique string list")
+    n_hvg = len(hvg)
+    pca_mean = np.asarray(block["pca_mean"], dtype=float)
+    if pca_mean.shape != (n_hvg,) or not np.all(np.isfinite(pca_mean)):
+        raise PayloadError("response_projection pca_mean must be a finite length-n_hvg vector")
+    components = np.asarray(block["pca_components"], dtype=float)
+    if components.shape != (response_dim, n_hvg) or not np.all(np.isfinite(components)):
+        raise PayloadError("response_projection pca_components must be (response_dim, n_hvg)")
+    control = np.asarray(block["control_mean"], dtype=float)
+    if control.shape != (response_dim,) or not np.all(np.isfinite(control)):
+        raise PayloadError("response_projection control_mean must be a finite response_dim vector")
+    if isinstance(block["median_library"], bool) or not isinstance(
+        block["median_library"], (int, float)
+    ) or not np.isfinite(block["median_library"]) or block["median_library"] <= 0:
+        raise PayloadError("response_projection median_library must be a positive number")
+    # cross-source equality (spec §2.2)
+    if not _float_hex_equal(components, payload["pca_components"]):
+        raise PayloadError("response_projection pca_components diverge from payload pca_components")
+    if not _float_hex_equal(control, payload["control_mean"]):
+        raise PayloadError("response_projection control_mean diverge from payload control_mean")
+    fit_role = payload["fit_role_artifact"]
+    if block["raw_data_sha256"] != fit_role["raw_data_sha256"]:
+        raise PayloadError("response_projection raw_data_sha256 diverges from fit_role_artifact")
+    if block["gene_order_sha256"] != fit_role["gene_order_sha256"]:
+        raise PayloadError("response_projection gene_order_sha256 diverges from fit_role_artifact")
+```
+
+Then in `_validate_payload`, keep every existing v1 check, and **before** it returns add:
+
+```python
+    _validate_fit_role_block(payload["fit_role_artifact"])
+    _validate_response_projection(payload["response_projection"], payload, response_dim)
+```
+
+(`response_dim` is already validated as a positive int earlier in `_validate_payload`.)
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `uv run pytest tests/alive/compose/test_baseline_subprocess.py -q`
+Expected: PASS — migrated v1 tests + new schema tests. (Prediction round-trip + predict e2e still pass: prediction format is unchanged in this task; the stub still reads only aggregate keys.)
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/alive/compose/baseline_subprocess.py tests/alive/compose/test_baseline_subprocess.py
+git commit -m "feat(compose): payload-v2 schema with fit_role + projection blocks and cross-source equality (A2 task 4)"
+```
+
+---
+
+### Task 5: prediction envelope + backend unwrap + provenance binding
+
+**Files:**
+- Modify: `src/alive/compose/baseline_subprocess.py`, `scripts/baselines/stub_worker.py`
+- Test: `tests/alive/compose/test_baseline_subprocess.py`
+
+**Interfaces:**
+- Produces: `write_predictions(path, preds, *, execution_manifest) -> str`; `read_predictions(path) -> tuple[dict[tuple[str, str], np.ndarray], dict]`; `_validate_execution_manifest`; `EXECUTION_MANIFEST_KEYS`. `SubprocessBaselineBackend.predict` unwraps the envelope, verifies the manifest + `predictions_sha256`, stores `self._last_execution_manifest`, and returns the predictions dict (adapter seam unchanged). `provenance_manifest` gains the checkpoint/prediction digests once a prediction has run.
+
+**Note for the implementer:** `read_predictions` now returns a **tuple**; update `predict` to unpack it. The stub is updated here to a minimal envelope emitter (still additive singles path) so the e2e tests stay green — Task 7 replaces the stub body with the operator path. Migrate `test_prediction_round_trip` to pass an `execution_manifest` and expect the tuple.
+
+- [ ] **Step 1: Write the failing test**
+
+Update/add in `tests/alive/compose/test_baseline_subprocess.py`:
+
+```python
+def _manifest() -> dict:
+    return {
+        "prediction_representation": "cell_raw_counts",
+        "adapter_version": "1",
+        "adapter_sha256": "a" * 64,
+        "expected_gene_order_sha256": _GENE_ORDER_SHA,
+        "observed_gene_order_sha256": _GENE_ORDER_SHA,
+        "checkpoint_sha256": "c" * 64,
+        "worker_sha256": "w" * 64,
+        "config_sha256": "cfg" ,
+        "resource_sha256": "res",
+        "environment_lock_sha256": "env",
+        "fit_artifact_content_sha256": "1" * 64,
+        "combined_request_sha256": "req",
+        "predictions_sha256": "",  # filled by write_predictions? no — caller computes; see below
+    }
+
+
+def test_prediction_envelope_round_trip(tmp_path):
+    preds = {("A", "B"): np.array([1.0, 2.0, 3.0]), ("A", "C"): np.array([4.0, 5.0, 6.0])}
+    path = str(tmp_path / "preds")
+    manifest = _manifest()
+    c = write_predictions(path, preds, execution_manifest=manifest)
+    back_preds, back_manifest = read_predictions(path)
+    assert set(back_preds) == set(preds)
+    np.testing.assert_allclose(back_preds[("A", "B")], preds[("A", "B")])
+    assert back_manifest["prediction_representation"] == "cell_raw_counts"
+    assert len(c) == 64
+
+
+def test_prediction_envelope_bad_representation_rejected(tmp_path):
+    preds = {("A", "B"): np.array([1.0, 2.0, 3.0])}
+    manifest = _manifest()
+    manifest["prediction_representation"] = "made_up"
+    with pytest.raises(PayloadError, match="representation"):
+        write_predictions(str(tmp_path / "p"), preds, execution_manifest=manifest)
+```
+
+Also update `test_prediction_round_trip` (rename or adapt to the envelope) and keep `test_predict_end_to_end_through_adapter` / `test_predict_is_deterministic` — they now flow through the envelope-emitting stub.
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `uv run pytest tests/alive/compose/test_baseline_subprocess.py -k envelope -q`
+Expected: FAIL — `write_predictions() got an unexpected keyword argument 'execution_manifest'`.
+
+- [ ] **Step 3: Write minimal implementation**
+
+In `baseline_subprocess.py`:
+
+```python
+EXECUTION_MANIFEST_KEYS: frozenset[str] = frozenset({
+    "prediction_representation", "adapter_version", "adapter_sha256",
+    "expected_gene_order_sha256", "observed_gene_order_sha256", "checkpoint_sha256",
+    "worker_sha256", "config_sha256", "resource_sha256", "environment_lock_sha256",
+    "fit_artifact_content_sha256", "combined_request_sha256", "predictions_sha256",
+})
+
+
+def _validate_execution_manifest(manifest: object) -> None:
+    if not isinstance(manifest, dict) or set(manifest) != set(EXECUTION_MANIFEST_KEYS):
+        raise PayloadError("execution_manifest has an unexpected key set")
+    if manifest["prediction_representation"] not in PREDICTION_REPRESENTATIONS:
+        raise PayloadError("execution_manifest prediction_representation is not a registered enum")
+    if manifest["expected_gene_order_sha256"] != manifest["observed_gene_order_sha256"]:
+        raise PayloadError("worker observed a different gene order than expected")
+    for key in EXECUTION_MANIFEST_KEYS:
+        if not (isinstance(manifest[key], str) and manifest[key]):
+            raise PayloadError(f"execution_manifest {key} must be a non-empty string")
+
+
+def write_predictions(
+    path: str,
+    preds: Mapping[tuple[str, str], np.ndarray],
+    *,
+    execution_manifest: Mapping[str, object],
+) -> str:
+    pairs = [[list(p), np.asarray(v, dtype=float).tolist()] for p, v in preds.items()]
+    predictions_sha256 = _sha256(_canonical_json(pairs))
+    manifest = dict(execution_manifest)
+    manifest["predictions_sha256"] = predictions_sha256
+    _validate_execution_manifest(manifest)
+    obj = {"schema_version": _SCHEMA_VERSION, "predictions": pairs, "execution_manifest": manifest}
+    text = _canonical_json(obj)
+    with open(path + ".json", "w", encoding="utf-8") as fh:
+        fh.write(text)
+    return _sha256(text)
+
+
+def read_predictions(path: str) -> tuple[dict[tuple[str, str], np.ndarray], dict]:
+    with open(path + ".json", encoding="utf-8") as fh:
+        obj = json.load(fh)
+    if set(obj) != {"schema_version", "predictions", "execution_manifest"}:
+        raise PayloadError("prediction file has an unexpected key set")
+    if obj.get("schema_version") != _SCHEMA_VERSION:
+        raise PayloadError("prediction file has an unexpected schema_version")
+    if not isinstance(obj["predictions"], list):
+        raise PayloadError("predictions must be a list")
+    predictions: dict[tuple[str, str], np.ndarray] = {}
+    for item in obj["predictions"]:
+        if not isinstance(item, list) or len(item) != 2:
+            raise PayloadError("each prediction record must be [pair, vector]")
+        pair, vec = item
+        if (
+            not isinstance(pair, list) or len(pair) != 2
+            or not all(isinstance(gene, str) and gene for gene in pair)
+        ):
+            raise PayloadError("prediction pair IDs must be two non-empty strings")
+        pair_id = (pair[0], pair[1])
+        if pair_id in predictions:
+            raise PayloadError(f"duplicate prediction pair {pair_id!r}")
+        predictions[pair_id] = np.asarray(vec, dtype=float)
+    manifest = obj["execution_manifest"]
+    _validate_execution_manifest(manifest)
+    recomputed = _sha256(_canonical_json(obj["predictions"]))
+    if manifest["predictions_sha256"] != recomputed:
+        raise PayloadError("execution_manifest predictions_sha256 does not match predictions")
+    return predictions, dict(manifest)
+```
+
+Update `predict` (bottom of the method) to unwrap + store:
+
+```python
+            preds, manifest = read_predictions(out)
+            self._last_execution_manifest = manifest
+            return preds
+```
+
+Add the field to the dataclass: `_last_execution_manifest: dict | None = field(default=None, init=False, repr=False)`. In `provenance_manifest`, after the existing dict, if `self._last_execution_manifest is not None`, add `"execution_manifest": {k: self._last_execution_manifest[k] for k in ("checkpoint_sha256", "predictions_sha256", "prediction_representation", "fit_artifact_content_sha256")}` so the checkpoint + prediction digests bind into the Phase-2a method lock (spec §2.5, §10). (Keep `provenance_manifest` valid before any predict by guarding on `None`.)
+
+Rewrite `scripts/baselines/stub_worker.py` to emit the envelope (minimal, additive path retained for this task):
+
+```python
+    ...
+    preds = {}
+    for g, h in p["pair_ids"]:
+        vec = singles[idx[g]] + singles[idx[h]]
+        preds[(g, h)] = vec[:dim]
+    fit_role = p["fit_role_artifact"]
+    proj = p["response_projection"]
+    manifest = {
+        "prediction_representation": "cell_raw_counts",
+        "adapter_version": "stub-1",
+        "adapter_sha256": "0" * 64,
+        "expected_gene_order_sha256": proj["gene_order_sha256"],
+        "observed_gene_order_sha256": proj["gene_order_sha256"],
+        "checkpoint_sha256": "0" * 64,
+        "worker_sha256": "0" * 64,
+        "config_sha256": "stub",
+        "resource_sha256": "stub",
+        "environment_lock_sha256": "stub",
+        "fit_artifact_content_sha256": fit_role["content_manifest_sha256"],
+        "combined_request_sha256": "stub",
+        "predictions_sha256": "",  # write_predictions fills this
+    }
+    write_predictions(a.out, preds, execution_manifest=manifest)
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `uv run pytest tests/alive/compose/test_baseline_subprocess.py -q`
+Expected: PASS — envelope round-trip, rejection, and the migrated e2e/deterministic predict tests.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/alive/compose/baseline_subprocess.py scripts/baselines/stub_worker.py tests/alive/compose/test_baseline_subprocess.py
+git commit -m "feat(compose): {predictions, execution_manifest} envelope + backend unwrap/binding (A2 task 5)"
+```
+
+---
+
+### Task 6: phase2a `build_subprocess_fit_payload` → v2 with equality enforcement
+
+**Files:**
+- Modify: `src/alive/compose/phase2a.py`
+- Test: `tests/alive/compose/test_phase2a.py`
+
+**Interfaces:**
+- Consumes: `FitRoleArtifactSpec.to_payload_block()` (A1), `build_response_projection` (Task 1), `bind_response_source` (Task 3).
+- Produces: `build_subprocess_fit_payload(*, inputs, outcome_store, response_artifact, oof_folds, fit_role_spec, gene_order, raw_data_sha256) -> dict` emitting `schema_version: 2` with both blocks attached and cross-source digest equality enforced.
+
+**Note for the implementer:** the current signature and the current 2-key `response_artifact` requirement change. `response_artifact` still supplies `response_space` + `control_mean`; the new `fit_role_spec` (a `FitRoleArtifactSpec`), `gene_order` (full var_names), and `raw_data_sha256` are added params. The payload's `pca_components`/`control_mean` must be **identical objects** to those the projection block serializes, so build the projection block from the same `response_space`/`control_mean` and reuse its serialized arrays for the aggregate keys to guarantee the Task-4 equality check passes.
+
+- [ ] **Step 1: Write the failing test**
+
+Update `_subprocess_adapters` in `tests/alive/compose/test_phase2a.py` to pass the new args and add an equality assertion. Because the fixture uses a `SimpleNamespace` for `response_space`, replace it with a real `fit_response_space` result (small) so `build_response_projection` works; and build a real `FitRoleArtifactSpec` via A1's generator into `tmp_path`. Add:
+
+```python
+def test_build_subprocess_payload_is_v2_with_consistent_blocks(tmp_path):
+    # ... assemble inputs, store, a real response_space + control_mean,
+    #     a real fit_role_spec via generate_fit_role_artifact into tmp_path,
+    #     gene_order = full var_names, raw_data_sha256 shared everywhere ...
+    payload = build_subprocess_fit_payload(
+        inputs=inputs, outcome_store=store, response_artifact=response_artifact,
+        oof_folds=[0] * len(inputs.cal_pair_ids), fit_role_spec=fit_role_spec,
+        gene_order=gene_order, raw_data_sha256="shared_raw",
+    )
+    assert payload["schema_version"] == 2
+    assert set(payload["fit_role_artifact"]) and set(payload["response_projection"])
+    assert payload["response_projection"]["raw_data_sha256"] == payload["fit_role_artifact"]["raw_data_sha256"]
+    # the whole payload must pass v2 validation (cross-source equality holds)
+    from alive.compose.baseline_subprocess import _validate_payload
+    _validate_payload(payload)  # raises PayloadError on any divergence
+```
+
+(The implementer writes the full fixture assembly; it mirrors the existing `_subprocess_adapters` construction plus a real response space and fit-role artifact.)
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `uv run pytest tests/alive/compose/test_phase2a.py -k subprocess -q`
+Expected: FAIL — signature mismatch / `schema_version` still 1.
+
+- [ ] **Step 3: Write minimal implementation**
+
+Rewrite `build_subprocess_fit_payload` in `phase2a.py`:
+
+```python
+def build_subprocess_fit_payload(
+    *,
+    inputs: Phase2aInputs,
+    outcome_store: DevelopmentOutcomeStore,
+    response_artifact: Mapping,
+    oof_folds: Sequence[int],
+    fit_role_spec: "FitRoleArtifactSpec",
+    gene_order: Sequence[str],
+    raw_data_sha256: str,
+) -> dict[str, object]:
+    """Assemble the canonical payload-v2 fit-role payload for GEARS/CPA workers."""
+    if set(response_artifact) != {"response_space", "control_mean"}:
+        raise ValueError("response_artifact must contain exactly response_space + control_mean")
+    response_space = response_artifact["response_space"]
+    control_mean = np.asarray(response_artifact["control_mean"], dtype=float)
+    if control_mean.shape != (inputs.response_dim,):
+        raise ValueError("response artifact control_mean is not response_dim aligned")
+    if len(oof_folds) != len(inputs.cal_pair_ids):
+        raise ValueError("oof_folds must align one-to-one with calibration pairs")
+    if outcome_store.combo_calibration_pair_ids != tuple(tuple(p) for p in inputs.cal_pair_ids):
+        raise ValueError("development outcomes are not aligned with calibration pair IDs")
+
+    projection = build_response_projection(
+        response_space, gene_order=gene_order, control_mean=control_mean,
+        raw_data_sha256=raw_data_sha256,
+    )
+    fit_role_block = fit_role_spec.to_payload_block()
+    bound = bind_response_source(gene_order=gene_order, raw_data_sha256=raw_data_sha256)
+    # source binding: the fit-role artifact, the projection, and the response
+    # source must share one raw-data SHA and one gene order (spec §7.2, §2.2)
+    if fit_role_block["raw_data_sha256"] != bound["raw_data_sha256"]:
+        raise ValueError("fit-role artifact raw_data_sha256 does not match response source")
+    if fit_role_block["gene_order_sha256"] != bound["gene_order_sha256"]:
+        raise ValueError("fit-role artifact gene_order_sha256 does not match response source")
+
+    genes = tuple(sorted(inputs.delta_by_gene, key=lambda gene: gene.encode("utf-8")))
+    calibration_delta = np.asarray(inputs.additive_cal, dtype=float) + np.asarray(
+        outcome_store.combo_calibration_eps, dtype=float
+    )
+    return {
+        "schema_version": 2,
+        "response_dim": int(inputs.response_dim),
+        "seed": int(inputs.seed),
+        "allowed_roles": ["singles", "combo_calibration"],
+        "pair_ids": [],
+        "single_gene_ids": list(genes),
+        "singles_response": [
+            np.asarray(inputs.delta_by_gene[gene], dtype=float).tolist() for gene in genes
+        ],
+        # reuse the projection-serialized arrays so the cross-source equality holds
+        "control_mean": projection["control_mean"],
+        "calibration_pair_ids": [list(pair) for pair in inputs.cal_pair_ids],
+        "calibration_delta": calibration_delta.tolist(),
+        "pca_components": projection["pca_components"],
+        "oof_folds": [int(fold) for fold in oof_folds],
+        "fit_role_artifact": fit_role_block,
+        "response_projection": projection,
+    }
+```
+
+Add imports at the top of `phase2a.py`:
+
+```python
+from alive.compose.fit_role import FitRoleArtifactSpec, build_response_projection
+from alive.compose.response import bind_response_source
+```
+
+(The old `components`/`pca_components` derivation and its `response_dim` alignment check are now covered by `build_response_projection`, which validates shapes against the space — keep that guarantee by relying on the projection block.)
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `uv run pytest tests/alive/compose/test_phase2a.py -q`
+Expected: PASS — the v2 payload validates and every other phase2a test still passes.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/alive/compose/phase2a.py tests/alive/compose/test_phase2a.py
+git commit -m "feat(compose): emit payload-v2 with fit-role + projection blocks and source binding (A2 task 6)"
+```
+
+---
+
+### Task 7: v2 stub worker operator path + integration test
+
+**Files:**
+- Modify: `scripts/baselines/stub_worker.py`
+- Create: `tests/alive/compose/test_payload_v2_integration.py`
+
+**Interfaces:**
+- Consumes: `validate_fit_role_artifact` + `apply_response_projection` (fit_role), `SubprocessBaselineBackend`, `write_payload`/`read_payload`, A1's `generate_fit_role_artifact` (fixture).
+- Produces: a stub worker that reads + validates the fit-role `.h5ad`, fits once (deterministic checkpoint), predicts native full-gene per pair from the artifact's `combo_calibration` cells, applies the §2.3 operator, and returns the envelope with real digests; an integration test that drives a combined double+single request through `SubprocessBaselineBackend` and asserts fit-once/checkpoint/manifest/role-split/projection.
+
+**Note for the implementer:** this is the task that makes the stub non-trivial (spec §7.2 — aggregate-only additive behavior must NOT pass integration). The stub must open the `.h5ad`, so the integration test writes a **real** fit-role artifact via A1's `generate_fit_role_artifact` into an approved root under `tmp_path` and references it (path + digests) in the payload's `fit_role_artifact` block. Sealed rows are never present in the artifact (A1 guarantees this); the stub reads only `combo_calibration` cells.
+
+- [ ] **Step 1: Write the failing test**
+
+Create `tests/alive/compose/test_payload_v2_integration.py`. It must:
+1. Build a synthetic Norman-shaped AnnData (control + singles + combo_calibration rows; a small full gene universe) in `tmp_path`.
+2. Run the audited extractor + `generate_fit_role_artifact` to write a real `.h5ad` + get a `FitRoleArtifactSpec`.
+3. Fit a real `ResponseSpace` on control+single rows; compute the z-space `control_mean`; build the `response_projection` block; build a valid v2 payload whose `fit_role_artifact` block = `spec.to_payload_block()` (with `path` = the real artifact path) and whose aggregate `pca_components`/`control_mean` = the projection's.
+4. Configure a `SubprocessBaselineBackend(name="stub", env_python=sys.executable, worker_script=<stub>, import_name="json")` with that payload and predict a **combined** request of one double + one single-unseen pair.
+5. Assert:
+
+```python
+    out = adapter.predict(context, [("AAA", "BBB"), ("AAA", "CCC")], response_dim)
+    assert set(out) == {("AAA", "BBB"), ("AAA", "CCC")}
+    for vec in out.values():
+        assert vec.shape == (response_dim,)
+        assert np.all(np.isfinite(vec))
+    # projection path was exercised (δ̂ is not identically zero for calibration-cell native preds)
+    assert any(np.linalg.norm(v) > 1e-9 for v in out.values())
+    # the manifest bound into provenance carries the checkpoint + prediction digests
+    prov = backend.provenance_manifest
+    assert prov["execution_manifest"]["prediction_representation"] == "cell_raw_counts"
+    assert len(prov["execution_manifest"]["checkpoint_sha256"]) == 64
+```
+
+Also add a tamper assertion: mutate the artifact bytes after the payload is built and assert the worker fails (`BaselineUnavailable`) before returning predictions (validation catches the SHA mismatch).
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `uv run pytest tests/alive/compose/test_payload_v2_integration.py -q`
+Expected: FAIL — the stub still uses the additive path and ignores the artifact/operator, so the manifest digests are placeholder `"0"*64` and `checkpoint_sha256` is not a real per-fit digest / δ̂ may be identically the additive sum.
+
+- [ ] **Step 3: Write minimal implementation**
+
+Rewrite `scripts/baselines/stub_worker.py` to the operator path:
+
+```python
+# scripts/baselines/stub_worker.py
+"""SYNTHETIC-ONLY payload-v2 reference worker (protocol reference, not a baseline).
+
+Reads + validates the fit-role artifact, fits once (a deterministic checkpoint
+over the combo_calibration cells), predicts each requested pair's native
+full-gene expression as those calibration cells, applies the registered §2.3
+response operator, and returns the {predictions, execution_manifest} envelope.
+The real gears/cpa workers replace this under the locked envs (pod-only).
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+
+import anndata as ad
+import numpy as np
+
+from alive.compose.baseline_subprocess import read_payload, write_predictions
+from alive.compose.fit_role import (
+    FitRoleArtifactSpec,
+    apply_response_projection,
+    validate_fit_role_artifact,
+)
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--in", dest="work_dir", required=True)
+    ap.add_argument("--out", dest="out", required=True)
+    a = ap.parse_args()
+    p = read_payload(a.work_dir)
+    fit_role = p["fit_role_artifact"]
+    proj = p["response_projection"]
+    dim = int(p["response_dim"])
+
+    # 1. re-validate the artifact exactly as the guard requires (fails closed)
+    spec = FitRoleArtifactSpec(
+        path=fit_role["path"], sha256=fit_role["sha256"],
+        content_manifest_sha256=fit_role["content_manifest_sha256"],
+        raw_data_sha256=fit_role["raw_data_sha256"],
+        pair_manifest_sha256=fit_role["pair_manifest_sha256"],
+        eligibility_hash=fit_role["eligibility_hash"],
+        row_identity_sha256=fit_role["row_identity_sha256"],
+        gene_order_sha256=fit_role["gene_order_sha256"],
+        n_cells=int(fit_role["n_cells"]), n_genes=int(fit_role["n_genes"]),
+        role_counts=dict(fit_role["role_counts"]),
+    )
+    import os
+
+    approved_root = os.path.dirname(os.path.realpath(fit_role["path"]))
+    validate_fit_role_artifact(
+        fit_role["path"], spec=spec, approved_root=approved_root,
+        calibration_pair_ids=[tuple(pr) for pr in p["calibration_pair_ids"]],
+        sealed_pair_ids=[],
+    )
+
+    # 2. load the artifact; native full-gene combo_calibration cells only
+    adata = ad.read_h5ad(fit_role["path"])
+    gene_order = [str(v) for v in adata.var_names]
+    roles = [str(r) for r in adata.obs["role"]]
+    calib_rows = np.array([i for i, r in enumerate(roles) if r == "combo_calibration"])
+    native = np.asarray(adata.X[calib_rows].todense(), dtype=np.float64)
+
+    # 3. fit once -> deterministic checkpoint over the calibration native block
+    checkpoint = hashlib.sha256(
+        json.dumps(np.round(native, 6).tolist(), separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+    # 4. predict combined union once: each pair -> project native calib cells -> δ̂
+    control_mean = np.asarray(proj["control_mean"], dtype=np.float64)
+    z = apply_response_projection(proj, native, gene_order, representation="cell_raw_counts")
+    delta = z.mean(axis=0) - control_mean          # length response_dim
+    preds = {(g, h): delta[:dim] for g, h in p["pair_ids"]}
+
+    manifest = {
+        "prediction_representation": "cell_raw_counts",
+        "adapter_version": "stub-2",
+        "adapter_sha256": hashlib.sha256(b"stub-response-operator-v2").hexdigest(),
+        "expected_gene_order_sha256": proj["gene_order_sha256"],
+        "observed_gene_order_sha256": __import__("alive.compose.fit_role", fromlist=["x"])
+        .canonical_gene_order_sha256(gene_order),
+        "checkpoint_sha256": checkpoint,
+        "worker_sha256": hashlib.sha256(open(__file__, "rb").read()).hexdigest(),
+        "config_sha256": "stub", "resource_sha256": "stub", "environment_lock_sha256": "stub",
+        "fit_artifact_content_sha256": fit_role["content_manifest_sha256"],
+        "combined_request_sha256": hashlib.sha256(
+            json.dumps([list(pr) for pr in p["pair_ids"]], separators=(",", ":")).encode("utf-8")
+        ).hexdigest(),
+        "predictions_sha256": "",
+    }
+    write_predictions(a.out, preds, execution_manifest=manifest)
+
+
+if __name__ == "__main__":
+    main()
+```
+
+(Clean up the `observed_gene_order_sha256` line to a normal import of `canonical_gene_order_sha256` at the top; the inline `__import__` above is a placeholder to avoid a second import edit — the implementer should import it properly.) The stub deliberately produces δ̂ from the calibration cells' native projection, so `expected == observed` gene order, the operator runs, and δ̂ ≠ 0.
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `uv run pytest tests/alive/compose/test_payload_v2_integration.py -q`
+Expected: PASS — combined request predicts both pairs, δ̂ non-trivial, manifest carries a real per-fit checkpoint, tamper is caught before prediction.
+
+- [ ] **Step 5: Run the full compose suite + ruff, then commit**
+
+Run: `uv run pytest tests/alive/compose -q && uv run ruff check src/alive/compose scripts/baselines tests/alive/compose && uv run ruff format --check src/alive/compose scripts/baselines tests/alive/compose`
+Expected: all green.
+
+```bash
+git add scripts/baselines/stub_worker.py tests/alive/compose/test_payload_v2_integration.py
+git commit -m "feat(compose): v2 reference stub operator path + payload-v2 integration test (A2 task 7)"
+```
+
+---
+
+## Self-Review (completed by plan author)
+
+**Spec coverage:** §2.1 fit_role block → Task 4 (validation) + Task 6 (emission via `to_payload_block`). §2.2 response_projection → Task 1 (serialize) + Task 4 (validate + equality). §2.3 operator → Task 2. §2.4 representation enum → Task 2 (operator branches) + Task 5 (manifest enum). §2.5 single fit/checkpoint + manifest → Task 5 (envelope/binding) + Task 7 (fit-once + checkpoint). §5.1 negative leakage: shape reject (#5) Task 2/4; digest divergence (#8) Task 4; sha mismatch/tamper Task 7. §6 known-answer → Task 2. §7.2 all four modified files → Tasks 4/5/6 + response.py Task 3 + stub Task 5/7. §8 integration → Task 7. §9 fail-closed → every validator raises; Task 7 tamper. §10 completion (source binding, single checkpoint, ruff, gate) → Task 6 binding + Task 7 checkpoint + Step 5 ruff; the **science-dev loop gate** runs after Task 7 (finishing step, not a code task).
+
+**Placeholder scan:** the stub's `observed_gene_order_sha256` inline `__import__` is explicitly flagged for the implementer to replace with a top-level import — noted, not a silent TODO. All other steps carry complete code.
+
+**Type consistency:** `read_predictions` returns `tuple[dict, dict]` from Task 5 onward; `predict` unpacks it (Task 5). `build_response_projection(response_space, *, gene_order, control_mean, raw_data_sha256)` is consistent across Tasks 1/6. `apply_response_projection(block, x, gene_order, *, representation)` consistent Tasks 2/7. `build_subprocess_fit_payload` new signature consistent Task 6 test + call.
+
+**Post-implementation (not a code task):** run the **science-dev loop gate** (LOCAL harness) on the A2 increment — expected anchors `seal_access_zero`, `no_outcome_selected_test_set`, `fit_on_training_roles_only`, `protocol_versioned`/`baseline_registered` → yes/n-a (spec §10.2) — then `finishing-a-development-branch`.
+
+## Execution Handoff
+
+Two execution options:
+1. **Subagent-Driven (recommended)** — fresh subagent per task, spec+quality review between tasks, broad final review.
+2. **Inline Execution** — batch execution with checkpoints.
