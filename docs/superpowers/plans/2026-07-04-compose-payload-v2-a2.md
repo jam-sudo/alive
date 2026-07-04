@@ -30,7 +30,7 @@ These refine the spec's illustrative signatures within the approved contract. **
 
 1. **Operator lives in `fit_role.py`.** Both `build_response_projection` (serialize) and `apply_response_projection` (reconstruct, pure numpy) go in `src/alive/compose/fit_role.py`, matching spec §7.1 which places `build_response_projection` there, so the stub and (later) GEARS/CPA workers import the projection contract from one module.
 2. **`build_response_projection` signature is extended** from the §7.1 sketch `(response_space, *, gene_order)` to `(response_space, *, gene_order, control_mean, raw_data_sha256)`, because the §2.2 block requires the z-space `control_mean` (which is `None` on a verified `ResponseSpace`) and `raw_data_sha256`. It calls `verify_response_artifact` internally to obtain validated arrays + the combined `response_artifact_sha256`.
-3. **A2's `phase2a` change is scoped to `build_subprocess_fit_payload`** (emit `schema_version:2`, attach both blocks, enforce cross-source digest equality). The combined-request single call + role split + projection path are demonstrated end-to-end in the **integration test** driving `SubprocessBaselineBackend` directly (spec §8), and the checkpoint/prediction digests bind to the method lock via `SubprocessBaselineBackend.provenance_manifest`. Rewiring the full `run_phase2a` sealed-run orchestration is **not** in A2 (driver C / spec §10.1).
+3. **A2's `phase2a` change is TWO focused pieces (both required by spec §7.2):** (a) `build_subprocess_fit_payload` emits `schema_version:2`, attaches both blocks, enforces cross-source digest equality (Task 6); and (b) `run_phase2a` calls each subprocess adapter **once with the combined double∪single pair union** and splits the result by role — honoring the §2.5 single-fit rule and §10 completion criterion (Task 8). In-process `fitted_models` (`predict_eps`, no re-fit) are unchanged and may still be evaluated per-role. **Deferred to later sub-projects (NOT A2):** the durable final-ledger + development seed-variability (sub-project **D**), and the production driver that assembles real raw/split/gene identity + approved artifacts root (sub-project **C**, spec §10.1). So A2 rewires the subprocess *invocation cardinality* but not the ledger/driver.
 4. **Reference stub strategy (spec §1.2, §5, §7.2):** the v2 stub reads + validates the fit-role `.h5ad`, loads its **`combo_calibration`** cells (non-sealed, present in the artifact), treats their raw counts as the per-pair native full-gene prediction, declares `prediction_representation = "cell_raw_counts"`, applies the §2.3 operator, and returns δ̂ + a real manifest. This yields observable non-zero δ̂ and exercises the whole operator path — it is a **protocol reference, not a baseline** (its numbers are not scientific claims).
 
 ---
@@ -40,15 +40,26 @@ These refine the spec's illustrative signatures within the approved contract. **
 - `src/alive/compose/fit_role.py` — **add** `build_response_projection`, `apply_response_projection`, `_normalize_log1p_full` helper. (existing A1 code unchanged.)
 - `src/alive/compose/response.py` — **add** `bind_response_source`. (existing fitting/projection unchanged.)
 - `src/alive/compose/baseline_subprocess.py` — **modify** `_SCHEMA_VERSION`, `_REQUIRED_KEYS`, `_validate_payload`, `write_predictions`, `read_predictions`, `SubprocessBaselineBackend.predict`, `provenance_manifest`; **add** `_validate_response_projection`, `_validate_fit_role_block`, `_validate_execution_manifest`, `_float_hex`, `_float_hex_equal`, `EXECUTION_MANIFEST_KEYS`, `PREDICTION_REPRESENTATIONS`.
-- `src/alive/compose/phase2a.py` — **modify** `build_subprocess_fit_payload`.
-- `scripts/baselines/stub_worker.py` — **rewrite** to the v2 operator path.
+- `src/alive/compose/phase2a.py` — **modify** `build_subprocess_fit_payload` (Task 6); **modify** `_predict_role` + `run_phase2a` and **add** `_predict_combined_adapters` (Task 8).
+- `scripts/baselines/stub_worker.py` — **rewrite** to the v2 operator path (Task 5 envelope shell → Task 7 operator).
 - `tests/alive/compose/test_fit_role.py` — **add** projection unit + known-answer tests.
 - `tests/alive/compose/test_response.py` — **add** `bind_response_source` tests.
-- `tests/alive/compose/test_baseline_subprocess.py` — **migrate** payload/prediction helpers to v2; **add** schema + envelope + leakage tests.
-- `tests/alive/compose/test_phase2a.py` — **migrate** `_subprocess_adapters`; **add** v2 payload + equality tests.
+- `tests/alive/compose/test_baseline_subprocess.py` — **migrate** payload/prediction helpers to v2; **add** schema + envelope + leakage tests (Task 4/5); **remove** the two additive predict-through-adapter tests superseded by the integration test (Task 7).
+- `tests/alive/compose/test_phase2a.py` — **migrate** `_subprocess_adapters` (thread `tmp_path`); **add** v2 payload + equality tests (Task 6) and the combined-invocation test (Task 8).
 - `tests/alive/compose/test_payload_v2_integration.py` — **new** integration test (fixture builder + combined request through `SubprocessBaselineBackend`).
 
 Tasks are **sequential** (later tasks import earlier symbols). BASE for Task 1 = current `main` HEAD (`62a2bd4`). Each task ends with `uv run pytest tests/alive/compose -q` green.
+
+### Fixture contract (Tasks 6, 7, 8 — the synthetic Norman-shaped fixture)
+
+Several tasks build a synthetic fit-role `.h5ad` and a matching payload. To keep `validate_fit_role_artifact` + `apply_response_projection` + the payload validator mutually consistent, every fixture MUST satisfy:
+
+- The artifact's `var_names` (full gene universe, e.g. `["G0"..."G7"]`) **is** the `gene_order` passed to `build_response_projection` and `bind_response_source`; all three `gene_order_sha256` values are therefore equal.
+- The `ResponseSpace` is fit on the artifact's `control` + `singles` rows (indices derived from `obs.role`), and the z-space `control_mean` = `space.project(X, control_idx).mean(axis=0)`.
+- The payload's `calibration_pair_ids` **==** the artifact's `combo_calibration` pairs (canonical order), and `single_gene_ids`/`delta_by_gene` cover the pair genes.
+- `raw_data_sha256` is one shared string across the artifact block, the projection block, and `bind_response_source`.
+- The artifact is written under an approved root inside `tmp_path` (so `validate_fit_role_artifact`'s path policy passes), and `tmp_path` is threaded into `_subprocess_adapters(inputs, store, tmp_path)`.
+- Requested `pair_ids` for the sealed double/single are NOT `combo_calibration` pairs (they are sealed IDs predicted from the fitted checkpoint; their cells are absent from the artifact).
 
 ---
 
@@ -1149,6 +1160,7 @@ from alive.compose.baseline_subprocess import read_payload, write_predictions
 from alive.compose.fit_role import (
     FitRoleArtifactSpec,
     apply_response_projection,
+    canonical_gene_order_sha256,
     validate_fit_role_artifact,
 )
 
@@ -1207,8 +1219,7 @@ def main() -> None:
         "adapter_version": "stub-2",
         "adapter_sha256": hashlib.sha256(b"stub-response-operator-v2").hexdigest(),
         "expected_gene_order_sha256": proj["gene_order_sha256"],
-        "observed_gene_order_sha256": __import__("alive.compose.fit_role", fromlist=["x"])
-        .canonical_gene_order_sha256(gene_order),
+        "observed_gene_order_sha256": canonical_gene_order_sha256(gene_order),
         "checkpoint_sha256": checkpoint,
         "worker_sha256": hashlib.sha256(open(__file__, "rb").read()).hexdigest(),
         "config_sha256": "stub", "resource_sha256": "stub", "environment_lock_sha256": "stub",
@@ -1225,32 +1236,216 @@ if __name__ == "__main__":
     main()
 ```
 
-(Clean up the `observed_gene_order_sha256` line to a normal import of `canonical_gene_order_sha256` at the top; the inline `__import__` above is a placeholder to avoid a second import edit — the implementer should import it properly.) The stub deliberately produces δ̂ from the calibration cells' native projection, so `expected == observed` gene order, the operator runs, and δ̂ ≠ 0.
+The stub deliberately produces δ̂ from the calibration cells' native projection, so `expected == observed` gene order, the operator runs, and δ̂ ≠ 0.
 
-- [ ] **Step 4: Run test to verify it passes**
+- [ ] **Step 4: Migrate the two now-broken additive predict tests**
 
-Run: `uv run pytest tests/alive/compose/test_payload_v2_integration.py -q`
-Expected: PASS — combined request predicts both pairs, δ̂ non-trivial, manifest carries a real per-fit checkpoint, tamper is caught before prediction.
+Rewriting the shared `stub_worker.py` to the operator path breaks two tests in `tests/alive/compose/test_baseline_subprocess.py` that drive the *same* stub with the fake `_payload()` path and assert the additive sum `[0.5, 0.7, 0.9]`:
+`test_predict_end_to_end_through_adapter` and `test_predict_is_deterministic`. Those additive semantics no longer exist (the v2 stub is operator-based and requires a real `.h5ad`), and the adapter-through-backend e2e is now covered by `test_payload_v2_integration.py`. **Delete both tests** from `test_baseline_subprocess.py`. **Keep** `test_payload_with_sealed_token_is_refused` — it only calls `configure_payload` (which validates the payload without running the worker) and remains valid. If `_context`/`_backend`/`_STUB` become unused after the deletion, remove them; if the retained refusal test still uses `_backend`/`_STUB`, leave those in place.
 
-- [ ] **Step 5: Run the full compose suite + ruff, then commit**
+- [ ] **Step 5: Run the integration + subprocess tests**
+
+Run: `uv run pytest tests/alive/compose/test_payload_v2_integration.py tests/alive/compose/test_baseline_subprocess.py -q`
+Expected: PASS — combined request predicts both pairs, δ̂ non-trivial, manifest carries a real per-fit checkpoint, tamper is caught before prediction; the two additive tests are gone and the sealed-token refusal test still passes.
+
+- [ ] **Step 6: Run the full compose suite + ruff, then commit**
 
 Run: `uv run pytest tests/alive/compose -q && uv run ruff check src/alive/compose scripts/baselines tests/alive/compose && uv run ruff format --check src/alive/compose scripts/baselines tests/alive/compose`
 Expected: all green.
 
 ```bash
-git add scripts/baselines/stub_worker.py tests/alive/compose/test_payload_v2_integration.py
+git add scripts/baselines/stub_worker.py tests/alive/compose/test_payload_v2_integration.py tests/alive/compose/test_baseline_subprocess.py
 git commit -m "feat(compose): v2 reference stub operator path + payload-v2 integration test (A2 task 7)"
+```
+
+---
+
+### Task 8: single combined subprocess invocation in `run_phase2a` (§2.5)
+
+**Files:**
+- Modify: `src/alive/compose/phase2a.py`
+- Test: `tests/alive/compose/test_phase2a.py`
+
+**Interfaces:**
+- Produces: `_combined_pair_union(double_ids, single_ids) -> list[tuple[str, str]]`; `_baseline_context(inputs) -> BaselineTrainingContext`; `_predict_combined_adapters(inputs, combined_pair_ids, baseline_adapters) -> dict[str, dict[tuple[str, str], np.ndarray]]`. `_predict_role` gains a keyword `adapter_predictions: Mapping | None = None`; `run_phase2a` computes the union once, calls `_predict_combined_adapters` once, and passes the result to both `_predict_role` calls.
+
+**Why:** spec §2.5/§7.2/§10 require each subprocess worker to fit **once** and predict the combined pair union once — `SubprocessBaselineBackend.predict` runs a fresh worker (fit + predict) per call, so calling it once per role (as `run_phase2a` does today at `phase2a.py:1256-1271`) re-fits GEARS/CPA twice. In-process `fitted_models` use `predict_eps` (no re-fit) and are unaffected; only the subprocess-adapter branch is rerouted.
+
+- [ ] **Step 1: Write the failing test**
+
+Add to `tests/alive/compose/test_phase2a.py` (reuse the existing minimal-`Phase2aInputs` construction; `Z`/`mean` can be zeros of the right shape):
+
+```python
+from alive.compose.phase2a import (
+    _combined_pair_union,
+    _predict_combined_adapters,
+    _predict_role,
+)
+
+
+class _SpyAdapter:
+    """Duck-typed baseline adapter that records each predict() call."""
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+        self.calls: list[tuple] = []
+
+    def predict(self, context, pair_ids, response_dim):
+        self.calls.append(tuple(tuple(p) for p in pair_ids))
+        return {(g, h): np.full(response_dim, len(g + h), dtype=float) for g, h in pair_ids}
+
+
+def test_subprocess_adapter_fits_once_for_combined_union(minimal_inputs):
+    inputs = minimal_inputs  # sealed_double_pair_ids + sealed_single_pair_ids disjoint, non-empty
+    spy = _SpyAdapter("gears")
+    adapters = {"gears": spy}
+    combined = _combined_pair_union(inputs.sealed_double_pair_ids, inputs.sealed_single_pair_ids)
+    adapter_preds = _predict_combined_adapters(inputs, combined, adapters)
+    assert len(spy.calls) == 1                              # fit-once
+    assert spy.calls[0] == tuple(combined)                 # combined union, once
+    Z = np.zeros((1, inputs.response_dim))
+    mean = np.zeros(inputs.response_dim)
+    double = _predict_role(
+        inputs, inputs.sealed_double_pair_ids, {}, Z, mean, adapters,
+        adapter_predictions=adapter_preds,
+    )
+    single = _predict_role(
+        inputs, inputs.sealed_single_pair_ids, {}, Z, mean, adapters,
+        adapter_predictions=adapter_preds,
+    )
+    assert len(spy.calls) == 1                              # NOT re-invoked during role split
+    assert set(double["gears"]) == {tuple(p) for p in inputs.sealed_double_pair_ids}
+    assert set(single["gears"]) == {tuple(p) for p in inputs.sealed_single_pair_ids}
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `uv run pytest tests/alive/compose/test_phase2a.py -k combined_union -q`
+Expected: FAIL — `ImportError: cannot import name '_combined_pair_union'` / `_predict_role` has no `adapter_predictions` kwarg.
+
+- [ ] **Step 3: Write minimal implementation**
+
+In `phase2a.py`, extract the adapter context and add the two helpers:
+
+```python
+def _baseline_context(inputs: Phase2aInputs) -> BaselineTrainingContext:
+    """The frozen development-role context handed to every subprocess adapter."""
+    return BaselineTrainingContext(
+        allowed_roles=frozenset({"singles", "combo_calibration"}),
+        pair_manifest_checksum=inputs.manifest_checksum,
+        response_space_checksum=inputs.response_space_checksum,
+        training_pair_ids=tuple(tuple(p) for p in inputs.cal_pair_ids),
+        single_gene_ids=tuple(
+            sorted(inputs.delta_by_gene, key=lambda gene: str(gene).encode("utf-8"))
+        ),
+    )
+
+
+def _combined_pair_union(
+    double_ids: Sequence[tuple[str, str]],
+    single_ids: Sequence[tuple[str, str]],
+) -> list[tuple[str, str]]:
+    """Ordered de-duplicated double∪single request (doubles first) for a single fit."""
+    union: list[tuple[str, str]] = []
+    for p in (*double_ids, *single_ids):
+        pair = (p[0], p[1])
+        if pair not in union:
+            union.append(pair)
+    return union
+
+
+def _predict_combined_adapters(
+    inputs: Phase2aInputs,
+    combined_pair_ids: Sequence[tuple[str, str]],
+    baseline_adapters: Mapping[str, object],
+) -> dict[str, dict[tuple[str, str], np.ndarray]]:
+    """Invoke every subprocess adapter EXACTLY once on the combined pair union.
+
+    Honors the single-fit / single-checkpoint / combined-request rule (spec §2.5):
+    each worker fits once and predicts the whole union; ``_predict_role`` then
+    splits the cached result per role without re-invoking the worker.
+    """
+    context = _baseline_context(inputs)
+    return {
+        name: adapter.predict(context, list(combined_pair_ids), inputs.response_dim)
+        for name, adapter in baseline_adapters.items()
+    }
+```
+
+Change the `_predict_role` signature to add `adapter_predictions` and reroute its adapter branch:
+
+```python
+def _predict_role(
+    inputs: Phase2aInputs,
+    pair_ids: Sequence[tuple[str, str]],
+    fitted_models: Mapping[str, object],
+    selected_Z: np.ndarray,
+    perturbation_mean_prediction: np.ndarray,
+    baseline_adapters: Mapping[str, BaselineAdapter] | None = None,
+    *,
+    adapter_predictions: Mapping[str, Mapping[tuple[str, str], np.ndarray]] | None = None,
+) -> dict[str, dict[tuple[str, str], np.ndarray]]:
+    ...
+    # (learned models / additive / no_change / perturbation_mean unchanged)
+    if baseline_adapters:
+        if adapter_predictions is None:
+            context = _baseline_context(inputs)
+            for name, adapter in baseline_adapters.items():
+                out[name] = adapter.predict(context, list(pair_ids), inputs.response_dim)
+        else:
+            for name in baseline_adapters:
+                combined = adapter_predictions[name]
+                out[name] = {
+                    (g, h): np.asarray(combined[(g, h)], dtype=float) for g, h in pair_ids
+                }
+    return out
+```
+
+Replace the inline context block that previously lived in `_predict_role` with a call to `_baseline_context(inputs)` (the extraction above). In `run_phase2a`, replace the two `_predict_role` calls (`phase2a.py:1256-1271`) with:
+
+```python
+    combined_pairs = _combined_pair_union(
+        inputs.sealed_double_pair_ids, inputs.sealed_single_pair_ids
+    )
+    adapter_predictions = (
+        _predict_combined_adapters(inputs, combined_pairs, adapters) if adapters else None
+    )
+    double_preds = _predict_role(
+        inputs, inputs.sealed_double_pair_ids, fitted, selected_Z, mean_prediction, adapters,
+        adapter_predictions=adapter_predictions,
+    )
+    single_preds = _predict_role(
+        inputs, inputs.sealed_single_pair_ids, fitted, selected_Z, mean_prediction, adapters,
+        adapter_predictions=adapter_predictions,
+    )
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `uv run pytest tests/alive/compose/test_phase2a.py -q`
+Expected: PASS — the combined-invocation test plus every existing phase2a test (the split still feeds `FrozenPredictionBundle.create` the same per-role structure, now sourced from one combined call).
+
+- [ ] **Step 5: Run the full compose suite + ruff, then commit**
+
+Run: `uv run pytest tests/alive/compose -q && uv run ruff check src/alive/compose tests/alive/compose && uv run ruff format --check src/alive/compose tests/alive/compose`
+Expected: all green.
+
+```bash
+git add src/alive/compose/phase2a.py tests/alive/compose/test_phase2a.py
+git commit -m "feat(compose): subprocess adapters fit once on the combined pair union (A2 task 8)"
 ```
 
 ---
 
 ## Self-Review (completed by plan author)
 
-**Spec coverage:** §2.1 fit_role block → Task 4 (validation) + Task 6 (emission via `to_payload_block`). §2.2 response_projection → Task 1 (serialize) + Task 4 (validate + equality). §2.3 operator → Task 2. §2.4 representation enum → Task 2 (operator branches) + Task 5 (manifest enum). §2.5 single fit/checkpoint + manifest → Task 5 (envelope/binding) + Task 7 (fit-once + checkpoint). §5.1 negative leakage: shape reject (#5) Task 2/4; digest divergence (#8) Task 4; sha mismatch/tamper Task 7. §6 known-answer → Task 2. §7.2 all four modified files → Tasks 4/5/6 + response.py Task 3 + stub Task 5/7. §8 integration → Task 7. §9 fail-closed → every validator raises; Task 7 tamper. §10 completion (source binding, single checkpoint, ruff, gate) → Task 6 binding + Task 7 checkpoint + Step 5 ruff; the **science-dev loop gate** runs after Task 7 (finishing step, not a code task).
+**Spec coverage:** §2.1 fit_role block → Task 4 (validation) + Task 6 (emission via `to_payload_block`). §2.2 response_projection → Task 1 (serialize) + Task 4 (validate + equality). §2.3 operator → Task 2. §2.4 representation enum → Task 2 (operator branches) + Task 5 (manifest enum). §2.5 single fit/checkpoint + manifest → Task 5 (envelope/binding) + Task 7 (fit-once + checkpoint) + **Task 8 (combined single subprocess invocation in `run_phase2a`)**. §5.1 negative leakage: shape reject (#5) Task 2/4; digest divergence (#8) Task 4; sha mismatch/tamper Task 7. §6 known-answer → Task 2. §7.2 all four modified files → Tasks 4/5/6/8 + response.py Task 3 + stub Task 5/7. §8 integration → Task 7. §9 fail-closed → every validator raises; Task 7 tamper. §10 completion (source binding, single combined invocation/checkpoint, ruff, gate) → Task 6 binding + Task 7 checkpoint + Task 8 single invocation + Step-5/6 ruff; the **science-dev loop gate** runs after Task 8 (finishing step, not a code task). **Deferred (NOT A2, per decision #3):** durable ledger + seed-variability (D), production driver (C).
 
-**Placeholder scan:** the stub's `observed_gene_order_sha256` inline `__import__` is explicitly flagged for the implementer to replace with a top-level import — noted, not a silent TODO. All other steps carry complete code.
+**Placeholder scan:** no placeholders — the stub uses a top-level `canonical_gene_order_sha256` import (Task 7). Every code step carries complete code; the T6/T7/T8 fixture assembly is delegated to the implementer but bounded by the explicit **Fixture contract** (above) so it has a single interpretation.
 
-**Type consistency:** `read_predictions` returns `tuple[dict, dict]` from Task 5 onward; `predict` unpacks it (Task 5). `build_response_projection(response_space, *, gene_order, control_mean, raw_data_sha256)` is consistent across Tasks 1/6. `apply_response_projection(block, x, gene_order, *, representation)` consistent Tasks 2/7. `build_subprocess_fit_payload` new signature consistent Task 6 test + call.
+**Type consistency:** `read_predictions` returns `tuple[dict, dict]` from Task 5 onward; `predict` unpacks it (Task 5). `build_response_projection(response_space, *, gene_order, control_mean, raw_data_sha256)` is consistent across Tasks 1/6. `apply_response_projection(block, x, gene_order, *, representation)` consistent Tasks 2/7. `build_subprocess_fit_payload` new signature consistent Task 6 test + call. `_predict_role`'s new `adapter_predictions` kwarg (Task 8) defaults to `None`, preserving any existing direct caller; `run_phase2a` always passes the combined-once result.
+
+**Iteration-1 gate fixes (spec-review loop, iteration 1 → NEEDS_IMPROVEMENT):** (a) `design_sound` NO — Task 7 now migrates/deletes the two additive predict-through-adapter tests broken by the operator stub (Step 4), so every task ends green; (b) §2.5 double-fit — added **Task 8** so subprocess adapters fit once on the combined union (was wrongly deferred by the old decision #3); (c) fixture ambiguity — added the **Fixture contract** and `_subprocess_adapters(…, tmp_path)` threading; (d) readability — replaced the stub's inline `__import__` with a top-level import.
 
 **Post-implementation (not a code task):** run the **science-dev loop gate** (LOCAL harness) on the A2 increment — expected anchors `seal_access_zero`, `no_outcome_selected_test_set`, `fit_on_training_roles_only`, `protocol_versioned`/`baseline_registered` → yes/n-a (spec §10.2) — then `finishing-a-development-branch`.
 
