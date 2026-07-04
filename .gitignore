@@ -29,6 +29,9 @@ dist/
 .coverage
 htmlcov/
 
+# --- Local scratch reference (never commit; not part of the tracked repo) ---
+claude_science/
+
 # --- OS / editor ---
 .DS_Store
 .playwright-mcp/
