@@ -1,5 +1,9 @@
 # CARTOGRAPHER MVP 수정안 및 Active Cartographer 가능성 평가
 
+> **⚠ SUPERSEDED (2026-07-04) — 2026-06-21 시점 검토.** 이 개정 제안서 이후 `TG-K562-v1`은 COMPLETE
+> (sealed verdict `NO_DISTINCT_WIN`)이 됐고 활성 protocol은 `COMPOSE-K562-v1`(ACTIVE 2026-06-30)이다.
+> 현재 상태는 `CLAUDE.md` §4 registry. 원본은 기록으로 보존한다.
+
 작성일: 2026-06-21  
 대상 문서: `docs/superpowers/plans/2026-06-20-cartographer-mvp.md`  
 주의: 이 문서는 원본 계획을 수정하지 않은 독립적인 검토·개정 제안서다.

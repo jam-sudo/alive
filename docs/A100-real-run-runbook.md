@@ -1,5 +1,11 @@
 # CARTOGRAPHER Trust-Gate — A100 Real-Run Runbook (`TG-K562-v1`)
 
+> **Status (2026-07-04): `TG-K562-v1` is COMPLETE — do not re-run.** The decisive K562 run below was
+> executed (RunPod A100, run_id `d18c601b`) and registered **`NO_DISTINCT_WIN`**; the sealed cohort
+> was opened once and is now spent. This runbook is retained for provenance and reproducibility only.
+> For the ACTIVE `COMPOSE-K562-v1` sealed run, see
+> `docs/superpowers/runbooks/2026-07-02-compose-k562-pod-sealed-run.md`.
+
 > **Scope.** Take a bare A100 instance to a real, decisive K562 scientific run.
 > Phases A→E. Two gates (C: ESM smoke, D: mini validation) must pass before the
 > full run. **One irreversible step: `evaluate-once`** (opens the sealed cohort
@@ -25,11 +31,9 @@ Pipeline order (each post-`prepare` command takes `--run-id`):
 ## Phase A — code + environment
 
 ### Step 0 — get the code onto the A100
-There is currently **no git remote**. Either:
+The repo has a remote: `origin → https://github.com/jam-sudo/alive.git` (private). Either:
 - **Remote (recommended; lets you `git pull` toolkit updates):**
-  - local Mac: `gh repo create alive --private --source=. --remote=origin --push`
-    (or create an empty private repo and `git remote add origin <URL> && git push -u origin main`)
-  - A100: `git clone <URL> alive && cd alive`
+  - A100: `gh auth login` (or a PAT), then `git clone https://github.com/jam-sudo/alive.git alive && cd alive`
 - **rsync (no remote):**
   `rsync -av --exclude .git/sdd --exclude artifacts --exclude .venv /path/ALIVE/ user@a100:~/alive/`
 

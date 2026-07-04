@@ -3,7 +3,9 @@
 > **문서 역할:** COMPOSE-K562-v1의 일회성 sealed evaluation을 위한 운영 계약.
 > **개정일:** 2026-07-02
 > **현재 실행 상태:** **BLOCKED — §2의 pre-seal release blocker가 모두 해결·검토·commit되기 전에는 실행 금지.**
-> **코드 기준점:** `main` merge commit `c324b33` 이상.
+> **코드 기준점:** `main` `62a2bd4` 이상(2026-07-04). `c324b33`(PR #5) 이후 PR #6–#8이 §2.1 fit-role
+> artifact(A1)와 payload-v2(A2) 계약을 추가했다. worker/driver/durable-ledger(sub-project B/C/D)는
+> 여전히 미구현이므로 runbook은 BLOCKED 유지.
 > **상위 계약:** COMPOSE spec §7/§10.5–§10.6, deep-baseline design §1/§7,
 > `CLAUDE.md` §5/§6/§9/§10/§11/§14.2.
 > **seal 계약:** COMPOSE seal은 TG-K562와 독립이며 정확히 한 번만 연다. 재실행·resume 없음.

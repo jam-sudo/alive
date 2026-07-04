@@ -1,5 +1,11 @@
 # ALIVE Model #1 — Perturbation-as-Operator (A-centered hybrid) · FINAL 설계 스펙
 
+> **⚠ SUPERSEDED / long-range-parked (2026-07-04).** 이 "확정 설계"는 `CLAUDE.md` §4 protocol registry에
+> 등록되지 않았고 어떤 active spec도 참조하지 않는다. 핵심 capability(Cell-B mean win by architecture)가
+> prior-art 대비 non-novel로 판명되어 `COMPOSE-K562-v1`(비가산 epistasis operator)로 pivot했다.
+> unseen-target transfer 축은 `CT-RPE1-v1`(DEFERRED)로 이관했다. 이 문서는 long-range 참고로만 보존한다.
+> (개정일 필드 없음 — 2026-06-20 작성 기준.)
+
 > 상태: 설계 확정안 (project owner 검토용). MVP = 단일유전자 예측 surrogate. **causal/mechanistic 주장 금지**, 식별성은 "제약된 가설공간"으로만 표현. 모든 win 주장은 perturbation-level bootstrap 95% CI 하한 > 0 + 사전등록 보조지표 무회귀로만 인정.
 >
 > 이 문서는 4개 컴포넌트 설계(operator-formulation / gene-feature-encoder / distributional-decoder / cellB-win-eval-roadmap)를 통합하고, critique panel의 모든 fatal_flaw·serious_concern·required_fix를 (a) 설계에 직접 반영하거나 (b) 명시적 accepted risk + 완화책으로 처리한 결과다. 가장 무거운 비판 — **"state-dependent 항은 pseudobulk 평균에 수학적으로 0을 기여하므로, PDS/DES로 결정되는 Cell B win과 분리된다"** — 을 §2.4와 §4에 정면으로 박았다.

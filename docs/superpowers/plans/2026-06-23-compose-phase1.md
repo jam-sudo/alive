@@ -1,5 +1,10 @@
 # COMPOSE-K562-v1 Phase 1 Implementation Plan
 
+> **Note (2026-07-04):** 이 plan의 내장 Phase-1 config schema(`lambda_grid`, `false_gi_tol`)는 이후
+> 진화했다 — live `configs/compose_k562_v1_phase1.yaml`에는 두 key가 없고 λ는 `phase1.py`에서 hard-code,
+> false-GI guard는 scale-relative ratio margin(`_FALSE_GI_RATIO_MARGIN`)이다. plan을 문자 그대로 재현하지
+> 말고 현재 config/코드를 기준으로 삼을 것.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Build the cheap go/no-go for the COMPOSE epistasis milestone — prove the bilinear interaction-composition operator is identifiable/recoverable on synthetic data (claim 1), and run the Norman power/measurability/rank pre-check gates — WITHOUT touching any seal or integrating GEARS/CPA.

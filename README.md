@@ -1,4 +1,12 @@
-# ALIVE — CARTOGRAPHER Trust-Gate MVP
+# ALIVE — CARTOGRAPHER Trust-Gate MVP (`TG-K562-v1`, COMPLETE)
+
+> **Status (2026-07-04).** `TG-K562-v1` is **COMPLETE** — the sealed evaluation was opened once and
+> registered **`NO_DISTINCT_WIN`** (the conformal error bound was valid and retained, but the gate
+> did **not** beat the comparator family). The active protocol is now **`COMPOSE-K562-v1`** (Norman
+> K562 CRISPRa non-additive epistasis operator; ACTIVE 2026-06-30, A100 sealed confirmatory run
+> pending). **This README documents the now-complete CARTOGRAPHER pipeline and its mechanics** — the
+> `evaluate-once` seal described below has already been spent for `TG-K562-v1`. See `CLAUDE.md` §4
+> for the protocol registry.
 
 A retrospective, leakage-controlled **trust-gate** for single-gene CRISPRi perturbation-response
 prediction. Given a frozen base predictor, an error-aware gate ranks held-out K562 perturbations by

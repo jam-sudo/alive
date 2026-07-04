@@ -29,7 +29,7 @@ clean tree를 요구하고 COMPOSE seal은 1회 열린다.
 `COMPOSE-K562-v1` seal은 `TG-K562-v1` seal과 **교체 불가**다(CLAUDE.md §6.3). 하나의 run ID·audit·
 report가 두 seal을 동시에 대표할 수 없다.
 
-본 milestone은 다음 durable finding 위에 선다([[alive-operator-design-incremental]]):
+본 milestone은 다음 durable finding 위에 선다(project-memory *alive-operator-design-incremental*):
 function-class-identity상 held-out perturbation의 *평균*에서는 additive가 null이라 architecture로
 이길 수 없고, architecture가 additive를 이기는 유일한 자리는 **non-additive 구조(조합·off-origin)**.
 따라서 본 milestone의 천장은 "단일 perturbation을 더 잘 맞히기"가 아니라 "**개입의 합성/간섭을
@@ -134,7 +134,7 @@ disjoint roles:
 
 - **Power gate.** valid double-unseen 쌍 수·쌍당 cell 수 → additive-vs-model 대비의 detectable
   effect. 미달 시 **headline을 가장 잘-powered된 regime(예: single-unseen)으로 강등**하고
-  double-unseen은 exploratory로 보고한다(§14.2 sample-size 분석).
+  double-unseen은 exploratory로 보고한다(sample-size/detectable-effect 분석 — activation blocker `docs/activation-evidence/compose/real_norman_detectable_effect_report.json`).
 - **Measurability / noise-ceiling gate.** split-half(또는 replicate) 추정기로 $\varepsilon$의
   noise floor와 추정가능 분산(천장)을 산출·보고한다. 이 gate는 `combo_calibration`/unsealed
   development pairs 또는 outcome-independent cell-count metadata만 사용한다. `sealed_double_unseen`
@@ -163,7 +163,7 @@ interaction용 per-gene factor:
 $$z_g=[\,\mathrm{PCA}_k(\delta_g)\;;\;\text{(optional) ESM 사영}\,]\in\mathbb{R}^k,\quad
 \text{singles에서 먼저 고정}.$$
 
-ESM는 bolt-on이 아니라 **고정 입력 factor**로 재도입한다([[cartographer-mvp-built-merged]]의 OOF
+ESM는 bolt-on이 아니라 **고정 입력 factor**로 재도입한다(project-memory *cartographer-mvp-built-merged*의 OOF
 탐색적 가설 1: 서열 축이 신호를 가질 수 있음을, 이번엔 식별가능 구조 안에서 검증). $z_g$를 먼저
 고정해야 Stage 2가 선형이 된다(end-to-end는 rotation ambiguity로 식별성을 잃음 → ablation L3).
 
@@ -246,7 +246,7 @@ bootstrap한다. additive가 큰 효과를 이미 잡으므로 이 대비는 비
   동시추론**으로만 우위 주장(사후 최강 comparator 선택 금지).
 - **(구조, 2차)** held-out 쌍의 GI 부호/class 복원 > chance(등록 metric·chance 기준).
 
-### 4.4 Known-answer metric tests (§13.5)
+### 4.4 Known-answer metric tests (CLAUDE.md §13 known-answer 요건)
 
 constant·shuffled-pairs·additive=truth($\Delta\approx0$)·perfect-GI($\Delta$ 최대)를 toy로 검증.
 
@@ -266,11 +266,11 @@ report는 두 축을 모두 싣고, regime은 headline + secondary 전부 보고
 ### 4.6 무결성 표현 규율
 
 verdict는 구조적 clause를 **한계와 함께** 보고하고 "모든 무결성 검증 완료"라 쓰지 않는다. 이는
-run 내부 자기검증이며 독립 audit이 아님을 명시한다([[cartographer-mvp-built-merged]] 교훈).
+run 내부 자기검증이며 독립 audit이 아님을 명시한다(project-memory *cartographer-mvp-built-merged* 교훈).
 
 ---
 
-## 5. Phasing (I5; §15 최소 falsifying 실험)
+## 5. Phasing (I5; CLAUDE.md §15 최소 falsifying 실험)
 
 - **Phase 1 (값쌈, go/no-go 결정).** 합성 식별가능성 입증(claim 1, §3.4) + Norman에서
   power·measurability·rank gate(§2.4)만. real 연구의 가치를 *결정*한다. gate 실패 시 GEARS/CPA
@@ -366,7 +366,7 @@ claim·정직성 계약을 고정한다. 이는 sealed scientific run의 승인�
 
 > **상태 (2026-06-30): 6개 blocker 전부 충족 — activation 완료.** evidence는
 > `docs/activation-evidence/compose/`(phi-rank, detectable-effect, GEARS/CPA lock)와
-> `docs/data-cards/norman_compose_k562_v1.json`, tests는 `tests/alive/compose/` (591 green).
+> `docs/data-cards/norman_compose_k562_v1.json`, tests는 `tests/alive/compose/` (activation commit `d507a09` 기준 591 green; 현재 645).
 > CLAUDE.md registry는 같은 activation commit에서 `ACTIVE`로 전환된다. 아래 목록은 충족한
 > 계약을 기록으로 보존한다.
 

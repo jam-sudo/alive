@@ -1,5 +1,11 @@
 # Virtual Cell 프로젝트 실행 계획안 (ALIVE)
 
+> **⚠ SUPERSEDED (2026-07-04) — historical planning doc.** 이 계획안은 K562→RPE1 held-out cell-line
+> transfer를 1차 MVP로 제시하지만, 현재 governance에서 그 축은 `CT-RPE1-v1` = **DEFERRED**다. 완료된
+> `TG-K562-v1`(sealed verdict `NO_DISTINCT_WIN`)과 활성 `COMPOSE-K562-v1`(Norman K562 CRISPRa, ACTIVE
+> 2026-06-30)은 이후 결정이다. authoritative protocol 상태는 `CLAUDE.md` §4 registry. 이 문서는
+> pre-pivot 기록으로 보존한다.
+
 > **프로젝트:** 세포 수준 causal world model — 개입(유전자 억제) 결과를 실험 전에 예측
 > **기반 문서:** `virtual-cell-model-blueprint.md` (비전), `virtual-cell-research-report.md` (근거)
 > **작성일:** 2026-06-19 · **상태:** Phase 0 (목적 정의) 진입
