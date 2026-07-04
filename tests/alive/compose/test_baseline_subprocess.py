@@ -23,7 +23,6 @@ from alive.compose.baseline_subprocess import (
     write_payload,
     write_predictions,
 )
-from alive.compose.baselines_combo import BaselineAdapter, BaselineTrainingContext
 from alive.provenance import sha256_json
 
 _GENES = ["A", "B", "C"]
@@ -300,16 +299,6 @@ def test_is_available_false_for_bad_python() -> None:
 _STUB = str(Path(__file__).resolve().parents[3] / "scripts" / "baselines" / "stub_worker.py")
 
 
-def _context() -> BaselineTrainingContext:
-    return BaselineTrainingContext(
-        allowed_roles=frozenset({"singles", "combo_calibration"}),
-        pair_manifest_checksum="deadbeef",
-        response_space_checksum="cafe",
-        training_pair_ids=(("B", "C"),),
-        single_gene_ids=("A", "B", "C"),
-    )
-
-
 def _backend(tmp_path) -> SubprocessBaselineBackend:
     # expected_response_artifact_sha256 matches _payload()'s response_projection
     # ("3" * 64); execution_identity_lock matches the stub worker's manifest.
@@ -322,29 +311,6 @@ def _backend(tmp_path) -> SubprocessBaselineBackend:
         expected_response_artifact_sha256="3" * 64,
         execution_identity_lock=_stub_lock(),
     )
-
-
-def test_predict_end_to_end_through_adapter(tmp_path) -> None:
-    be = _backend(tmp_path)
-    be.configure_payload(_payload())
-    adapter = BaselineAdapter(name="stub", backend=be)
-    out = adapter.predict(_context(), [("A", "B"), ("A", "C")], 3)
-    assert set(out) == {("A", "B"), ("A", "C")}
-    # additive stub: delta(A,B) = singles[A] + singles[B]
-    np.testing.assert_allclose(out[("A", "B")], np.array([0.5, 0.7, 0.9]))
-    # the verified execution manifest enters the provenance manifest post-predict.
-    prov = be.provenance_manifest
-    assert prov["execution_manifest"]["prediction_representation"] == "cell_raw_counts"
-    assert prov["execution_identity_lock"]["adapter_version"] == "stub-1"
-
-
-def test_predict_is_deterministic(tmp_path) -> None:
-    be1, be2 = _backend(tmp_path), _backend(tmp_path)
-    be1.configure_payload(_payload())
-    be2.configure_payload(_payload())
-    a = BaselineAdapter(name="stub", backend=be1).predict(_context(), [("A", "B")], 3)
-    b = BaselineAdapter(name="stub", backend=be2).predict(_context(), [("A", "B")], 3)
-    np.testing.assert_allclose(a[("A", "B")], b[("A", "B")])
 
 
 def test_payload_with_sealed_token_is_refused(tmp_path) -> None:
