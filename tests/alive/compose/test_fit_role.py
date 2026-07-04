@@ -15,6 +15,7 @@ from alive.compose.fit_role import (
     FitRoleArtifactSpec,
     FitRoleExtraction,
     _file_sha256,
+    build_response_projection,
     canonical_gene_order_sha256,
     content_manifest_sha256,
     extract_fit_roles,
@@ -22,6 +23,7 @@ from alive.compose.fit_role import (
     row_identity_sha256,
     validate_fit_role_artifact,
 )
+from alive.compose.response import fit_response_space
 
 
 def _csr(rows: list[list[float]]) -> sparse.csr_matrix:
@@ -495,3 +497,57 @@ def test_validate_rejects_provenance_row_identity_mismatch(tmp_path):
     )
     with pytest.raises(FitRoleArtifactError):
         _validate(tampered, str(tmp_path))
+
+
+# --- Task 1 (A2): build_response_projection block serialization -----------------
+
+
+def _toy_space_and_counts(seed: int = 0):
+    rng = np.random.default_rng(seed)
+    # 20 control + 12 single cells, 8 genes, integer counts, positive library
+    counts = rng.integers(1, 40, size=(32, 8)).astype(np.float64)
+    X = sparse.csr_matrix(counts)
+    control_idx = np.arange(0, 20)
+    single_idx = np.arange(20, 32)
+    space = fit_response_space(
+        X,
+        control_idx=control_idx,
+        eligible_single_idx=single_idx,
+        n_hvg=5,
+        pca_dim=3,
+        seed=1,
+    )
+    control_mean = space.project(X, control_idx).mean(axis=0)  # z-space control centroid
+    gene_order = [f"G{i}" for i in range(8)]
+    return space, X, control_idx, control_mean, gene_order
+
+
+def test_build_response_projection_block_shape_and_fields():
+    space, X, _, control_mean, gene_order = _toy_space_and_counts()
+    block = build_response_projection(
+        space,
+        gene_order=gene_order,
+        control_mean=control_mean,
+        raw_data_sha256="rawdeadbeef",
+    )
+    assert set(block) == {
+        "response_artifact_sha256",
+        "raw_data_sha256",
+        "gene_order_sha256",
+        "hvg_gene_ids",
+        "transform",
+        "median_library",
+        "pca_mean",
+        "pca_components",
+        "control_mean",
+        "delta_convention",
+    }
+    assert block["transform"] == ["normalize_total_median", "log1p"]
+    assert block["delta_convention"] == "z_minus_control_mean"
+    assert block["raw_data_sha256"] == "rawdeadbeef"
+    # hvg_gene_ids maps hvg_idx onto gene_order, order preserved
+    assert block["hvg_gene_ids"] == [gene_order[i] for i in space.hvg_idx]
+    assert len(block["pca_mean"]) == space.n_hvg
+    assert np.asarray(block["pca_components"]).shape == (space.pca_dim, space.n_hvg)
+    assert len(block["control_mean"]) == space.pca_dim
+    np.testing.assert_allclose(block["control_mean"], control_mean)

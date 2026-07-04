@@ -16,6 +16,7 @@ from dataclasses import dataclass
 import numpy as np
 from scipy import sparse
 
+from alive.compose.response import RESPONSE_TRANSFORM, ResponseSpace, verify_response_artifact
 from alive.provenance import sha256_json
 
 _ALLOWED_ROLES: frozenset[str] = frozenset({"control", "singles", "combo_calibration"})
@@ -799,3 +800,82 @@ def _validate_fit_role_artifact_checks(
         raise FitRoleArtifactError("artifact shape differs from spec")
     if role_counts != spec.role_counts:
         raise FitRoleArtifactError("artifact role_counts differ from spec")
+
+
+def build_response_projection(
+    response_space: ResponseSpace,
+    *,
+    gene_order: Sequence[str],
+    control_mean: Sequence[float] | np.ndarray,
+    raw_data_sha256: str,
+) -> dict:
+    """Serialize a ``ResponseSpace`` into the spec §2.2 ``response_projection`` block.
+
+    The block is the single-source-of-truth native→PCA-50 operator a worker
+    applies to its full-gene predictions. ``verify_response_artifact`` re-checks
+    the space checksum and yields the combined (space + control_mean) digest used
+    as ``response_artifact_sha256``.
+
+    Parameters
+    ----------
+    response_space : ResponseSpace
+        The frozen, checksum-sealed response space (its ``_control_mean`` may be
+        ``None``; the z-space centroid is supplied separately).
+    gene_order : sequence of str
+        Canonical full gene-ID order the space was fit against; ``hvg_idx`` maps
+        into it to name the HVGs and to bind ``gene_order_sha256``.
+    control_mean : sequence of float
+        z-space control centroid, length ``pca_dim``.
+    raw_data_sha256 : str
+        Exact raw-data digest, embedded for cross-source equality (spec §2.2).
+
+    Returns
+    -------
+    dict
+        The ``response_projection`` block (spec §2.2).
+
+    Raises
+    ------
+    FitRoleArtifactError
+        On a checksum/shape/range/finiteness violation.
+    """
+    genes = _check_gene_ids(gene_order)
+    try:
+        snapshot, ctrl, combined = verify_response_artifact(response_space, control_mean)
+    except ValueError as exc:
+        raise FitRoleArtifactError(f"invalid response space: {exc}") from exc
+
+    n_hvg = int(snapshot.n_hvg)
+    pca_dim = int(snapshot.pca_dim)
+    hvg_idx = np.asarray(snapshot.hvg_idx, dtype=np.int64)
+    if hvg_idx.shape != (n_hvg,):
+        raise FitRoleArtifactError("hvg_idx does not match n_hvg")
+    if hvg_idx.min(initial=0) < 0 or (hvg_idx.size and int(hvg_idx.max()) >= len(genes)):
+        raise FitRoleArtifactError("hvg_idx out of range for the given gene_order")
+    pca_components = np.asarray(snapshot.pca_components, dtype=np.float64)
+    pca_mean = np.asarray(snapshot.pca_mean, dtype=np.float64)
+    if pca_components.shape != (pca_dim, n_hvg):
+        raise FitRoleArtifactError("pca_components shape does not match (pca_dim, n_hvg)")
+    if pca_mean.shape != (n_hvg,):
+        raise FitRoleArtifactError("pca_mean length does not match n_hvg")
+    if ctrl.shape != (pca_dim,):
+        raise FitRoleArtifactError("control_mean must be a pca_dim vector")
+    if not (
+        np.all(np.isfinite(pca_components))
+        and np.all(np.isfinite(pca_mean))
+        and np.all(np.isfinite(ctrl))
+    ):
+        raise FitRoleArtifactError("projection arrays must be finite")
+
+    return {
+        "response_artifact_sha256": str(combined),
+        "raw_data_sha256": str(raw_data_sha256),
+        "gene_order_sha256": canonical_gene_order_sha256(genes),
+        "hvg_gene_ids": [genes[int(i)] for i in hvg_idx],
+        "transform": list(RESPONSE_TRANSFORM),
+        "median_library": float(snapshot.median_library),
+        "pca_mean": pca_mean.tolist(),
+        "pca_components": pca_components.tolist(),
+        "control_mean": ctrl.tolist(),
+        "delta_convention": "z_minus_control_mean",
+    }
