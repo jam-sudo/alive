@@ -347,8 +347,10 @@ def build_subprocess_fit_payload(
     reused verbatim for the top-level ``pca_components`` / ``control_mean`` so the
     validator's cross-source float equality holds, and the fit-role artifact's
     raw-data + gene-order digests are bound to the response source. The
-    ``response_artifact_sha256``↔``response_space_checksum`` binding is added by a
-    later task.
+    projection's ``response_artifact_sha256`` must additionally equal
+    ``inputs.response_space_checksum`` (the separately verified response-space
+    checksum), closing the circular-equality gap: the payload is bound to the
+    *independently* verified response artifact, not merely self-consistent.
 
     Parameters
     ----------
@@ -376,9 +378,10 @@ def build_subprocess_fit_payload(
     Raises
     ------
     ValueError
-        On a malformed response artifact, a fold/pair misalignment, or a
+        On a malformed response artifact, a fold/pair misalignment, a
         raw-data / gene-order digest mismatch between the fit-role artifact and
-        the response source.
+        the response source, or a projection whose ``response_artifact_sha256``
+        does not equal the independently verified ``inputs.response_space_checksum``.
     """
     if set(response_artifact) != {"response_space", "control_mean"}:
         raise ValueError("response_artifact must contain exactly response_space + control_mean")
@@ -397,6 +400,8 @@ def build_subprocess_fit_payload(
         control_mean=control_mean,
         raw_data_sha256=raw_data_sha256,
     )
+    if projection["response_artifact_sha256"] != inputs.response_space_checksum:
+        raise ValueError("projection does not match the independently verified response artifact")
     fit_role_block = fit_role_spec.to_payload_block()
     bound = bind_response_source(gene_order=gene_order, raw_data_sha256=raw_data_sha256)
     if fit_role_block["raw_data_sha256"] != bound["raw_data_sha256"]:

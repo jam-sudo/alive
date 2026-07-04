@@ -241,8 +241,12 @@ def _subprocess_adapters(inputs: Phase2aInputs, store: DevelopmentOutcomeStore, 
     response_artifact, gene_order, fit_role_spec, combined = _response_and_fit_role(
         tmp_path, response_dim=inputs.response_dim, raw_data_sha256="subproc-shared-raw"
     )
+    # bind the independently verified response-artifact digest onto the payload
+    # inputs so the emitter's response_artifact_sha256 <-> response_space_checksum
+    # guard is satisfied (the run itself keeps its own inputs / expected_hashes).
+    payload_inputs = dataclasses.replace(inputs, response_space_checksum=combined)
     payload = build_subprocess_fit_payload(
-        inputs=inputs,
+        inputs=payload_inputs,
         outcome_store=store,
         response_artifact=response_artifact,
         oof_folds=[0] * len(inputs.cal_pair_ids),
@@ -441,6 +445,31 @@ def test_build_subprocess_payload_is_v2_with_consistent_blocks(tmp_path):
     from alive.compose.baseline_subprocess import _validate_payload
 
     _validate_payload(payload, expected_response_artifact_sha256=inputs.response_space_checksum)
+
+
+def test_build_subprocess_payload_rejects_unverified_response_artifact(tmp_path):
+    # Same Fixture-contract assembly as the Task-4 consistency test, but the bound
+    # response-space checksum is corrupted so it no longer equals the projection's
+    # independently verified response digest. The emitter must fail closed BEFORE a
+    # payload is returned (Global Constraint "Response artifact equality is not
+    # circular"; spec §2.2).
+    inst = _build_instance(np.random.default_rng(77))
+    store = _store(inst)
+    response_artifact, gene_order, fit_role_spec, combined = _response_and_fit_role(
+        tmp_path, response_dim=_inputs(inst).response_dim, raw_data_sha256="shared_raw"
+    )
+    inputs = _inputs(inst, response_space_checksum=combined)
+    inputs = dataclasses.replace(inputs, response_space_checksum="f" * 64)
+    with pytest.raises(ValueError, match="independently verified response artifact"):
+        build_subprocess_fit_payload(
+            inputs=inputs,
+            outcome_store=store,
+            response_artifact=response_artifact,
+            oof_folds=[0] * len(inputs.cal_pair_ids),
+            fit_role_spec=fit_role_spec,
+            gene_order=gene_order,
+            raw_data_sha256="shared_raw",
+        )
 
 
 def test_l1_prediction_equals_identity_only_path():
