@@ -18,7 +18,13 @@ import numpy as np
 import pytest
 from scipy import sparse
 
-from alive.compose.response import ResponseSpace, fit_response_space, verify_response_artifact
+from alive.compose.response import (
+    ResponseSpace,
+    bind_response_source,
+    fit_response_space,
+    verify_response_artifact,
+)
+from alive.provenance import sha256_json
 
 # ---------------------------------------------------------------------------
 # Fixtures / helpers
@@ -357,3 +363,19 @@ def test_verify_response_artifact_rejects_nonfinite_control_mean():
 
     with pytest.raises(ValueError, match="finite"):
         verify_response_artifact(space, control_mean)
+
+
+def test_bind_response_source_matches_canonical_gene_digest():
+    genes = ["G0", "G1", "G2"]
+    bound = bind_response_source(gene_order=genes, raw_data_sha256="rawbeef")
+    assert bound == {
+        "gene_order_sha256": sha256_json(["G0", "G1", "G2"]),
+        "raw_data_sha256": "rawbeef",
+    }
+
+
+def test_bind_response_source_rejects_empty_or_duplicate_genes():
+    with pytest.raises(ValueError):
+        bind_response_source(gene_order=[], raw_data_sha256="r")
+    with pytest.raises(ValueError):
+        bind_response_source(gene_order=["G0", "G0"], raw_data_sha256="r")

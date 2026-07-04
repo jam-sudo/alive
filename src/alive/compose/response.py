@@ -28,6 +28,7 @@ densified. The full matrix is never materialised.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 
 import numpy as np
@@ -515,3 +516,45 @@ def _round_array(arr: NDArray) -> list:
 def _round_float(value: float) -> float:
     """Round a scalar to 12 decimals for stable checksums."""
     return float(np.round(float(value), 12))
+
+
+def bind_response_source(
+    *,
+    gene_order: Sequence[str],
+    raw_data_sha256: str,
+) -> dict:
+    """Bind the response artifact to its canonical gene order and raw-data digest.
+
+    Phase-2a/2b enforce that these digests equal the fit-role artifact's and the
+    projection block's, so the response space, the cell-level fit data, and the
+    outcome source share one raw-data SHA and one gene order (spec §7.2, §2.2).
+
+    Parameters
+    ----------
+    gene_order : sequence of str
+        Canonical full gene-ID order the response space was fit against. Must be
+        non-empty and unique.
+    raw_data_sha256 : str
+        Exact raw-data digest from the data card / RunSpec / ledger.
+
+    Returns
+    -------
+    dict
+        ``{"gene_order_sha256": <bare hex>, "raw_data_sha256": <str>}``.
+
+    Raises
+    ------
+    ValueError
+        If ``gene_order`` is empty or contains duplicate / empty IDs.
+    """
+    genes = [str(g) for g in gene_order]
+    if not genes:
+        raise ValueError("gene_order must be non-empty")
+    if any(g == "" for g in genes):
+        raise ValueError("gene_order must not contain empty IDs")
+    if len(set(genes)) != len(genes):
+        raise ValueError("gene_order must be unique")
+    return {
+        "gene_order_sha256": sha256_json(genes),
+        "raw_data_sha256": str(raw_data_sha256),
+    }
