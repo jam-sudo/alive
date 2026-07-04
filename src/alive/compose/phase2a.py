@@ -939,6 +939,92 @@ def _inputs_scan_view(inputs: Phase2aInputs) -> dict[str, object]:
     return view
 
 
+def _baseline_context(inputs: Phase2aInputs) -> BaselineTrainingContext:
+    """The frozen development-role context handed to every subprocess adapter.
+
+    Parameters
+    ----------
+    inputs : Phase2aInputs
+        The bound inputs; only development-role identities/checksums are read.
+
+    Returns
+    -------
+    BaselineTrainingContext
+        The single context reused for the combined subprocess fit (spec §2.5),
+        pinning the allowed roles, manifest/response checksums and the ordered
+        calibration pair IDs and single-gene IDs.
+    """
+    return BaselineTrainingContext(
+        allowed_roles=frozenset({"singles", "combo_calibration"}),
+        pair_manifest_checksum=inputs.manifest_checksum,
+        response_space_checksum=inputs.response_space_checksum,
+        training_pair_ids=tuple(tuple(p) for p in inputs.cal_pair_ids),
+        single_gene_ids=tuple(
+            sorted(inputs.delta_by_gene, key=lambda gene: str(gene).encode("utf-8"))
+        ),
+    )
+
+
+def _combined_pair_union(
+    double_ids: Sequence[tuple[str, str]],
+    single_ids: Sequence[tuple[str, str]],
+) -> list[tuple[str, str]]:
+    """Ordered de-duplicated double∪single request (doubles first) for a single fit.
+
+    Parameters
+    ----------
+    double_ids : sequence of (str, str)
+        The registered double-unseen sealed pair IDs.
+    single_ids : sequence of (str, str)
+        The registered single-unseen sealed pair IDs.
+
+    Returns
+    -------
+    list of (str, str)
+        The combined request the subprocess worker fits/predicts exactly once,
+        with the double-unseen pairs first and any overlap de-duplicated.
+    """
+    union: list[tuple[str, str]] = []
+    for p in (*double_ids, *single_ids):
+        pair = (p[0], p[1])
+        if pair not in union:
+            union.append(pair)
+    return union
+
+
+def _predict_combined_adapters(
+    inputs: Phase2aInputs,
+    combined_pair_ids: Sequence[tuple[str, str]],
+    baseline_adapters: Mapping[str, object],
+) -> dict[str, dict[tuple[str, str], np.ndarray]]:
+    """Invoke every subprocess adapter EXACTLY once on the combined pair union.
+
+    Honors the single-fit / single-checkpoint / combined-request rule (spec §2.5):
+    each worker fits once and predicts the whole union; :func:`_predict_role` then
+    splits the cached result per role without re-invoking the worker.
+
+    Parameters
+    ----------
+    inputs : Phase2aInputs
+        The bound inputs; supplies the frozen :func:`_baseline_context`.
+    combined_pair_ids : sequence of (str, str)
+        The ordered double∪single request from :func:`_combined_pair_union`.
+    baseline_adapters : Mapping of str to adapter
+        The subprocess adapters keyed by method name.
+
+    Returns
+    -------
+    dict
+        ``name -> {pair_id -> length-response_dim prediction vector}`` for every
+        adapter, each produced by a single ``predict`` call over the union.
+    """
+    context = _baseline_context(inputs)
+    return {
+        name: adapter.predict(context, list(combined_pair_ids), inputs.response_dim)
+        for name, adapter in baseline_adapters.items()
+    }
+
+
 def _predict_role(
     inputs: Phase2aInputs,
     pair_ids: Sequence[tuple[str, str]],
@@ -946,6 +1032,8 @@ def _predict_role(
     selected_Z: np.ndarray,
     perturbation_mean_prediction: np.ndarray,
     baseline_adapters: Mapping[str, BaselineAdapter] | None = None,
+    *,
+    adapter_predictions: Mapping[str, Mapping[tuple[str, str], np.ndarray]] | None = None,
 ) -> dict[str, dict[tuple[str, str], np.ndarray]]:
     """Predict every roster method for a sealed role using identities/features only.
 
@@ -971,6 +1059,14 @@ def _predict_role(
         Learned models already fitted on calibration data (``predict_eps``).
     selected_Z : numpy.ndarray
         The factor bank for the selected ``k_total``.
+    baseline_adapters : Mapping of str to BaselineAdapter, optional
+        Subprocess adapters (GEARS/CPA). When ``adapter_predictions`` is None the
+        adapter predicts this role directly; otherwise it is only a key roster.
+    adapter_predictions : Mapping of str to (Mapping of pair_id to ndarray), optional
+        The pre-computed combined single-fit predictions from
+        :func:`_predict_combined_adapters`. When supplied this role's predictions
+        are SLICED out of it (no re-invocation), enforcing the §2.5 single-fit
+        rule. When None (default) the adapter is invoked per role.
 
     Returns
     -------
@@ -999,17 +1095,19 @@ def _predict_role(
         (g, h): np.asarray(perturbation_mean_prediction, dtype=float).copy() for g, h in pair_ids
     }
     if baseline_adapters:
-        context = BaselineTrainingContext(
-            allowed_roles=frozenset({"singles", "combo_calibration"}),
-            pair_manifest_checksum=inputs.manifest_checksum,
-            response_space_checksum=inputs.response_space_checksum,
-            training_pair_ids=tuple(tuple(p) for p in inputs.cal_pair_ids),
-            single_gene_ids=tuple(
-                sorted(inputs.delta_by_gene, key=lambda gene: str(gene).encode("utf-8"))
-            ),
-        )
-        for name, adapter in baseline_adapters.items():
-            out[name] = adapter.predict(context, list(pair_ids), inputs.response_dim)
+        if adapter_predictions is None:
+            # Direct per-role call (preserves any direct caller): each adapter
+            # fits + predicts this role. run_phase2a NEVER takes this branch —
+            # it pre-computes the combined single fit and passes the split below.
+            context = _baseline_context(inputs)
+            for name, adapter in baseline_adapters.items():
+                out[name] = adapter.predict(context, list(pair_ids), inputs.response_dim)
+        else:
+            # Split the already-computed combined union (spec §2.5 single fit):
+            # slice this role's pairs out of the shared prediction — no re-invoke.
+            for name in baseline_adapters:
+                combined = adapter_predictions[name]
+                out[name] = {(g, h): np.asarray(combined[(g, h)], dtype=float) for g, h in pair_ids}
     return out
 
 
@@ -1300,6 +1398,19 @@ def _run_phase2a_core(
         model = factory()
         model.fit(selected_Z, list(inputs.cal_idx_pairs), eps_cal, lam=float(selected_lambda))
         fitted[name] = model
+    # Combined single-fit invocation (spec §2.5) BEFORE the adapter provenance
+    # read: each subprocess worker fits ONCE and predicts the whole double∪single
+    # union. This MUST precede the provenance_manifest read below because
+    # SubprocessBaselineBackend.provenance_manifest only carries the execution
+    # manifest (checkpoint + prediction digests) AFTER a predict has run, so the
+    # combined predict must happen first for those digests to bind into
+    # effective_model_checksum (spec §2.5/§10 — the method lock).
+    combined_pairs = _combined_pair_union(
+        inputs.sealed_double_pair_ids, inputs.sealed_single_pair_ids
+    )
+    adapter_predictions = (
+        _predict_combined_adapters(inputs, combined_pairs, adapters) if adapters else None
+    )
     model_artifact_checksums = {
         name: fitted_model_checksum(model) for name, model in sorted(fitted.items())
     }
@@ -1323,6 +1434,7 @@ def _run_phase2a_core(
         selected_Z,
         mean_prediction,
         adapters,
+        adapter_predictions=adapter_predictions,
     )
     single_preds = _predict_role(
         inputs,
@@ -1331,6 +1443,7 @@ def _run_phase2a_core(
         selected_Z,
         mean_prediction,
         adapters,
+        adapter_predictions=adapter_predictions,
     )
 
     roster = cfg.method_roster

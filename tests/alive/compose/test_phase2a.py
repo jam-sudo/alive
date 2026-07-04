@@ -46,6 +46,9 @@ from alive.compose.phase2a import (
     OutcomeAccessAudit,
     Phase2aInputs,
     Phase2aResult,
+    _combined_pair_union,
+    _predict_combined_adapters,
+    _predict_role,
     _scan_inputs_for_leakage,
     _verify_factor_banks,
     _verify_scientific_data_assets,
@@ -932,3 +935,57 @@ def test_result_is_frozen_dataclass():
     assert dataclasses.is_dataclass(res)
     with pytest.raises(dataclasses.FrozenInstanceError):
         res.sealed_access_count = 1  # type: ignore[misc]
+
+
+# --------------------------------------------------------------------------- #
+# §2.5 single-fit rule: subprocess adapters fit ONCE on the combined pair union
+# --------------------------------------------------------------------------- #
+@pytest.fixture
+def minimal_inputs() -> Phase2aInputs:
+    """A minimal ``Phase2aInputs`` with disjoint, non-empty sealed roles."""
+    return _inputs(_build_instance(np.random.default_rng(8)))
+
+
+class _SpyAdapter:
+    """Duck-typed baseline adapter that records each predict() call."""
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+        self.calls: list[tuple] = []
+
+    def predict(self, context, pair_ids, response_dim):
+        self.calls.append(tuple(tuple(p) for p in pair_ids))
+        return {(g, h): np.full(response_dim, len(g + h), dtype=float) for g, h in pair_ids}
+
+
+def test_subprocess_adapter_fits_once_for_combined_union(minimal_inputs):
+    inputs = minimal_inputs  # sealed_double_pair_ids + sealed_single_pair_ids disjoint, non-empty
+    spy = _SpyAdapter("gears")
+    adapters = {"gears": spy}
+    combined = _combined_pair_union(inputs.sealed_double_pair_ids, inputs.sealed_single_pair_ids)
+    adapter_preds = _predict_combined_adapters(inputs, combined, adapters)
+    assert len(spy.calls) == 1  # fit-once
+    assert spy.calls[0] == tuple(combined)  # combined union, once
+    Z = np.zeros((1, inputs.response_dim))
+    mean = np.zeros(inputs.response_dim)
+    double = _predict_role(
+        inputs,
+        inputs.sealed_double_pair_ids,
+        {},
+        Z,
+        mean,
+        adapters,
+        adapter_predictions=adapter_preds,
+    )
+    single = _predict_role(
+        inputs,
+        inputs.sealed_single_pair_ids,
+        {},
+        Z,
+        mean,
+        adapters,
+        adapter_predictions=adapter_preds,
+    )
+    assert len(spy.calls) == 1  # NOT re-invoked during role split
+    assert set(double["gears"]) == {tuple(p) for p in inputs.sealed_double_pair_ids}
+    assert set(single["gears"]) == {tuple(p) for p in inputs.sealed_single_pair_ids}
