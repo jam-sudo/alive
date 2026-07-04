@@ -15,6 +15,7 @@ from alive.compose.fit_role import (
     FitRoleArtifactSpec,
     FitRoleExtraction,
     _file_sha256,
+    apply_response_projection,
     build_response_projection,
     canonical_gene_order_sha256,
     content_manifest_sha256,
@@ -551,3 +552,126 @@ def test_build_response_projection_block_shape_and_fields():
     assert np.asarray(block["pca_components"]).shape == (space.pca_dim, space.n_hvg)
     assert len(block["control_mean"]) == space.pca_dim
     np.testing.assert_allclose(block["control_mean"], control_mean)
+
+
+# --- Task 2 (A2): apply_response_projection worker-side operator -----------------
+
+
+def test_operator_matches_responsespace_project_raw_counts():
+    space, X, control_idx, control_mean, gene_order = _toy_space_and_counts(seed=3)
+    block = build_response_projection(
+        space,
+        gene_order=gene_order,
+        control_mean=control_mean,
+        raw_data_sha256="r",
+    )
+    dense = np.asarray(X.todense(), dtype=np.float64)
+    # single-row round trip == ResponseSpace.project on the same row
+    for i in (0, 5, 25):
+        z = apply_response_projection(
+            block,
+            dense[[i]],
+            gene_order,
+            representation="cell_raw_counts",
+        )
+        np.testing.assert_allclose(z[0], space.project(X, np.array([i]))[0], rtol=0, atol=1e-9)
+    # population mean matches too
+    idx = np.arange(20, 32)
+    z_mean = apply_response_projection(
+        block,
+        dense[idx],
+        gene_order,
+        representation="cell_raw_counts",
+    ).mean(axis=0)
+    np.testing.assert_allclose(z_mean, space.project(X, idx).mean(axis=0), atol=1e-9)
+
+
+def test_pseudobulk_is_a_distinct_nonlinear_path():
+    space, X, control_idx, control_mean, gene_order = _toy_space_and_counts(seed=4)
+    block = build_response_projection(
+        space,
+        gene_order=gene_order,
+        control_mean=control_mean,
+        raw_data_sha256="r",
+    )
+    dense = np.asarray(X.todense(), dtype=np.float64)
+    idx = np.arange(20, 32)
+    mean_of_project = apply_response_projection(
+        block,
+        dense[idx],
+        gene_order,
+        representation="cell_raw_counts",
+    ).mean(axis=0)
+    pseudobulk = dense[idx].mean(axis=0, keepdims=True)
+    project_of_mean = apply_response_projection(
+        block,
+        pseudobulk,
+        gene_order,
+        representation="raw_pseudobulk_approximation",
+    )[0]
+    # normalize/log1p nonlinearity => the two differ (guards against silent swap)
+    assert not np.allclose(mean_of_project, project_of_mean, atol=1e-6)
+
+
+def test_cell_log_normalized_skips_the_raw_transform():
+    space, X, control_idx, control_mean, gene_order = _toy_space_and_counts(seed=5)
+    block = build_response_projection(
+        space,
+        gene_order=gene_order,
+        control_mean=control_mean,
+        raw_data_sha256="r",
+    )
+    dense = np.asarray(X.todense(), dtype=np.float64)
+    i = 7
+    # pre-apply the frozen normalize+log1p, then feed as log-normalized
+    lib = dense[i].sum()
+    normed = np.log1p(dense[i] * (block["median_library"] / lib))[None, :]
+    z_log = apply_response_projection(
+        block,
+        normed,
+        gene_order,
+        representation="cell_log_normalized",
+    )
+    z_raw = apply_response_projection(
+        block,
+        dense[[i]],
+        gene_order,
+        representation="cell_raw_counts",
+    )
+    np.testing.assert_allclose(z_log[0], z_raw[0], atol=1e-9)
+
+
+def test_operator_rejects_gene_order_mismatch():
+    space, X, control_idx, control_mean, gene_order = _toy_space_and_counts(seed=6)
+    block = build_response_projection(
+        space,
+        gene_order=gene_order,
+        control_mean=control_mean,
+        raw_data_sha256="r",
+    )
+    dense = np.asarray(X.todense(), dtype=np.float64)
+    with pytest.raises(FitRoleArtifactError):
+        apply_response_projection(
+            block,
+            dense[[0]],
+            [f"X{i}" for i in range(8)],
+            representation="cell_raw_counts",
+        )
+
+
+def test_operator_rejects_nonfinite_negative_and_scale_mismatch_inputs():
+    space, X, _, control_mean, gene_order = _toy_space_and_counts(seed=7)
+    block = build_response_projection(
+        space,
+        gene_order=gene_order,
+        control_mean=control_mean,
+        raw_data_sha256="r",
+    )
+    dense = np.asarray(X.todense(), dtype=np.float64)
+    bad = dense[[0]].copy()
+    bad[0, 0] = -1.0
+    with pytest.raises(FitRoleArtifactError):
+        apply_response_projection(block, bad, gene_order, representation="cell_raw_counts")
+    bad[0, 0] = np.nan
+    with pytest.raises(FitRoleArtifactError):
+        apply_response_projection(block, bad, gene_order, representation="cell_log_normalized")

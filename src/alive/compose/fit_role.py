@@ -879,3 +879,96 @@ def build_response_projection(
         "control_mean": ctrl.tolist(),
         "delta_convention": "z_minus_control_mean",
     }
+
+
+PREDICTION_REPRESENTATIONS: frozenset[str] = frozenset(
+    {"cell_raw_counts", "cell_log_normalized", "raw_pseudobulk_approximation"}
+)
+
+
+def _normalize_log1p_full(x: np.ndarray, median_library: float) -> np.ndarray:
+    """Frozen library-size normalize to ``median_library`` then ``log1p``.
+
+    Identical arithmetic to ``response._normalize_log1p`` so the worker-side
+    operator reproduces ``ResponseSpace.project`` exactly.
+    """
+    lib = x.sum(axis=1, keepdims=True)
+    safe = np.where(lib > 0, lib, 1.0)
+    return np.log1p(x * (median_library / safe))
+
+
+def apply_response_projection(
+    block: Mapping,
+    x_native: np.ndarray,
+    gene_order: Sequence[str],
+    *,
+    representation: str,
+) -> np.ndarray:
+    """Reconstruct the spec §2.3 operator ``z(x)`` for full-gene rows (pure numpy).
+
+    ``cell_raw_counts`` and ``raw_pseudobulk_approximation`` apply the full frozen
+    transform (normalize to ``median_library`` + ``log1p``) then HVG subset +
+    centering + PCA projection; ``cell_log_normalized`` skips the raw transform
+    because the caller already log-normalized at the same ``median_library``.
+    Truth δ (``mean(z) - control_mean``) is computed by the caller and is
+    invariant to ``representation`` (spec §2.4).
+
+    Parameters
+    ----------
+    block : Mapping
+        A ``response_projection`` block (spec §2.2).
+    x_native : numpy.ndarray
+        Rows over the full ``gene_order``: raw counts for ``cell_raw_counts`` /
+        ``raw_pseudobulk_approximation``; log-normalized values for
+        ``cell_log_normalized``. Shape ``(n_rows, n_genes)``.
+    gene_order : sequence of str
+        The full gene-ID order of ``x_native``; must match the block's
+        ``gene_order_sha256``.
+    representation : str
+        One of :data:`PREDICTION_REPRESENTATIONS`.
+
+    Returns
+    -------
+    numpy.ndarray
+        Projected z-coordinates, shape ``(n_rows, pca_dim)``.
+
+    Raises
+    ------
+    FitRoleArtifactError
+        On an unknown representation, a gene-order digest mismatch, or a shape
+        mismatch.
+    """
+    if representation not in PREDICTION_REPRESENTATIONS:
+        raise FitRoleArtifactError(f"unknown prediction representation: {representation!r}")
+    genes = [str(g) for g in gene_order]
+    if canonical_gene_order_sha256(genes) != block["gene_order_sha256"]:
+        raise FitRoleArtifactError("gene_order digest mismatch for projection")
+    X = np.asarray(x_native, dtype=np.float64)
+    if X.ndim != 2 or X.shape[1] != len(genes):
+        raise FitRoleArtifactError("x_native must be (n_rows, n_genes) over the full gene order")
+    if not np.all(np.isfinite(X)):
+        raise FitRoleArtifactError("x_native must contain only finite values")
+    if np.any(X < 0):
+        raise FitRoleArtifactError("registered native/log1p representations must be non-negative")
+
+    if representation == "cell_log_normalized":
+        normed = X
+    else:
+        normed = _normalize_log1p_full(X, float(block["median_library"]))
+
+    name_to_col = {g: i for i, g in enumerate(genes)}
+    hvg_gene_ids = list(block["hvg_gene_ids"])
+    try:
+        hvg_cols = [name_to_col[g] for g in hvg_gene_ids]
+    except KeyError as exc:
+        raise FitRoleArtifactError(f"hvg gene {exc} absent from gene_order") from exc
+    sub = normed[:, hvg_cols]
+    pca_mean = np.asarray(block["pca_mean"], dtype=np.float64)
+    pca_components = np.asarray(block["pca_components"], dtype=np.float64)
+    if pca_mean.shape != (len(hvg_cols),):
+        raise FitRoleArtifactError("pca_mean is not aligned with hvg_gene_ids")
+    if pca_components.ndim != 2 or pca_components.shape[1] != len(hvg_cols):
+        raise FitRoleArtifactError("pca_components are not aligned with hvg_gene_ids")
+    if not np.all(np.isfinite(pca_mean)) or not np.all(np.isfinite(pca_components)):
+        raise FitRoleArtifactError("projection arrays must be finite")
+    return (sub - pca_mean) @ pca_components.T
