@@ -12,28 +12,74 @@ import pytest
 from alive.compose.baseline_subprocess import (
     PayloadError,
     SubprocessBaselineBackend,
+    _validate_payload,
     read_payload,
     read_predictions,
     write_payload,
     write_predictions,
 )
 from alive.compose.baselines_combo import BaselineAdapter, BaselineTrainingContext
+from alive.provenance import sha256_json
+
+_GENES = ["A", "B", "C"]
+_GENE_ORDER_SHA = sha256_json(_GENES)
+
+
+def _fit_role_block() -> dict:
+    return {
+        "format": "anndata_h5ad",
+        "artifact_schema_version": 1,
+        "path": "/approved/artifacts/fit_role.h5ad",
+        "sha256": "sha256:" + "0" * 64,
+        "content_manifest_sha256": "1" * 64,
+        "raw_data_sha256": "raw123",
+        "pair_manifest_sha256": "pm123",
+        "eligibility_hash": "elig123",
+        "row_identity_sha256": "2" * 64,
+        "role_obs_key": "role",
+        "perturbation_obs_key": "perturbation",
+        "allowed_obs_roles": ["control", "singles", "combo_calibration"],
+        "gene_order_sha256": _GENE_ORDER_SHA,
+        "n_cells": 30,
+        "n_genes": 3,
+        "role_counts": {"control": 20, "singles": 6, "combo_calibration": 4},
+        "counts_location": "X",
+    }
+
+
+def _response_projection_block(pca_components, control_mean) -> dict:
+    return {
+        "response_artifact_sha256": "3" * 64,
+        "raw_data_sha256": "raw123",  # == fit_role_artifact.raw_data_sha256
+        "gene_order_sha256": _GENE_ORDER_SHA,  # == fit_role_artifact.gene_order_sha256
+        "hvg_gene_ids": ["A", "B"],
+        "transform": ["normalize_total_median", "log1p"],
+        "median_library": 1000.0,
+        "pca_mean": [0.0, 0.0],
+        "pca_components": pca_components,  # == payload["pca_components"]
+        "control_mean": control_mean,  # == payload["control_mean"]
+        "delta_convention": "z_minus_control_mean",
+    }
 
 
 def _payload() -> dict:
+    pca_components = [[1.0, 0.0], [0.0, 1.0], [0.0, 0.0]]
+    control_mean = [0.0, 0.0, 0.0]
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "response_dim": 3,
         "seed": 11,
         "allowed_roles": ["combo_calibration", "singles"],
         "pair_ids": [["A", "B"], ["A", "C"]],
         "single_gene_ids": ["A", "B", "C"],
         "singles_response": [[0.1, 0.2, 0.3], [0.4, 0.5, 0.6], [0.7, 0.8, 0.9]],
-        "control_mean": [0.0, 0.0, 0.0],
+        "control_mean": control_mean,
         "calibration_pair_ids": [["B", "C"]],
         "calibration_delta": [[0.5, 0.5, 0.5]],
-        "pca_components": [[1.0, 0.0], [0.0, 1.0], [0.0, 0.0]],
+        "pca_components": pca_components,
         "oof_folds": [0],
+        "fit_role_artifact": _fit_role_block(),
+        "response_projection": _response_projection_block(pca_components, control_mean),
     }
 
 
@@ -155,3 +201,64 @@ def test_payload_with_sealed_token_is_refused() -> None:
     bad["single_gene_ids"] = ["A", "sealed_double_unseen", "C"]
     with pytest.raises(ValueError, match="sealed"):
         be.configure_payload(bad)
+
+
+def test_v1_schema_version_rejected(tmp_path):
+    p = _payload()
+    p["schema_version"] = 1
+    with pytest.raises(PayloadError):
+        write_payload(str(tmp_path), p)
+
+
+def test_projection_control_mean_divergence_rejected(tmp_path):
+    p = _payload()
+    p["response_projection"]["control_mean"] = [9.0, 9.0, 9.0]  # != payload control_mean
+    with pytest.raises(PayloadError, match="control_mean"):
+        write_payload(str(tmp_path), p)
+
+
+def test_projection_raw_data_divergence_rejected(tmp_path):
+    p = _payload()
+    p["response_projection"]["raw_data_sha256"] = "different"
+    with pytest.raises(PayloadError, match="raw_data"):
+        write_payload(str(tmp_path), p)
+
+
+def test_projection_bad_pca_mean_length_rejected(tmp_path):
+    p = _payload()
+    p["response_projection"]["pca_mean"] = [0.0, 0.0, 0.0]  # len 3 != 2 hvg
+    with pytest.raises(PayloadError, match="pca_mean"):
+        write_payload(str(tmp_path), p)
+
+
+def test_projection_response_artifact_divergence_rejected():
+    p = _payload()
+    with pytest.raises(PayloadError, match="verified response artifact"):
+        _validate_payload(p, expected_response_artifact_sha256="f" * 64)
+
+
+def test_malformed_digest_and_role_counts_rejected(tmp_path):
+    p = _payload()
+    p["fit_role_artifact"]["content_manifest_sha256"] = "not-a-sha"
+    with pytest.raises(PayloadError):
+        write_payload(str(tmp_path), p)
+    p = _payload()
+    p["fit_role_artifact"]["role_counts"]["control"] += 1
+    with pytest.raises(PayloadError, match="n_cells"):
+        write_payload(str(tmp_path), p)
+
+
+def test_fit_role_disallowed_obs_role_rejected(tmp_path):
+    p = _payload()
+    p["fit_role_artifact"]["allowed_obs_roles"] = ["control", "sealed_double_unseen"]
+    with pytest.raises(ValueError):  # sealed-token scan or role-subset
+        write_payload(str(tmp_path), p)
+
+
+def test_pair_ids_overlapping_calibration_rejected(tmp_path):
+    # In A2 the sealed request pair_ids must be disjoint from the calibration
+    # cells present in the fit artifact.
+    p = _payload()
+    p["pair_ids"] = [["A", "B"], ["B", "C"]]  # ("B","C") is a calibration pair
+    with pytest.raises(PayloadError, match="disjoint"):
+        write_payload(str(tmp_path), p)

@@ -55,6 +55,7 @@ from alive.compose.config2 import (
 )
 from alive.compose.datacard import compute_compose_run_id
 from alive.compose.diagnostics2 import FutilityResult, real_calibration_diagnostics
+from alive.compose.fit_role import FitRoleArtifactSpec, build_response_projection
 from alive.compose.freeze import (
     FrozenPredictionBundle,
     OutcomeLeakageError,
@@ -62,7 +63,7 @@ from alive.compose.freeze import (
     _assert_no_sealed,
 )
 from alive.compose.models import fitted_model_checksum
-from alive.compose.response import ResponseSpace, verify_response_artifact
+from alive.compose.response import ResponseSpace, bind_response_source, verify_response_artifact
 from alive.compose.zfactor import GeneFactorBank
 from alive.provenance import RunLedger, sha256_bytes, sha256_file, sha256_json
 
@@ -334,27 +335,81 @@ def build_subprocess_fit_payload(
     outcome_store: DevelopmentOutcomeStore,
     response_artifact: Mapping,
     oof_folds: Sequence[int],
+    fit_role_spec: FitRoleArtifactSpec,
+    gene_order: Sequence[str],
+    raw_data_sha256: str,
 ) -> dict[str, object]:
-    """Assemble the canonical fit-role-only payload for GEARS/CPA workers."""
+    """Assemble the canonical payload-v2 fit-role payload for GEARS/CPA workers.
+
+    The v2 payload carries the A1 ``fit_role_artifact`` block and a serialized
+    native→PCA response operator (``response_projection``) alongside the
+    development singles/calibration design. The serialized projection arrays are
+    reused verbatim for the top-level ``pca_components`` / ``control_mean`` so the
+    validator's cross-source float equality holds, and the fit-role artifact's
+    raw-data + gene-order digests are bound to the response source. The
+    ``response_artifact_sha256``↔``response_space_checksum`` binding is added by a
+    later task.
+
+    Parameters
+    ----------
+    inputs : Phase2aInputs
+        Bound development inputs (identities/features only).
+    outcome_store : DevelopmentOutcomeStore
+        Calibration-only outcome store, aligned with ``inputs.cal_pair_ids``.
+    response_artifact : Mapping
+        ``{"response_space": ResponseSpace, "control_mean": z-space centroid}``.
+    oof_folds : sequence of int
+        OOF fold assignment, one per calibration pair.
+    fit_role_spec : FitRoleArtifactSpec
+        The immutable identity of the written fit-role ``.h5ad`` artifact.
+    gene_order : sequence of str
+        Canonical full gene order the response space was fit against; must equal
+        the fit-role artifact's ``var_names``.
+    raw_data_sha256 : str
+        Shared raw-data digest bound across the artifact, projection and source.
+
+    Returns
+    -------
+    dict of str to object
+        The payload-v2 fit-role payload.
+
+    Raises
+    ------
+    ValueError
+        On a malformed response artifact, a fold/pair misalignment, or a
+        raw-data / gene-order digest mismatch between the fit-role artifact and
+        the response source.
+    """
     if set(response_artifact) != {"response_space", "control_mean"}:
         raise ValueError("response_artifact must contain exactly response_space + control_mean")
     response_space = response_artifact["response_space"]
-    components = np.asarray(getattr(response_space, "pca_components", None), dtype=float)
     control_mean = np.asarray(response_artifact["control_mean"], dtype=float)
-    if components.ndim != 2 or components.shape[0] != inputs.response_dim:
-        raise ValueError("response-space PCA components are not response_dim aligned")
     if control_mean.shape != (inputs.response_dim,):
         raise ValueError("response artifact control_mean is not response_dim aligned")
     if len(oof_folds) != len(inputs.cal_pair_ids):
         raise ValueError("oof_folds must align one-to-one with calibration pairs")
     if outcome_store.combo_calibration_pair_ids != tuple(tuple(p) for p in inputs.cal_pair_ids):
         raise ValueError("development outcomes are not aligned with calibration pair IDs")
+
+    projection = build_response_projection(
+        response_space,
+        gene_order=gene_order,
+        control_mean=control_mean,
+        raw_data_sha256=raw_data_sha256,
+    )
+    fit_role_block = fit_role_spec.to_payload_block()
+    bound = bind_response_source(gene_order=gene_order, raw_data_sha256=raw_data_sha256)
+    if fit_role_block["raw_data_sha256"] != bound["raw_data_sha256"]:
+        raise ValueError("fit-role artifact raw_data_sha256 does not match response source")
+    if fit_role_block["gene_order_sha256"] != bound["gene_order_sha256"]:
+        raise ValueError("fit-role artifact gene_order_sha256 does not match response source")
+
     genes = tuple(sorted(inputs.delta_by_gene, key=lambda gene: gene.encode("utf-8")))
     calibration_delta = np.asarray(inputs.additive_cal, dtype=float) + np.asarray(
         outcome_store.combo_calibration_eps, dtype=float
     )
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "response_dim": int(inputs.response_dim),
         "seed": int(inputs.seed),
         "allowed_roles": ["singles", "combo_calibration"],
@@ -363,11 +418,14 @@ def build_subprocess_fit_payload(
         "singles_response": [
             np.asarray(inputs.delta_by_gene[gene], dtype=float).tolist() for gene in genes
         ],
-        "control_mean": control_mean.tolist(),
+        # reuse the projection-serialized arrays so the cross-source equality holds
+        "control_mean": projection["control_mean"],
         "calibration_pair_ids": [list(pair) for pair in inputs.cal_pair_ids],
         "calibration_delta": calibration_delta.tolist(),
-        "pca_components": components.tolist(),
+        "pca_components": projection["pca_components"],
         "oof_folds": [int(fold) for fold in oof_folds],
+        "fit_role_artifact": fit_role_block,
+        "response_projection": projection,
     }
 
 

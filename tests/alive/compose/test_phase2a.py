@@ -27,15 +27,16 @@ import dataclasses
 import json
 import sys
 from pathlib import Path
-from types import SimpleNamespace
 
 import numpy as np
 import pytest
+from scipy import sparse
 
 from alive.compose.baseline_subprocess import SubprocessBaselineBackend
 from alive.compose.baselines_combo import BaselineAdapter, additive
 from alive.compose.config2 import ScientificModeError, load_compose_phase2_config
 from alive.compose.datacard import compute_compose_run_id
+from alive.compose.fit_role import FitRoleExtraction, generate_fit_role_artifact
 from alive.compose.freeze import FrozenPredictionBundle, OutcomeLeakageError
 from alive.compose.models import IDOnlyModel, L1Model, L2Model, L3Model
 from alive.compose.operator import bilinear_predict
@@ -160,15 +161,81 @@ def _model_factories():
     }
 
 
-def _subprocess_adapters(inputs: Phase2aInputs, store: DevelopmentOutcomeStore):
+def _response_and_fit_role(tmp_path, *, response_dim, raw_data_sha256, seed=0, tag="a"):
+    """Assemble a real response space + a written fit-role artifact for a payload.
+
+    Builds a synthetic raw-count matrix (positive libraries, integer counts) over
+    a ``response_dim + 1``-gene transcriptome, fits a leakage-safe response space
+    on the control + single rows (``pca_dim == response_dim`` so the projection
+    aligns with the payload's ``response_dim``), takes the z-space control
+    centroid, and writes an immutable fit-role ``.h5ad`` whose ``var_names`` equal
+    the ``gene_order`` and whose ``raw_data_sha256`` equals the shared digest.
+
+    Returns
+    -------
+    tuple
+        ``(response_artifact, gene_order, fit_role_spec, combined_checksum)`` where
+        ``combined_checksum`` is ``verify_response_artifact(space, control_mean)[2]``.
+    """
+    rng = np.random.default_rng(4242 + seed)
+    n_genes = response_dim + 1
+    gene_order = [f"T{i}" for i in range(n_genes)]
+    n_control, n_single, n_combo = 12, 8, 4
+    n_cells = n_control + n_single + n_combo
+    counts = rng.integers(1, 50, size=(n_cells, n_genes)).astype(np.float64)
+    X = sparse.csr_matrix(counts)
+    control_idx = np.arange(0, n_control)
+    single_idx = np.arange(n_control, n_control + n_single)
+    space = fit_response_space(
+        X,
+        control_idx=control_idx,
+        eligible_single_idx=single_idx,
+        n_hvg=n_genes,
+        pca_dim=response_dim,
+        seed=seed,
+    )
+    control_mean = space.project(X, control_idx).mean(axis=0)
+    _, _, combined = verify_response_artifact(space, control_mean)
+
+    rows = (
+        [(f"c{i}", "control", "control") for i in range(n_control)]
+        + [(f"s{i}", "singles", f"S{i}") for i in range(n_single)]
+        + [(f"m{i}", "combo_calibration", f"CA{i}_CB{i}") for i in range(n_combo)]
+    )
+    extraction = FitRoleExtraction(
+        X=X,
+        var_names=tuple(gene_order),
+        rows=tuple(rows),
+        role_counts={"control": n_control, "singles": n_single, "combo_calibration": n_combo},
+        raw_data_sha256=raw_data_sha256,
+        pair_manifest_sha256=f"pair-manifest-{tag}",
+        eligibility_hash=f"eligibility-{tag}",
+    )
+    spec = generate_fit_role_artifact(
+        extraction=extraction,
+        out_path=str(Path(tmp_path) / f"fit_role_{tag}.h5ad"),
+        config_sha256="config-sha",
+        data_card_sha256="data-card-sha",
+        calibration_gene_set_hash="cal-set-sha",
+        generator_code_sha256="gen-code-sha",
+        writer_environment_sha256="writer-env-sha",
+    )
+    response_artifact = {"response_space": space, "control_mean": control_mean}
+    return response_artifact, gene_order, spec, combined
+
+
+def _subprocess_adapters(inputs: Phase2aInputs, store: DevelopmentOutcomeStore, tmp_path):
+    response_artifact, gene_order, fit_role_spec, _ = _response_and_fit_role(
+        tmp_path, response_dim=inputs.response_dim, raw_data_sha256="subproc-shared-raw"
+    )
     payload = build_subprocess_fit_payload(
         inputs=inputs,
         outcome_store=store,
-        response_artifact={
-            "response_space": SimpleNamespace(pca_components=np.eye(inputs.response_dim)),
-            "control_mean": np.zeros(inputs.response_dim),
-        },
+        response_artifact=response_artifact,
         oof_folds=[0] * len(inputs.cal_pair_ids),
+        fit_role_spec=fit_role_spec,
+        gene_order=gene_order,
+        raw_data_sha256="subproc-shared-raw",
     )
     worker = Path(__file__).parents[3] / "scripts" / "baselines" / "stub_worker.py"
     adapters = {}
@@ -305,7 +372,7 @@ def test_continue_produces_a_verified_bundle_no_outcomes():
     assert set(res.bundle.predictions_single_unseen["additive"]) == set(inst["sealed_single_id"])
 
 
-def test_subprocess_baselines_are_wired_into_phase2a_freeze():
+def test_subprocess_baselines_are_wired_into_phase2a_freeze(tmp_path):
     inst = _build_instance(np.random.default_rng(31))
     local_factories = {
         name: factory
@@ -314,7 +381,7 @@ def test_subprocess_baselines_are_wired_into_phase2a_freeze():
     }
     inputs = _inputs(inst, model_factories=local_factories)
     store = _store(inst)
-    adapters = _subprocess_adapters(inputs, store)
+    adapters = _subprocess_adapters(inputs, store, tmp_path)
     res = run_phase2a_fixture(
         inputs,
         store,
@@ -327,6 +394,37 @@ def test_subprocess_baselines_are_wired_into_phase2a_freeze():
         assert set(res.bundle.predictions_single_unseen[method]) == set(inst["sealed_single_id"])
     assert res.method_lock is not None
     assert len(res.method_lock["method_roster"]) == 9
+
+
+def test_build_subprocess_payload_is_v2_with_consistent_blocks(tmp_path):
+    inst = _build_instance(np.random.default_rng(77))
+    inputs_base = _inputs(inst)
+    store = _store(inst)
+    response_artifact, gene_order, fit_role_spec, combined = _response_and_fit_role(
+        tmp_path, response_dim=inputs_base.response_dim, raw_data_sha256="shared_raw"
+    )
+    # bind the independently verified response-artifact digest onto the inputs
+    inputs = _inputs(inst, response_space_checksum=combined)
+    payload = build_subprocess_fit_payload(
+        inputs=inputs,
+        outcome_store=store,
+        response_artifact=response_artifact,
+        oof_folds=[0] * len(inputs.cal_pair_ids),
+        fit_role_spec=fit_role_spec,
+        gene_order=gene_order,
+        raw_data_sha256="shared_raw",
+    )
+    assert payload["schema_version"] == 2
+    assert (
+        payload["response_projection"]["raw_data_sha256"]
+        == payload["fit_role_artifact"]["raw_data_sha256"]
+    )
+    assert (
+        payload["response_projection"]["response_artifact_sha256"] == inputs.response_space_checksum
+    )
+    from alive.compose.baseline_subprocess import _validate_payload
+
+    _validate_payload(payload, expected_response_artifact_sha256=inputs.response_space_checksum)
 
 
 def test_l1_prediction_equals_identity_only_path():
