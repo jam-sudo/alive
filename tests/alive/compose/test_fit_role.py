@@ -9,9 +9,11 @@ import pytest
 from scipy import sparse
 
 from alive.compose.fit_role import (
+    _ALLOWED_ROLES,
     ComposeFitRoleExtractor,
     FitRoleArtifactError,
     FitRoleArtifactSpec,
+    FitRoleExtraction,
     _file_sha256,
     canonical_gene_order_sha256,
     content_manifest_sha256,
@@ -322,3 +324,174 @@ def test_validate_wraps_malformed_artifact_as_fit_role_error(tmp_path):
     )
     with pytest.raises(FitRoleArtifactError):
         _validate(missing_spec, str(tmp_path))
+
+
+# --- Task 0: role<->token and spec<->provenance validation hardening ------------
+# These reproductions build FULLY self-consistent artifacts + specs (every
+# file/content digest matches) so that only the new validator checks can catch
+# them. They FAIL on the pre-Task-0 validator (the bypass accepts them) and pass
+# once the role<->token classifier and spec<->provenance binding are enforced.
+
+
+def _forge_artifact(
+    tmp_path: Path,
+    name: str,
+    *,
+    rows,
+    X: sparse.csr_matrix,
+    var_names=("G1", "G2", "G3"),
+    raw_data_sha256: str = "raw",
+    pair_manifest_sha256: str = "pm",
+    eligibility_hash: str = "elig",
+) -> FitRoleArtifactSpec:
+    """Write a self-consistent artifact + spec from ARBITRARY rows.
+
+    Builds a :class:`FitRoleExtraction` directly (bypassing the role-deriving
+    extractor) so a forged role/token pairing or duplicate/empty ``source_row_id``
+    can be materialised, then generates a matching spec via the real writer.
+    """
+    role_counts = {r: sum(1 for _, rr, _ in rows if rr == r) for r in sorted(_ALLOWED_ROLES)}
+    extraction = FitRoleExtraction(
+        X=X,
+        var_names=tuple(var_names),
+        rows=tuple(rows),
+        role_counts=role_counts,
+        raw_data_sha256=raw_data_sha256,
+        pair_manifest_sha256=pair_manifest_sha256,
+        eligibility_hash=eligibility_hash,
+    )
+    return generate_fit_role_artifact(
+        extraction=extraction,
+        out_path=str(tmp_path / name),
+        config_sha256="c",
+        data_card_sha256="d",
+        calibration_gene_set_hash="g",
+        generator_code_sha256="x",
+        writer_environment_sha256="e",
+    )
+
+
+def test_validate_rejects_sealed_combo_mislabeled_as_singles(tmp_path):
+    # Reproduction (a): a SEALED combo token carried on a row DECLARED `singles`.
+    # The artifact + spec are fully self-consistent; only per-row role<->token
+    # classification (not gated on role == combo_calibration) catches the leak.
+    X = _csr([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
+    spec = _forge_artifact(
+        tmp_path,
+        "sealed_as_single.h5ad",
+        rows=(("r0", "control", "control"), ("r1", "singles", "AAA_BBB")),
+        X=X,
+    )
+    with pytest.raises(FitRoleArtifactError):
+        _validate(spec, str(tmp_path))  # calib CEBPE_KLF1; sealed AAA_BBB
+
+
+def test_validate_rejects_single_gene_token_mislabeled_as_control(tmp_path):
+    # role<->token consistency for non-combo rows: a single-gene token declared
+    # `control` must be rejected (control/single token<->role is now checked).
+    X = _csr([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
+    spec = _forge_artifact(
+        tmp_path,
+        "single_as_control.h5ad",
+        rows=(("r0", "control", "control"), ("r1", "control", "KLF1")),
+        X=X,
+    )
+    with pytest.raises(FitRoleArtifactError):
+        _validate(spec, str(tmp_path))
+
+
+def test_validate_rejects_unregistered_combo_hidden_as_singles(tmp_path):
+    # An unregistered combo token (neither calibration nor sealed) hidden under a
+    # `singles` role must fail closed regardless of the declared role.
+    X = _csr([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
+    spec = _forge_artifact(
+        tmp_path,
+        "unreg_combo.h5ad",
+        rows=(("r0", "control", "control"), ("r1", "singles", "XXX_YYY")),
+        X=X,
+    )
+    with pytest.raises(FitRoleArtifactError):
+        _validate(spec, str(tmp_path))
+
+
+@pytest.mark.parametrize("field", ["raw_data_sha256", "pair_manifest_sha256", "eligibility_hash"])
+def test_validate_rejects_spec_provenance_lineage_mismatch(tmp_path, field):
+    # Reproduction (b): the trusted spec advertises lineage that disagrees with the
+    # artifact's own uns.provenance while every file/content digest still matches.
+    spec = _gen(tmp_path)
+    tampered = FitRoleArtifactSpec(**{**spec.__dict__, field: "forged-lineage"})
+    with pytest.raises(FitRoleArtifactError):
+        _validate(tampered, str(tmp_path))
+
+
+def test_validate_rejects_duplicate_source_row_id(tmp_path):
+    # Duplicate source_row_id must be rejected before digesting (row identity is
+    # meaningless if rows are not uniquely addressable).
+    X = _csr([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
+    spec = _forge_artifact(
+        tmp_path,
+        "dup_src.h5ad",
+        rows=(("dup", "control", "control"), ("dup", "singles", "KLF1")),
+        X=X,
+    )
+    with pytest.raises(FitRoleArtifactError):
+        _validate(spec, str(tmp_path))
+
+
+def test_validate_rejects_empty_source_row_id(tmp_path):
+    X = _csr([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
+    spec = _forge_artifact(
+        tmp_path,
+        "empty_src.h5ad",
+        rows=(("", "control", "control"), ("r1", "singles", "KLF1")),
+        X=X,
+    )
+    with pytest.raises(FitRoleArtifactError):
+        _validate(spec, str(tmp_path))
+
+
+def test_validate_rejects_role_count_mismatch(tmp_path):
+    spec = _gen(tmp_path)
+    bad = {"control": 99, "singles": 0, "combo_calibration": 0}
+    tampered = FitRoleArtifactSpec(**{**spec.__dict__, "role_counts": bad})
+    with pytest.raises(FitRoleArtifactError):
+        _validate(tampered, str(tmp_path))
+
+
+def test_validate_rejects_provenance_row_identity_mismatch(tmp_path):
+    # uns.provenance carries its own row/gene digests; if they disagree with the
+    # trusted spec (even while content_manifest is self-consistent) reject.
+    import anndata as ad
+
+    spec = _gen(tmp_path)
+    adata = ad.read_h5ad(spec.path)
+    prov = dict(adata.uns["provenance"])
+    prov["row_identity_sha256"] = "sha_forged"
+    var_names = [str(v) for v in adata.var_names]
+    rows = tuple(
+        (str(s), str(r), str(p))
+        for s, r, p in zip(adata.obs["source_row_id"], adata.obs["role"], adata.obs["perturbation"])
+    )
+    role_counts = {r: sum(1 for _, rr, _ in rows if rr == r) for r in sorted(_ALLOWED_ROLES)}
+    cm = content_manifest_sha256(
+        schema_version=1,
+        X=sparse.csr_matrix(adata.X),
+        var_names=var_names,
+        rows=rows,
+        provenance=prov,
+        role_counts=role_counts,
+    )
+    adata.uns["provenance"] = prov
+    adata.uns["content_manifest_sha256"] = cm
+    out = tmp_path / "prov_row_tamper.h5ad"
+    adata.write_h5ad(out)
+    tampered = FitRoleArtifactSpec(
+        **{
+            **spec.__dict__,
+            "path": str(out),
+            "sha256": _file_sha256(str(out)),
+            "content_manifest_sha256": cm,
+        }
+    )
+    with pytest.raises(FitRoleArtifactError):
+        _validate(tampered, str(tmp_path))

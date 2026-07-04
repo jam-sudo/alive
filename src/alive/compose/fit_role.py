@@ -586,6 +586,68 @@ def _assert_canonical_path(path: str, approved_root: str) -> str:
     return ap
 
 
+def _required_role_for_token(
+    perturbation: str,
+    *,
+    calib: set[tuple[str, str]],
+    sealed: set[tuple[str, str]],
+    control_token: str,
+    combo_sep: str,
+) -> str:
+    """Return the fit role every artifact row carrying ``perturbation`` must declare.
+
+    Mirrors :meth:`ComposeFitRoleExtractor._role_of` so validation classifies each
+    stored token independently of its declared role: the control token maps to
+    ``control``, a canonical registered calibration combo to ``combo_calibration``,
+    and any other token to ``singles``. Unlike the extractor it never returns
+    ``None`` — a valid fit artifact never stores a sealed combo cell, so a sealed
+    pair appearing in obs is a leak and fails closed.
+
+    Parameters
+    ----------
+    perturbation : str
+        The stored obs perturbation token for one row.
+    calib : set of tuple of str
+        Registered calibration combo pairs (canonical, byte-ordered).
+    sealed : set of tuple of str
+        Sealed combo pairs; any occurrence in obs is a leak.
+    control_token : str
+        The token that denotes a control cell.
+    combo_sep : str
+        Separator between the two single-gene tokens of a combo.
+
+    Returns
+    -------
+    str
+        The required role (``control`` / ``singles`` / ``combo_calibration``).
+
+    Raises
+    ------
+    FitRoleArtifactError
+        If a combo token is non-canonical, sealed, in both pair sets, or
+        unregistered — fail closed.
+    """
+    if perturbation == control_token:
+        return "control"
+    if combo_sep in perturbation:
+        a, b = _canonical_pair(perturbation, combo_sep)
+        if perturbation != f"{a}{combo_sep}{b}":
+            raise FitRoleArtifactError(f"combo token is not canonical: {perturbation!r}")
+        pair = (a, b)
+        in_calib = pair in calib
+        in_sealed = pair in sealed
+        if in_calib and in_sealed:
+            raise FitRoleArtifactError(
+                f"combo pair {pair!r} is in both calibration and sealed sets"
+            )
+        if in_sealed:
+            raise FitRoleArtifactError(f"sealed pair present in artifact obs: {pair!r}")
+        if not in_calib:
+            raise FitRoleArtifactError(f"combo pair not in calibration set: {pair!r}")
+        return "combo_calibration"
+    return "singles"
+
+
 def validate_fit_role_artifact(
     path: str,
     *,
@@ -593,13 +655,16 @@ def validate_fit_role_artifact(
     approved_root: str,
     calibration_pair_ids: Sequence[tuple[str, str]],
     sealed_pair_ids: Sequence[tuple[str, str]],
+    control_token: str = "control",
+    combo_sep: str = "_",
 ) -> None:
     """Re-validate a fit-role artifact against its spec before fitting (spec §5).
 
     Re-reads the artifact from disk and re-checks path policy, the file byte
-    digest, every logical-content identity digest, the role closure, and the
-    absence of any sealed combo pair. This is the exact guard a worker runs
-    before fit; it fails closed on any mismatch.
+    digest, per-row role↔token consistency, the binding of the trusted spec to the
+    artifact's own provenance/shape, every logical-content identity digest, the
+    role closure, and the absence of any sealed combo pair. This is the exact
+    guard a worker runs before fit; it fails closed on any mismatch.
 
     Parameters
     ----------
@@ -610,18 +675,25 @@ def validate_fit_role_artifact(
     approved_root : str
         Directory the artifact must live inside.
     calibration_pair_ids : Sequence of tuple of str
-        Registered calibration combo pairs; every ``combo_calibration`` cell
-        must belong to this set.
+        Registered calibration combo pairs; every combo cell must belong to this
+        set.
     sealed_pair_ids : Sequence of tuple of str
-        Sealed combo pairs; no ``combo_calibration`` cell may belong to this
-        set (a sealed pair present in obs is a leak → reject).
+        Sealed combo pairs; no cell of any role may carry a sealed pair (a sealed
+        pair present in obs is a leak → reject).
+    control_token : str, default ``"control"``
+        Token denoting a control cell (A1-consistent default so existing callers
+        that pass only the pair sets keep working).
+    combo_sep : str, default ``"_"``
+        Separator between the two single-gene tokens of a combo (A1-consistent
+        default).
 
     Raises
     ------
     FitRoleArtifactError
-        On any path, digest, role-closure, or sealed-pair violation, and on any
-        otherwise-unexpected failure from a malformed/forged artifact (every
-        failure surfaces as ``FitRoleArtifactError`` — fail closed).
+        On any path, digest, role↔token, lineage, shape, role-closure, or
+        sealed-pair violation, and on any otherwise-unexpected failure from a
+        malformed/forged artifact (every failure surfaces as
+        ``FitRoleArtifactError`` — fail closed).
     """
     try:
         _validate_fit_role_artifact_checks(
@@ -630,6 +702,8 @@ def validate_fit_role_artifact(
             approved_root=approved_root,
             calibration_pair_ids=calibration_pair_ids,
             sealed_pair_ids=sealed_pair_ids,
+            control_token=control_token,
+            combo_sep=combo_sep,
         )
     except FitRoleArtifactError:
         raise
@@ -644,6 +718,8 @@ def _validate_fit_role_artifact_checks(
     approved_root: str,
     calibration_pair_ids: Sequence[tuple[str, str]],
     sealed_pair_ids: Sequence[tuple[str, str]],
+    control_token: str = "control",
+    combo_sep: str = "_",
 ) -> None:
     """Run every fit-role validation check; raise on the first violation.
 
@@ -666,28 +742,60 @@ def _validate_fit_role_artifact_checks(
     calib = {tuple(p) for p in calibration_pair_ids}
     sealed = {tuple(p) for p in sealed_pair_ids}
     perts = [str(p) for p in adata.obs["perturbation"]]
+    srcs = [str(s) for s in adata.obs["source_row_id"]]
+
+    # role↔token: classify EVERY row independently of its declared role (spec
+    # §7.1; mirrors ComposeFitRoleExtractor._role_of). A sealed combo mislabeled
+    # `singles`/`control`, a non-canonical combo, or an unregistered combo all
+    # fail closed here — the check is NOT gated on role == "combo_calibration".
     for role, pert in zip(roles, perts):
-        if role == "combo_calibration":
-            pair = _canonical_pair(pert)
-            if pair in sealed:
-                raise FitRoleArtifactError(f"sealed pair present in artifact obs: {pair!r}")
-            if pair not in calib:
-                raise FitRoleArtifactError(f"combo pair not in calibration set: {pair!r}")
+        expected = _required_role_for_token(
+            pert, calib=calib, sealed=sealed, control_token=control_token, combo_sep=combo_sep
+        )
+        if role != expected:
+            raise FitRoleArtifactError(
+                f"role/token mismatch: token {pert!r} requires role {expected!r}, got {role!r}"
+            )
+
+    # non-empty, unique source_row_id before recomputing row/content digests
+    if any(s == "" for s in srcs):
+        raise FitRoleArtifactError("source_row_id must be non-empty")
+    if len(set(srcs)) != len(srcs):
+        raise FitRoleArtifactError("source_row_id must be unique")
 
     var_names = [str(v) for v in adata.var_names]
-    rows = tuple((str(s), r, p) for s, r, p in zip(adata.obs["source_row_id"], roles, perts))
+    rows = tuple((s, r, p) for s, r, p in zip(srcs, roles, perts))
     role_counts = {r: sum(1 for _, rr, _ in rows if rr == r) for r in sorted(_ALLOWED_ROLES)}
     if canonical_gene_order_sha256(var_names) != spec.gene_order_sha256:
         raise FitRoleArtifactError("gene_order digest mismatch")
     if row_identity_sha256(rows) != spec.row_identity_sha256:
         raise FitRoleArtifactError("row_identity digest mismatch")
+
+    # bind the independently trusted spec to the artifact's OWN provenance/shape so
+    # a spec cannot advertise false lineage while pointing at a valid-but-different
+    # artifact (the content manifest is recomputed from this same provenance).
+    provenance = dict(adata.uns["provenance"])
+    for key in ("raw_data_sha256", "pair_manifest_sha256", "eligibility_hash"):
+        if str(provenance[key]) != str(getattr(spec, key)):
+            raise FitRoleArtifactError(f"{key} differs between spec and artifact provenance")
+    if str(provenance["row_identity_sha256"]) != spec.row_identity_sha256:
+        raise FitRoleArtifactError("provenance row_identity_sha256 mismatch")
+    if str(provenance["gene_order_sha256"]) != spec.gene_order_sha256:
+        raise FitRoleArtifactError("provenance gene_order_sha256 mismatch")
+
     recomputed = content_manifest_sha256(
         schema_version=_ARTIFACT_SCHEMA_VERSION,
         X=sparse.csr_matrix(adata.X),
         var_names=var_names,
         rows=rows,
-        provenance=dict(adata.uns["provenance"]),
+        provenance=provenance,
         role_counts=role_counts,
     )
     if recomputed != spec.content_manifest_sha256:
         raise FitRoleArtifactError("content_manifest digest mismatch")
+    if str(adata.uns["content_manifest_sha256"]) != spec.content_manifest_sha256:
+        raise FitRoleArtifactError("stored content_manifest_sha256 differs from spec")
+    if adata.n_obs != spec.n_cells or adata.n_vars != spec.n_genes:
+        raise FitRoleArtifactError("artifact shape differs from spec")
+    if role_counts != spec.role_counts:
+        raise FitRoleArtifactError("artifact role_counts differ from spec")
