@@ -24,6 +24,7 @@ Load-bearing contracts under test (brief steps 1-9, plan §2.1 / §2.5):
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -32,7 +33,7 @@ import numpy as np
 import pytest
 from scipy import sparse
 
-from alive.compose.baseline_subprocess import SubprocessBaselineBackend
+from alive.compose.baseline_subprocess import ExecutionIdentityLock, SubprocessBaselineBackend
 from alive.compose.baselines_combo import BaselineAdapter, additive
 from alive.compose.config2 import ScientificModeError, load_compose_phase2_config
 from alive.compose.datacard import compute_compose_run_id
@@ -224,8 +225,20 @@ def _response_and_fit_role(tmp_path, *, response_dim, raw_data_sha256, seed=0, t
     return response_artifact, gene_order, spec, combined
 
 
+def _stub_execution_lock() -> ExecutionIdentityLock:
+    """The lock whose identities match ``stub_worker.py``'s emitted manifest."""
+    return ExecutionIdentityLock(
+        prediction_representation="cell_raw_counts",
+        adapter_version="stub-1",
+        adapter_sha256=hashlib.sha256(b"stub-1").hexdigest(),
+        config_sha256=hashlib.sha256(b"stub-config").hexdigest(),
+        resource_sha256=hashlib.sha256(b"stub-resource").hexdigest(),
+        environment_lock_sha256=hashlib.sha256(b"stub-environment").hexdigest(),
+    )
+
+
 def _subprocess_adapters(inputs: Phase2aInputs, store: DevelopmentOutcomeStore, tmp_path):
-    response_artifact, gene_order, fit_role_spec, _ = _response_and_fit_role(
+    response_artifact, gene_order, fit_role_spec, combined = _response_and_fit_role(
         tmp_path, response_dim=inputs.response_dim, raw_data_sha256="subproc-shared-raw"
     )
     payload = build_subprocess_fit_payload(
@@ -246,6 +259,9 @@ def _subprocess_adapters(inputs: Phase2aInputs, store: DevelopmentOutcomeStore, 
             worker_script=str(worker),
             import_name="json",
             seed=inputs.seed,
+            approved_artifacts_root=str(tmp_path),
+            expected_response_artifact_sha256=combined,
+            execution_identity_lock=_stub_execution_lock(),
         )
         backend.configure_payload(payload)
         adapters[name] = BaselineAdapter(name=name, backend=backend)

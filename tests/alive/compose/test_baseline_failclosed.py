@@ -8,7 +8,7 @@ import sys
 import numpy as np
 import pytest
 
-from alive.compose.baseline_subprocess import SubprocessBaselineBackend
+from alive.compose.baseline_subprocess import ExecutionIdentityLock, SubprocessBaselineBackend
 from alive.compose.baselines_combo import (
     BaselineAdapter,
     BaselineTrainingContext,
@@ -28,11 +28,23 @@ def _context() -> BaselineTrainingContext:
 
 
 def test_unavailable_backend_raises_baseline_unavailable() -> None:
+    # Construction-only fields: the adapter short-circuits on is_available before
+    # any predict, so the approved root / lock are never exercised here.
     be = SubprocessBaselineBackend(
         name="gears",
         env_python=sys.executable,
         worker_script="x",
         import_name="definitely_not_a_real_module_xyz",
+        approved_artifacts_root="/unused",
+        expected_response_artifact_sha256="0" * 64,
+        execution_identity_lock=ExecutionIdentityLock(
+            prediction_representation="cell_raw_counts",
+            adapter_version="1",
+            adapter_sha256="a" * 64,
+            config_sha256="e" * 64,
+            resource_sha256="f" * 64,
+            environment_lock_sha256="0" * 64,
+        ),
     )
     adapter = BaselineAdapter(name="gears", backend=be)
     with pytest.raises(BaselineUnavailable):

@@ -104,8 +104,18 @@ baselines:                            # roster FROZEN before any outcome (§9 / 
   additive: delta_g + delta_h         # primary null floor
   lower_bounds: [no_change, perturbation_mean]
   id_only: linear_no_bilinear
-  gears: { package: gears, revision: null, environment_status: unpinned_activation_blocker }
-  cpa: { package: cpa-tools, revision: null, environment_status: unpinned_activation_blocker }
+  gears:                              # representation method-locked; worker cannot self-select
+    package: gears
+    revision: null
+    environment_status: unpinned_activation_blocker
+    prediction_representation: raw_pseudobulk_approximation   # GEARS predicts pseudobulk
+    approximation_bias_report_sha256: null   # explicit activation blocker until bias measured
+  cpa:
+    package: cpa-tools
+    revision: null
+    environment_status: unpinned_activation_blocker
+    prediction_representation: cell_raw_counts   # exact per-cell; change only by config revision
+    approximation_bias_report_sha256: null   # must stay null for an exact representation
   ablation_ladder: [l1_bilinear_identifiable, l2_saturation, l3_hypernetwork]  # L1 = headline
 
 leakage_control:

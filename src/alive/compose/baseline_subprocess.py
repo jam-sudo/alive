@@ -14,8 +14,8 @@ import json
 import os
 import subprocess
 import tempfile
-from collections.abc import Mapping
-from dataclasses import dataclass, field
+from collections.abc import Mapping, Sequence
+from dataclasses import KW_ONLY, dataclass, field
 from pathlib import Path
 
 import numpy as np
@@ -366,10 +366,220 @@ def read_payload(work_dir: str) -> dict:
     return payload
 
 
-def write_predictions(path: str, preds: Mapping[tuple[str, str], np.ndarray]) -> str:
+#: The exact key set every worker execution manifest must carry (Task 5).
+EXECUTION_MANIFEST_KEYS: frozenset[str] = frozenset(
+    {
+        "prediction_representation",
+        "adapter_version",
+        "adapter_sha256",
+        "expected_gene_order_sha256",
+        "observed_gene_order_sha256",
+        "checkpoint_sha256",
+        "worker_sha256",
+        "config_sha256",
+        "resource_sha256",
+        "environment_lock_sha256",
+        "fit_artifact_content_sha256",
+        "combined_request_sha256",
+        "predictions_sha256",
+    }
+)
+
+
+@dataclass(frozen=True)
+class ExecutionIdentityLock:
+    """Controller-trusted, out-of-band worker-execution identity (spec §2.5).
+
+    The controller supplies this at construction; it is the ground truth that a
+    self-reported worker execution manifest is verified against. A worker may not
+    select its own representation, adapter, config, resource or environment
+    identity — every field here is compared to the worker's claim and any
+    divergence fails closed.
+
+    Attributes
+    ----------
+    prediction_representation : str
+        The registered prediction representation the worker is locked to; one of
+        :data:`PREDICTION_REPRESENTATIONS`.
+    adapter_version : str
+        The pinned adapter version identity.
+    adapter_sha256 : str
+        The pinned adapter content digest (bare 64 lowercase hex).
+    config_sha256 : str
+        The pinned worker-config digest (bare 64 lowercase hex).
+    resource_sha256 : str
+        The pinned resource-manifest digest (bare 64 lowercase hex).
+    environment_lock_sha256 : str
+        The pinned environment-lock digest (bare 64 lowercase hex).
+    """
+
+    prediction_representation: str
+    adapter_version: str
+    adapter_sha256: str
+    config_sha256: str
+    resource_sha256: str
+    environment_lock_sha256: str
+
+
+def _validate_execution_manifest(manifest: object) -> None:
+    """Structurally validate a worker execution manifest (spec §2.5).
+
+    Checks the exact key set, that ``prediction_representation`` is a registered
+    enum, that expected and observed gene orders agree, and that every field is a
+    non-empty 64-lowercase-hex digest string. This is a self-consistency check
+    only; it is **not** evidence that the worker's claimed identities are the
+    controller's expected identities (that is :func:`_verify_execution_manifest`).
+
+    Parameters
+    ----------
+    manifest : object
+        The candidate execution manifest.
+
+    Raises
+    ------
+    PayloadError
+        On any structural, enum, gene-order or digest-format violation.
+    """
+    if not isinstance(manifest, dict) or set(manifest) != set(EXECUTION_MANIFEST_KEYS):
+        raise PayloadError("execution_manifest has an unexpected key set")
+    if manifest["prediction_representation"] not in PREDICTION_REPRESENTATIONS:
+        raise PayloadError("execution_manifest prediction_representation is not a registered enum")
+    if manifest["expected_gene_order_sha256"] != manifest["observed_gene_order_sha256"]:
+        raise PayloadError("worker observed a different gene order than expected")
+    for key in EXECUTION_MANIFEST_KEYS:
+        if not (isinstance(manifest[key], str) and manifest[key]):
+            raise PayloadError(f"execution_manifest {key} must be a non-empty string")
+    for key in (
+        "adapter_sha256",
+        "expected_gene_order_sha256",
+        "observed_gene_order_sha256",
+        "checkpoint_sha256",
+        "worker_sha256",
+        "fit_artifact_content_sha256",
+        "combined_request_sha256",
+        "predictions_sha256",
+        "config_sha256",
+        "resource_sha256",
+        "environment_lock_sha256",
+    ):
+        if not _is_bare_sha256(manifest[key]):
+            raise PayloadError(f"execution_manifest {key} must be exact 64 lowercase hex")
+
+
+def _ordered_request_sha256(pair_ids: Sequence[tuple[str, str]]) -> str:
+    """Return the order-sensitive digest of a requested pair-ID sequence."""
+    return _sha256(_canonical_json([list(pair) for pair in pair_ids]))
+
+
+def _file_sha256_bare(path: str) -> str:
+    """Return the streaming bare-hex SHA-256 of an on-disk file's bytes."""
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _verify_execution_manifest(
+    manifest: Mapping[str, str],
+    *,
+    payload: Mapping[str, object],
+    requested_pair_ids: Sequence[tuple[str, str]],
+    worker_script: str,
+    checkpoint_path: str,
+    identity_lock: ExecutionIdentityLock,
+) -> None:
+    """Independently verify a worker execution manifest (spec §2.5).
+
+    A structurally self-consistent worker manifest is not evidence: this
+    controller-side check RECOMPUTES the worker-script digest, the ordered
+    request digest, the fit-artifact content digest and the checkpoint-file
+    digest, reads the expected gene order from the payload, and compares the
+    adapter / config / resource / environment / representation identities to the
+    trusted :class:`ExecutionIdentityLock` — never to the worker's own claims.
+
+    Parameters
+    ----------
+    manifest : Mapping
+        The worker-reported execution manifest.
+    payload : Mapping
+        The fit-role payload the worker was invoked with (source of the expected
+        gene order and fit-artifact content digest).
+    requested_pair_ids : Sequence of tuple of str
+        The exact ordered pair IDs the controller requested.
+    worker_script : str
+        Path to the worker script the controller launched.
+    checkpoint_path : str
+        Path to the checkpoint sidecar the worker produced.
+    identity_lock : ExecutionIdentityLock
+        The controller-trusted, out-of-band execution identity.
+
+    Raises
+    ------
+    PayloadError
+        On any structural violation or any divergence between the worker's claim
+        and the controller-computed / trusted identity.
+    """
+    _validate_execution_manifest(dict(manifest))
+    expected = {
+        "prediction_representation": identity_lock.prediction_representation,
+        "adapter_version": identity_lock.adapter_version,
+        "adapter_sha256": identity_lock.adapter_sha256,
+        "config_sha256": identity_lock.config_sha256,
+        "resource_sha256": identity_lock.resource_sha256,
+        "environment_lock_sha256": identity_lock.environment_lock_sha256,
+        "expected_gene_order_sha256": payload["response_projection"]["gene_order_sha256"],
+        "fit_artifact_content_sha256": payload["fit_role_artifact"]["content_manifest_sha256"],
+        "combined_request_sha256": _ordered_request_sha256(requested_pair_ids),
+        "worker_sha256": _file_sha256_bare(worker_script),
+        "checkpoint_sha256": _file_sha256_bare(checkpoint_path),
+    }
+    for key, value in expected.items():
+        if manifest[key] != value:
+            raise PayloadError(f"execution_manifest {key} differs from controller expectation")
+
+
+def write_predictions(
+    path: str,
+    preds: Mapping[tuple[str, str], np.ndarray],
+    *,
+    execution_manifest: Mapping[str, object],
+) -> str:
+    """Write the ``{schema_version, predictions, execution_manifest}`` envelope.
+
+    The predictions are serialized as ``[pair, vector]`` records; their canonical
+    digest is written into ``execution_manifest["predictions_sha256"]`` and the
+    full manifest is structurally validated before the file is emitted.
+
+    Parameters
+    ----------
+    path : str
+        Output stem; ``".json"`` is appended.
+    preds : Mapping
+        Mapping from canonical pair ID to its response-space prediction vector.
+    execution_manifest : Mapping
+        The worker execution manifest (its ``predictions_sha256`` is overwritten
+        with the digest of the serialized predictions before validation).
+
+    Returns
+    -------
+    str
+        The bare-hex SHA-256 of the serialized envelope file.
+
+    Raises
+    ------
+    PayloadError
+        If the resulting execution manifest is structurally invalid.
+    """
+    pairs = [[list(p), np.asarray(v, dtype=float).tolist()] for p, v in preds.items()]
+    predictions_sha256 = _sha256(_canonical_json(pairs))
+    manifest = dict(execution_manifest)
+    manifest["predictions_sha256"] = predictions_sha256
+    _validate_execution_manifest(manifest)
     obj = {
         "schema_version": _SCHEMA_VERSION,
-        "pairs": [[list(p), np.asarray(v, dtype=float).tolist()] for p, v in preds.items()],
+        "predictions": pairs,
+        "execution_manifest": manifest,
     }
     text = _canonical_json(obj)
     with open(path + ".json", "w", encoding="utf-8") as fh:
@@ -377,17 +587,37 @@ def write_predictions(path: str, preds: Mapping[tuple[str, str], np.ndarray]) ->
     return _sha256(text)
 
 
-def read_predictions(path: str) -> dict[tuple[str, str], np.ndarray]:
+def read_predictions(path: str) -> tuple[dict[tuple[str, str], np.ndarray], dict]:
+    """Read + validate the prediction envelope, returning ``(preds, manifest)``.
+
+    Parameters
+    ----------
+    path : str
+        Input stem; ``".json"`` is appended.
+
+    Returns
+    -------
+    tuple
+        ``(predictions, execution_manifest)`` where ``predictions`` maps each
+        canonical pair ID to its response-space vector and ``execution_manifest``
+        is the structurally validated, predictions-bound manifest dict.
+
+    Raises
+    ------
+    PayloadError
+        On any structural, duplicate, digest-format or predictions-binding
+        violation.
+    """
     with open(path + ".json", encoding="utf-8") as fh:
         obj = json.load(fh)
-    if set(obj) != {"schema_version", "pairs"}:
+    if set(obj) != {"schema_version", "predictions", "execution_manifest"}:
         raise PayloadError("prediction file has an unexpected key set")
     if obj.get("schema_version") != _SCHEMA_VERSION:
         raise PayloadError("prediction file has an unexpected schema_version")
-    if not isinstance(obj["pairs"], list):
-        raise PayloadError("prediction pairs must be a list")
+    if not isinstance(obj["predictions"], list):
+        raise PayloadError("predictions must be a list")
     predictions: dict[tuple[str, str], np.ndarray] = {}
-    for item in obj["pairs"]:
+    for item in obj["predictions"]:
         if not isinstance(item, list) or len(item) != 2:
             raise PayloadError("each prediction record must be [pair, vector]")
         pair, vec = item
@@ -401,7 +631,12 @@ def read_predictions(path: str) -> dict[tuple[str, str], np.ndarray]:
         if pair_id in predictions:
             raise PayloadError(f"duplicate prediction pair {pair_id!r}")
         predictions[pair_id] = np.asarray(vec, dtype=float)
-    return predictions
+    manifest = obj["execution_manifest"]
+    _validate_execution_manifest(manifest)
+    recomputed = _sha256(_canonical_json(obj["predictions"]))
+    if manifest["predictions_sha256"] != recomputed:
+        raise PayloadError("execution_manifest predictions_sha256 does not match predictions")
+    return predictions, dict(manifest)
 
 
 @dataclass
@@ -417,26 +652,43 @@ class SubprocessBaselineBackend:
     worker_script: str
     import_name: str
     seed: int = 11
+    _: KW_ONLY
+    approved_artifacts_root: str
+    expected_response_artifact_sha256: str
+    execution_identity_lock: ExecutionIdentityLock
     _available: bool | None = field(default=None, init=False, repr=False)
     _payload: dict | None = field(default=None, init=False, repr=False)
+    _last_execution_manifest: dict | None = field(default=None, init=False, repr=False)
 
     def configure_payload(self, payload: Mapping[str, object]) -> None:
         """Bind a validated fit-role payload before Phase-2a prediction."""
         candidate = dict(payload)
         _assert_no_sealed_reference(candidate)
-        _validate_payload(candidate)
+        _validate_payload(
+            candidate,
+            expected_response_artifact_sha256=self.expected_response_artifact_sha256,
+        )
         _canonical_json(candidate)
         self._payload = candidate
 
     @property
     def provenance_manifest(self) -> dict[str, object]:
-        """Return the worker/payload identity bound into the Phase-2a model lock."""
+        """Return the worker/payload identity bound into the Phase-2a model lock.
+
+        Before any predict has run this carries the full frozen
+        :class:`ExecutionIdentityLock`. After a successful controller-side
+        verification it additionally carries the **entire** verified execution
+        manifest (not merely a digest subset), so the ordered request,
+        worker/config/resource/environment and adapter identities all enter the
+        method lock. Scientific completion requires the post-predict form.
+        """
         if self._payload is None:
             raise PayloadError(f"{self.name} backend has no fit-role payload assigned")
         worker = Path(self.worker_script)
         if not worker.is_file():
             raise PayloadError(f"{self.name} worker script does not exist: {str(worker)!r}")
-        return {
+        lock = self.execution_identity_lock
+        manifest: dict[str, object] = {
             "name": self.name,
             "env_python": str(Path(self.env_python).resolve()),
             "worker_script": str(worker.resolve()),
@@ -444,7 +696,20 @@ class SubprocessBaselineBackend:
             "import_name": self.import_name,
             "seed": int(self.seed),
             "payload_sha256": _sha256(_canonical_json(self._payload)),
+            "execution_identity_lock": {
+                "prediction_representation": lock.prediction_representation,
+                "adapter_version": lock.adapter_version,
+                "adapter_sha256": lock.adapter_sha256,
+                "config_sha256": lock.config_sha256,
+                "resource_sha256": lock.resource_sha256,
+                "environment_lock_sha256": lock.environment_lock_sha256,
+            },
         }
+        if self._last_execution_manifest is not None:
+            manifest["execution_manifest"] = {
+                key: self._last_execution_manifest[key] for key in sorted(EXECUTION_MANIFEST_KEYS)
+            }
+        return manifest
 
     @property
     def is_available(self) -> bool:
@@ -501,6 +766,11 @@ class SubprocessBaselineBackend:
         """
         if self._payload is None:
             raise PayloadError(f"{self.name} backend has no fit-role payload assigned")
+        approved_root = os.path.realpath(self.approved_artifacts_root)
+        if not (os.path.isabs(approved_root) and os.path.isdir(approved_root)):
+            raise PayloadError(
+                f"{self.name} approved_artifacts_root must be an absolute existing directory"
+            )
         payload = dict(self._payload)
         payload["pair_ids"] = [list(p) for p in pair_ids]
         payload["response_dim"] = int(response_dim)
@@ -510,11 +780,33 @@ class SubprocessBaselineBackend:
             write_payload(work_dir, payload)
             out = f"{work_dir}/preds"
             r = subprocess.run(
-                [self.env_python, self.worker_script, "--in", work_dir, "--out", out],
+                [
+                    self.env_python,
+                    self.worker_script,
+                    "--in",
+                    work_dir,
+                    "--out",
+                    out,
+                    "--approved-root",
+                    approved_root,
+                ],
                 capture_output=True,
                 text=True,
                 timeout=1800,
             )
             if r.returncode != 0:
                 raise BaselineUnavailable(f"{self.name} worker failed: {r.stderr[-500:]}")
-            return read_predictions(out)
+            preds, manifest = read_predictions(out)
+            checkpoint_path = out + ".checkpoint"
+            if os.path.islink(checkpoint_path) or not os.path.isfile(checkpoint_path):
+                raise PayloadError("worker did not produce the required checkpoint sidecar")
+            _verify_execution_manifest(
+                manifest,
+                payload=payload,
+                requested_pair_ids=pair_ids,
+                worker_script=self.worker_script,
+                checkpoint_path=checkpoint_path,
+                identity_lock=self.execution_identity_lock,
+            )
+            self._last_execution_manifest = manifest
+            return preds
