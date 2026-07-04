@@ -162,7 +162,9 @@ def _model_factories():
     }
 
 
-def _response_and_fit_role(tmp_path, *, response_dim, raw_data_sha256, seed=0, tag="a"):
+def _response_and_fit_role(
+    tmp_path, *, response_dim, raw_data_sha256, cal_pair_ids, seed=0, tag="a"
+):
     """Assemble a real response space + a written fit-role artifact for a payload.
 
     Builds a synthetic raw-count matrix (positive libraries, integer counts) over
@@ -171,6 +173,10 @@ def _response_and_fit_role(tmp_path, *, response_dim, raw_data_sha256, seed=0, t
     aligns with the payload's ``response_dim``), takes the z-space control
     centroid, and writes an immutable fit-role ``.h5ad`` whose ``var_names`` equal
     the ``gene_order`` and whose ``raw_data_sha256`` equals the shared digest.
+
+    The ``combo_calibration`` cells carry tokens drawn from ``cal_pair_ids`` (the
+    payload's calibration pairs), so the operator-path worker's
+    ``validate_fit_role_artifact`` guard accepts every combo cell.
 
     Returns
     -------
@@ -181,7 +187,8 @@ def _response_and_fit_role(tmp_path, *, response_dim, raw_data_sha256, seed=0, t
     rng = np.random.default_rng(4242 + seed)
     n_genes = response_dim + 1
     gene_order = [f"T{i}" for i in range(n_genes)]
-    n_control, n_single, n_combo = 12, 8, 4
+    combo_pairs = [tuple(p) for p in cal_pair_ids][:4]
+    n_control, n_single, n_combo = 12, 8, len(combo_pairs)
     n_cells = n_control + n_single + n_combo
     counts = rng.integers(1, 50, size=(n_cells, n_genes)).astype(np.float64)
     X = sparse.csr_matrix(counts)
@@ -201,7 +208,7 @@ def _response_and_fit_role(tmp_path, *, response_dim, raw_data_sha256, seed=0, t
     rows = (
         [(f"c{i}", "control", "control") for i in range(n_control)]
         + [(f"s{i}", "singles", f"S{i}") for i in range(n_single)]
-        + [(f"m{i}", "combo_calibration", f"CA{i}_CB{i}") for i in range(n_combo)]
+        + [(f"m{i}", "combo_calibration", f"{a}_{b}") for i, (a, b) in enumerate(combo_pairs)]
     )
     extraction = FitRoleExtraction(
         X=X,
@@ -229,8 +236,8 @@ def _stub_execution_lock() -> ExecutionIdentityLock:
     """The lock whose identities match ``stub_worker.py``'s emitted manifest."""
     return ExecutionIdentityLock(
         prediction_representation="cell_raw_counts",
-        adapter_version="stub-1",
-        adapter_sha256=hashlib.sha256(b"stub-1").hexdigest(),
+        adapter_version="stub-2",
+        adapter_sha256=hashlib.sha256(b"stub-response-operator-v2").hexdigest(),
         config_sha256=hashlib.sha256(b"stub-config").hexdigest(),
         resource_sha256=hashlib.sha256(b"stub-resource").hexdigest(),
         environment_lock_sha256=hashlib.sha256(b"stub-environment").hexdigest(),
@@ -239,7 +246,10 @@ def _stub_execution_lock() -> ExecutionIdentityLock:
 
 def _subprocess_adapters(inputs: Phase2aInputs, store: DevelopmentOutcomeStore, tmp_path):
     response_artifact, gene_order, fit_role_spec, combined = _response_and_fit_role(
-        tmp_path, response_dim=inputs.response_dim, raw_data_sha256="subproc-shared-raw"
+        tmp_path,
+        response_dim=inputs.response_dim,
+        raw_data_sha256="subproc-shared-raw",
+        cal_pair_ids=inputs.cal_pair_ids,
     )
     # bind the independently verified response-artifact digest onto the payload
     # inputs so the emitter's response_artifact_sha256 <-> response_space_checksum
@@ -421,7 +431,10 @@ def test_build_subprocess_payload_is_v2_with_consistent_blocks(tmp_path):
     inputs_base = _inputs(inst)
     store = _store(inst)
     response_artifact, gene_order, fit_role_spec, combined = _response_and_fit_role(
-        tmp_path, response_dim=inputs_base.response_dim, raw_data_sha256="shared_raw"
+        tmp_path,
+        response_dim=inputs_base.response_dim,
+        raw_data_sha256="shared_raw",
+        cal_pair_ids=inputs_base.cal_pair_ids,
     )
     # bind the independently verified response-artifact digest onto the inputs
     inputs = _inputs(inst, response_space_checksum=combined)
@@ -456,7 +469,10 @@ def test_build_subprocess_payload_rejects_unverified_response_artifact(tmp_path)
     inst = _build_instance(np.random.default_rng(77))
     store = _store(inst)
     response_artifact, gene_order, fit_role_spec, combined = _response_and_fit_role(
-        tmp_path, response_dim=_inputs(inst).response_dim, raw_data_sha256="shared_raw"
+        tmp_path,
+        response_dim=_inputs(inst).response_dim,
+        raw_data_sha256="shared_raw",
+        cal_pair_ids=_inputs(inst).cal_pair_ids,
     )
     inputs = _inputs(inst, response_space_checksum=combined)
     inputs = dataclasses.replace(inputs, response_space_checksum="f" * 64)
