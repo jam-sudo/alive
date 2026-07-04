@@ -452,6 +452,62 @@ def test_baselines_gears_missing_inner_key_rejected(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# per-method prediction-representation lock (Task 5)
+# ---------------------------------------------------------------------------
+def test_canonical_baseline_representations_are_locked():
+    cfg = load_compose_phase2_config(CANON)
+    reps = {name: (rep, bias) for name, rep, bias in cfg.baseline_representations}
+    assert reps["gears"] == ("raw_pseudobulk_approximation", None)
+    assert reps["cpa"] == ("cell_raw_counts", None)
+
+
+def test_null_pseudobulk_bias_keeps_activation_blocked():
+    # The canonical config sets the GEARS pseudobulk bias report to null, which
+    # keeps that method's representation scientifically activation-blocked.
+    cfg = load_compose_phase2_config(CANON)
+    assert cfg.pseudobulk_representation_activation_blocked is True
+
+
+def test_measured_pseudobulk_bias_lifts_activation_block(tmp_path):
+    raw = _raw()
+    raw["baselines"]["gears"]["approximation_bias_report_sha256"] = "a" * 64
+    cfg = load_compose_phase2_config(_write(tmp_path, raw))
+    assert cfg.pseudobulk_representation_activation_blocked is False
+    reps = {name: bias for name, _representation, bias in cfg.baseline_representations}
+    assert reps["gears"] == "a" * 64
+
+
+def test_unregistered_representation_rejected(tmp_path):
+    raw = _raw()
+    raw["baselines"]["gears"]["prediction_representation"] = "made_up_representation"
+    with pytest.raises(Phase2ConfigError, match="prediction_representation"):
+        load_compose_phase2_config(_write(tmp_path, raw))
+
+
+def test_pseudobulk_malformed_bias_sha_rejected(tmp_path):
+    raw = _raw()
+    raw["baselines"]["gears"]["approximation_bias_report_sha256"] = "not-a-64-hex-sha"
+    with pytest.raises(Phase2ConfigError, match="approximation_bias_report_sha256"):
+        load_compose_phase2_config(_write(tmp_path, raw))
+
+
+def test_cell_level_representation_rejects_non_null_bias(tmp_path):
+    # cpa is an exact cell_raw_counts representation; a non-null bias report is
+    # meaningless for an exact representation and must be rejected.
+    raw = _raw()
+    raw["baselines"]["cpa"]["approximation_bias_report_sha256"] = "b" * 64
+    with pytest.raises(Phase2ConfigError, match="null for the exact representation"):
+        load_compose_phase2_config(_write(tmp_path, raw))
+
+
+def test_missing_representation_key_rejected(tmp_path):
+    raw = _raw()
+    del raw["baselines"]["gears"]["prediction_representation"]
+    with pytest.raises(Phase2ConfigError):
+        load_compose_phase2_config(_write(tmp_path, raw))
+
+
+# ---------------------------------------------------------------------------
 # status enum (I2)
 # ---------------------------------------------------------------------------
 def test_status_typo_rejected(tmp_path):

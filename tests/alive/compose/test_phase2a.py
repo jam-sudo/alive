@@ -24,18 +24,20 @@ Load-bearing contracts under test (brief steps 1-9, plan §2.1 / §2.5):
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import json
 import sys
 from pathlib import Path
-from types import SimpleNamespace
 
 import numpy as np
 import pytest
+from scipy import sparse
 
-from alive.compose.baseline_subprocess import SubprocessBaselineBackend
+from alive.compose.baseline_subprocess import ExecutionIdentityLock, SubprocessBaselineBackend
 from alive.compose.baselines_combo import BaselineAdapter, additive
 from alive.compose.config2 import ScientificModeError, load_compose_phase2_config
 from alive.compose.datacard import compute_compose_run_id
+from alive.compose.fit_role import FitRoleExtraction, generate_fit_role_artifact
 from alive.compose.freeze import FrozenPredictionBundle, OutcomeLeakageError
 from alive.compose.models import IDOnlyModel, L1Model, L2Model, L3Model
 from alive.compose.operator import bilinear_predict
@@ -44,6 +46,9 @@ from alive.compose.phase2a import (
     OutcomeAccessAudit,
     Phase2aInputs,
     Phase2aResult,
+    _combined_pair_union,
+    _predict_combined_adapters,
+    _predict_role,
     _scan_inputs_for_leakage,
     _verify_factor_banks,
     _verify_scientific_data_assets,
@@ -160,15 +165,107 @@ def _model_factories():
     }
 
 
-def _subprocess_adapters(inputs: Phase2aInputs, store: DevelopmentOutcomeStore):
+def _response_and_fit_role(
+    tmp_path, *, response_dim, raw_data_sha256, cal_pair_ids, seed=0, tag="a"
+):
+    """Assemble a real response space + a written fit-role artifact for a payload.
+
+    Builds a synthetic raw-count matrix (positive libraries, integer counts) over
+    a ``response_dim + 1``-gene transcriptome, fits a leakage-safe response space
+    on the control + single rows (``pca_dim == response_dim`` so the projection
+    aligns with the payload's ``response_dim``), takes the z-space control
+    centroid, and writes an immutable fit-role ``.h5ad`` whose ``var_names`` equal
+    the ``gene_order`` and whose ``raw_data_sha256`` equals the shared digest.
+
+    The ``combo_calibration`` cells carry tokens drawn from ``cal_pair_ids`` (the
+    payload's calibration pairs), so the operator-path worker's
+    ``validate_fit_role_artifact`` guard accepts every combo cell.
+
+    Returns
+    -------
+    tuple
+        ``(response_artifact, gene_order, fit_role_spec, combined_checksum)`` where
+        ``combined_checksum`` is ``verify_response_artifact(space, control_mean)[2]``.
+    """
+    rng = np.random.default_rng(4242 + seed)
+    n_genes = response_dim + 1
+    gene_order = [f"T{i}" for i in range(n_genes)]
+    combo_pairs = [tuple(p) for p in cal_pair_ids][:4]
+    n_control, n_single, n_combo = 12, 8, len(combo_pairs)
+    n_cells = n_control + n_single + n_combo
+    counts = rng.integers(1, 50, size=(n_cells, n_genes)).astype(np.float64)
+    X = sparse.csr_matrix(counts)
+    control_idx = np.arange(0, n_control)
+    single_idx = np.arange(n_control, n_control + n_single)
+    space = fit_response_space(
+        X,
+        control_idx=control_idx,
+        eligible_single_idx=single_idx,
+        n_hvg=n_genes,
+        pca_dim=response_dim,
+        seed=seed,
+    )
+    control_mean = space.project(X, control_idx).mean(axis=0)
+    _, _, combined = verify_response_artifact(space, control_mean)
+
+    rows = (
+        [(f"c{i}", "control", "control") for i in range(n_control)]
+        + [(f"s{i}", "singles", f"S{i}") for i in range(n_single)]
+        + [(f"m{i}", "combo_calibration", f"{a}_{b}") for i, (a, b) in enumerate(combo_pairs)]
+    )
+    extraction = FitRoleExtraction(
+        X=X,
+        var_names=tuple(gene_order),
+        rows=tuple(rows),
+        role_counts={"control": n_control, "singles": n_single, "combo_calibration": n_combo},
+        raw_data_sha256=raw_data_sha256,
+        pair_manifest_sha256=f"pair-manifest-{tag}",
+        eligibility_hash=f"eligibility-{tag}",
+    )
+    spec = generate_fit_role_artifact(
+        extraction=extraction,
+        out_path=str(Path(tmp_path) / f"fit_role_{tag}.h5ad"),
+        config_sha256="config-sha",
+        data_card_sha256="data-card-sha",
+        calibration_gene_set_hash="cal-set-sha",
+        generator_code_sha256="gen-code-sha",
+        writer_environment_sha256="writer-env-sha",
+    )
+    response_artifact = {"response_space": space, "control_mean": control_mean}
+    return response_artifact, gene_order, spec, combined
+
+
+def _stub_execution_lock() -> ExecutionIdentityLock:
+    """The lock whose identities match ``stub_worker.py``'s emitted manifest."""
+    return ExecutionIdentityLock(
+        prediction_representation="cell_raw_counts",
+        adapter_version="stub-2",
+        adapter_sha256=hashlib.sha256(b"stub-response-operator-v2").hexdigest(),
+        config_sha256=hashlib.sha256(b"stub-config").hexdigest(),
+        resource_sha256=hashlib.sha256(b"stub-resource").hexdigest(),
+        environment_lock_sha256=hashlib.sha256(b"stub-environment").hexdigest(),
+    )
+
+
+def _subprocess_adapters(inputs: Phase2aInputs, store: DevelopmentOutcomeStore, tmp_path):
+    response_artifact, gene_order, fit_role_spec, combined = _response_and_fit_role(
+        tmp_path,
+        response_dim=inputs.response_dim,
+        raw_data_sha256="subproc-shared-raw",
+        cal_pair_ids=inputs.cal_pair_ids,
+    )
+    # bind the independently verified response-artifact digest onto the payload
+    # inputs so the emitter's response_artifact_sha256 <-> response_space_checksum
+    # guard is satisfied (the run itself keeps its own inputs / expected_hashes).
+    payload_inputs = dataclasses.replace(inputs, response_space_checksum=combined)
     payload = build_subprocess_fit_payload(
-        inputs=inputs,
+        inputs=payload_inputs,
         outcome_store=store,
-        response_artifact={
-            "response_space": SimpleNamespace(pca_components=np.eye(inputs.response_dim)),
-            "control_mean": np.zeros(inputs.response_dim),
-        },
+        response_artifact=response_artifact,
         oof_folds=[0] * len(inputs.cal_pair_ids),
+        fit_role_spec=fit_role_spec,
+        gene_order=gene_order,
+        raw_data_sha256="subproc-shared-raw",
     )
     worker = Path(__file__).parents[3] / "scripts" / "baselines" / "stub_worker.py"
     adapters = {}
@@ -179,6 +276,9 @@ def _subprocess_adapters(inputs: Phase2aInputs, store: DevelopmentOutcomeStore):
             worker_script=str(worker),
             import_name="json",
             seed=inputs.seed,
+            approved_artifacts_root=str(tmp_path),
+            expected_response_artifact_sha256=combined,
+            execution_identity_lock=_stub_execution_lock(),
         )
         backend.configure_payload(payload)
         adapters[name] = BaselineAdapter(name=name, backend=backend)
@@ -305,7 +405,7 @@ def test_continue_produces_a_verified_bundle_no_outcomes():
     assert set(res.bundle.predictions_single_unseen["additive"]) == set(inst["sealed_single_id"])
 
 
-def test_subprocess_baselines_are_wired_into_phase2a_freeze():
+def test_subprocess_baselines_are_wired_into_phase2a_freeze(tmp_path):
     inst = _build_instance(np.random.default_rng(31))
     local_factories = {
         name: factory
@@ -314,7 +414,7 @@ def test_subprocess_baselines_are_wired_into_phase2a_freeze():
     }
     inputs = _inputs(inst, model_factories=local_factories)
     store = _store(inst)
-    adapters = _subprocess_adapters(inputs, store)
+    adapters = _subprocess_adapters(inputs, store, tmp_path)
     res = run_phase2a_fixture(
         inputs,
         store,
@@ -327,6 +427,68 @@ def test_subprocess_baselines_are_wired_into_phase2a_freeze():
         assert set(res.bundle.predictions_single_unseen[method]) == set(inst["sealed_single_id"])
     assert res.method_lock is not None
     assert len(res.method_lock["method_roster"]) == 9
+
+
+def test_build_subprocess_payload_is_v2_with_consistent_blocks(tmp_path):
+    inst = _build_instance(np.random.default_rng(77))
+    inputs_base = _inputs(inst)
+    store = _store(inst)
+    response_artifact, gene_order, fit_role_spec, combined = _response_and_fit_role(
+        tmp_path,
+        response_dim=inputs_base.response_dim,
+        raw_data_sha256="shared_raw",
+        cal_pair_ids=inputs_base.cal_pair_ids,
+    )
+    # bind the independently verified response-artifact digest onto the inputs
+    inputs = _inputs(inst, response_space_checksum=combined)
+    payload = build_subprocess_fit_payload(
+        inputs=inputs,
+        outcome_store=store,
+        response_artifact=response_artifact,
+        oof_folds=[0] * len(inputs.cal_pair_ids),
+        fit_role_spec=fit_role_spec,
+        gene_order=gene_order,
+        raw_data_sha256="shared_raw",
+    )
+    assert payload["schema_version"] == 2
+    assert (
+        payload["response_projection"]["raw_data_sha256"]
+        == payload["fit_role_artifact"]["raw_data_sha256"]
+    )
+    assert (
+        payload["response_projection"]["response_artifact_sha256"] == inputs.response_space_checksum
+    )
+    from alive.compose.baseline_subprocess import _validate_payload
+
+    _validate_payload(payload, expected_response_artifact_sha256=inputs.response_space_checksum)
+
+
+def test_build_subprocess_payload_rejects_unverified_response_artifact(tmp_path):
+    # Same Fixture-contract assembly as the Task-4 consistency test, but the bound
+    # response-space checksum is corrupted so it no longer equals the projection's
+    # independently verified response digest. The emitter must fail closed BEFORE a
+    # payload is returned (Global Constraint "Response artifact equality is not
+    # circular"; spec §2.2).
+    inst = _build_instance(np.random.default_rng(77))
+    store = _store(inst)
+    response_artifact, gene_order, fit_role_spec, combined = _response_and_fit_role(
+        tmp_path,
+        response_dim=_inputs(inst).response_dim,
+        raw_data_sha256="shared_raw",
+        cal_pair_ids=_inputs(inst).cal_pair_ids,
+    )
+    inputs = _inputs(inst, response_space_checksum=combined)
+    inputs = dataclasses.replace(inputs, response_space_checksum="f" * 64)
+    with pytest.raises(ValueError, match="independently verified response artifact"):
+        build_subprocess_fit_payload(
+            inputs=inputs,
+            outcome_store=store,
+            response_artifact=response_artifact,
+            oof_folds=[0] * len(inputs.cal_pair_ids),
+            fit_role_spec=fit_role_spec,
+            gene_order=gene_order,
+            raw_data_sha256="shared_raw",
+        )
 
 
 def test_l1_prediction_equals_identity_only_path():
@@ -773,3 +935,57 @@ def test_result_is_frozen_dataclass():
     assert dataclasses.is_dataclass(res)
     with pytest.raises(dataclasses.FrozenInstanceError):
         res.sealed_access_count = 1  # type: ignore[misc]
+
+
+# --------------------------------------------------------------------------- #
+# §2.5 single-fit rule: subprocess adapters fit ONCE on the combined pair union
+# --------------------------------------------------------------------------- #
+@pytest.fixture
+def minimal_inputs() -> Phase2aInputs:
+    """A minimal ``Phase2aInputs`` with disjoint, non-empty sealed roles."""
+    return _inputs(_build_instance(np.random.default_rng(8)))
+
+
+class _SpyAdapter:
+    """Duck-typed baseline adapter that records each predict() call."""
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+        self.calls: list[tuple] = []
+
+    def predict(self, context, pair_ids, response_dim):
+        self.calls.append(tuple(tuple(p) for p in pair_ids))
+        return {(g, h): np.full(response_dim, len(g + h), dtype=float) for g, h in pair_ids}
+
+
+def test_subprocess_adapter_fits_once_for_combined_union(minimal_inputs):
+    inputs = minimal_inputs  # sealed_double_pair_ids + sealed_single_pair_ids disjoint, non-empty
+    spy = _SpyAdapter("gears")
+    adapters = {"gears": spy}
+    combined = _combined_pair_union(inputs.sealed_double_pair_ids, inputs.sealed_single_pair_ids)
+    adapter_preds = _predict_combined_adapters(inputs, combined, adapters)
+    assert len(spy.calls) == 1  # fit-once
+    assert spy.calls[0] == tuple(combined)  # combined union, once
+    Z = np.zeros((1, inputs.response_dim))
+    mean = np.zeros(inputs.response_dim)
+    double = _predict_role(
+        inputs,
+        inputs.sealed_double_pair_ids,
+        {},
+        Z,
+        mean,
+        adapters,
+        adapter_predictions=adapter_preds,
+    )
+    single = _predict_role(
+        inputs,
+        inputs.sealed_single_pair_ids,
+        {},
+        Z,
+        mean,
+        adapters,
+        adapter_predictions=adapter_preds,
+    )
+    assert len(spy.calls) == 1  # NOT re-invoked during role split
+    assert set(double["gears"]) == {tuple(p) for p in inputs.sealed_double_pair_ids}
+    assert set(single["gears"]) == {tuple(p) for p in inputs.sealed_single_pair_ids}

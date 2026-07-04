@@ -9,10 +9,14 @@ import pytest
 from scipy import sparse
 
 from alive.compose.fit_role import (
+    _ALLOWED_ROLES,
     ComposeFitRoleExtractor,
     FitRoleArtifactError,
     FitRoleArtifactSpec,
+    FitRoleExtraction,
     _file_sha256,
+    apply_response_projection,
+    build_response_projection,
     canonical_gene_order_sha256,
     content_manifest_sha256,
     extract_fit_roles,
@@ -20,6 +24,7 @@ from alive.compose.fit_role import (
     row_identity_sha256,
     validate_fit_role_artifact,
 )
+from alive.compose.response import fit_response_space
 
 
 def _csr(rows: list[list[float]]) -> sparse.csr_matrix:
@@ -322,3 +327,351 @@ def test_validate_wraps_malformed_artifact_as_fit_role_error(tmp_path):
     )
     with pytest.raises(FitRoleArtifactError):
         _validate(missing_spec, str(tmp_path))
+
+
+# --- Task 0: role<->token and spec<->provenance validation hardening ------------
+# These reproductions build FULLY self-consistent artifacts + specs (every
+# file/content digest matches) so that only the new validator checks can catch
+# them. They FAIL on the pre-Task-0 validator (the bypass accepts them) and pass
+# once the role<->token classifier and spec<->provenance binding are enforced.
+
+
+def _forge_artifact(
+    tmp_path: Path,
+    name: str,
+    *,
+    rows,
+    X: sparse.csr_matrix,
+    var_names=("G1", "G2", "G3"),
+    raw_data_sha256: str = "raw",
+    pair_manifest_sha256: str = "pm",
+    eligibility_hash: str = "elig",
+) -> FitRoleArtifactSpec:
+    """Write a self-consistent artifact + spec from ARBITRARY rows.
+
+    Builds a :class:`FitRoleExtraction` directly (bypassing the role-deriving
+    extractor) so a forged role/token pairing or duplicate/empty ``source_row_id``
+    can be materialised, then generates a matching spec via the real writer.
+    """
+    role_counts = {r: sum(1 for _, rr, _ in rows if rr == r) for r in sorted(_ALLOWED_ROLES)}
+    extraction = FitRoleExtraction(
+        X=X,
+        var_names=tuple(var_names),
+        rows=tuple(rows),
+        role_counts=role_counts,
+        raw_data_sha256=raw_data_sha256,
+        pair_manifest_sha256=pair_manifest_sha256,
+        eligibility_hash=eligibility_hash,
+    )
+    return generate_fit_role_artifact(
+        extraction=extraction,
+        out_path=str(tmp_path / name),
+        config_sha256="c",
+        data_card_sha256="d",
+        calibration_gene_set_hash="g",
+        generator_code_sha256="x",
+        writer_environment_sha256="e",
+    )
+
+
+def test_validate_rejects_sealed_combo_mislabeled_as_singles(tmp_path):
+    # Reproduction (a): a SEALED combo token carried on a row DECLARED `singles`.
+    # The artifact + spec are fully self-consistent; only per-row role<->token
+    # classification (not gated on role == combo_calibration) catches the leak.
+    X = _csr([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
+    spec = _forge_artifact(
+        tmp_path,
+        "sealed_as_single.h5ad",
+        rows=(("r0", "control", "control"), ("r1", "singles", "AAA_BBB")),
+        X=X,
+    )
+    with pytest.raises(FitRoleArtifactError):
+        _validate(spec, str(tmp_path))  # calib CEBPE_KLF1; sealed AAA_BBB
+
+
+def test_validate_rejects_single_gene_token_mislabeled_as_control(tmp_path):
+    # role<->token consistency for non-combo rows: a single-gene token declared
+    # `control` must be rejected (control/single token<->role is now checked).
+    X = _csr([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
+    spec = _forge_artifact(
+        tmp_path,
+        "single_as_control.h5ad",
+        rows=(("r0", "control", "control"), ("r1", "control", "KLF1")),
+        X=X,
+    )
+    with pytest.raises(FitRoleArtifactError):
+        _validate(spec, str(tmp_path))
+
+
+def test_validate_rejects_unregistered_combo_hidden_as_singles(tmp_path):
+    # An unregistered combo token (neither calibration nor sealed) hidden under a
+    # `singles` role must fail closed regardless of the declared role.
+    X = _csr([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
+    spec = _forge_artifact(
+        tmp_path,
+        "unreg_combo.h5ad",
+        rows=(("r0", "control", "control"), ("r1", "singles", "XXX_YYY")),
+        X=X,
+    )
+    with pytest.raises(FitRoleArtifactError):
+        _validate(spec, str(tmp_path))
+
+
+@pytest.mark.parametrize("field", ["raw_data_sha256", "pair_manifest_sha256", "eligibility_hash"])
+def test_validate_rejects_spec_provenance_lineage_mismatch(tmp_path, field):
+    # Reproduction (b): the trusted spec advertises lineage that disagrees with the
+    # artifact's own uns.provenance while every file/content digest still matches.
+    spec = _gen(tmp_path)
+    tampered = FitRoleArtifactSpec(**{**spec.__dict__, field: "forged-lineage"})
+    with pytest.raises(FitRoleArtifactError):
+        _validate(tampered, str(tmp_path))
+
+
+def test_validate_rejects_duplicate_source_row_id(tmp_path):
+    # Duplicate source_row_id must be rejected before digesting (row identity is
+    # meaningless if rows are not uniquely addressable).
+    X = _csr([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
+    spec = _forge_artifact(
+        tmp_path,
+        "dup_src.h5ad",
+        rows=(("dup", "control", "control"), ("dup", "singles", "KLF1")),
+        X=X,
+    )
+    with pytest.raises(FitRoleArtifactError):
+        _validate(spec, str(tmp_path))
+
+
+def test_validate_rejects_empty_source_row_id(tmp_path):
+    X = _csr([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
+    spec = _forge_artifact(
+        tmp_path,
+        "empty_src.h5ad",
+        rows=(("", "control", "control"), ("r1", "singles", "KLF1")),
+        X=X,
+    )
+    with pytest.raises(FitRoleArtifactError):
+        _validate(spec, str(tmp_path))
+
+
+def test_validate_rejects_role_count_mismatch(tmp_path):
+    spec = _gen(tmp_path)
+    bad = {"control": 99, "singles": 0, "combo_calibration": 0}
+    tampered = FitRoleArtifactSpec(**{**spec.__dict__, "role_counts": bad})
+    with pytest.raises(FitRoleArtifactError):
+        _validate(tampered, str(tmp_path))
+
+
+def test_validate_rejects_provenance_row_identity_mismatch(tmp_path):
+    # uns.provenance carries its own row/gene digests; if they disagree with the
+    # trusted spec (even while content_manifest is self-consistent) reject.
+    import anndata as ad
+
+    spec = _gen(tmp_path)
+    adata = ad.read_h5ad(spec.path)
+    prov = dict(adata.uns["provenance"])
+    prov["row_identity_sha256"] = "sha_forged"
+    var_names = [str(v) for v in adata.var_names]
+    rows = tuple(
+        (str(s), str(r), str(p))
+        for s, r, p in zip(adata.obs["source_row_id"], adata.obs["role"], adata.obs["perturbation"])
+    )
+    role_counts = {r: sum(1 for _, rr, _ in rows if rr == r) for r in sorted(_ALLOWED_ROLES)}
+    cm = content_manifest_sha256(
+        schema_version=1,
+        X=sparse.csr_matrix(adata.X),
+        var_names=var_names,
+        rows=rows,
+        provenance=prov,
+        role_counts=role_counts,
+    )
+    adata.uns["provenance"] = prov
+    adata.uns["content_manifest_sha256"] = cm
+    out = tmp_path / "prov_row_tamper.h5ad"
+    adata.write_h5ad(out)
+    tampered = FitRoleArtifactSpec(
+        **{
+            **spec.__dict__,
+            "path": str(out),
+            "sha256": _file_sha256(str(out)),
+            "content_manifest_sha256": cm,
+        }
+    )
+    with pytest.raises(FitRoleArtifactError):
+        _validate(tampered, str(tmp_path))
+
+
+# --- Task 1 (A2): build_response_projection block serialization -----------------
+
+
+def _toy_space_and_counts(seed: int = 0):
+    rng = np.random.default_rng(seed)
+    # 20 control + 12 single cells, 8 genes, integer counts, positive library
+    counts = rng.integers(1, 40, size=(32, 8)).astype(np.float64)
+    X = sparse.csr_matrix(counts)
+    control_idx = np.arange(0, 20)
+    single_idx = np.arange(20, 32)
+    space = fit_response_space(
+        X,
+        control_idx=control_idx,
+        eligible_single_idx=single_idx,
+        n_hvg=5,
+        pca_dim=3,
+        seed=1,
+    )
+    control_mean = space.project(X, control_idx).mean(axis=0)  # z-space control centroid
+    gene_order = [f"G{i}" for i in range(8)]
+    return space, X, control_idx, control_mean, gene_order
+
+
+def test_build_response_projection_block_shape_and_fields():
+    space, X, _, control_mean, gene_order = _toy_space_and_counts()
+    block = build_response_projection(
+        space,
+        gene_order=gene_order,
+        control_mean=control_mean,
+        raw_data_sha256="rawdeadbeef",
+    )
+    assert set(block) == {
+        "response_artifact_sha256",
+        "raw_data_sha256",
+        "gene_order_sha256",
+        "hvg_gene_ids",
+        "transform",
+        "median_library",
+        "pca_mean",
+        "pca_components",
+        "control_mean",
+        "delta_convention",
+    }
+    assert block["transform"] == ["normalize_total_median", "log1p"]
+    assert block["delta_convention"] == "z_minus_control_mean"
+    assert block["raw_data_sha256"] == "rawdeadbeef"
+    # hvg_gene_ids maps hvg_idx onto gene_order, order preserved
+    assert block["hvg_gene_ids"] == [gene_order[i] for i in space.hvg_idx]
+    assert len(block["pca_mean"]) == space.n_hvg
+    assert np.asarray(block["pca_components"]).shape == (space.pca_dim, space.n_hvg)
+    assert len(block["control_mean"]) == space.pca_dim
+    np.testing.assert_allclose(block["control_mean"], control_mean)
+
+
+# --- Task 2 (A2): apply_response_projection worker-side operator -----------------
+
+
+def test_operator_matches_responsespace_project_raw_counts():
+    space, X, control_idx, control_mean, gene_order = _toy_space_and_counts(seed=3)
+    block = build_response_projection(
+        space,
+        gene_order=gene_order,
+        control_mean=control_mean,
+        raw_data_sha256="r",
+    )
+    dense = np.asarray(X.todense(), dtype=np.float64)
+    # single-row round trip == ResponseSpace.project on the same row
+    for i in (0, 5, 25):
+        z = apply_response_projection(
+            block,
+            dense[[i]],
+            gene_order,
+            representation="cell_raw_counts",
+        )
+        np.testing.assert_allclose(z[0], space.project(X, np.array([i]))[0], rtol=0, atol=1e-9)
+    # population mean matches too
+    idx = np.arange(20, 32)
+    z_mean = apply_response_projection(
+        block,
+        dense[idx],
+        gene_order,
+        representation="cell_raw_counts",
+    ).mean(axis=0)
+    np.testing.assert_allclose(z_mean, space.project(X, idx).mean(axis=0), atol=1e-9)
+
+
+def test_pseudobulk_is_a_distinct_nonlinear_path():
+    space, X, control_idx, control_mean, gene_order = _toy_space_and_counts(seed=4)
+    block = build_response_projection(
+        space,
+        gene_order=gene_order,
+        control_mean=control_mean,
+        raw_data_sha256="r",
+    )
+    dense = np.asarray(X.todense(), dtype=np.float64)
+    idx = np.arange(20, 32)
+    mean_of_project = apply_response_projection(
+        block,
+        dense[idx],
+        gene_order,
+        representation="cell_raw_counts",
+    ).mean(axis=0)
+    pseudobulk = dense[idx].mean(axis=0, keepdims=True)
+    project_of_mean = apply_response_projection(
+        block,
+        pseudobulk,
+        gene_order,
+        representation="raw_pseudobulk_approximation",
+    )[0]
+    # normalize/log1p nonlinearity => the two differ (guards against silent swap)
+    assert not np.allclose(mean_of_project, project_of_mean, atol=1e-6)
+
+
+def test_cell_log_normalized_skips_the_raw_transform():
+    space, X, control_idx, control_mean, gene_order = _toy_space_and_counts(seed=5)
+    block = build_response_projection(
+        space,
+        gene_order=gene_order,
+        control_mean=control_mean,
+        raw_data_sha256="r",
+    )
+    dense = np.asarray(X.todense(), dtype=np.float64)
+    i = 7
+    # pre-apply the frozen normalize+log1p, then feed as log-normalized
+    lib = dense[i].sum()
+    normed = np.log1p(dense[i] * (block["median_library"] / lib))[None, :]
+    z_log = apply_response_projection(
+        block,
+        normed,
+        gene_order,
+        representation="cell_log_normalized",
+    )
+    z_raw = apply_response_projection(
+        block,
+        dense[[i]],
+        gene_order,
+        representation="cell_raw_counts",
+    )
+    np.testing.assert_allclose(z_log[0], z_raw[0], atol=1e-9)
+
+
+def test_operator_rejects_gene_order_mismatch():
+    space, X, control_idx, control_mean, gene_order = _toy_space_and_counts(seed=6)
+    block = build_response_projection(
+        space,
+        gene_order=gene_order,
+        control_mean=control_mean,
+        raw_data_sha256="r",
+    )
+    dense = np.asarray(X.todense(), dtype=np.float64)
+    with pytest.raises(FitRoleArtifactError):
+        apply_response_projection(
+            block,
+            dense[[0]],
+            [f"X{i}" for i in range(8)],
+            representation="cell_raw_counts",
+        )
+
+
+def test_operator_rejects_nonfinite_negative_and_scale_mismatch_inputs():
+    space, X, _, control_mean, gene_order = _toy_space_and_counts(seed=7)
+    block = build_response_projection(
+        space,
+        gene_order=gene_order,
+        control_mean=control_mean,
+        raw_data_sha256="r",
+    )
+    dense = np.asarray(X.todense(), dtype=np.float64)
+    bad = dense[[0]].copy()
+    bad[0, 0] = -1.0
+    with pytest.raises(FitRoleArtifactError):
+        apply_response_projection(block, bad, gene_order, representation="cell_raw_counts")
+    bad[0, 0] = np.nan
+    with pytest.raises(FitRoleArtifactError):
+        apply_response_projection(block, bad, gene_order, representation="cell_log_normalized")

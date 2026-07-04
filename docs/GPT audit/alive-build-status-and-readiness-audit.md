@@ -1,5 +1,10 @@
 # ALIVE 빌드 현황 및 Real-Run 준비도 감사
 
+> **⚠ SUPERSEDED (2026-07-04) — 2026-06-21 시점 snapshot.** 이 감사는 TG-K562를 "full-data 미시작 /
+> sealed 미실행"으로 기술하지만, 이후 `TG-K562-v1` sealed run이 실행되어 **`NO_DISTINCT_WIN`**을
+> registered했고 `COMPOSE-K562-v1`이 ACTIVE(2026-06-30)가 됐다. 현재 상태는 `CLAUDE.md` §4 registry.
+> 원본은 point-in-time 기록으로 보존한다.
+
 작성일: 2026-06-21  
 대상 저장소: `/Users/jam/ALIVE`  
 검토 방식: 코드 수정 없는 읽기 전용 검사, cache-disabled 테스트, 저장소 밖 패키지 빌드

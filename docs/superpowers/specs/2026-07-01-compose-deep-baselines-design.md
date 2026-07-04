@@ -1,5 +1,11 @@
 # COMPOSE Deep-Baseline Backends + Phase-2b Activation Bindings — Implementation Design
 
+> **✅ IMPLEMENTED / MERGED (2026-07-04 note).** 이 설계는 PR #5(`c324b33`, 2026-07-02 merged)로
+> 구현됐다 — `phase2b.py`의 provenance/ledger integrity(아래 §0.B/§0.C가 `TODO(activation)`·미배선으로
+> 기술한 부분)는 이미 배선 완료(`build_activation_provenance_inputs`, pre-access registration). 따라서
+> "상태: DRAFT … owner 검토 대기"와 §0의 미배선 전제는 그 시점 기록으로 읽을 것. (§0.3이 예측한
+> `"BLOCKED candidate config"` docstring 후속만 여전히 유효.)
+
 > **문서 역할:** activation-time **구현 설계**. 새 과학 주장이 아니다.
 > **상태:** DRAFT (rev 2, spec-review iteration 1 반영) — owner 검토 대기.
 > **개정일:** 2026-07-01

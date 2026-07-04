@@ -267,8 +267,34 @@ _KNOWN_BASELINES = frozenset(
         "ablation_ladder",
     }
 )
-_KNOWN_BASELINE_GEARS = frozenset({"package", "revision", "environment_status"})
-_KNOWN_BASELINE_CPA = frozenset({"package", "revision", "environment_status"})
+_KNOWN_BASELINE_GEARS = frozenset(
+    {
+        "package",
+        "revision",
+        "environment_status",
+        "prediction_representation",
+        "approximation_bias_report_sha256",
+    }
+)
+_KNOWN_BASELINE_CPA = frozenset(
+    {
+        "package",
+        "revision",
+        "environment_status",
+        "prediction_representation",
+        "approximation_bias_report_sha256",
+    }
+)
+# Registered prediction-representation enum. Mirrors
+# ``alive.compose.fit_role.PREDICTION_REPRESENTATIONS`` (kept local so the config
+# loader stays standalone, consistent with this module's pinned-value design).
+# ``raw_pseudobulk_approximation`` is an approximation of the exact per-cell
+# representation, so it carries an approximation-bias report; the two
+# ``cell_*`` representations are exact and must NOT carry a bias report.
+_KNOWN_PREDICTION_REPRESENTATIONS = frozenset(
+    {"cell_raw_counts", "cell_log_normalized", "raw_pseudobulk_approximation"}
+)
+_APPROXIMATE_REPRESENTATIONS = frozenset({"raw_pseudobulk_approximation"})
 _KNOWN_LEAKAGE_CONTROL = frozenset(
     {"baseline_training_roles", "sealed_outcomes_touched_before_freeze"}
 )
@@ -388,6 +414,7 @@ class ComposePhase2Config:
     registered_seeds: tuple[int, ...]
     comparator_family: tuple[str, ...]
     method_roster: tuple[str, ...]
+    baseline_representations: tuple[tuple[str, str, str | None], ...]
     metric_primary: str
     metric_formula: str
     material_margin_vs_additive: float
@@ -411,6 +438,21 @@ class ComposePhase2Config:
     def is_active(self) -> bool:
         """Return ``True`` only when the config status is exactly ``active``."""
         return self.status == "active"
+
+    @property
+    def pseudobulk_representation_activation_blocked(self) -> bool:
+        """Return ``True`` while any pseudobulk-approx baseline lacks a bias report.
+
+        A ``raw_pseudobulk_approximation`` baseline whose
+        ``approximation_bias_report_sha256`` is ``null`` keeps that method's
+        representation scientifically activation-blocked: the approximation error
+        has not been measured. A committed 64-hex bias-report SHA lifts the block.
+        Exact ``cell_*`` representations never contribute to this block.
+        """
+        return any(
+            representation in _APPROXIMATE_REPRESENTATIONS and bias is None
+            for _name, representation, bias in self.baseline_representations
+        )
 
 
 def _require(mapping: dict[str, Any], key: str, context: str) -> Any:
@@ -473,6 +515,70 @@ def _strict_int(value: Any, context: str) -> int:
     return value
 
 
+def _is_bare_sha256_hex(value: Any) -> bool:
+    """Return ``True`` for an exact bare 64-character lowercase-hex digest."""
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(ch in "0123456789abcdef" for ch in value)
+    )
+
+
+def _validate_baseline_method_representation(
+    block: dict[str, Any], name: str
+) -> tuple[str, str | None]:
+    """Validate one deep-baseline method's representation lock (Task 5).
+
+    The method's ``prediction_representation`` must be a registered enum, and it
+    is method-locked here so a worker cannot self-select it. The
+    ``approximation_bias_report_sha256`` rule depends on the representation:
+
+    * ``raw_pseudobulk_approximation`` (an approximation) accepts either a bare
+      64-lowercase-hex bias-report SHA or ``null``. ``null`` keeps this method's
+      representation scientifically activation-blocked; a measured 64-hex report
+      SHA is required to lift that block.
+    * the exact ``cell_*`` representations must carry ``null`` — a non-null bias
+      report is meaningless for an exact representation and is rejected.
+
+    Parameters
+    ----------
+    block : dict
+        The per-method baseline block (already schema-closed).
+    name : str
+        The method name (``"gears"`` / ``"cpa"``), for error messages.
+
+    Returns
+    -------
+    tuple
+        ``(prediction_representation, approximation_bias_report_sha256)`` where
+        the second element is ``None`` when no bias report is registered.
+
+    Raises
+    ------
+    Phase2ConfigError
+        On an unregistered representation, a malformed bias SHA, or a non-null
+        bias SHA paired with an exact representation.
+    """
+    representation = _require(block, "prediction_representation", f"baselines.{name}")
+    if representation not in _KNOWN_PREDICTION_REPRESENTATIONS:
+        raise Phase2ConfigError(
+            f"baselines.{name}.prediction_representation must be one of "
+            f"{sorted(_KNOWN_PREDICTION_REPRESENTATIONS)}, got {representation!r}"
+        )
+    bias = _require(block, "approximation_bias_report_sha256", f"baselines.{name}")
+    if bias is not None and not _is_bare_sha256_hex(bias):
+        raise Phase2ConfigError(
+            f"baselines.{name}.approximation_bias_report_sha256 must be null or an exact "
+            f"64 lowercase hex digest, got {bias!r}"
+        )
+    if representation not in _APPROXIMATE_REPRESENTATIONS and bias is not None:
+        raise Phase2ConfigError(
+            f"baselines.{name}.approximation_bias_report_sha256 must be null for the exact "
+            f"representation {representation!r}"
+        )
+    return representation, bias
+
+
 def load_compose_phase2_config(path: str | Path) -> ComposePhase2Config:
     """Load and strictly validate the COMPOSE Phase-2 YAML config.
 
@@ -526,7 +632,9 @@ def load_compose_phase2_config(path: str | Path) -> ComposePhase2Config:
     futility_conditions, dev_oof_metric, dev_oof_threshold = _validate_futility(
         _require(raw, "futility", "top-level")
     )
-    method_roster = _validate_baselines(_require(raw, "baselines", "top-level"))
+    method_roster, baseline_representations = _validate_baselines(
+        _require(raw, "baselines", "top-level")
+    )
     (
         metric_primary,
         metric_formula,
@@ -563,6 +671,7 @@ def load_compose_phase2_config(path: str | Path) -> ComposePhase2Config:
         registered_seeds=registered_seeds,
         comparator_family=comparator_family,
         method_roster=method_roster,
+        baseline_representations=baseline_representations,
         metric_primary=metric_primary,
         metric_formula=metric_formula,
         material_margin_vs_additive=material_margin,
@@ -833,8 +942,19 @@ def _validate_futility(block: dict[str, Any]) -> tuple[tuple[str, ...], str, flo
     return conditions, metric, threshold
 
 
-def _validate_baselines(block: dict[str, Any]) -> tuple[str, ...]:
-    """Validate and return the exact Phase-2a/2b method roster."""
+def _validate_baselines(
+    block: dict[str, Any],
+) -> tuple[tuple[str, ...], tuple[tuple[str, str, str | None], ...]]:
+    """Validate the method roster and the per-method representation lock.
+
+    Returns
+    -------
+    tuple
+        ``(method_roster, representations)`` where ``representations`` is a tuple
+        of ``(method, prediction_representation, approximation_bias_report_sha256)``
+        for the deep baselines (``gears``, ``cpa``); the bias element is ``None``
+        when no report is registered.
+    """
     _close_schema(block, _KNOWN_BASELINES, "baselines")
     lower_bounds = _require(block, "lower_bounds", "baselines")
     ladder = _require(block, "ablation_ladder", "baselines")
@@ -842,7 +962,11 @@ def _validate_baselines(block: dict[str, Any]) -> tuple[str, ...]:
         raise Phase2ConfigError("baselines.lower_bounds must be [no_change, perturbation_mean]")
     if ladder != ["l1_bilinear_identifiable", "l2_saturation", "l3_hypernetwork"]:
         raise Phase2ConfigError("baselines.ablation_ladder does not match the registered ladder")
-    return _EXPECTED_METHOD_ROSTER
+    representations = tuple(
+        (name, *_validate_baseline_method_representation(_require(block, name, "baselines"), name))
+        for name in ("gears", "cpa")
+    )
+    return _EXPECTED_METHOD_ROSTER, representations
 
 
 def _validate_metric(

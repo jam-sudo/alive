@@ -16,6 +16,7 @@ from dataclasses import dataclass
 import numpy as np
 from scipy import sparse
 
+from alive.compose.response import RESPONSE_TRANSFORM, ResponseSpace, verify_response_artifact
 from alive.provenance import sha256_json
 
 _ALLOWED_ROLES: frozenset[str] = frozenset({"control", "singles", "combo_calibration"})
@@ -586,6 +587,68 @@ def _assert_canonical_path(path: str, approved_root: str) -> str:
     return ap
 
 
+def _required_role_for_token(
+    perturbation: str,
+    *,
+    calib: set[tuple[str, str]],
+    sealed: set[tuple[str, str]],
+    control_token: str,
+    combo_sep: str,
+) -> str:
+    """Return the fit role every artifact row carrying ``perturbation`` must declare.
+
+    Mirrors :meth:`ComposeFitRoleExtractor._role_of` so validation classifies each
+    stored token independently of its declared role: the control token maps to
+    ``control``, a canonical registered calibration combo to ``combo_calibration``,
+    and any other token to ``singles``. Unlike the extractor it never returns
+    ``None`` — a valid fit artifact never stores a sealed combo cell, so a sealed
+    pair appearing in obs is a leak and fails closed.
+
+    Parameters
+    ----------
+    perturbation : str
+        The stored obs perturbation token for one row.
+    calib : set of tuple of str
+        Registered calibration combo pairs (canonical, byte-ordered).
+    sealed : set of tuple of str
+        Sealed combo pairs; any occurrence in obs is a leak.
+    control_token : str
+        The token that denotes a control cell.
+    combo_sep : str
+        Separator between the two single-gene tokens of a combo.
+
+    Returns
+    -------
+    str
+        The required role (``control`` / ``singles`` / ``combo_calibration``).
+
+    Raises
+    ------
+    FitRoleArtifactError
+        If a combo token is non-canonical, sealed, in both pair sets, or
+        unregistered — fail closed.
+    """
+    if perturbation == control_token:
+        return "control"
+    if combo_sep in perturbation:
+        a, b = _canonical_pair(perturbation, combo_sep)
+        if perturbation != f"{a}{combo_sep}{b}":
+            raise FitRoleArtifactError(f"combo token is not canonical: {perturbation!r}")
+        pair = (a, b)
+        in_calib = pair in calib
+        in_sealed = pair in sealed
+        if in_calib and in_sealed:
+            raise FitRoleArtifactError(
+                f"combo pair {pair!r} is in both calibration and sealed sets"
+            )
+        if in_sealed:
+            raise FitRoleArtifactError(f"sealed pair present in artifact obs: {pair!r}")
+        if not in_calib:
+            raise FitRoleArtifactError(f"combo pair not in calibration set: {pair!r}")
+        return "combo_calibration"
+    return "singles"
+
+
 def validate_fit_role_artifact(
     path: str,
     *,
@@ -593,13 +656,16 @@ def validate_fit_role_artifact(
     approved_root: str,
     calibration_pair_ids: Sequence[tuple[str, str]],
     sealed_pair_ids: Sequence[tuple[str, str]],
+    control_token: str = "control",
+    combo_sep: str = "_",
 ) -> None:
     """Re-validate a fit-role artifact against its spec before fitting (spec §5).
 
     Re-reads the artifact from disk and re-checks path policy, the file byte
-    digest, every logical-content identity digest, the role closure, and the
-    absence of any sealed combo pair. This is the exact guard a worker runs
-    before fit; it fails closed on any mismatch.
+    digest, per-row role↔token consistency, the binding of the trusted spec to the
+    artifact's own provenance/shape, every logical-content identity digest, the
+    role closure, and the absence of any sealed combo pair. This is the exact
+    guard a worker runs before fit; it fails closed on any mismatch.
 
     Parameters
     ----------
@@ -610,18 +676,25 @@ def validate_fit_role_artifact(
     approved_root : str
         Directory the artifact must live inside.
     calibration_pair_ids : Sequence of tuple of str
-        Registered calibration combo pairs; every ``combo_calibration`` cell
-        must belong to this set.
+        Registered calibration combo pairs; every combo cell must belong to this
+        set.
     sealed_pair_ids : Sequence of tuple of str
-        Sealed combo pairs; no ``combo_calibration`` cell may belong to this
-        set (a sealed pair present in obs is a leak → reject).
+        Sealed combo pairs; no cell of any role may carry a sealed pair (a sealed
+        pair present in obs is a leak → reject).
+    control_token : str, default ``"control"``
+        Token denoting a control cell (A1-consistent default so existing callers
+        that pass only the pair sets keep working).
+    combo_sep : str, default ``"_"``
+        Separator between the two single-gene tokens of a combo (A1-consistent
+        default).
 
     Raises
     ------
     FitRoleArtifactError
-        On any path, digest, role-closure, or sealed-pair violation, and on any
-        otherwise-unexpected failure from a malformed/forged artifact (every
-        failure surfaces as ``FitRoleArtifactError`` — fail closed).
+        On any path, digest, role↔token, lineage, shape, role-closure, or
+        sealed-pair violation, and on any otherwise-unexpected failure from a
+        malformed/forged artifact (every failure surfaces as
+        ``FitRoleArtifactError`` — fail closed).
     """
     try:
         _validate_fit_role_artifact_checks(
@@ -630,6 +703,8 @@ def validate_fit_role_artifact(
             approved_root=approved_root,
             calibration_pair_ids=calibration_pair_ids,
             sealed_pair_ids=sealed_pair_ids,
+            control_token=control_token,
+            combo_sep=combo_sep,
         )
     except FitRoleArtifactError:
         raise
@@ -644,6 +719,8 @@ def _validate_fit_role_artifact_checks(
     approved_root: str,
     calibration_pair_ids: Sequence[tuple[str, str]],
     sealed_pair_ids: Sequence[tuple[str, str]],
+    control_token: str = "control",
+    combo_sep: str = "_",
 ) -> None:
     """Run every fit-role validation check; raise on the first violation.
 
@@ -666,28 +743,232 @@ def _validate_fit_role_artifact_checks(
     calib = {tuple(p) for p in calibration_pair_ids}
     sealed = {tuple(p) for p in sealed_pair_ids}
     perts = [str(p) for p in adata.obs["perturbation"]]
+    srcs = [str(s) for s in adata.obs["source_row_id"]]
+
+    # role↔token: classify EVERY row independently of its declared role (spec
+    # §7.1; mirrors ComposeFitRoleExtractor._role_of). A sealed combo mislabeled
+    # `singles`/`control`, a non-canonical combo, or an unregistered combo all
+    # fail closed here — the check is NOT gated on role == "combo_calibration".
     for role, pert in zip(roles, perts):
-        if role == "combo_calibration":
-            pair = _canonical_pair(pert)
-            if pair in sealed:
-                raise FitRoleArtifactError(f"sealed pair present in artifact obs: {pair!r}")
-            if pair not in calib:
-                raise FitRoleArtifactError(f"combo pair not in calibration set: {pair!r}")
+        expected = _required_role_for_token(
+            pert, calib=calib, sealed=sealed, control_token=control_token, combo_sep=combo_sep
+        )
+        if role != expected:
+            raise FitRoleArtifactError(
+                f"role/token mismatch: token {pert!r} requires role {expected!r}, got {role!r}"
+            )
+
+    # non-empty, unique source_row_id before recomputing row/content digests
+    if any(s == "" for s in srcs):
+        raise FitRoleArtifactError("source_row_id must be non-empty")
+    if len(set(srcs)) != len(srcs):
+        raise FitRoleArtifactError("source_row_id must be unique")
 
     var_names = [str(v) for v in adata.var_names]
-    rows = tuple((str(s), r, p) for s, r, p in zip(adata.obs["source_row_id"], roles, perts))
+    rows = tuple((s, r, p) for s, r, p in zip(srcs, roles, perts))
     role_counts = {r: sum(1 for _, rr, _ in rows if rr == r) for r in sorted(_ALLOWED_ROLES)}
     if canonical_gene_order_sha256(var_names) != spec.gene_order_sha256:
         raise FitRoleArtifactError("gene_order digest mismatch")
     if row_identity_sha256(rows) != spec.row_identity_sha256:
         raise FitRoleArtifactError("row_identity digest mismatch")
+
+    # bind the independently trusted spec to the artifact's OWN provenance/shape so
+    # a spec cannot advertise false lineage while pointing at a valid-but-different
+    # artifact (the content manifest is recomputed from this same provenance).
+    provenance = dict(adata.uns["provenance"])
+    for key in ("raw_data_sha256", "pair_manifest_sha256", "eligibility_hash"):
+        if str(provenance[key]) != str(getattr(spec, key)):
+            raise FitRoleArtifactError(f"{key} differs between spec and artifact provenance")
+    if str(provenance["row_identity_sha256"]) != spec.row_identity_sha256:
+        raise FitRoleArtifactError("provenance row_identity_sha256 mismatch")
+    if str(provenance["gene_order_sha256"]) != spec.gene_order_sha256:
+        raise FitRoleArtifactError("provenance gene_order_sha256 mismatch")
+
     recomputed = content_manifest_sha256(
         schema_version=_ARTIFACT_SCHEMA_VERSION,
         X=sparse.csr_matrix(adata.X),
         var_names=var_names,
         rows=rows,
-        provenance=dict(adata.uns["provenance"]),
+        provenance=provenance,
         role_counts=role_counts,
     )
     if recomputed != spec.content_manifest_sha256:
         raise FitRoleArtifactError("content_manifest digest mismatch")
+    if str(adata.uns["content_manifest_sha256"]) != spec.content_manifest_sha256:
+        raise FitRoleArtifactError("stored content_manifest_sha256 differs from spec")
+    if adata.n_obs != spec.n_cells or adata.n_vars != spec.n_genes:
+        raise FitRoleArtifactError("artifact shape differs from spec")
+    if role_counts != spec.role_counts:
+        raise FitRoleArtifactError("artifact role_counts differ from spec")
+
+
+def build_response_projection(
+    response_space: ResponseSpace,
+    *,
+    gene_order: Sequence[str],
+    control_mean: Sequence[float] | np.ndarray,
+    raw_data_sha256: str,
+) -> dict:
+    """Serialize a ``ResponseSpace`` into the spec §2.2 ``response_projection`` block.
+
+    The block is the single-source-of-truth native→PCA-50 operator a worker
+    applies to its full-gene predictions. ``verify_response_artifact`` re-checks
+    the space checksum and yields the combined (space + control_mean) digest used
+    as ``response_artifact_sha256``.
+
+    Parameters
+    ----------
+    response_space : ResponseSpace
+        The frozen, checksum-sealed response space (its ``_control_mean`` may be
+        ``None``; the z-space centroid is supplied separately).
+    gene_order : sequence of str
+        Canonical full gene-ID order the space was fit against; ``hvg_idx`` maps
+        into it to name the HVGs and to bind ``gene_order_sha256``.
+    control_mean : sequence of float
+        z-space control centroid, length ``pca_dim``.
+    raw_data_sha256 : str
+        Exact raw-data digest, embedded for cross-source equality (spec §2.2).
+
+    Returns
+    -------
+    dict
+        The ``response_projection`` block (spec §2.2).
+
+    Raises
+    ------
+    FitRoleArtifactError
+        On a checksum/shape/range/finiteness violation.
+    """
+    genes = _check_gene_ids(gene_order)
+    try:
+        snapshot, ctrl, combined = verify_response_artifact(response_space, control_mean)
+    except ValueError as exc:
+        raise FitRoleArtifactError(f"invalid response space: {exc}") from exc
+
+    n_hvg = int(snapshot.n_hvg)
+    pca_dim = int(snapshot.pca_dim)
+    hvg_idx = np.asarray(snapshot.hvg_idx, dtype=np.int64)
+    if hvg_idx.shape != (n_hvg,):
+        raise FitRoleArtifactError("hvg_idx does not match n_hvg")
+    if hvg_idx.min(initial=0) < 0 or (hvg_idx.size and int(hvg_idx.max()) >= len(genes)):
+        raise FitRoleArtifactError("hvg_idx out of range for the given gene_order")
+    pca_components = np.asarray(snapshot.pca_components, dtype=np.float64)
+    pca_mean = np.asarray(snapshot.pca_mean, dtype=np.float64)
+    if pca_components.shape != (pca_dim, n_hvg):
+        raise FitRoleArtifactError("pca_components shape does not match (pca_dim, n_hvg)")
+    if pca_mean.shape != (n_hvg,):
+        raise FitRoleArtifactError("pca_mean length does not match n_hvg")
+    if ctrl.shape != (pca_dim,):
+        raise FitRoleArtifactError("control_mean must be a pca_dim vector")
+    if not (
+        np.all(np.isfinite(pca_components))
+        and np.all(np.isfinite(pca_mean))
+        and np.all(np.isfinite(ctrl))
+    ):
+        raise FitRoleArtifactError("projection arrays must be finite")
+
+    return {
+        "response_artifact_sha256": str(combined),
+        "raw_data_sha256": str(raw_data_sha256),
+        "gene_order_sha256": canonical_gene_order_sha256(genes),
+        "hvg_gene_ids": [genes[int(i)] for i in hvg_idx],
+        "transform": list(RESPONSE_TRANSFORM),
+        "median_library": float(snapshot.median_library),
+        "pca_mean": pca_mean.tolist(),
+        "pca_components": pca_components.tolist(),
+        "control_mean": ctrl.tolist(),
+        "delta_convention": "z_minus_control_mean",
+    }
+
+
+PREDICTION_REPRESENTATIONS: frozenset[str] = frozenset(
+    {"cell_raw_counts", "cell_log_normalized", "raw_pseudobulk_approximation"}
+)
+
+
+def _normalize_log1p_full(x: np.ndarray, median_library: float) -> np.ndarray:
+    """Frozen library-size normalize to ``median_library`` then ``log1p``.
+
+    Identical arithmetic to ``response._normalize_log1p`` so the worker-side
+    operator reproduces ``ResponseSpace.project`` exactly.
+    """
+    lib = x.sum(axis=1, keepdims=True)
+    safe = np.where(lib > 0, lib, 1.0)
+    return np.log1p(x * (median_library / safe))
+
+
+def apply_response_projection(
+    block: Mapping,
+    x_native: np.ndarray,
+    gene_order: Sequence[str],
+    *,
+    representation: str,
+) -> np.ndarray:
+    """Reconstruct the spec §2.3 operator ``z(x)`` for full-gene rows (pure numpy).
+
+    ``cell_raw_counts`` and ``raw_pseudobulk_approximation`` apply the full frozen
+    transform (normalize to ``median_library`` + ``log1p``) then HVG subset +
+    centering + PCA projection; ``cell_log_normalized`` skips the raw transform
+    because the caller already log-normalized at the same ``median_library``.
+    Truth δ (``mean(z) - control_mean``) is computed by the caller and is
+    invariant to ``representation`` (spec §2.4).
+
+    Parameters
+    ----------
+    block : Mapping
+        A ``response_projection`` block (spec §2.2).
+    x_native : numpy.ndarray
+        Rows over the full ``gene_order``: raw counts for ``cell_raw_counts`` /
+        ``raw_pseudobulk_approximation``; log-normalized values for
+        ``cell_log_normalized``. Shape ``(n_rows, n_genes)``.
+    gene_order : sequence of str
+        The full gene-ID order of ``x_native``; must match the block's
+        ``gene_order_sha256``.
+    representation : str
+        One of :data:`PREDICTION_REPRESENTATIONS`.
+
+    Returns
+    -------
+    numpy.ndarray
+        Projected z-coordinates, shape ``(n_rows, pca_dim)``.
+
+    Raises
+    ------
+    FitRoleArtifactError
+        On an unknown representation, a gene-order digest mismatch, or a shape
+        mismatch.
+    """
+    if representation not in PREDICTION_REPRESENTATIONS:
+        raise FitRoleArtifactError(f"unknown prediction representation: {representation!r}")
+    genes = [str(g) for g in gene_order]
+    if canonical_gene_order_sha256(genes) != block["gene_order_sha256"]:
+        raise FitRoleArtifactError("gene_order digest mismatch for projection")
+    X = np.asarray(x_native, dtype=np.float64)
+    if X.ndim != 2 or X.shape[1] != len(genes):
+        raise FitRoleArtifactError("x_native must be (n_rows, n_genes) over the full gene order")
+    if not np.all(np.isfinite(X)):
+        raise FitRoleArtifactError("x_native must contain only finite values")
+    if np.any(X < 0):
+        raise FitRoleArtifactError("registered native/log1p representations must be non-negative")
+
+    if representation == "cell_log_normalized":
+        normed = X
+    else:
+        normed = _normalize_log1p_full(X, float(block["median_library"]))
+
+    name_to_col = {g: i for i, g in enumerate(genes)}
+    hvg_gene_ids = list(block["hvg_gene_ids"])
+    try:
+        hvg_cols = [name_to_col[g] for g in hvg_gene_ids]
+    except KeyError as exc:
+        raise FitRoleArtifactError(f"hvg gene {exc} absent from gene_order") from exc
+    sub = normed[:, hvg_cols]
+    pca_mean = np.asarray(block["pca_mean"], dtype=np.float64)
+    pca_components = np.asarray(block["pca_components"], dtype=np.float64)
+    if pca_mean.shape != (len(hvg_cols),):
+        raise FitRoleArtifactError("pca_mean is not aligned with hvg_gene_ids")
+    if pca_components.ndim != 2 or pca_components.shape[1] != len(hvg_cols):
+        raise FitRoleArtifactError("pca_components are not aligned with hvg_gene_ids")
+    if not np.all(np.isfinite(pca_mean)) or not np.all(np.isfinite(pca_components)):
+        raise FitRoleArtifactError("projection arrays must be finite")
+    return (sub - pca_mean) @ pca_components.T

@@ -1,7 +1,7 @@
 # ALIVE — Virtual Cell Project Governance
 
 > **문서 역할:** project-wide scientific governance and agent operating contract
-> **개정일:** 2026-06-30
+> **개정일:** 2026-07-04
 > **현재 활성 protocol:** `COMPOSE-K562-v1` (ACTIVE, 2026-06-30 activation; TG-K562-v1 COMPLETE) — sealed confirmatory run은 A100에서 1회
 > **다음 milestone:** `COMPOSE-K562-v1` sealed double-unseen 확정 실행 → `CT-RPE1-v1` (deferred)
 
@@ -13,13 +13,13 @@ ALIVE는 단계적으로 virtual cell을 구축하는 연구 프로젝트다. �
 cellular context를 입력받아 intervention 이후의 cell-population distribution을 예측하고,
 예측할 수 없는 영역에서는 측정을 요청할 수 있는 causal virtual-cell world model이다.
 
-현재 활성 MVP는 **K562 retrospective CARTOGRAPHER Trust-Gate**다. Frozen additive
-perturbation-response surrogate 위에서:
+현재 활성 protocol은 **`COMPOSE-K562-v1`**다(ACTIVE, 2026-06-30 activation) — Norman K562 CRISPRa
+조합 perturbation에서 단일-gene signature로 고정한 factor로 transcriptome-valued 비가산 성분을
+식별가능한 bilinear operator로 예측한다(§4.2). 선행 **`TG-K562-v1`**(K562 retrospective CARTOGRAPHER
+Trust-Gate; frozen additive surrogate 위 scalar prediction-error bound + PREDICT/ABSTAIN routing)은
+COMPLETE이며 sealed verdict는 `NO_DISTINCT_WIN`이다(§4.1).
 
-1. scalar global prediction-error bound를 calibration하고,
-2. held-out K562 perturbation을 PREDICT/ABSTAIN 순서로 routing한다.
-
-현재 MVP를 mechanistic, causal, temporally resolved, clinically predictive, distribution-valued
+현재 결과를 mechanistic, causal, temporally resolved, clinically predictive, distribution-valued
 prediction-set model 또는 Active Cartographer라고 부르지 않는다.
 
 장기 모델 target은 다음과 같다.
@@ -71,19 +71,22 @@ CLAUDE.md는 다음 세부사항을 복제하지 않는다.
 8. **Long-range milestones:** `virtual-cell-project-plan.md`
 
 이 순위는 **도메인별**로 적용된다. Safety, seal, leakage, governance invariant는 이 문서가
-최상위이고, scientific claim의 정의는 해당 milestone spec(현재 CARTOGRAPHER spec §0)이 최상위다.
+최상위이고, scientific claim의 정의는 해당 milestone spec(현재 활성 `COMPOSE-K562-v1` spec §0)이 최상위다.
 Spec §0의 source-of-truth 목록은 claim 도메인 기준이라 `CLAUDE.md`를 마지막에 두지만, 이는 이
 §3.1과 모순이 아니라 도메인이 다른 것이다. 두 도메인이 직접 충돌하면 — 예: safety invariant가
 어떤 claim 구성을 금지 — safety invariant가 우선하여 run을 중단시키고 §3.2로 처리한다.
 
-현재 CARTOGRAPHER protocol의 문서는 다음과 같다.
+현재 활성 protocol(`COMPOSE-K562-v1`)의 문서는 다음과 같다(§4.2).
 
 - Scientific spec:
-  `docs/superpowers/specs/2026-06-20-cartographer-design.md`
-- Implementation plan:
-  `docs/superpowers/plans/2026-06-20-cartographer-mvp.md`
+  `docs/superpowers/specs/2026-06-22-compose-epistasis-operator-design.md`
 - Config:
-  `configs/cartographer_trust_gate_k562_v1.yaml`
+  `configs/compose_k562_v1_phase2.yaml`
+
+완료된 `TG-K562-v1`(CARTOGRAPHER) 문서는 §4.1이 가리킨다:
+`docs/superpowers/specs/2026-06-20-cartographer-design.md`,
+`docs/superpowers/plans/2026-06-20-cartographer-mvp.md`,
+`configs/cartographer_trust_gate_k562_v1.yaml`.
 
 ### 3.2 충돌 처리
 
@@ -137,10 +140,10 @@ protocol-independent safety invariant는 모든 protocol에 적용된다. Protoc
 > Norman K562 CRISPRa 조합 perturbation에서 단일-gene signature로 고정한 factor를 사용해
 > transcriptome-valued 비가산 성분을 식별가능한 bilinear operator로 예측한다.
 
-Scientific claim contract와 candidate Phase-2 config는 다음에 있다.
+Scientific claim contract와 activated Phase-2 config는 다음에 있다.
 
 - Spec: `docs/superpowers/specs/2026-06-22-compose-epistasis-operator-design.md`
-- Candidate config: `configs/compose_k562_v1_phase2.yaml`
+- Config (activated, `status: active`): `configs/compose_k562_v1_phase2.yaml`
 
 Owner는 Phase 2 설계와 사전등록 후보를 승인했고, 아래 6개 activation blocker가 모두
 version-controlled evidence/tests로 충족되어 **2026-06-30 이 commit에서 registry를 `ACTIVE`로
@@ -279,9 +282,9 @@ split 후 조용히 건너뛰지 않는다.
 
 ## 8. Model and feature governance
 
-### 8.1 Current K562 Trust-Gate
+### 8.1 `TG-K562-v1` Trust-Gate (COMPLETE)
 
-현재 TG-K562 base는 ESM target feature와 additive population-shift predictor를 사용한다.
+TG-K562 base는 ESM target feature와 additive population-shift predictor를 사용한다.
 정확한 architecture와 grid는 CARTOGRAPHER spec/config가 정한다.
 
 Scientific mode에서:
@@ -312,7 +315,7 @@ means, self-distance floor와 mean-collapse diagnostics를 유지한다.
 
 ### 9.1 `TG-K562-v1`
 
-현재 comparator family는 CARTOGRAPHER spec/config에 등록한다. 최소한 다음 범주를 포함한다.
+TG-K562-v1 comparator family는 CARTOGRAPHER spec/config에 등록한다. 최소한 다음 범주를 포함한다.
 
 - feature-distance UQ
 - ensemble-disagreement UQ
@@ -384,13 +387,15 @@ Run directory와 ledger는 write-once state machine이어야 한다.
 
 ```text
 src/alive/data/         ingestion, manifest, preprocessing, feature bank, outcome store
-src/alive/base/         frozen base predictors
-src/alive/gate/         Trust-Gate components
+src/alive/base/         frozen base predictors (TG-K562)
+src/alive/gate/         Trust-Gate components (TG-K562)
 src/alive/baselines/    registered UQ/error baselines
 src/alive/conformal/    scalar calibration artifacts
 src/alive/metrics/      distance and selective metrics
 src/alive/eval/         bootstrap, verdict, reports
 src/alive/experiment/   staged development and evaluation
+src/alive/compose/      COMPOSE outcome store, terminal state machine, provenance2 (ACTIVE)
+src/alive/*.py          top-level: cli.py config.py io.py provenance.py types.py
 configs/                immutable experiment configurations
 tests/                  unit, leakage, metric, reproducibility, integration
 docs/                   versioned specs, plans and audits

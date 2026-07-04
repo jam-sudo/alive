@@ -55,6 +55,7 @@ from alive.compose.config2 import (
 )
 from alive.compose.datacard import compute_compose_run_id
 from alive.compose.diagnostics2 import FutilityResult, real_calibration_diagnostics
+from alive.compose.fit_role import FitRoleArtifactSpec, build_response_projection
 from alive.compose.freeze import (
     FrozenPredictionBundle,
     OutcomeLeakageError,
@@ -62,7 +63,7 @@ from alive.compose.freeze import (
     _assert_no_sealed,
 )
 from alive.compose.models import fitted_model_checksum
-from alive.compose.response import ResponseSpace, verify_response_artifact
+from alive.compose.response import ResponseSpace, bind_response_source, verify_response_artifact
 from alive.compose.zfactor import GeneFactorBank
 from alive.provenance import RunLedger, sha256_bytes, sha256_file, sha256_json
 
@@ -334,27 +335,86 @@ def build_subprocess_fit_payload(
     outcome_store: DevelopmentOutcomeStore,
     response_artifact: Mapping,
     oof_folds: Sequence[int],
+    fit_role_spec: FitRoleArtifactSpec,
+    gene_order: Sequence[str],
+    raw_data_sha256: str,
 ) -> dict[str, object]:
-    """Assemble the canonical fit-role-only payload for GEARS/CPA workers."""
+    """Assemble the canonical payload-v2 fit-role payload for GEARS/CPA workers.
+
+    The v2 payload carries the A1 ``fit_role_artifact`` block and a serialized
+    native→PCA response operator (``response_projection``) alongside the
+    development singles/calibration design. The serialized projection arrays are
+    reused verbatim for the top-level ``pca_components`` / ``control_mean`` so the
+    validator's cross-source float equality holds, and the fit-role artifact's
+    raw-data + gene-order digests are bound to the response source. The
+    projection's ``response_artifact_sha256`` must additionally equal
+    ``inputs.response_space_checksum`` (the separately verified response-space
+    checksum), closing the circular-equality gap: the payload is bound to the
+    *independently* verified response artifact, not merely self-consistent.
+
+    Parameters
+    ----------
+    inputs : Phase2aInputs
+        Bound development inputs (identities/features only).
+    outcome_store : DevelopmentOutcomeStore
+        Calibration-only outcome store, aligned with ``inputs.cal_pair_ids``.
+    response_artifact : Mapping
+        ``{"response_space": ResponseSpace, "control_mean": z-space centroid}``.
+    oof_folds : sequence of int
+        OOF fold assignment, one per calibration pair.
+    fit_role_spec : FitRoleArtifactSpec
+        The immutable identity of the written fit-role ``.h5ad`` artifact.
+    gene_order : sequence of str
+        Canonical full gene order the response space was fit against; must equal
+        the fit-role artifact's ``var_names``.
+    raw_data_sha256 : str
+        Shared raw-data digest bound across the artifact, projection and source.
+
+    Returns
+    -------
+    dict of str to object
+        The payload-v2 fit-role payload.
+
+    Raises
+    ------
+    ValueError
+        On a malformed response artifact, a fold/pair misalignment, a
+        raw-data / gene-order digest mismatch between the fit-role artifact and
+        the response source, or a projection whose ``response_artifact_sha256``
+        does not equal the independently verified ``inputs.response_space_checksum``.
+    """
     if set(response_artifact) != {"response_space", "control_mean"}:
         raise ValueError("response_artifact must contain exactly response_space + control_mean")
     response_space = response_artifact["response_space"]
-    components = np.asarray(getattr(response_space, "pca_components", None), dtype=float)
     control_mean = np.asarray(response_artifact["control_mean"], dtype=float)
-    if components.ndim != 2 or components.shape[0] != inputs.response_dim:
-        raise ValueError("response-space PCA components are not response_dim aligned")
     if control_mean.shape != (inputs.response_dim,):
         raise ValueError("response artifact control_mean is not response_dim aligned")
     if len(oof_folds) != len(inputs.cal_pair_ids):
         raise ValueError("oof_folds must align one-to-one with calibration pairs")
     if outcome_store.combo_calibration_pair_ids != tuple(tuple(p) for p in inputs.cal_pair_ids):
         raise ValueError("development outcomes are not aligned with calibration pair IDs")
+
+    projection = build_response_projection(
+        response_space,
+        gene_order=gene_order,
+        control_mean=control_mean,
+        raw_data_sha256=raw_data_sha256,
+    )
+    if projection["response_artifact_sha256"] != inputs.response_space_checksum:
+        raise ValueError("projection does not match the independently verified response artifact")
+    fit_role_block = fit_role_spec.to_payload_block()
+    bound = bind_response_source(gene_order=gene_order, raw_data_sha256=raw_data_sha256)
+    if fit_role_block["raw_data_sha256"] != bound["raw_data_sha256"]:
+        raise ValueError("fit-role artifact raw_data_sha256 does not match response source")
+    if fit_role_block["gene_order_sha256"] != bound["gene_order_sha256"]:
+        raise ValueError("fit-role artifact gene_order_sha256 does not match response source")
+
     genes = tuple(sorted(inputs.delta_by_gene, key=lambda gene: gene.encode("utf-8")))
     calibration_delta = np.asarray(inputs.additive_cal, dtype=float) + np.asarray(
         outcome_store.combo_calibration_eps, dtype=float
     )
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "response_dim": int(inputs.response_dim),
         "seed": int(inputs.seed),
         "allowed_roles": ["singles", "combo_calibration"],
@@ -363,11 +423,14 @@ def build_subprocess_fit_payload(
         "singles_response": [
             np.asarray(inputs.delta_by_gene[gene], dtype=float).tolist() for gene in genes
         ],
-        "control_mean": control_mean.tolist(),
+        # reuse the projection-serialized arrays so the cross-source equality holds
+        "control_mean": projection["control_mean"],
         "calibration_pair_ids": [list(pair) for pair in inputs.cal_pair_ids],
         "calibration_delta": calibration_delta.tolist(),
-        "pca_components": components.tolist(),
+        "pca_components": projection["pca_components"],
         "oof_folds": [int(fold) for fold in oof_folds],
+        "fit_role_artifact": fit_role_block,
+        "response_projection": projection,
     }
 
 
@@ -876,6 +939,92 @@ def _inputs_scan_view(inputs: Phase2aInputs) -> dict[str, object]:
     return view
 
 
+def _baseline_context(inputs: Phase2aInputs) -> BaselineTrainingContext:
+    """The frozen development-role context handed to every subprocess adapter.
+
+    Parameters
+    ----------
+    inputs : Phase2aInputs
+        The bound inputs; only development-role identities/checksums are read.
+
+    Returns
+    -------
+    BaselineTrainingContext
+        The single context reused for the combined subprocess fit (spec §2.5),
+        pinning the allowed roles, manifest/response checksums and the ordered
+        calibration pair IDs and single-gene IDs.
+    """
+    return BaselineTrainingContext(
+        allowed_roles=frozenset({"singles", "combo_calibration"}),
+        pair_manifest_checksum=inputs.manifest_checksum,
+        response_space_checksum=inputs.response_space_checksum,
+        training_pair_ids=tuple(tuple(p) for p in inputs.cal_pair_ids),
+        single_gene_ids=tuple(
+            sorted(inputs.delta_by_gene, key=lambda gene: str(gene).encode("utf-8"))
+        ),
+    )
+
+
+def _combined_pair_union(
+    double_ids: Sequence[tuple[str, str]],
+    single_ids: Sequence[tuple[str, str]],
+) -> list[tuple[str, str]]:
+    """Ordered de-duplicated double∪single request (doubles first) for a single fit.
+
+    Parameters
+    ----------
+    double_ids : sequence of (str, str)
+        The registered double-unseen sealed pair IDs.
+    single_ids : sequence of (str, str)
+        The registered single-unseen sealed pair IDs.
+
+    Returns
+    -------
+    list of (str, str)
+        The combined request the subprocess worker fits/predicts exactly once,
+        with the double-unseen pairs first and any overlap de-duplicated.
+    """
+    union: list[tuple[str, str]] = []
+    for p in (*double_ids, *single_ids):
+        pair = (p[0], p[1])
+        if pair not in union:
+            union.append(pair)
+    return union
+
+
+def _predict_combined_adapters(
+    inputs: Phase2aInputs,
+    combined_pair_ids: Sequence[tuple[str, str]],
+    baseline_adapters: Mapping[str, object],
+) -> dict[str, dict[tuple[str, str], np.ndarray]]:
+    """Invoke every subprocess adapter EXACTLY once on the combined pair union.
+
+    Honors the single-fit / single-checkpoint / combined-request rule (spec §2.5):
+    each worker fits once and predicts the whole union; :func:`_predict_role` then
+    splits the cached result per role without re-invoking the worker.
+
+    Parameters
+    ----------
+    inputs : Phase2aInputs
+        The bound inputs; supplies the frozen :func:`_baseline_context`.
+    combined_pair_ids : sequence of (str, str)
+        The ordered double∪single request from :func:`_combined_pair_union`.
+    baseline_adapters : Mapping of str to adapter
+        The subprocess adapters keyed by method name.
+
+    Returns
+    -------
+    dict
+        ``name -> {pair_id -> length-response_dim prediction vector}`` for every
+        adapter, each produced by a single ``predict`` call over the union.
+    """
+    context = _baseline_context(inputs)
+    return {
+        name: adapter.predict(context, list(combined_pair_ids), inputs.response_dim)
+        for name, adapter in baseline_adapters.items()
+    }
+
+
 def _predict_role(
     inputs: Phase2aInputs,
     pair_ids: Sequence[tuple[str, str]],
@@ -883,6 +1032,8 @@ def _predict_role(
     selected_Z: np.ndarray,
     perturbation_mean_prediction: np.ndarray,
     baseline_adapters: Mapping[str, BaselineAdapter] | None = None,
+    *,
+    adapter_predictions: Mapping[str, Mapping[tuple[str, str], np.ndarray]] | None = None,
 ) -> dict[str, dict[tuple[str, str], np.ndarray]]:
     """Predict every roster method for a sealed role using identities/features only.
 
@@ -908,6 +1059,14 @@ def _predict_role(
         Learned models already fitted on calibration data (``predict_eps``).
     selected_Z : numpy.ndarray
         The factor bank for the selected ``k_total``.
+    baseline_adapters : Mapping of str to BaselineAdapter, optional
+        Subprocess adapters (GEARS/CPA). When ``adapter_predictions`` is None the
+        adapter predicts this role directly; otherwise it is only a key roster.
+    adapter_predictions : Mapping of str to (Mapping of pair_id to ndarray), optional
+        The pre-computed combined single-fit predictions from
+        :func:`_predict_combined_adapters`. When supplied this role's predictions
+        are SLICED out of it (no re-invocation), enforcing the §2.5 single-fit
+        rule. When None (default) the adapter is invoked per role.
 
     Returns
     -------
@@ -936,17 +1095,19 @@ def _predict_role(
         (g, h): np.asarray(perturbation_mean_prediction, dtype=float).copy() for g, h in pair_ids
     }
     if baseline_adapters:
-        context = BaselineTrainingContext(
-            allowed_roles=frozenset({"singles", "combo_calibration"}),
-            pair_manifest_checksum=inputs.manifest_checksum,
-            response_space_checksum=inputs.response_space_checksum,
-            training_pair_ids=tuple(tuple(p) for p in inputs.cal_pair_ids),
-            single_gene_ids=tuple(
-                sorted(inputs.delta_by_gene, key=lambda gene: str(gene).encode("utf-8"))
-            ),
-        )
-        for name, adapter in baseline_adapters.items():
-            out[name] = adapter.predict(context, list(pair_ids), inputs.response_dim)
+        if adapter_predictions is None:
+            # Direct per-role call (preserves any direct caller): each adapter
+            # fits + predicts this role. run_phase2a NEVER takes this branch —
+            # it pre-computes the combined single fit and passes the split below.
+            context = _baseline_context(inputs)
+            for name, adapter in baseline_adapters.items():
+                out[name] = adapter.predict(context, list(pair_ids), inputs.response_dim)
+        else:
+            # Split the already-computed combined union (spec §2.5 single fit):
+            # slice this role's pairs out of the shared prediction — no re-invoke.
+            for name in baseline_adapters:
+                combined = adapter_predictions[name]
+                out[name] = {(g, h): np.asarray(combined[(g, h)], dtype=float) for g, h in pair_ids}
     return out
 
 
@@ -1237,6 +1398,19 @@ def _run_phase2a_core(
         model = factory()
         model.fit(selected_Z, list(inputs.cal_idx_pairs), eps_cal, lam=float(selected_lambda))
         fitted[name] = model
+    # Combined single-fit invocation (spec §2.5) BEFORE the adapter provenance
+    # read: each subprocess worker fits ONCE and predicts the whole double∪single
+    # union. This MUST precede the provenance_manifest read below because
+    # SubprocessBaselineBackend.provenance_manifest only carries the execution
+    # manifest (checkpoint + prediction digests) AFTER a predict has run, so the
+    # combined predict must happen first for those digests to bind into
+    # effective_model_checksum (spec §2.5/§10 — the method lock).
+    combined_pairs = _combined_pair_union(
+        inputs.sealed_double_pair_ids, inputs.sealed_single_pair_ids
+    )
+    adapter_predictions = (
+        _predict_combined_adapters(inputs, combined_pairs, adapters) if adapters else None
+    )
     model_artifact_checksums = {
         name: fitted_model_checksum(model) for name, model in sorted(fitted.items())
     }
@@ -1260,6 +1434,7 @@ def _run_phase2a_core(
         selected_Z,
         mean_prediction,
         adapters,
+        adapter_predictions=adapter_predictions,
     )
     single_preds = _predict_role(
         inputs,
@@ -1268,6 +1443,7 @@ def _run_phase2a_core(
         selected_Z,
         mean_prediction,
         adapters,
+        adapter_predictions=adapter_predictions,
     )
 
     roster = cfg.method_roster
