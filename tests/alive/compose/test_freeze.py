@@ -31,6 +31,7 @@ from alive.compose.freeze import (
     FrozenPredictionBundle,
     OutcomeLeakageError,
 )
+from alive.provenance import sha256_json
 
 # --------------------------------------------------------------------------- #
 # fixtures
@@ -63,6 +64,19 @@ def _roster_preds(pairs) -> dict[str, dict[tuple[str, str], np.ndarray]]:
 
 
 def _bundle(**overrides) -> FrozenPredictionBundle:
+    model_artifact_checksums = {
+        name: sha256_json({"fixture_model": name})
+        for name in ROSTER
+        if name not in {"additive", "no_change", "perturbation_mean"}
+    }
+    model_checksum = sha256_json(
+        {
+            "schema": "compose_model_set_v1",
+            "methods": model_artifact_checksums,
+            "selected_k_total": 4,
+            "selected_lambda": float(1e-3).hex(),
+        }
+    )
     kwargs = dict(
         run_id="deadbeefcafef00d",
         method_roster=ROSTER,
@@ -72,7 +86,8 @@ def _bundle(**overrides) -> FrozenPredictionBundle:
         predictions_single_unseen=_roster_preds(SINGLE_PAIRS),
         response_space_checksum="rs-checksum",
         factor_checksum="zf-checksum",
-        model_checksum="model-checksum",
+        model_checksum=model_checksum,
+        model_artifact_checksums=model_artifact_checksums,
         manifest_checksum="manifest-checksum",
         selected_k_total=4,
         selected_lambda=1e-3,
@@ -97,6 +112,18 @@ def test_create_seals_a_checksum_and_verifies():
 
 def test_create_is_deterministic_checksum():
     assert _bundle().bundle_checksum == _bundle().bundle_checksum
+
+
+def test_create_rejects_model_checksum_not_derived_from_artifact_map():
+    with pytest.raises(FreezeError, match="model checksum does not bind"):
+        _bundle(model_checksum="0" * 64)
+
+
+def test_verify_rejects_per_method_artifact_checksum_tampering():
+    bundle = _bundle()
+    bundle.model_artifact_checksums["gears"] = "0" * 64
+    with pytest.raises(FreezeError, match="model checksum does not bind"):
+        bundle.verify()
 
 
 def test_roundtrip_to_from_dict_preserves_checksum_and_predictions():

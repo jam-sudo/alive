@@ -321,6 +321,31 @@ def test_payload_with_sealed_token_is_refused(tmp_path) -> None:
         be.configure_payload(bad)
 
 
+def test_configure_payload_detaches_nested_state(tmp_path) -> None:
+    be = _backend(tmp_path)
+    payload = _payload()
+    be.configure_payload(payload)
+    payload["response_projection"]["response_artifact_sha256"] = "4" * 64
+    payload["fit_role_artifact"]["path"] = "/tampered/after/configure.h5ad"
+    assert be._payload["response_projection"]["response_artifact_sha256"] == "3" * 64
+    assert be._payload["fit_role_artifact"]["path"] == "/approved/artifacts/fit_role.h5ad"
+
+
+def test_predict_rejects_relative_approved_root() -> None:
+    be = SubprocessBaselineBackend(
+        name="stub",
+        env_python=sys.executable,
+        worker_script=_STUB,
+        import_name="json",
+        approved_artifacts_root=".",
+        expected_response_artifact_sha256="3" * 64,
+        execution_identity_lock=_stub_lock(),
+    )
+    be.configure_payload(_payload())
+    with pytest.raises(PayloadError, match="absolute path"):
+        be.predict(None, [("A", "B")], 3)
+
+
 def test_v1_schema_version_rejected(tmp_path):
     p = _payload()
     p["schema_version"] = 1

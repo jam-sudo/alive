@@ -57,7 +57,7 @@ from alive.compose.scoring2 import RegimeScore
 from alive.compose.split import build_split_manifest
 from alive.compose.terminal import Phase2bTerminal, TerminalState
 from alive.compose.verdict2 import MethodAxis, SealedAxis
-from alive.provenance import EnvironmentInfo, RunLedger
+from alive.provenance import EnvironmentInfo, RunLedger, sha256_json
 
 from alive.compose.phase2b import (  # isort: skip
     ActivationProvenanceInputs,
@@ -254,6 +254,19 @@ def _build_bundle(manifest: dict, cfg, *, response_dim=2, futility_status="CONTI
     """A FrozenPredictionBundle whose sealed pairs == the manifest roles exactly."""
     double_ids = tuple(_role_pairs(manifest, "sealed_double_unseen"))
     single_ids = tuple(_role_pairs(manifest, "sealed_single_unseen"))
+    model_artifact_checksums = {
+        name: sha256_json({"fixture_model": name})
+        for name in cfg.method_roster
+        if name not in {"additive", "no_change", "perturbation_mean"}
+    }
+    model_checksum = sha256_json(
+        {
+            "schema": "compose_model_set_v1",
+            "methods": model_artifact_checksums,
+            "selected_k_total": 4,
+            "selected_lambda": float(0.01).hex(),
+        }
+    )
     return FrozenPredictionBundle.create(
         run_id=_run_id(cfg),
         method_roster=cfg.method_roster,
@@ -267,7 +280,8 @@ def _build_bundle(manifest: dict, cfg, *, response_dim=2, futility_status="CONTI
         ),
         response_space_checksum="rs-checksum",
         factor_checksum="zf-checksum",
-        model_checksum="model-checksum",
+        model_checksum=model_checksum,
+        model_artifact_checksums=model_artifact_checksums,
         manifest_checksum=manifest["checksum"],
         selected_k_total=4,
         selected_lambda=0.01,

@@ -1143,6 +1143,46 @@ def _validate_baseline_adapters(
     return adapters
 
 
+def _validate_adapter_runtime_bindings(
+    inputs: Phase2aInputs,
+    config: ComposePhase2Config,
+    adapters: Mapping[str, BaselineAdapter],
+) -> None:
+    """Bind every subprocess backend to the active run and method preregistration.
+
+    Payload construction validates its own response artifact, but the Phase2a
+    orchestrator must also prove that the *configured backend* consumes the same
+    response space as ``inputs`` and uses the representation registered for that
+    method. Otherwise predictions can be frozen under an unrelated response-space
+    checksum or a worker can silently select a different nonlinear adapter.
+    """
+    expected_representations = {
+        name: representation
+        for name, representation, _bias_report in config.baseline_representations
+    }
+    mismatches: list[str] = []
+    for name, adapter in sorted(adapters.items()):
+        backend = adapter.backend
+        observed_response = getattr(backend, "expected_response_artifact_sha256", None)
+        if observed_response != inputs.response_space_checksum:
+            mismatches.append(
+                f"{name}.response_space({observed_response!r}!={inputs.response_space_checksum!r})"
+            )
+        lock = getattr(backend, "execution_identity_lock", None)
+        observed_representation = getattr(lock, "prediction_representation", None)
+        expected_representation = expected_representations.get(name)
+        if observed_representation != expected_representation:
+            mismatches.append(
+                f"{name}.prediction_representation("
+                f"{observed_representation!r}!={expected_representation!r})"
+            )
+    if mismatches:
+        raise ScientificModeError(
+            "subprocess backend identities differ from the bound run/config: "
+            + ", ".join(mismatches)
+        )
+
+
 def _build_method_lock(
     inputs: Phase2aInputs,
     roster: tuple[str, ...],
@@ -1341,6 +1381,7 @@ def _run_phase2a_core(
         baseline_adapters=baseline_adapters,
         required=not fixture_execution,
     )
+    _validate_adapter_runtime_bindings(inputs, cfg, adapters)
 
     # Step 2: bind runtime values, in-memory contents, role provenance and run ID.
     _validate_config_contract(inputs, cfg, tuple(adapters))
@@ -1459,6 +1500,7 @@ def _run_phase2a_core(
         response_space_checksum=inputs.response_space_checksum,
         factor_checksum=inputs.factor_checksum,
         model_checksum=effective_model_checksum,
+        model_artifact_checksums=model_artifact_checksums,
         manifest_checksum=inputs.manifest_checksum,
         selected_k_total=selected_k,
         selected_lambda=selected_lambda,

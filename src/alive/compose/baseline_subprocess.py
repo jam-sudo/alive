@@ -668,8 +668,16 @@ class SubprocessBaselineBackend:
             candidate,
             expected_response_artifact_sha256=self.expected_response_artifact_sha256,
         )
-        _canonical_json(candidate)
-        self._payload = candidate
+        # Canonical JSON round-trip creates a detached deep snapshot. A shallow
+        # ``dict(payload)`` would retain aliases to nested lists/blocks, allowing
+        # callers to mutate an already-validated payload after configuration.
+        snapshot = json.loads(_canonical_json(candidate))
+        _validate_payload(
+            snapshot,
+            expected_response_artifact_sha256=self.expected_response_artifact_sha256,
+        )
+        self._payload = snapshot
+        self._last_execution_manifest = None
 
     @property
     def provenance_manifest(self) -> dict[str, object]:
@@ -766,8 +774,14 @@ class SubprocessBaselineBackend:
         """
         if self._payload is None:
             raise PayloadError(f"{self.name} backend has no fit-role payload assigned")
+        if not isinstance(self.approved_artifacts_root, str) or not os.path.isabs(
+            self.approved_artifacts_root
+        ):
+            raise PayloadError(
+                f"{self.name} approved_artifacts_root must be supplied as an absolute path"
+            )
         approved_root = os.path.realpath(self.approved_artifacts_root)
-        if not (os.path.isabs(approved_root) and os.path.isdir(approved_root)):
+        if not os.path.isdir(approved_root):
             raise PayloadError(
                 f"{self.name} approved_artifacts_root must be an absolute existing directory"
             )
@@ -789,6 +803,8 @@ class SubprocessBaselineBackend:
                     out,
                     "--approved-root",
                     approved_root,
+                    "--prediction-representation",
+                    self.execution_identity_lock.prediction_representation,
                 ],
                 capture_output=True,
                 text=True,

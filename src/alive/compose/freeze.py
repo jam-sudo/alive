@@ -12,6 +12,8 @@ without refitting. It carries (plan §2.5):
 * **predictions only** — one length-``response_dim`` vector per (method, pair) —
   and **never** a measured pair outcome;
 * the response-space, factor, model and manifest checksums;
+* the per-method fitted-model / adapter-execution artifact checksums used to
+  derive the aggregate model checksum;
 * the selected hyperparameters and registered seeds;
 * the development diagnostics and futility status.
 
@@ -57,6 +59,8 @@ REQUIRED_METHODS: tuple[str, ...] = (
     "gears",
     "cpa",
 )
+
+NON_ARTIFACT_METHODS: frozenset[str] = frozenset({"additive", "no_change", "perturbation_mean"})
 
 #: Substrings that mark a *measured outcome* (vs a prediction). The bundle holds
 #: predictions only, so any of these appearing as a key/value/path anywhere in the
@@ -171,6 +175,56 @@ def _is_canonical(pair: tuple[str, str]) -> bool:
     """Return ``True`` if ``pair`` is canonical ``(min, max)`` by UTF-8 bytes."""
     g, h = pair
     return g.encode("utf-8") <= h.encode("utf-8")
+
+
+def _validate_model_artifact_binding(
+    method_roster: tuple[str, ...],
+    model_artifact_checksums: Mapping[str, str],
+    model_checksum: str,
+    selected_k_total: int,
+    selected_lambda: float,
+) -> dict[str, str]:
+    """Validate the complete method-artifact map and its aggregate checksum."""
+    if not isinstance(model_artifact_checksums, Mapping):
+        raise FreezeError("model_artifact_checksums must be a mapping")
+    invalid_keys = [repr(key) for key in model_artifact_checksums if not isinstance(key, str)]
+    if invalid_keys:
+        raise FreezeError(f"model artifact checksum keys must be strings: {invalid_keys}")
+    expected_methods = set(method_roster) - NON_ARTIFACT_METHODS
+    supplied_methods = set(model_artifact_checksums)
+    if supplied_methods != expected_methods:
+        raise FreezeError(
+            "model artifact checksum roster mismatch "
+            f"(missing={sorted(expected_methods - supplied_methods)}, "
+            f"extra={sorted(supplied_methods - expected_methods)})"
+        )
+    malformed = {
+        name: digest
+        for name, digest in model_artifact_checksums.items()
+        if not isinstance(digest, str)
+        or len(digest) != 64
+        or any(char not in "0123456789abcdef" for char in digest)
+    }
+    if malformed:
+        raise FreezeError(
+            "model artifact checksums must be 64 lowercase hexadecimal characters "
+            f"for {sorted(malformed)}"
+        )
+    snapshot = {name: model_artifact_checksums[name] for name in sorted(model_artifact_checksums)}
+    expected_checksum = sha256_json(
+        {
+            "schema": "compose_model_set_v1",
+            "methods": snapshot,
+            "selected_k_total": int(selected_k_total),
+            "selected_lambda": float(selected_lambda).hex(),
+        }
+    )
+    if model_checksum != expected_checksum:
+        raise FreezeError(
+            "model checksum does not bind the supplied per-method artifact checksums "
+            "and selected hyperparameters"
+        )
+    return snapshot
 
 
 def _validate_role_predictions(
@@ -323,6 +377,10 @@ class FrozenPredictionBundle:
         As above for the ``sealed_single_unseen`` role.
     response_space_checksum, factor_checksum, model_checksum, manifest_checksum :
         str. Upstream artifact checksums this bundle is bound to.
+    model_artifact_checksums : dict
+        Complete ``method -> SHA-256`` mapping for fitted models and external
+        adapter executions. The aggregate ``model_checksum`` is recomputed from
+        this mapping and the selected hyperparameters.
     selected_k_total : int
         Selected total factor dimension.
     selected_lambda : float
@@ -348,6 +406,7 @@ class FrozenPredictionBundle:
     response_space_checksum: str
     factor_checksum: str
     model_checksum: str
+    model_artifact_checksums: dict[str, str]
     manifest_checksum: str
     selected_k_total: int
     selected_lambda: float
@@ -371,6 +430,7 @@ class FrozenPredictionBundle:
         response_space_checksum: str,
         factor_checksum: str,
         model_checksum: str,
+        model_artifact_checksums: Mapping[str, str],
         manifest_checksum: str,
         selected_k_total: int,
         selected_lambda: float,
@@ -388,6 +448,10 @@ class FrozenPredictionBundle:
         manifest_checksum, selected_k_total, selected_lambda, registered_seeds,
         futility_status, response_dim
             Recorded verbatim into the checksummed payload.
+        model_artifact_checksums : Mapping[str, str]
+            Exact fitted-model / adapter-execution checksum roster. Its keys must
+            equal every non-analytic method in ``method_roster`` and its contents
+            must derive ``model_checksum`` with the selected hyperparameters.
         method_roster : sequence of str
             The complete registered method roster. Must equal ``required_roster``
             when supplied; must be non-empty and unique otherwise.
@@ -446,6 +510,13 @@ class FrozenPredictionBundle:
         validated_single = _validate_role_predictions(
             "sealed_single_unseen", roster, single_ids, predictions_single_unseen, response_dim
         )
+        validated_model_artifacts = _validate_model_artifact_binding(
+            roster,
+            model_artifact_checksums,
+            str(model_checksum),
+            int(selected_k_total),
+            float(selected_lambda),
+        )
 
         bundle = cls(
             run_id=str(run_id),
@@ -457,6 +528,7 @@ class FrozenPredictionBundle:
             response_space_checksum=str(response_space_checksum),
             factor_checksum=str(factor_checksum),
             model_checksum=str(model_checksum),
+            model_artifact_checksums=validated_model_artifacts,
             manifest_checksum=str(manifest_checksum),
             selected_k_total=int(selected_k_total),
             selected_lambda=float(selected_lambda),
@@ -483,6 +555,7 @@ class FrozenPredictionBundle:
             "response_space_checksum": self.response_space_checksum,
             "factor_checksum": self.factor_checksum,
             "model_checksum": self.model_checksum,
+            "model_artifact_checksums": self.model_artifact_checksums,
             "manifest_checksum": self.manifest_checksum,
             "selected_k_total": int(self.selected_k_total),
             "selected_lambda": round(float(self.selected_lambda), 12),
@@ -522,6 +595,13 @@ class FrozenPredictionBundle:
             self.pair_ids_single_unseen,
             self.predictions_single_unseen,
             self.response_dim,
+        )
+        _validate_model_artifact_binding(
+            self.method_roster,
+            self.model_artifact_checksums,
+            self.model_checksum,
+            self.selected_k_total,
+            self.selected_lambda,
         )
         recomputed = sha256_json(self._payload())
         if recomputed != self.bundle_checksum:
@@ -568,6 +648,7 @@ class FrozenPredictionBundle:
             response_space_checksum=data["response_space_checksum"],
             factor_checksum=data["factor_checksum"],
             model_checksum=data["model_checksum"],
+            model_artifact_checksums=dict(data["model_artifact_checksums"]),
             manifest_checksum=data["manifest_checksum"],
             selected_k_total=int(data["selected_k_total"]),
             selected_lambda=float(data["selected_lambda"]),

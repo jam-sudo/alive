@@ -600,19 +600,18 @@ def test_blocked_config_cannot_start_scientific_pipeline(tmp_path):
         )
 
 
-def test_activated_canonical_config_passes_scientific_gate():
-    # The canonical config is ACTIVE (2026-06-30 activation). With a full owner
-    # activation record and a clean tree it passes the scientific-mode gate
-    # (does not raise). This is the positive counterpart to the blocked-rejection
-    # invariant above; the real sealed run additionally happens only on the A100.
+def test_activated_canonical_config_is_blocked_by_missing_pseudobulk_bias_report():
+    # Status activation alone is insufficient: the canonical GEARS representation
+    # remains an approximation whose registered bias report checksum is null.
     cfg = load_compose_phase2_config(CANON)
     assert cfg.status == "active"
-    assert_scientific_mode_allowed(
-        cfg,
-        fixture_mode=False,
-        activation_record=_activation_record(),
-        git_is_clean=True,
-    )
+    with pytest.raises(ScientificModeError, match="approximation-bias report"):
+        assert_scientific_mode_allowed(
+            cfg,
+            fixture_mode=False,
+            activation_record=_activation_record(),
+            git_is_clean=True,
+        )
 
 
 def test_scientific_mode_requires_activation_record(tmp_path):
@@ -686,6 +685,7 @@ def test_scientific_mode_requires_matching_protocol(tmp_path):
 def test_scientific_mode_allowed_when_fully_activated(tmp_path):
     raw = _raw()
     raw["status"] = "active"
+    raw["baselines"]["gears"]["approximation_bias_report_sha256"] = "a" * 64
     cfg = load_compose_phase2_config(_write(tmp_path, raw))
     # All four scientific-mode preconditions satisfied -> must not raise.
     assert_scientific_mode_allowed(
