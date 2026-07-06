@@ -1,132 +1,363 @@
 # COMPOSE Durable Final-Ledger + Seed-Variability (sub-project D) Design
 
 > **문서 역할:** dev-stage 설계 계약 (scientific claim contract 아님)
-> **개정일:** 2026-07-05
-> **상위 protocol:** `COMPOSE-K562-v1` (ACTIVE, 2026-06-30 activation)
-> **상위 계약:** pod sealed-run runbook `docs/superpowers/runbooks/2026-07-02-compose-k562-pod-sealed-run.md` §2.4 (durable artifact + reporting), §2.5.8 (release gate)
+> **개정일:** 2026-07-06
+> **상위 protocol:** `COMPOSE-K562-v1`
+> **상위 계약:** pod sealed-run runbook
+> `docs/superpowers/runbooks/2026-07-02-compose-k562-pod-sealed-run.md` §2.4, §2.5, §7–§8
 > **거버넌스:** `CLAUDE.md` §5, §10, §11, §14, §15
-> **선행:** deep-baselines A/B/C + driver-guards 모두 로컬 완결. 이 서브프로젝트는 그 위에 스택.
-
----
 
 ## 0. 목적과 범위
 
-pod sealed-run runbook이 §2 release blocker로 지정한 두 가지 내구성 요구를 dev-stage에서 구현한다:
-현재 `Phase2bResult.ledger`가 프로세스 메모리 객체라 terminal 전이 후 결과가 파일로 보존되지 않고,
-stochastic comparator의 development seed-variability(CLAUDE.md §10이 요구)가 산출되지 않는다.
+이 서브프로젝트는 다음 두 release blocker를 해결한다.
 
-이 서브프로젝트는 **과학적 결과를 재계산하지 않는다.** `Phase2bResult`가 이미 노출하는 값
-(`regime_double`/`regime_single`=`RegimeScore`, `sealed_verdict`, provenance/result checksum)을
-**내구 저장**하고, seed-variability는 **non-sealed development role에서만** 별도 산출한다.
+1. seal 소비 후 terminal artifact만 남고 최종 ledger/registered summary가 유실될 수 있는 crash gap
+2. stochastic deep comparator의 non-sealed development seed variability 미보고
+
+이 작업은 실제 seal을 열거나 sealed 결과를 재계산하지 않는다. D1은 Phase2b terminal artifact를
+권위 있는 복구 원본으로 삼아 파생 산출물을 내구화하고, D2는 Phase2a의 고정 calibration
+gene-disjoint OOF 설계에서만 수행한다. Gate PASS는 scientific verdict가 아니다.
 
 ### In scope
-- **D1** — terminal 전이가 반영된 최종 ledger + registered-summary artifact를 원자적 write-once로
-  export하고 재독출 검증(§1, §2).
-- **D2** — stochastic comparator development seed-variability 요약 하니스(§3).
+
+- **D1:** terminal payload의 registered aggregate summary 완결, final ledger/summary의 recovery-safe
+  write-once publish, 단일 durable commit marker
+- **D2:** GEARS/CPA의 registered-seed calibration OOF variability report와 pre-seal provenance 결속
 
 ### Out of scope
-- 실제 gears/cpa의 seed-variability **숫자** — 잠긴 env가 필요하므로 pod에서 동일 하니스로 산출.
-- 실제 sealed run, 실제 Norman 로드, 실제 worker — pod 소관.
-- object-storage 업로드/재검증(runbook §8) — pod teardown 절차.
-- verdict/scoring 로직 변경 — D는 기존 결과를 저장·요약만 한다.
 
-### 거버넌스
-- **seal은 열지 않는다.** D1은 **이미 소비된** `Phase2bResult`의 아티팩트를 저장하고, D2는 non-sealed
-  development outcome store만 사용한다. gate PASS ≠ 과학 verdict.
-- 등록되지 않은 **per-pair CI를 생성하지 않는다**(CLAUDE.md §10, runbook §2.4) — 등록된 추론은
-  pair-resampled aggregate simultaneous bound다.
-- write-once/immutability(§11): 기존 아티팩트를 조용히 덮어쓰지 않는다.
+- 실제 GEARS/CPA 수치 산출, 실제 Norman load, 실제 sealed run, object-storage upload
+- verdict threshold나 primary inference 방식 변경
+- Phase2b outcome-store source/pair/gene binding, Phase-1 method-axis binding 등 다른 release blocker
 
----
+## 1. D1 원칙: terminal이 권위 있는 복구 원본이다
 
-## 1. D1 — 최종 ledger 내구 export
+여러 파일을 순서대로 `atomic_write_once`하는 것만으로는 파일 집합 전체가 원자적이지 않다. 따라서
+다음 두 수준을 구분한다.
 
-`export_final_ledger(*, run_dir, ledger) -> Path`.
+- 각 파일은 `atomic_write_once`로 개별 원자·write-once 설치한다.
+- 파일 집합의 완결성은 마지막에 설치되는 단일
+  `phase2b_durable_commit.json`으로 판정한다. 이 marker가 없으면 durable export는 **미완료**이며
+  recovery-only 경로로만 복구한다. sealed evaluation을 다시 실행하지 않는다.
 
-- terminal 전이가 반영된 **최종** `RunLedger`(`Phase2bResult.ledger`)를 canonical JSON
-  (`json.dumps(ledger.to_dict(), sort_keys=True, separators=(",", ":"))`)으로 직렬화해
-  `run_dir/phase2b_final_ledger.json`에 `alive.io.atomic_write_once`로 쓴다.
-- 기존 `provenance2.persist_pre_access_ledger`(pre-access snapshot)의 **post-access 짝**이다. 동일
-  primitive·동일 직렬화. pre-access 파일과 **다른 이름**이라 둘 다 보존된다.
-- **재독출 검증:** 쓴 뒤 파일을 다시 읽어 파싱하고 직렬화 bytes가 byte-identical함을 확인한다.
-  불일치 시 `DurableLedgerError`.
-- write-once: 대상 파일이 이미 있으면 `atomic_write_once`가 실패한다(재실행 금지, §11).
+정확히 하나의 terminal artifact(`COMPLETE`, `INVALID`, `ABORTED_AFTER_SEAL`)가 seal 소비 상태의
+권위 있는 원본이다. final ledger와 registered summary는 terminal을 덮어쓰거나 terminal state를
+변경하지 않는 파생 산출물이다.
 
-## 2. D1 — registered-summary artifact
+모든 terminal artifact는 `terminal_payload_checksum`을 포함한다. 이는 해당 필드 자체를 제외한
+canonical terminal payload의 SHA-256이다. Recovery는 외부 ledger가 아직 없어도 이 checksum으로
+terminal bytes의 내부 무결성을 먼저 확인한다.
 
-`export_registered_summary(*, run_dir, result) -> Path`.
+### 1.1 비순환 checksum 계층
 
-`Phase2bResult`에서 **추출만** 한 registered summary를 `run_dir/phase2b_registered_summary.json`에
-write-once + 재독출 검증한다. 필수 항목(runbook §2.4):
+terminal과 provenance가 서로의 SHA를 포함하면 고정점이 필요한 순환 참조가 생긴다. 이를 금지하고
+checksum 방향을 다음과 같이 단방향으로 고정한다.
 
-- per-method aggregate error, theta, simultaneous lower bounds — `result.regime_double` /
-  `result.regime_single`(`RegimeScore`)에서.
-- GI-explained secondary interval — `RegimeScore`의 secondary block에서.
-- sample counts — `RegimeScore`의 등록된 sample-count 필드에서.
-- integrity clauses — `result.sealed_verdict`(`ComposeIntegrityReport`)에서, integrity disclaimer
-  포함(run-internal self-check, NOT audit).
-- audit/checksums — `run_id`, `terminal_state`, `sealed_access_count`, `provenance_checksum`,
-  `result_checksum`.
+1. `pre_access_provenance`는 seal 전 입력과 upstream artifact만 포함한다. persisted pre-access ledger는
+   이 canonical payload의 self-checksum을 write-once entry로 보존한다. payload 자체는 이후 terminal의
+   embedded provenance에 포함되므로 기존 `RunLedger` schema를 임의 확장하지 않는다.
+2. `terminal_embedded_provenance`는 검증된 `pre_access_provenance` payload에 seal audit identity와
+   double/single regime-result checksum을 추가한다. `provenance_checksum`은 이 payload의
+   self-excluding checksum이다.
+3. terminal은 `terminal_embedded_provenance` **payload와 checksum을 모두** 포함하고, 그 terminal
+   전체를 `terminal_payload_checksum`으로 결속한다.
+4. final ledger와 durable commit marker가 terminal file SHA를 바깥에서 결속한다.
 
-summary는 self-excluding checksum을 갖는다(자기 checksum 제외 후 해시). **per-pair CI를 포함하지
-않는다.** `gi_structure_recovery`는 `NOT_EVALUABLE`로 그대로 기록한다.
+따라서 `terminal_embedded_provenance`에는 `terminal_report_sha256`, final-ledger SHA, commit-marker SHA를
+넣지 않는다. 기존 `Phase2bProvenance.terminal_report_sha256` 필드는 이 embedded schema에서 제거하거나
+명시적 `null/not_applicable`로 schema-version을 올려야 하며, 빈 문자열을 complete provenance처럼
+취급하지 않는다. terminal 안에는 checksum만 단독으로 남겨서는 안 된다. Recovery는 embedded payload를
+재해시해 `provenance_checksum`을 검증하고 그 payload로 final ledger의 개별 provenance entry를 복원한다.
 
-### 1–2 공통: terminal 보호 경계
-두 export는 terminal 전이가 확정된 뒤, **`COMPLETE`뿐 아니라 `INVALID`/`ABORTED_AFTER_SEAL`에서도**
-호출된다 — 이들도 seal-소비 결과이므로 아티팩트를 보존한다(runbook §2.4, §2.5). 정확한 호출 지점
-배선(누가 `run_phase2b` 후 export를 호출하는지)은 구현계획에서 확정하되, 본 설계는 export 함수가
-terminal state와 무관하게 주어진 `Phase2bResult`를 저장함을 고정한다.
+## 2. terminal payload 계약
 
----
+모든 terminal JSON은 `schema="compose_phase2b_terminal_v2"`를 사용하고 unknown/missing key를 거부한다.
+JSON number는 finite 값만 허용하며 checksum 입력은 정수·문자열·boolean과 IEEE-754 `float.hex()` 문자열로
+canonicalize한다. `NaN`, `Infinity`, platform-dependent repr, 비정렬 mapping은 금지한다.
 
-## 3. D2 — development seed-variability 요약
+공통 exact fields는 다음과 같다.
 
-`development_seed_variability(*, inputs, dev_outcome_store, comparators, seeds) -> SeedVariabilityReport`.
+- `schema`, `protocol`, `run_id`, `terminal_state`
+- `sealed_access_count`, `seal_audit_reference`
+- `pre_access_ledger_sha256`, `pre_access_provenance_checksum`
+- `terminal_payload_checksum`
 
-- 등록된 `seeds`마다 **stochastic** comparator(`gears`, `cpa`, `l3_hypernetwork`)를 **non-sealed
-  development role에서만** 재적합하고, comparator별 development-phase error를 수집한다.
-- comparator별 spread 요약(across seeds): mean, std, min, max, 그리고 seed→error 매핑.
-- **seal 재개방 없음:** `dev_outcome_store`(development role)만 사용한다. sealed outcome store를 받지
-  않는다(구조적으로 seal 미접근 — driver-guards §2와 동일 원칙).
-- **deterministic component**(`l1_bilinear_identifiable` headline, `additive`, `id_only`)는 구성상
-  seed-불변이므로 재적합하지 않고 **single-shot**로 명시 기록한다. 이 사실을 stochastic seed-variability
-  보고의 **대체 근거로 쓰지 않는다**(runbook §2.4).
-- report는 self-checksummed하며 D1 registered-summary에 포함되거나 그 옆에 write-once로 저장된다
-  (정확한 배치는 구현계획).
+state별 허용 필드는 아래 절에 열거한 집합과 공통 fields의 합집합뿐이다. finalizer는 filename과
+`terminal_state`의 일치도 검증한다.
 
-### 3.1 로컬 vs pod
-하니스(seed 루프·재적합·수집·요약)는 **100% 로컬 빌드·검증**한다: stub adapter(결정론 → spread 0 =
-known-answer 테스트) + `l3_hypernetwork`(실제 stochastic → 실제 non-zero spread). **실제 gears/cpa
-숫자는 잠긴 env가 필요하므로 동일 하니스로 pod에서** 산출한다(로컬은 stub으로 배선만 증명).
+### 2.1 COMPLETE/INVALID
 
----
+Phase2b는 terminal 전이 전에 최종 state와 최종 verdict를 먼저 결정하고, outcome-free
+`RegisteredEvaluationSummary`를 한 번 구성한다. 이 summary는 다음을 포함한다.
 
-## 4. 보존되는 거버넌스 불변식
-- seal 미개방(D1=소비된 결과 저장, D2=non-sealed dev 분석). `sealed_access_count`는 D가 증가시키지
-  않는다.
-- write-once/immutability(§11): 모든 export는 `atomic_write_once`로 기존 파일을 덮지 않고, 쓴 뒤
-  재독출 검증한다.
-- per-pair CI 금지; 등록된 aggregate simultaneous bound만(§10, runbook §2.4).
-- seed-variability는 non-sealed development role에서만; deterministic single-shot을 stochastic 보고의
-  대체로 쓰지 않음.
-- D는 verdict/scoring 값을 재계산하지 않고 `Phase2bResult`에서 추출만 한다.
+- protocol, run ID, terminal state, sealed access count
+- double/single regime별 sample count
+- method별 aggregate pair MSE (`mean(pair_errors[method])`을 protected evaluation 안에서 한 번 계산)
+- comparator별 theta와 simultaneous lower bound, family confidence, bootstrap replicate count
+- GI-explained point/interval 및 `gi_structure_recovery="NOT_EVALUABLE"`
+- 최종 sealed/method axes, 모든 verdict clause, integrity disclaimer
+- bundle/manifest/provenance/regime-result/bounds checksum
+- seed-variability report checksum
 
-## 5. 테스트 (전부 로컬 실행 가능, `CLAUDE.md` §13)
-- **D1 export_final_ledger:** 합성 `RunLedger` write→재독출 byte-identical; 두 번째 호출은 write-once
-  실패; pre-access 파일과 공존.
-- **D1 registered-summary:** 합성 `Phase2bResult`에서 모든 필수 필드 추출·self-checksum 검증; per-pair
-  CI 부재 확인; `COMPLETE`/`INVALID`/`ABORTED_AFTER_SEAL` 모두 저장됨; 변조 시 재독출 검증 실패.
-- **D2 seed-variability:** stub adapter → 모든 seed 동일 error(spread 0) known-answer; `l3` → non-zero
-  spread; deterministic comparator는 재적합 안 됨(single-shot로 표기); `dev_outcome_store`만 접근하고
-  sealed store 미접근(leakage 테스트).
-- 전 스위트 + ruff green. 이후 `spec-review`/`science-dev` loop-gate로 게이트.
+COMPLETE/INVALID의 state-specific exact fields는 `registered_summary`,
+`registered_summary_checksum`, `final_verdict_checksum`, `terminal_embedded_provenance`,
+`provenance_checksum`, `evaluation_payload_checksum`, `final_result_checksum`이다.
+`registered_summary`와 `terminal_embedded_provenance`는 checksum만이 아니라 canonical payload 자체를
+포함한다.
 
-## 6. 완료 정의
-- §1–§3 코드가 로컬에서 구현되고 §5 테스트가 전부 green이다.
-- 실제 gears/cpa seed-variability 숫자·object-storage 업로드·sealed run은 pod runbook으로 명시 이관된다.
+per-pair error 배열, per-pair CI, raw cell/count matrix는 terminal payload에 넣지 않는다. Aggregate 값의
+계산은 exporter가 사후 재계산하지 않는다. protected evaluation에서 생성해 terminal checksum으로
+고정하고, exporter는 terminal에서 그대로 복사한다.
+
+`INVALID`도 정상 verdict를 INVALID로 교체한 **후** summary와 checksum을 만든다. 다음 checksum을
+구분한다.
+
+- `evaluation_payload_checksum`: scoring 직후의 regime/bounds 결과 결속
+- `final_result_checksum`: 정확히 `{terminal_state, final_verdict_checksum,
+  registered_summary_checksum, evaluation_payload_checksum, provenance_checksum}`를 결속한 checksum
+- `terminal_payload_checksum`: 위 필드를 포함한 terminal 전체에서 자기 필드만 제외한 checksum
+
+`Phase2bResult.result_checksum`은 `final_result_checksum`이어야 한다. INVALID 결과가 정상 verdict
+payload의 checksum을 재사용해서는 안 된다.
+
+### 2.2 ABORTED_AFTER_SEAL
+
+abort 경로는 원래 예외를 재발생시키므로 `Phase2bResult`가 존재하지 않는다. 따라서 abort export는
+`Phase2bResult`를 입력으로 받지 않는다. ABORTED terminal 자체가 다음 최소 summary를 포함한다.
+
+- run ID, terminal state, sealed access count/audit reference
+- exception class, scrubbed message, failing stage
+- 사용 가능한 preflight/run/bundle/manifest checksum
+- aggregate 결과가 없으면 `registered_results_status="NOT_AVAILABLE_DUE_TO_ABORT"`
+
+abort artifact는 raw outcome이나 부분 계산 배열을 포함하지 않는다.
+ABORTED의 state-specific exact fields는 `exception_class`, `message`, `stage`,
+`preflight_checksums`, `registered_results_status`다. audit가 실제로 durable claim됐는지는
+`sealed_access_count`와 audit record로 판정한다. 단순히 `claim_access()`가 호출됐다는 이유만으로 count를
+1로 만들지 않는다. audit claim 전 예외라면 별도 pre-access failure여야 하며
+`ABORTED_AFTER_SEAL`로 과장하지 않는다.
+
+## 3. D1 durable publish와 recovery
+
+공개 진입점은 메모리 객체가 아니라 durable 파일만 입력으로 받는다.
+
+```python
+finalize_phase2b_durable_outputs(
+    *,
+    run_dir: str | Path,
+    terminal_path: str | Path,
+    pre_access_ledger_path: str | Path,
+    seed_variability_path: str | Path,
+) -> DurableFinalizeResult
+```
+
+네 경로는 resolve 후 모두 `run_dir`의 직접 자식이어야 한다. symlink, directory, device, FIFO와
+허용 roster 밖 filename을 거부한다. `terminal_path`는 state에 대응하는 세 terminal filename 중 하나,
+`pre_access_ledger_path`는 정확히 `phase2b_pre_access_ledger.json`, `seed_variability_path`는 정확히
+`development_seed_variability.json`이어야 한다. finalizer는 caller가 준 경로만 신뢰하지 않고
+`run_dir`을 독립 scan해 terminal이 정확히 하나인지 확인한다.
+
+### 3.1 publish 순서
+
+1. terminal file을 읽고 canonical JSON, 정확한 terminal roster, run ID, self-checksum을 검증한다.
+2. persisted pre-access ledger를 읽고 run ID, embedded pre-access provenance payload/checksum과 upstream
+   checksum을 terminal과 대조한다.
+3. terminal payload에서 `phase2b_registered_summary.json` bytes를 **복사·정규화만** 하여 생성한다.
+4. terminal의 `terminal_embedded_provenance` payload를 개별 canonical provenance entry로 펼치고,
+   pre-access ledger snapshot에 terminal, summary, seed-variability artifact의 파일 SHA를 write-once
+   entry로 추가해 `phase2b_final_ledger.json`을 생성한다.
+5. 두 파일을 재독출하고 intended canonical bytes 및 SHA와 대조한다.
+6. 다음을 결속한 `phase2b_durable_commit.json`을 **마지막에** atomic write-once 설치한다.
+   - run ID와 terminal state
+   - terminal filename/SHA
+   - registered summary filename/SHA/self-checksum
+   - final ledger filename/SHA
+   - pre-access ledger SHA
+   - development seed-variability filename/SHA/self-checksum
+   - 위 필드를 결속한 self-excluding `commit_checksum`
+7. commit marker를 재독출해 self-checksum, 모든 파일 SHA와 run ID/state를 다시 검증한다.
+
+final ledger는 commit marker를 자기 artifact로 기록하지 않는다. 이는 self-reference를 피하기 위한
+의도적 비순환 구조이며, marker가 final ledger를 바깥에서 결속한다.
+
+Reporter, uploader와 runbook release gate는 terminal 파일 존재만으로 durable completion을 선언하지
+않고 commit marker 전체 검증을 요구한다. Marker가 없는 terminal은 seal 소비 사실과 terminal state의
+증거이지만 export-complete 상태는 아니다.
+
+### 3.2 retry/recovery 규칙
+
+`install_or_verify_exact(path, intended_bytes)`를 사용한다.
+
+- 파일이 없으면 `atomic_write_once`로 설치한다.
+- 파일이 이미 있으면 덮어쓰지 않고 byte-identical/SHA-identical인지 검증한다.
+- 기존 bytes가 다르면 `DurableLedgerError`로 영구 실패한다.
+
+commit marker가 없고 terminal이 하나 존재하면 recovery는 §3.1을 다시 수행할 수 있다. 이는 파생
+파일 복구이며 seal 재개방·재채점·terminal 재전이가 아니다. marker가 존재하면 모든 파일을 검증만
+하고 변경하지 않는다. terminal이 0개 또는 2개 이상이면 fail-closed한다.
+
+Recovery는 pre-access ledger에 기록된 seed-variability artifact의 실제 regular-file bytes와 SHA도
+검증한다. digest 주장만 있고 파일이 없거나 bytes가 다르면 commit marker를 만들지 않는다.
+
+### 3.3 Phase2b 배선
+
+- 정상/INVALID 경로: terminal write 완료 후 `finalize_phase2b_durable_outputs`를 호출한다.
+- abort 경로: `run_phase2b`의 단일 최상위 `except BaseException` owner가 `protect`가 남긴 terminal을
+  확인한 뒤 동일 finalizer를 호출하고 원래 traceback을 보존해 재발생시킨다. context manager 내부와
+  caller가 중복 호출하지 않는다. Finalizer 실패는 원래 evaluation 예외를 대체하지 않고 exception
+  note/log에 부가하며, commit marker 부재가 incomplete durable export를 나타낸다.
+- finalizer 자체가 실패해도 기존 terminal을 변경하거나 두 번째 terminal을 만들지 않는다. commit
+  marker 부재가 incomplete durable export를 명확히 나타내며 recovery-only 명령이 이를 복구한다.
+
+## 4. D2 development seed-variability 계약
+
+### 4.1 대상 method
+
+현재 코드에서 외부 seed로 재적합 가능한 stochastic comparator는 `gears`, `cpa`다. 현재
+`l3_hypernetwork`는 module-fixed seed를 사용하는 결정론적 구현이므로 deterministic single-shot으로
+분류한다. L3에 외부 seed parameter를 추가하려면 별도 protocol amendment와 model checksum schema
+revision이 필요하다.
+
+현재 deterministic roster는 다음과 같다.
+
+- `l1_bilinear_identifiable`, `l2_saturation`, `l3_hypernetwork`, `id_only`
+- `additive`, `no_change`, `perturbation_mean`
+
+### 4.2 평가 설계
+
+Seed variability는 in-sample training error가 아니라 Phase2a와 동일한 고정 calibration
+gene-disjoint OOF assignment에서 계산한다.
+
+각 `(method, registered_seed, fold)`에 대해:
+
+1. D2가 fold manifest(train/test/cross-group indices)를 **구성**한다 — 현재 코드에 이 이름의 persisted
+   아티팩트는 없다. Phase2a가 고정한 per-pair OOF fold 배정(`oof_folds`, calibration pair와 1:1)과
+   `select.py`의 group/cross-group 정의로부터 **결정론적으로 유도**하며, D2에서 fold를 새로 난수
+   생성하지 않는다. 구성된 manifest는 self-checksummed 아티팩트로 persist되어 report와 pre-access
+   ledger에 결속된다.
+2. controller가 **fold-scoped fit-role artifact와 payload를 새로 생성**한다. singles는 등록 계약대로
+   사용할 수 있지만 combo rows/targets는 train pair만 포함한다.
+3. held-out test와 cross-group pair의 row ID, target, aggregate, validation/early-stopping signal을 worker
+   payload에서 완전히 제외한다.
+4. 해당 fold의 held-out test pair 전체를 한 번 예측한다. worker는 pair ID/features만 받고 truth는
+   controller에 남긴다.
+5. controller가 frozen response space에서 pair별 MSE를 계산한다.
+6. 모든 fold의 held-out prediction을 canonical **covered OOF pair order**로 재조립한다.
+7. seed별 scalar는 동일 covered OOF pair 집합의 mean MSE로 고정한다.
+
+OOF fold assignment, calibration pair order, response checksum, fit-role artifact checksum, worker/config/
+resource/environment lock과 seed는 report에 결속한다. sealed pair identity나 outcome store를 입력으로
+받지 않는다.
+
+현재 gene-disjoint fold는 cross-group pair를 OOF test에서 제외할 수 있다. Report는 전체 calibration
+pair count, covered/uncovered count와 fraction, ordered covered/uncovered pair-ID checksum,
+`uncovered_tolerance`를 기록한다. 모든 method/seed는 **동일한 covered pair 집합**을 사용해야 하며
+누락 pair를 method별로 다르게 버릴 수 없다. Coverage가 Phase2a selection artifact와 다르거나 tolerance를
+초과하면 `INCOMPLETE`다.
+
+### 4.3 요약과 실패 정책
+
+등록 seed는 config의 exact ordered roster `(11, 23, 37)`를 사용한다. Comparator별로 다음을 기록한다.
+
+- ordered `seed -> oof_mean_pair_mse`
+- mean, sample standard deviation (`ddof=1`), min, max, range
+- 성공/실패 seed와 scrubbed failure class
+- prediction/checkpoint checksum per seed
+
+실패 seed를 삭제하고 성공 seed만 요약하지 않는다. 하나라도 실패하면 report status는 `INCOMPLETE`이며
+Phase2b preflight를 차단한다. 모든 seed가 성공해야 `COMPLETE`다.
+
+```python
+development_seed_variability(
+    *,
+    inputs,
+    development_outcome_store,
+    oof_fold_assignment,
+    baseline_adapters,
+    config,
+) -> SeedVariabilityReport
+```
+
+`inputs`는 frozen `Phase2aInputs`, `development_outcome_store`는 audited-unsealed 또는 bounded synthetic
+`DevelopmentOutcomeStore`, `oof_fold_assignment`는 Phase2a가 고정한 per-pair OOF fold 배정
+(`oof_folds`, calibration pair와 1:1)여야 한다. D2는 이 배정과 `select.py` group 정의에서 §4.2의 fold
+manifest를 내부 구성한다. 임의 outcome 배열/dict/path와 `ComposeOutcomeStore`는 받지 않는다.
+Calibration truth는 `inputs.additive_cal + development_outcome_store.combo_calibration_eps`로 한 번
+재구성하며 pair ID alignment와 outcome-store content checksum을 검증한다. Seed/pair/response checksum은
+`inputs`와 activated config의 exact equality로 가져온다.
+
+production entry는 caller-supplied payload/factory를 받지 않고 내부
+`build_fold_scoped_fit_payload(...)`만 호출한다. fixture 전용 private injection seam은 scientific entry에서
+구조적으로 도달할 수 없어야 한다. 각 payload는 train/test/cross-group pair 및 source-row checksum,
+train-only fit artifact checksum을 기록한다. worker hyperparameter 선택, checkpoint selection, early
+stopping에는 train payload 밖 outcome을 사용할 수 없다. seed는 Python/NumPy/framework/CUDA RNG 설정과
+worker identity에 전달하며 동일 seed 재실행의 determinism 또는 알려진 nondeterministic backend 상태를
+report한다.
+
+실제 GEARS/CPA 숫자는 locked pod environments에서 산출한다. 로컬 stub은 seed 전달·fold exclusion·
+alignment/checksum wiring known-answer만 검증하며, spread 0을 실제 stochastic stability 근거로 사용하지
+않는다.
+
+### 4.4 pre-seal 결속
+
+Seed variability report는 Phase2b 이후 사후 첨부물이 아니다.
+
+- Phase2a/final-pause 전에 self-checksummed write-once artifact로 생성한다.
+- upstream/pre-access ledger에 `development_seed_variability`로 기록한다.
+- Phase2b scientific preflight는 regular-file artifact 존재와 실제 bytes checksum, status `COMPLETE`,
+  exact method/seed roster 및 OOF coverage checksum을 검증한다.
+- registered summary와 durable commit marker는 이 report checksum을 참조한다.
+
+## 5. 거버넌스 불변식
+
+- D2는 non-sealed calibration outcomes만 사용하며 sealed store type을 받지 않는다.
+- D1은 terminal 이후 파생 파일만 복구하며 seal·scoring·verdict를 재실행하지 않는다.
+- per-pair CI를 만들지 않는다. Primary inference는 기존 pair-resampled aggregate simultaneous bound다.
+- 모든 파일은 write-once이며 existing mismatch를 덮어쓰지 않는다.
+- durable completion은 commit marker 존재와 전체 hash verification으로만 선언한다.
+- terminal state 또는 seal access 후 upstream stage를 재실행하지 않는다.
+
+## 6. 테스트
+
+### 6.1 D1
+
+- COMPLETE/INVALID terminal에서 summary/final-ledger/commit marker 생성 및 재독출 검증
+- abort fixture가 `Phase2bResult` 없이 abort terminal에서 최소 summary를 생성
+- summary, ledger, marker 각 publish 경계의 crash injection 후 recovery
+- partial existing file이 intended bytes와 같으면 verify-only, 다르면 fail-closed
+- marker가 마지막에 설치되며 marker 없이는 durable-complete로 판정하지 않음
+- terminal 0개/2개, run-ID mismatch, checksum tamper, second terminal 생성 시도 거부
+- terminal↔provenance checksum 순환이 없고 embedded provenance payload만으로 개별 final-ledger entry 복원
+- run_dir 밖 경로, symlink, 잘못된 filename과 non-regular input 거부
+- INVALID `final_result_checksum`이 최종 INVALID verdict/state 변화에 민감함
+- terminal/summary에 raw outcome, per-pair error, per-pair CI가 없음
+
+### 6.2 D2
+
+- held-out/cross-group pair의 ID·row·target이 해당 fold의 fit/validation/early-stopping payload에 들어가지 않음
+- OOF prediction이 canonical covered-pair order로 정확히 재조립되고 모든 method/seed coverage가 동일함
+- uncovered count/fraction/ID checksum이 Phase2a selection artifact(covered/uncovered)와 불일치 시 `INCOMPLETE`
+- seed가 worker lock/manifest/checkpoint/prediction checksum에 결속됨
+- stub known-answer는 동일 결과를 내되 이를 stability evidence로 해석하지 않음
+- 실패 seed 보존 및 `INCOMPLETE` preflight 차단
+- L3와 나머지 deterministic roster는 single-shot으로 분류되고 seed loop에서 제외됨
+- sealed store/object/path 주입 거부
+
+전체 suite와 `ruff check`, `ruff format --check`가 통과해야 한다. 실제 scientific run, sealed evaluation,
+외부 데이터 접근은 이 테스트에 포함하지 않는다.
+
+## 7. 완료 정의
+
+- §2–§4 계약이 구현되고 §6 테스트가 모두 통과한다.
+- recovery가 모든 crash boundary에서 seal 재개방 없이 동일 commit marker를 생성한다.
+- real GEARS/CPA seed report와 object-storage upload는 pod runbook 절차로 남는다.
+- 다른 release blocker가 남아 있는 동안 runbook 상태를 `READY`로 변경하지 않는다.
 
 ## 참고
-- 상위 계약: pod runbook §2.4, §2.5.8, §8.
-- 재사용: `alive.io.atomic_write_once`, `alive.compose.provenance2.persist_pre_access_ledger`,
-  `alive.compose.phase2b.Phase2bResult`, `RegimeScore`, `ComposeIntegrityReport`.
-- 거버넌스: `CLAUDE.md` §5, §10, §11, §14, §15.
+
+- `alive.io.atomic_write_once`
+- `alive.compose.terminal.Phase2bTerminal`
+- `alive.compose.provenance2.persist_pre_access_ledger`
+- `alive.compose.phase2b.Phase2bResult`
+- `alive.compose.scoring2.RegimeScore`
+- pod sealed-run runbook §2.4, §2.5, §7–§8
