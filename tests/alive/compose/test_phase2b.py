@@ -540,9 +540,13 @@ class _SpyStore:
         self.events: list[str] = []
         self._compose_fixture_marker = True
 
-    def evaluate_sealed_once(self, run_id, pair_ids):
-        self.events.append("evaluate_sealed_once")
-        return self._inner.evaluate_sealed_once(run_id, pair_ids)
+    def claim_sealed_access(self, run_id, pair_ids):
+        self.events.append("claim_sealed_access")
+        return self._inner.claim_sealed_access(run_id, pair_ids)
+
+    def materialize_claimed(self, claim):
+        self.events.append("materialize_claimed")
+        return self._inner.materialize_claimed(claim)
 
     def read_unsealed(self, pair_ids):  # pragma: no cover - defensive
         self.events.append("read_unsealed")
@@ -565,8 +569,9 @@ def test_predictions_consumed_readonly_no_access_until_step_six(tmp_path):
     kwargs["outcome_store"] = spy
     res = run_phase2b_fixture(**kwargs)
 
-    # exactly one access event, and the bundle was not mutated (consumed read-only).
-    assert spy.events == ["evaluate_sealed_once"]
+    # the durable claim then materialisation are the only sealed events, and the
+    # bundle was not mutated (consumed read-only).
+    assert spy.events == ["claim_sealed_access", "materialize_claimed"]
     assert kit["bundle"].bundle_checksum == pre_checksum
     kit["bundle"].verify()
     assert res.sealed_access_count == 1
@@ -731,10 +736,13 @@ class _EmptyCellsStore:
         self._audit_path = inner._audit_path
         self._compose_fixture_marker = True
 
-    def evaluate_sealed_once(self, run_id, pair_ids):
+    def claim_sealed_access(self, run_id, pair_ids):
+        return self._inner.claim_sealed_access(run_id, pair_ids)
+
+    def materialize_claimed(self, claim):
         from alive.compose.outcome_store import ObservedPair
 
-        release = self._inner.evaluate_sealed_once(run_id, pair_ids)
+        release = self._inner.materialize_claimed(claim)
         return {pid: ObservedPair(pair_id=pid, cells=op.cells[:0]) for pid, op in release.items()}
 
     def read_unsealed(self, pair_ids):  # pragma: no cover - defensive
@@ -773,16 +781,19 @@ def test_post_access_scoring_failure_writes_failure_terminal(tmp_path):
 
 
 class _RaisingAfterClaimStore:
-    """Store whose evaluate_sealed_once burns the audit, then raises."""
+    """Store whose durable claim burns the audit, then materialisation raises."""
 
     def __init__(self, inner: ComposeOutcomeStore) -> None:
         self._inner = inner
+        self._audit_path = inner._audit_path
         self._compose_fixture_marker = True
 
-    def evaluate_sealed_once(self, run_id, pair_ids):
-        # Burn the audit exactly as the real store would (write FIRST), then fail
-        # during materialisation — the worst-case the terminal must survive.
-        self._inner._write_audit_record(run_id, [self._inner._canonical(p) for p in pair_ids])
+    def claim_sealed_access(self, run_id, pair_ids):
+        # Burn the audit exactly as the real store would (durable write FIRST).
+        return self._inner.claim_sealed_access(run_id, pair_ids)
+
+    def materialize_claimed(self, claim):
+        # Fail AFTER the audit is on disk — the worst-case the terminal survives.
         raise RuntimeError("synthetic materialisation failure")
 
     def read_unsealed(self, pair_ids):  # pragma: no cover - defensive

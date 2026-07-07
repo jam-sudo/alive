@@ -60,7 +60,7 @@ from alive.compose.config2 import (
     assert_scientific_mode_allowed,
 )
 from alive.compose.freeze import FrozenPredictionBundle
-from alive.compose.outcome_store import ComposeOutcomeStore, ObservedPair
+from alive.compose.outcome_store import ComposeOutcomeStore, ObservedPair, SealedAccessClaim
 from alive.compose.preflight import EvaluationLock, run_preflight
 from alive.compose.provenance2 import (
     PRE_ACCESS_LEDGER_FILENAME,
@@ -1114,13 +1114,23 @@ def _run_phase2b_core(
     record_pre_access_provenance(ledger=ledger, provenance=pre_access_provenance)
     persist_pre_access_ledger(run_dir=run_dir, ledger=ledger)
 
-    # --- Step 5: claim access, then enter the protection boundary. ------------
-    terminal.claim_access()
+    # --- Step 5: attempt access, claim the DURABLE seal, then confirm. --------
+    # The consumption boundary is the durable audit write inside
+    # claim_sealed_access. attempt_access() enters ACCESS_ATTEMPTED (no terminal
+    # owed yet); a failure BEFORE the durable claim leaves NO terminal and
+    # sealed_access_count == 0. Only the VERIFIED durable audit reference advances
+    # the terminal to ACCESS_CLAIMED, after which every exit writes one terminal.
+    terminal.attempt_access()
+    union = list(lock.pair_ids_double_unseen) + list(lock.pair_ids_single_unseen)
+    claim = outcome_store.claim_sealed_access(lock.run_id, union)
+    terminal.confirm_durable_access(claim.audit_reference)
+
     result_box: dict[str, object] = {}
     with terminal.protect(stage=_PROTECT_STAGE, preflight_checksums=preflight_checksums):
         _evaluate_inside_boundary(
             terminal=terminal,
             outcome_store=outcome_store,
+            claim=claim,
             lock=lock,
             frozen_bundle=frozen_bundle,
             pair_manifest=pair_manifest,
@@ -1143,6 +1153,7 @@ def _evaluate_inside_boundary(
     *,
     terminal: Phase2bTerminal,
     outcome_store: ComposeOutcomeStore,
+    claim: SealedAccessClaim,
     lock: EvaluationLock,
     frozen_bundle: FrozenPredictionBundle,
     pair_manifest: Mapping,
@@ -1168,8 +1179,12 @@ def _evaluate_inside_boundary(
     single_ids = lock.pair_ids_single_unseen
     union = list(double_ids) + list(single_ids)
 
-    # --- Step 6: open the seal EXACTLY ONCE for the UNION of both roles. -------
-    release = outcome_store.evaluate_sealed_once(lock.run_id, union)
+    # --- Step 6: materialise the DURABLY-claimed union (seal already burned). --
+    # The seal was consumed once by claim_sealed_access (durable audit write) in
+    # _run_phase2b_core; this only materialises the claim's observed pairs. A
+    # failure HERE is post-audit → the protection boundary writes ABORTED (count
+    # 1). materialize_claimed re-verifies the claim against the persisted audit.
+    release = outcome_store.materialize_claimed(claim)
 
     # --- Step 7 + 8: derive truth in the response space; score each regime. ---
     # score_regime projects each ObservedPair through the frozen response space

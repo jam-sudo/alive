@@ -35,6 +35,12 @@ ObservedPair
     Frozen value object holding one pair's canonical ID and its materialised
     bounded cell matrix (the raw observed population; downstream Phase-2b
     transforms it into response space — this store does NOT transform it).
+SealedAccessClaim
+    Immutable receipt for a DURABLY consumed sealed access, returned by
+    :meth:`ComposeOutcomeStore.claim_sealed_access`. The consumption boundary is
+    split into ``claim_sealed_access`` (validate + write the durable audit FIRST)
+    and ``materialize_claimed`` (verify the claim against the persisted audit,
+    then materialise); ``evaluate_sealed_once`` is retained as a façade over both.
 OutcomeStore
     Runtime-checkable protocol that :class:`ComposeOutcomeStore` satisfies.
 ComposeOutcomeStore
@@ -108,6 +114,46 @@ class ObservedPair:
 
 
 # ---------------------------------------------------------------------------
+# SealedAccessClaim value object
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class SealedAccessClaim:
+    """Immutable receipt for a DURABLY consumed sealed access.
+
+    Produced ONLY by :meth:`ComposeOutcomeStore.claim_sealed_access` AFTER the
+    durable audit record has been written (the atomic once-only consumption
+    point). Its existence is proof the seal was durably burned; a pre-audit
+    failure raises before any claim is ever constructed.
+
+    The claim carries a durable ``audit_reference`` derived FROM the persisted
+    audit record so that :meth:`ComposeOutcomeStore.materialize_claimed` can
+    cross-verify the claim against the on-disk audit (run/request/reference
+    mismatch → fail closed) before materialising any observed row.
+
+    Parameters
+    ----------
+    run_id : str
+        The run identifier recorded in the durable audit.
+    audit_reference : str
+        Durable identity of the written audit record (its canonical SHA-256).
+    request_checksum : str
+        The audit record's ``request_checksum`` over the sorted canonical union.
+    manifest_checksum : str
+        The immutable split-manifest checksum recorded in the audit.
+    pair_ids : tuple of tuple of str
+        The canonical sealed union to materialise (pair ids only — never data).
+    """
+
+    run_id: str
+    audit_reference: str
+    request_checksum: str
+    manifest_checksum: str
+    pair_ids: tuple[PairID, ...]
+
+
+# ---------------------------------------------------------------------------
 # Protocol
 # ---------------------------------------------------------------------------
 
@@ -163,6 +209,56 @@ class OutcomeStore(Protocol):
         ------
         ComposeSealingError
             On any integrity violation (non-exact union, prior access, etc.).
+        """
+        ...
+
+    def claim_sealed_access(self, run_id: str, pair_ids: Sequence[PairID]) -> SealedAccessClaim:
+        """Durably CLAIM the sealed access (the atomic consumption point).
+
+        Validates the exact union, refuses prior access and writes the durable
+        audit record FIRST, then returns an immutable :class:`SealedAccessClaim`.
+
+        Parameters
+        ----------
+        run_id : str
+            Deterministic run identifier; the cohort may be claimed once per
+            ``audit_path``.
+        pair_ids : Sequence[tuple of str]
+            Must equal the registered sealed UNION exactly.
+
+        Returns
+        -------
+        SealedAccessClaim
+            The durable claim receipt (carries the ``audit_reference``).
+
+        Raises
+        ------
+        ComposeSealingError
+            On any integrity violation BEFORE the audit write, or if the cohort
+            was already claimed.
+        """
+        ...
+
+    def materialize_claimed(self, claim: SealedAccessClaim) -> Mapping[PairID, ObservedPair]:
+        """Materialise the observed pairs for a durable claim.
+
+        Verifies ``claim`` matches the persisted audit (run/request/reference
+        mismatch → fail closed), then materialises the claim's union.
+
+        Parameters
+        ----------
+        claim : SealedAccessClaim
+            A claim produced by :meth:`claim_sealed_access`.
+
+        Returns
+        -------
+        Mapping[tuple of str, ObservedPair]
+            Mapping from pair id to materialised :class:`ObservedPair`.
+
+        Raises
+        ------
+        ComposeSealingError
+            If the claim does not match the persisted audit.
         """
         ...
 
@@ -384,6 +480,48 @@ class ComposeOutcomeStore:
         ComposeSealingError
             On empty/duplicate/unknown/unsealed/missing/extra requests, on any
             prior access on this audit path, or on any other integrity violation.
+
+        Notes
+        -----
+        Retained as a thin façade over the consumption-boundary split
+        (:meth:`claim_sealed_access` then :meth:`materialize_claimed`) so the
+        exact-union / refuse-prior / write-once-audit semantics are unchanged for
+        existing non-terminal callers. The durable audit is still written BEFORE
+        any row is materialised.
+        """
+        claim = self.claim_sealed_access(run_id, pair_ids)
+        return self.materialize_claimed(claim)
+
+    def claim_sealed_access(self, run_id: str, pair_ids: Sequence[PairID]) -> SealedAccessClaim:
+        """Durably CLAIM the sealed access — the atomic once-only consumption point.
+
+        Performs the pre-materialisation half of the sealed gateway: validate the
+        exact union, refuse any prior access, then write the durable audit record
+        FIRST. The written record IS the consumption boundary: a crash after this
+        returns still leaves the audit path permanently burned. The returned
+        :class:`SealedAccessClaim` carries a durable ``audit_reference`` derived
+        from the persisted record.
+
+        Parameters
+        ----------
+        run_id : str
+            Deterministic run identifier; the sealed cohort may be claimed once
+            per ``audit_path``.
+        pair_ids : Sequence[tuple of str]
+            Must equal the sealed union exactly.
+
+        Returns
+        -------
+        SealedAccessClaim
+            The durable claim receipt.
+
+        Raises
+        ------
+        ComposeSealingError
+            On empty/duplicate/unknown/unsealed/missing/extra requests, on any
+            prior access on this audit path, or on any other integrity violation.
+            Every such failure is raised BEFORE the audit write, so no access is
+            consumed.
         """
         canon = [self._canonical(p) for p in pair_ids]
 
@@ -394,13 +532,80 @@ class ComposeOutcomeStore:
         #    on corrupt/partial audit lines).
         self._assert_not_previously_accessed(run_id)
 
-        # 3. Claim the access by writing the durable audit record FIRST. A crash
-        #    during materialisation (step 4) still consumes the access — the
-        #    audit path is permanently burned. Never reopen by crash-retrying.
-        self._write_audit_record(run_id, canon)
+        # 3. Claim the access by writing the durable audit record FIRST. This is
+        #    THE consumption boundary: a crash during materialisation still burns
+        #    the audit path. Never reopen by crash-retrying.
+        record = self._write_audit_record(run_id, canon)
 
-        # 4. Materialise data (after the audit is on disk).
-        return self._materialise_pairs(canon)
+        return SealedAccessClaim(
+            run_id=run_id,
+            audit_reference=self._audit_reference(record),
+            request_checksum=record["request_checksum"],
+            manifest_checksum=record["manifest_checksum"],
+            pair_ids=tuple(canon),
+        )
+
+    def materialize_claimed(self, claim: SealedAccessClaim) -> dict[PairID, ObservedPair]:
+        """Materialise the observed pairs backing a durable claim.
+
+        Verifies the ``claim`` against the persisted audit (a run_id, request or
+        reference mismatch fails closed) BEFORE materialising any row, then slices
+        only the claim's bounded pair rows (no global densification).
+
+        Parameters
+        ----------
+        claim : SealedAccessClaim
+            A claim produced by :meth:`claim_sealed_access` for this audit path.
+
+        Returns
+        -------
+        dict[tuple of str, ObservedPair]
+            One :class:`ObservedPair` per claimed pair.
+
+        Raises
+        ------
+        ComposeSealingError
+            If the persisted audit is absent, or does not match the claim's
+            ``run_id`` / ``request_checksum`` / ``audit_reference``.
+        """
+        records = self._read_audit_records()
+        if not records:
+            raise ComposeSealingError(
+                "materialize_claimed refused: no durable audit record backs this "
+                f"claim (run {claim.run_id!r}). The seal was never durably consumed."
+            )
+        record = records[0]
+        persisted_reference = self._audit_reference(record)
+        if (
+            record.get("run_id") != claim.run_id
+            or record.get("request_checksum") != claim.request_checksum
+            or persisted_reference != claim.audit_reference
+        ):
+            raise ComposeSealingError(
+                "materialize_claimed refused: the claim does not match the persisted "
+                f"audit (claim run {claim.run_id!r}, audit run "
+                f"{record.get('run_id')!r}). Fail-closed: a mismatched claim cannot "
+                "materialise sealed outcomes."
+            )
+        return self._materialise_pairs(list(claim.pair_ids))
+
+    @staticmethod
+    def _audit_reference(record: Mapping) -> str:
+        """Return the durable identity (canonical SHA-256) of an audit record.
+
+        Parameters
+        ----------
+        record : Mapping
+            A durable audit record (as written, or as read back from disk).
+
+        Returns
+        -------
+        str
+            Lowercase hex SHA-256 over the record's canonical JSON — stable across
+            a write / json round-trip so a persisted record recomputes the same
+            reference the claim carries.
+        """
+        return sha256_json(dict(record))
 
     # ------------------------------------------------------------------
     # Audit count and records (read from the persisted audit file)
@@ -604,10 +809,10 @@ class ComposeOutcomeStore:
                 ) from exc
         return records
 
-    def _write_audit_record(self, run_id: str, canon: list[PairID]) -> None:
+    def _write_audit_record(self, run_id: str, canon: list[PairID]) -> dict:
         """Append an immutable audit record to the durable JSONL audit file.
 
-        Called by :meth:`evaluate_sealed_once` BEFORE materialisation so that a
+        Called by :meth:`claim_sealed_access` BEFORE materialisation so that a
         crash during data loading still consumes the access (fail-safe toward
         sealing). The audit path is permanently burned once this record exists.
 
@@ -622,6 +827,12 @@ class ComposeOutcomeStore:
             The run identifier.
         canon : list of tuple of str
             The (validated) requested canonical pair ids.
+
+        Returns
+        -------
+        dict
+            The exact record written (so the caller can derive a durable
+            ``audit_reference`` from it).
         """
         sorted_pairs = sorted([list(p) for p in canon])
         record = {
@@ -642,3 +853,4 @@ class ComposeOutcomeStore:
                 f"sealed cohort was claimed concurrently at {str(self._audit_path)!r}; "
                 "the seal may be opened exactly once"
             ) from exc
+        return record

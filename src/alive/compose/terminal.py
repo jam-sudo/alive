@@ -7,8 +7,9 @@ seal without producing a durable terminal record.
 
 The guarantee
 -------------
-Once :meth:`Phase2bTerminal.claim_access` is called — the point the seal is about
-to be opened — EVERY exit path leaves exactly one write-once terminal artifact:
+Once :meth:`Phase2bTerminal.confirm_durable_access` advances the terminal to
+``ACCESS_CLAIMED`` — the point the durable audit proves the seal is consumed —
+EVERY exit path leaves exactly one write-once terminal artifact:
 
   * :attr:`TerminalState.COMPLETE` — a clean sealed evaluation;
   * :attr:`TerminalState.INVALID` — a post-access inconsistency (seal consumed,
@@ -25,11 +26,18 @@ clause writes an ``ABORTED_AFTER_SEAL`` artifact whenever the state is still
 
 State machine::
 
-    (initial) --acquire()--> PREPARED --claim_access()--> ACCESS_CLAIMED
-                                                              |
-                              complete(payload) ------------> COMPLETE
-                              invalid(reason) --------------> INVALID
-                              aborted(...) / protect finally> ABORTED_AFTER_SEAL
+    (initial) --acquire()--> PREPARED --attempt_access()--> ACCESS_ATTEMPTED
+                                                                  |
+                              confirm_durable_access(ref) ------> ACCESS_CLAIMED
+                                                                  |
+                              complete(payload) --------------> COMPLETE
+                              invalid(reason) ----------------> INVALID
+                              aborted(...) / protect finally--> ABORTED_AFTER_SEAL
+
+An exception in ``ACCESS_ATTEMPTED`` (before the durable audit) writes NO terminal
+— the seal was never consumed. The deprecated :meth:`Phase2bTerminal.claim_access`
+alias (``PREPARED -> ACCESS_CLAIMED`` in one step, no durable reference) is
+retained ONLY for terminal unit tests and must not be used on the seal-open path.
 
 Single ownership is enforced with an exclusive lock file created via
 ``os.open(..., O_CREAT | O_EXCL | O_WRONLY)`` BEFORE any preflight: a concurrent
@@ -107,14 +115,23 @@ _SCRUB_MIN_RUN = 4
 
 
 class TerminalState(Enum):
-    """The five-state Phase-2b terminal lifecycle.
+    """The six-state Phase-2b terminal lifecycle.
 
-    ``PREPARED`` and ``ACCESS_CLAIMED`` are transient; ``COMPLETE``, ``INVALID``
-    and ``ABORTED_AFTER_SEAL`` are terminal (each leaves exactly one write-once
-    artifact). The initial pre-:meth:`Phase2bTerminal.acquire` state is ``None``.
+    ``PREPARED``, ``ACCESS_ATTEMPTED`` and ``ACCESS_CLAIMED`` are transient;
+    ``COMPLETE``, ``INVALID`` and ``ABORTED_AFTER_SEAL`` are terminal (each leaves
+    exactly one write-once artifact). The initial pre-:meth:`Phase2bTerminal.acquire`
+    state is ``None``.
+
+    ``ACCESS_ATTEMPTED`` is the window between "about to open the seal" and the
+    durable audit write: an exception here writes NO terminal (the seal was never
+    durably consumed, ``sealed_access_count == 0``). Only a VERIFIED durable audit
+    reference (:meth:`Phase2bTerminal.confirm_durable_access`) advances
+    ``ACCESS_ATTEMPTED -> ACCESS_CLAIMED``; from ``ACCESS_CLAIMED`` every exit path
+    leaves exactly one terminal artifact.
     """
 
     PREPARED = "PREPARED"
+    ACCESS_ATTEMPTED = "ACCESS_ATTEMPTED"
     ACCESS_CLAIMED = "ACCESS_CLAIMED"
     COMPLETE = "COMPLETE"
     INVALID = "INVALID"
@@ -324,8 +341,8 @@ class Phase2bTerminal:
     """Single-owner terminal state machine guarding the one-time seal opening.
 
     Holds an exclusive lock over ``run_dir`` for the duration of the run and
-    guarantees that, once :meth:`claim_access` is called, every exit path leaves
-    exactly one write-once terminal artifact.
+    guarantees that, once :meth:`confirm_durable_access` reaches ``ACCESS_CLAIMED``,
+    every exit path leaves exactly one write-once terminal artifact.
 
     The no-raw-outcome property of terminal artifacts is OWNED BY the Task-8
     orchestrator, which must construct every payload as a summary / checksum-only
@@ -371,6 +388,10 @@ class Phase2bTerminal:
         self._audit_path = Path(audit_path) if audit_path is not None else None
         self._state: TerminalState | None = None
         self._lock_fd: int | None = None
+        #: The durable audit reference confirmed by :meth:`confirm_durable_access`
+        #: (``None`` until confirmed / on the deprecated in-memory path). Recorded
+        #: into ``ABORTED_AFTER_SEAL`` artifacts as durable proof of consumption.
+        self._audit_reference: str | None = None
 
     # ------------------------------------------------------------------
     # Read-only properties
@@ -450,12 +471,74 @@ class Phase2bTerminal:
 
         self._state = TerminalState.PREPARED
 
-    def claim_access(self) -> None:
-        """Mark the point the seal is about to be opened (``PREPARED -> CLAIMED``).
+    def attempt_access(self) -> None:
+        """Enter the pre-durable-audit window (``PREPARED -> ACCESS_ATTEMPTED``).
 
-        After this transition a terminal artifact is MANDATORY on every exit; the
-        :meth:`protect` boundary enforces it. Only valid from
+        Marks the point at which the seal is ABOUT to be opened but the durable
+        audit has NOT yet been written. An exception in ``ACCESS_ATTEMPTED`` writes
+        NO terminal artifact (the seal was never durably consumed — count 0):
+        :meth:`protect` refuses to wrap ``ACCESS_ATTEMPTED`` work and
+        :meth:`aborted` refuses to run from it. Only valid from
         :attr:`TerminalState.PREPARED`.
+
+        Raises
+        ------
+        TerminalError
+            If called from any state other than ``PREPARED``.
+        """
+        self._require_state(TerminalState.PREPARED, "attempt_access")
+        self._state = TerminalState.ACCESS_ATTEMPTED
+
+    def confirm_durable_access(self, audit_reference: str) -> None:
+        """Confirm the durable seal consumption (``ACCESS_ATTEMPTED -> CLAIMED``).
+
+        Only a VERIFIED durable audit reference advances the terminal into
+        ``ACCESS_CLAIMED``, after which a terminal artifact is MANDATORY on every
+        exit (the :meth:`protect` boundary enforces it) and any
+        ``ABORTED_AFTER_SEAL`` is only ever written post-audit (count 1).
+
+        The reference must be a non-empty string (a real claim receipt — an empty
+        or absent reference is not durable proof). When this terminal was
+        constructed with an ``audit_path``, the durable audit is additionally
+        required to already carry records (the seal really is burned on disk).
+        Only valid from :attr:`TerminalState.ACCESS_ATTEMPTED`.
+
+        Parameters
+        ----------
+        audit_reference : str
+            The durable identity of the written audit record (from the store's
+            :class:`~alive.compose.outcome_store.SealedAccessClaim`).
+
+        Raises
+        ------
+        TerminalError
+            If not in ``ACCESS_ATTEMPTED``, if ``audit_reference`` is empty, or if
+            an ``audit_path`` was supplied but has no durable records yet.
+        """
+        self._require_state(TerminalState.ACCESS_ATTEMPTED, "confirm_durable_access")
+        if not isinstance(audit_reference, str) or not audit_reference:
+            raise TerminalError(
+                "confirm_durable_access requires a non-empty durable audit reference; "
+                "an empty reference is not proof the seal was durably consumed."
+            )
+        if self._audit_path is not None and not self._audit_has_records():
+            raise TerminalError(
+                f"confirm_durable_access refused: audit {str(self._audit_path)!r} has "
+                "no durable records; the seal is not yet burned on disk."
+            )
+        self._audit_reference = audit_reference
+        self._state = TerminalState.ACCESS_CLAIMED
+
+    def claim_access(self) -> None:
+        """DEPRECATED in-memory claim (``PREPARED -> ACCESS_CLAIMED``).
+
+        Retained ONLY as a backward-compatible alias for terminal unit tests that
+        exercise the write/verify/ledger discipline in isolation (with no outcome
+        store). It transitions straight to ``ACCESS_CLAIMED`` WITHOUT a durable
+        audit reference and MUST NOT be used on the seal-open path — the real path
+        uses :meth:`attempt_access` then :meth:`confirm_durable_access`, so the
+        terminal never reaches ``ACCESS_CLAIMED`` without a durable audit. Only
+        valid from :attr:`TerminalState.PREPARED`.
 
         Raises
         ------
@@ -579,6 +662,7 @@ class Phase2bTerminal:
             "message": scrub_exception_message(str(exception)),
             "stage": stage,
             "preflight_checksums": checksums,
+            "audit_reference": self._audit_reference,
         }
         # The body's checksum field is now guaranteed safe, so guard the (possibly
         # reduced) value rather than the original unsafe input.
