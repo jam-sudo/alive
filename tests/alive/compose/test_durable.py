@@ -226,6 +226,46 @@ def _write_complete_terminal(
     return run_dir / Phase2bTerminal.COMPLETE_ARTIFACT
 
 
+def _write_aborted_terminal(
+    run_dir: Path,
+    *,
+    tmp_path: Path,
+    provenance: Phase2bProvenance,
+    pre_access_sha: str,
+) -> Path:
+    """Drive a real ``Phase2bTerminal`` to write a genuine v2 ``ABORTED_AFTER_SEAL``.
+
+    An aborted terminal carries NO ``registered_summary`` and NO
+    ``terminal_embedded_provenance`` — only the abort state fields (exception class,
+    scrubbed message, stage, preflight checksums, audit reference, results status),
+    the common identity roster (including the two pre-access identity anchors) and
+    the shared ``terminal_payload_checksum``. Its checksum is produced by the SAME
+    canonicalizer the summary-bearing terminals use.
+    """
+    audit_path = tmp_path / "audit.jsonl"
+    term = Phase2bTerminal(
+        run_dir,
+        ledger=RunLedger(
+            run_id=_RUN_ID, config_sha256="config-sha-bbbb", environment=_environment()
+        ),
+        audit_path=audit_path,
+        protocol=_PROTOCOL,
+        run_id=_RUN_ID,
+        pre_access_ledger_sha256=pre_access_sha,
+        pre_access_provenance_checksum=provenance.pre_access_checksum,
+    )
+    term.acquire()
+    term.attempt_access()
+    audit_path.write_text(json.dumps({"run_id": _RUN_ID, "pair_ids": []}) + "\n", encoding="utf-8")
+    term.confirm_durable_access("durable-audit-reference-xyz")
+    term.aborted(
+        exception=RuntimeError("scoring stage blew up"),
+        stage="scoring",
+        preflight_checksums={"pair_manifest": "11" * 32},
+    )
+    return run_dir / Phase2bTerminal.ABORTED_ARTIFACT
+
+
 def _build_scenario(
     tmp_path: Path, *, state: str = "COMPLETE", break_seed_self_checksum: bool = False
 ) -> dict:
@@ -239,13 +279,21 @@ def _build_scenario(
         run_dir, provenance=provenance, seed_byte_sha=seed_byte_sha
     )
     pre_access_sha = hashlib.sha256(pre_access_path.read_bytes()).hexdigest()
-    terminal_path = _write_complete_terminal(
-        run_dir,
-        tmp_path=tmp_path,
-        provenance=provenance,
-        pre_access_sha=pre_access_sha,
-        state=state,
-    )
+    if state == "ABORTED":
+        terminal_path = _write_aborted_terminal(
+            run_dir,
+            tmp_path=tmp_path,
+            provenance=provenance,
+            pre_access_sha=pre_access_sha,
+        )
+    else:
+        terminal_path = _write_complete_terminal(
+            run_dir,
+            tmp_path=tmp_path,
+            provenance=provenance,
+            pre_access_sha=pre_access_sha,
+            state=state,
+        )
     return {
         "run_dir": run_dir,
         "terminal_path": terminal_path,
@@ -655,9 +703,11 @@ def test_recover_two_terminals_fails_closed(tmp_path: Path) -> None:
         recover_phase2b_durable_outputs(run_dir=run_dir)
 
 
-def test_recover_aborted_terminal_is_refused(tmp_path: Path) -> None:
-    """ABORTED_AFTER_SEAL recovery is a separate concern (Task 6B); summary-bearing
-    recovery refuses a non-summary-bearing terminal (fail closed)."""
+def test_recover_malformed_aborted_terminal_fails_closed(tmp_path: Path) -> None:
+    """A MALFORMED aborted terminal (a bare ``{"terminal_state": ...}`` body, not a
+    real v2 abort artifact) fails closed: reduced-abort recovery (Task 6B) still
+    runs the FULL terminal verification (canonical JSON, exact roster, run id and
+    the shared payload-checksum), so a bogus abort body is rejected."""
     scenario = _build_scenario(tmp_path)
     run_dir = scenario["run_dir"]
     scenario["terminal_path"].unlink()
@@ -666,6 +716,175 @@ def test_recover_aborted_terminal_is_refused(tmp_path: Path) -> None:
     )
     with pytest.raises(DurableLedgerError):
         recover_phase2b_durable_outputs(run_dir=run_dir)
+
+
+# ---------------------------------------------------------------------------
+# Task 6B: reduced-abort forward publish + recovery (spec §3.3). An
+# ABORTED_AFTER_SEAL terminal has NO registered_summary and NO embedded
+# provenance; the reduced publish derives provenance from the pre-access ledger
+# snapshot and installs a marker whose field set omits every summary field.
+# ---------------------------------------------------------------------------
+
+
+def test_finalize_publishes_aborted_terminal_reduced_set(tmp_path: Path) -> None:
+    scenario = _build_scenario(tmp_path, state="ABORTED")
+    result = _finalize(scenario)
+
+    assert isinstance(result, DurableFinalizeResult)
+    assert result.terminal_state == "ABORTED_AFTER_SEAL"
+    # No registered summary on the abort path.
+    assert result.registered_summary_path is None
+
+    run_dir = scenario["run_dir"]
+    summary_path = run_dir / REGISTERED_SUMMARY_FILENAME
+    final_ledger_path = run_dir / FINAL_LEDGER_FILENAME
+    marker_path = run_dir / DURABLE_COMMIT_FILENAME
+
+    # The reduced set: NO registered summary artifact; final ledger + marker present.
+    assert not summary_path.exists()
+    assert final_ledger_path.is_file()
+    assert marker_path.is_file()
+    assert result.final_ledger_path == final_ledger_path
+    assert result.commit_marker_path == marker_path
+
+    # The final ledger binds {terminal, seed} file SHAs ONLY (no summary entry).
+    final_ledger = RunLedger.read(final_ledger_path)
+    names = {rec["name"] for rec in final_ledger.to_dict()["artifacts"]}
+    assert Phase2bTerminal.ABORTED_ARTIFACT in names
+    assert DEVELOPMENT_SEED_VARIABILITY_FILENAME in names
+    assert REGISTERED_SUMMARY_FILENAME not in names
+    assert FINAL_LEDGER_FILENAME not in names
+    assert DURABLE_COMMIT_FILENAME not in names
+    assert final_ledger.artifact_sha(Phase2bTerminal.ABORTED_ARTIFACT) == _file_sha(
+        scenario["terminal_path"]
+    )
+    assert final_ledger.artifact_sha(DEVELOPMENT_SEED_VARIABILITY_FILENAME) == _file_sha(
+        scenario["seed_path"]
+    )
+
+    # The marker: ABORTED state, NO registered_summary field, binds every present
+    # file SHA + the seed self-checksum, and its self-checksum recomputes.
+    marker = json.loads(marker_path.read_text(encoding="utf-8"))
+    assert marker["terminal_state"] == "ABORTED_AFTER_SEAL"
+    assert marker["run_id"] == _RUN_ID
+    assert "registered_summary" not in marker
+    assert marker["terminal"]["filename"] == Phase2bTerminal.ABORTED_ARTIFACT
+    assert marker["terminal"]["sha256"] == _file_sha(scenario["terminal_path"])
+    # marker last: it binds the on-disk final ledger SHA.
+    assert marker["final_ledger"]["sha256"] == _file_sha(final_ledger_path)
+    assert marker["pre_access_ledger"]["sha256"] == _file_sha(scenario["pre_access_path"])
+    assert marker["seed_variability"]["sha256"] == _file_sha(scenario["seed_path"])
+    assert marker["seed_variability"]["self_checksum"] == scenario["seed_report_checksum"]
+    core = {k: v for k, v in marker.items() if k != "commit_checksum"}
+    assert sha256_json(core) == marker["commit_checksum"] == result.commit_checksum
+
+
+def test_aborted_published_final_ledger_has_no_per_pair_ci(tmp_path: Path) -> None:
+    """The abort reduced set never introduces a per-pair CI / raw array (there is no
+    summary to publish at all)."""
+    scenario = _build_scenario(tmp_path, state="ABORTED")
+    result = _finalize(scenario)
+    assert result.registered_summary_path is None
+    marker = json.loads(result.commit_marker_path.read_text(encoding="utf-8"))
+
+    def _walk(obj: object) -> None:
+        if isinstance(obj, dict):
+            for value in obj.values():
+                _walk(value)
+        elif isinstance(obj, list):
+            assert len(obj) <= 8, "unexpectedly long array in abort marker"
+            for item in obj:
+                assert not isinstance(item, list), "nested list forbidden"
+                _walk(item)
+
+    _walk(marker)
+
+
+def test_finalize_aborted_is_idempotent_noop(tmp_path: Path) -> None:
+    scenario = _build_scenario(tmp_path, state="ABORTED")
+    first = _finalize(scenario)
+    ledger_before = first.final_ledger_path.read_bytes()
+    marker_before = first.commit_marker_path.read_bytes()
+
+    second = _finalize(scenario)
+
+    assert second.commit_checksum == first.commit_checksum
+    assert second.registered_summary_path is None
+    assert first.final_ledger_path.read_bytes() == ledger_before
+    assert first.commit_marker_path.read_bytes() == marker_before
+
+
+def test_recover_aborted_marker_absent_reproduces_marker(tmp_path: Path) -> None:
+    """Crash boundary: the final ledger was written but not the marker. Reduced-abort
+    recovery re-derives byte-identically and reproduces the SAME marker without
+    reopening the seal."""
+    scenario = _build_scenario(tmp_path, state="ABORTED")
+    reference = _finalize(scenario)
+    expected_marker = reference.commit_marker_path.read_bytes()
+    reference.commit_marker_path.unlink()
+
+    recovered = recover_phase2b_durable_outputs(run_dir=scenario["run_dir"])
+
+    assert recovered.terminal_state == "ABORTED_AFTER_SEAL"
+    assert recovered.registered_summary_path is None
+    assert recovered.commit_checksum == reference.commit_checksum
+    assert recovered.commit_marker_path.read_bytes() == expected_marker
+
+
+def test_recover_aborted_pristine_run_dir_publishes(tmp_path: Path) -> None:
+    """Recovery on a never-finalized abort run (1 abort terminal, no derived files)
+    performs the reduced publish and installs the marker (opens NO seal)."""
+    scenario = _build_scenario(tmp_path, state="ABORTED")
+    result = recover_phase2b_durable_outputs(run_dir=scenario["run_dir"])
+
+    run_dir = scenario["run_dir"]
+    assert result.terminal_state == "ABORTED_AFTER_SEAL"
+    assert result.registered_summary_path is None
+    assert not (run_dir / REGISTERED_SUMMARY_FILENAME).exists()
+    assert (run_dir / FINAL_LEDGER_FILENAME).is_file()
+    marker = json.loads((run_dir / DURABLE_COMMIT_FILENAME).read_text(encoding="utf-8"))
+    assert "registered_summary" not in marker
+    core = {k: v for k, v in marker.items() if k != "commit_checksum"}
+    assert sha256_json(core) == marker["commit_checksum"] == result.commit_checksum
+
+
+def test_recover_aborted_marker_present_is_verify_only(tmp_path: Path) -> None:
+    scenario = _build_scenario(tmp_path, state="ABORTED")
+    reference = _finalize(scenario)
+    ledger_inode = reference.final_ledger_path.stat().st_ino
+    marker_inode = reference.commit_marker_path.stat().st_ino
+    marker_before = reference.commit_marker_path.read_bytes()
+
+    recovered = recover_phase2b_durable_outputs(run_dir=scenario["run_dir"])
+
+    assert recovered.terminal_state == "ABORTED_AFTER_SEAL"
+    assert recovered.registered_summary_path is None
+    assert recovered.commit_checksum == reference.commit_checksum
+    assert reference.final_ledger_path.stat().st_ino == ledger_inode
+    assert reference.commit_marker_path.stat().st_ino == marker_inode
+    assert reference.commit_marker_path.read_bytes() == marker_before
+
+
+def test_recover_aborted_marker_present_tampered_seed_fails_closed(tmp_path: Path) -> None:
+    """A tampered seed report under a present abort marker fails closed (the
+    unconditional seed cross-check applies to the abort path too)."""
+    scenario = _build_scenario(tmp_path, state="ABORTED")
+    _finalize(scenario)
+    scenario["seed_path"].write_text(
+        json.dumps({"schema": "x", "report_checksum": "z"}, sort_keys=True), encoding="utf-8"
+    )
+    with pytest.raises(DurableLedgerError):
+        recover_phase2b_durable_outputs(run_dir=scenario["run_dir"])
+
+
+def test_recover_aborted_marker_present_tampered_final_ledger_fails_closed(tmp_path: Path) -> None:
+    """A tampered final ledger under a present abort marker fails the verify-only
+    path (the marker bound its SHA)."""
+    scenario = _build_scenario(tmp_path, state="ABORTED")
+    reference = _finalize(scenario)
+    reference.final_ledger_path.write_bytes(b'{"tampered":true}')
+    with pytest.raises(DurableLedgerError):
+        recover_phase2b_durable_outputs(run_dir=scenario["run_dir"])
 
 
 # ---------------------------------------------------------------------------

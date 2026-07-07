@@ -9,13 +9,19 @@ reopened (spec §1, §3.1).
 
 :func:`finalize_phase2b_durable_outputs` reads the already-written durable inputs
 — the sealed terminal, the persisted pre-access ledger snapshot, and the D2
-seed-variability report — and publishes three DERIVED files: the outcome-free
+seed-variability report — and publishes the DERIVED files. For a summary-bearing
+(``COMPLETE`` / ``INVALID``) terminal there are three: the outcome-free
 ``phase2b_registered_summary.json`` (a byte-faithful copy+normalise of the
 terminal's ``registered_summary``), ``phase2b_final_ledger.json`` (the pre-access
 ledger snapshot + the terminal's embedded provenance expanded into individual
 canonical entries + write-once file-SHA entries), and finally the single
-``phase2b_durable_commit.json`` marker binding every file SHA with a
-self-excluding ``commit_checksum``.
+``phase2b_durable_commit.json`` marker binding every file SHA with a self-excluding
+``commit_checksum``. For an ``ABORTED_AFTER_SEAL`` terminal — which carries no
+registered summary and no embedded provenance — it takes the REDUCED abort publish
+(spec §3.3): no registered summary file, a final ledger over the pre-access snapshot
+binding only the {terminal, seed} file SHAs (provenance comes from that snapshot,
+not the absent terminal-embedded provenance), and a marker whose DETERMINISTIC field
+set omits every summary field.
 
 This module opens NO seal and constructs NO outcome store. It only reads durable
 files and publishes derived files (forward publish + verification + idempotent
@@ -24,11 +30,12 @@ destination is written atomically write-once, a byte/SHA-identical destination i
 no-op, and a DIFFERENT pre-existing destination fails closed (never overwritten).
 This makes the forward publish idempotent and lets
 :func:`recover_phase2b_durable_outputs` re-drive a crash-interrupted publish:
-0 or ≥2 terminals fail closed, a lone terminal with no marker re-runs §3.1
-(byte-identical re-derivation ⇒ the SAME marker; NO seal is reopened), and a
-present marker is VERIFIED ONLY (never rewritten). Recovery also verifies the
-seed-variability artifact's actual regular-file bytes/SHA against the pre-access
-ledger record (spec §3.2).
+0 or ≥2 terminals fail closed, a lone terminal with no marker re-runs the matching
+forward publish (§3.1 summary-bearing or §3.3 reduced abort; byte-identical
+re-derivation ⇒ the SAME marker; NO seal is reopened), and a present marker is
+VERIFIED ONLY (never rewritten). Recovery also verifies the seed-variability
+artifact's actual regular-file bytes/SHA against the pre-access ledger record
+(spec §3.2).
 
 The whole-body ``terminal_payload_checksum`` is verified through the ONE shared
 :func:`~alive.compose.terminal.canonicalize_terminal_checksum_input`, never by
@@ -92,9 +99,10 @@ _TERMINAL_FILENAME_STATE: dict[str, TerminalState] = {
 _TERMINAL_FILENAMES: frozenset[str] = frozenset(_TERMINAL_FILENAME_STATE)
 
 #: Terminal states that carry a ``registered_summary`` + embedded provenance and are
-#: therefore publishable by this forward-publish finalizer (spec §2.1). An
-#: ``ABORTED_AFTER_SEAL`` terminal carries no registered summary; its durable
-#: finalize is a separate concern and is refused here (fail closed).
+#: therefore published via the FULL forward path (spec §2.1). An
+#: ``ABORTED_AFTER_SEAL`` terminal carries no registered summary and no embedded
+#: provenance; the finalizer branches to the REDUCED abort publish
+#: (:func:`_finalize_aborted_terminal`) for it (spec §3.3) rather than refusing.
 _SUMMARY_BEARING_STATES: frozenset[TerminalState] = frozenset(
     {TerminalState.COMPLETE, TerminalState.INVALID}
 )
@@ -119,14 +127,19 @@ class DurableFinalizeResult:
     run_dir : Path
         The resolved run directory holding every terminal and derived artifact.
     terminal_state : str
-        The verified terminal state value (``"COMPLETE"`` / ``"INVALID"``).
+        The verified terminal state value (``"COMPLETE"`` / ``"INVALID"`` /
+        ``"ABORTED_AFTER_SEAL"``).
     terminal_path : Path
         The resolved single sealed terminal artifact (the recovery source).
-    registered_summary_path : Path
-        The published outcome-free registered summary.
+    registered_summary_path : Path or None
+        The published outcome-free registered summary for a summary-bearing
+        (``COMPLETE`` / ``INVALID``) terminal; ``None`` on the reduced abort path
+        (an ``ABORTED_AFTER_SEAL`` terminal carries no registered summary, so none
+        is published).
     final_ledger_path : Path
         The published final ledger (pre-access snapshot + expanded provenance +
-        write-once file-SHA entries).
+        write-once file-SHA entries; the abort path records only the {terminal,
+        seed} file SHAs over the pre-access snapshot).
     commit_marker_path : Path
         The single durable commit marker installed LAST.
     commit_checksum : str
@@ -136,7 +149,7 @@ class DurableFinalizeResult:
     run_dir: Path
     terminal_state: str
     terminal_path: Path
-    registered_summary_path: Path
+    registered_summary_path: Path | None
     final_ledger_path: Path
     commit_marker_path: Path
     commit_checksum: str
@@ -407,6 +420,203 @@ def _read_seed_report_checksum(path: Path) -> str:
     return checksum
 
 
+def _finalize_aborted_terminal(
+    *,
+    run_dir_resolved: Path,
+    terminal_resolved: Path,
+    terminal_body: dict,
+    run_id: str,
+    terminal_state: TerminalState,
+    pre_access_resolved: Path,
+    seed_resolved: Path,
+) -> DurableFinalizeResult:
+    """Publish the REDUCED durable set for an ``ABORTED_AFTER_SEAL`` terminal (spec §3.3).
+
+    An aborted terminal carries NO ``registered_summary`` and NO
+    ``terminal_embedded_provenance``, so — unlike the summary-bearing path — this
+    derives all provenance from the PRE-ACCESS LEDGER snapshot (never the terminal).
+    It SKIPS ``phase2b_registered_summary.json``, builds
+    ``phase2b_final_ledger.json`` as the pre-access snapshot PLUS write-once
+    file-SHA entries for the {terminal, seed_variability} pair ONLY (the pre-access
+    snapshot already holds the pre-access provenance subset), and installs the
+    ``phase2b_durable_commit.json`` marker LAST with a DETERMINISTIC field set that
+    omits every registered-summary field. Because the field set is fixed for the
+    abort state and every value is deterministic canonical JSON / a file SHA, a
+    byte-identical re-derivation reproduces the SAME marker (idempotent recovery).
+
+    The caller has ALREADY run the shared terminal verification (path safety,
+    single-terminal scan, canonical JSON, exact ABORTED roster, run id, and the
+    whole-body ``terminal_payload_checksum`` via the shared canonicalizer). Opens
+    NO seal and constructs NO outcome store.
+
+    Parameters
+    ----------
+    run_dir_resolved : Path
+        The already-resolved run directory.
+    terminal_resolved : Path
+        The already-resolved ``ABORTED_AFTER_SEAL`` terminal artifact.
+    terminal_body : dict
+        The already-verified decoded terminal body (carrying the two pre-access
+        identity anchors used for the non-circular binding).
+    run_id : str
+        The verified non-empty terminal run id.
+    terminal_state : TerminalState
+        ``TerminalState.ABORTED_AFTER_SEAL`` (its ``.value`` is bound into the marker).
+    pre_access_resolved, seed_resolved : Path
+        The already-resolved pre-access ledger snapshot and seed-variability report.
+
+    Returns
+    -------
+    DurableFinalizeResult
+        The verified reduced publish (``registered_summary_path`` is ``None``).
+
+    Raises
+    ------
+    DurableLedgerError
+        On any pre-access binding, seed cross-check, write-once, or
+        re-verification failure. The sealed terminal is left untouched.
+    """
+    # --- Read + verify the pre-access ledger: run id, the persisted pre-access
+    # provenance subset checksum, and the non-circular binding. The abort terminal
+    # has NO embedded provenance, so the binding runs against the abort terminal's
+    # OWN pre-access identity anchors (the terminal roster proved them non-empty),
+    # never a terminal-embedded provenance payload.
+    try:
+        pre_access_ledger = RunLedger.read(pre_access_resolved)
+    except LedgerError as exc:
+        raise DurableLedgerError(
+            f"pre-access ledger {str(pre_access_resolved)!r} is not a valid ledger: {exc}"
+        ) from exc
+    pre_access_dict = pre_access_ledger.to_dict()
+    if pre_access_dict.get("run_id") != run_id:
+        raise DurableLedgerError(
+            f"pre-access ledger run_id {pre_access_dict.get('run_id')!r} disagrees with "
+            f"the terminal run_id {run_id!r}."
+        )
+    try:
+        recorded_pre_access_checksum = pre_access_ledger.artifact_sha(
+            PRE_ACCESS_PROVENANCE_ARTIFACT
+        )
+    except LedgerError as exc:
+        raise DurableLedgerError(
+            "pre-access ledger is missing the pre-access provenance subset checksum "
+            f"{PRE_ACCESS_PROVENANCE_ARTIFACT!r}: {exc}"
+        ) from exc
+    if terminal_body["pre_access_provenance_checksum"] != recorded_pre_access_checksum:
+        raise DurableLedgerError(
+            "the aborted terminal's pre_access_provenance_checksum does not match the "
+            "persisted pre-access ledger subset checksum (non-circular binding broken)."
+        )
+    pre_access_sha = _file_sha(pre_access_resolved)
+    if terminal_body["pre_access_ledger_sha256"] != pre_access_sha:
+        raise DurableLedgerError(
+            "the aborted terminal's pre_access_ledger_sha256 does not match the on-disk "
+            "pre-access ledger file SHA (the pre-access snapshot was modified)."
+        )
+
+    pre_access_artifacts = {rec["name"]: rec["sha256"] for rec in pre_access_dict["artifacts"]}
+
+    # --- Build phase2b_final_ledger.json = pre-access snapshot + write-once file-SHA
+    # entries for {terminal, seed} ONLY. No summary entry and no expanded
+    # terminal-embedded provenance (there is none): the pre-access snapshot already
+    # carries the pre-access provenance subset. It NEVER records the marker or itself.
+    final_ledger = RunLedger.read(pre_access_resolved)
+    terminal_sha = _file_sha(terminal_resolved)
+    seed_sha = _file_sha(seed_resolved)
+
+    # The seed-variability file the pre-access ledger digested must be byte-stable.
+    if "development_seed_variability" in pre_access_artifacts and (
+        pre_access_artifacts["development_seed_variability"] != seed_sha
+    ):
+        raise DurableLedgerError(
+            "the seed-variability file SHA disagrees with the digest recorded in the "
+            "pre-access ledger (the durable report was modified after binding)."
+        )
+
+    try:
+        final_ledger.record_artifact(terminal_resolved.name, terminal_sha)
+        final_ledger.record_artifact(DEVELOPMENT_SEED_VARIABILITY_FILENAME, seed_sha)
+    except DuplicateArtifactError as exc:
+        raise DurableLedgerError(
+            f"write-once violation assembling the abort final ledger: {exc}"
+        ) from exc
+    final_ledger_bytes = _canonical_bytes(final_ledger.to_dict())
+    final_ledger_sha = hashlib.sha256(final_ledger_bytes).hexdigest()
+    final_ledger_path = run_dir_resolved / FINAL_LEDGER_FILENAME
+    install_or_verify_exact(final_ledger_path, final_ledger_bytes.decode("utf-8"))
+
+    # Re-read the final ledger and compare to the intended canonical bytes + SHA.
+    if (
+        final_ledger_path.read_bytes() != final_ledger_bytes
+        or _file_sha(final_ledger_path) != final_ledger_sha
+    ):
+        raise DurableLedgerError(
+            "published abort final ledger failed post-install re-verification."
+        )
+
+    # --- Install phase2b_durable_commit.json LAST. The abort marker's field set is
+    # DETERMINISTIC for the abort state (NO registered_summary fields), so recovery
+    # re-derives it byte-identically. It binds the final ledger EXTERNALLY.
+    seed_self_checksum = _read_seed_report_checksum(seed_resolved)
+    marker_core = {
+        "schema": DURABLE_COMMIT_SCHEMA,
+        "protocol": terminal_body["protocol"],
+        "run_id": run_id,
+        "terminal_state": terminal_state.value,
+        "terminal": {"filename": terminal_resolved.name, "sha256": terminal_sha},
+        "final_ledger": {"filename": FINAL_LEDGER_FILENAME, "sha256": final_ledger_sha},
+        "pre_access_ledger": {"filename": PRE_ACCESS_LEDGER_FILENAME, "sha256": pre_access_sha},
+        "seed_variability": {
+            "filename": DEVELOPMENT_SEED_VARIABILITY_FILENAME,
+            "sha256": seed_sha,
+            "self_checksum": seed_self_checksum,
+        },
+    }
+    commit_checksum = sha256_json(marker_core)
+    marker = {**marker_core, COMMIT_CHECKSUM_FIELD: commit_checksum}
+    marker_bytes = _canonical_bytes(marker)
+    marker_path = run_dir_resolved / DURABLE_COMMIT_FILENAME
+    install_or_verify_exact(marker_path, marker_bytes.decode("utf-8"))
+
+    # Re-read the marker and re-verify self-checksum, every recorded file SHA, and
+    # run id / state.
+    marker_raw = marker_path.read_bytes()
+    try:
+        reloaded = json.loads(marker_raw)
+    except json.JSONDecodeError as exc:  # pragma: no cover - just installed
+        raise DurableLedgerError(f"abort commit marker re-read is not valid JSON: {exc}") from exc
+    if marker_raw != _canonical_bytes(reloaded):
+        raise DurableLedgerError("abort commit marker re-read is not canonical JSON.")
+    reloaded_core = {k: v for k, v in reloaded.items() if k != COMMIT_CHECKSUM_FIELD}
+    if sha256_json(reloaded_core) != reloaded.get(COMMIT_CHECKSUM_FIELD):
+        raise DurableLedgerError("abort commit marker self-checksum failed re-verification.")
+    if reloaded.get("run_id") != run_id or reloaded.get("terminal_state") != terminal_state.value:
+        raise DurableLedgerError(
+            "abort commit marker run_id / terminal_state failed re-verification."
+        )
+    file_sha_checks = (
+        (terminal_resolved, reloaded["terminal"]["sha256"]),
+        (final_ledger_path, reloaded["final_ledger"]["sha256"]),
+        (pre_access_resolved, reloaded["pre_access_ledger"]["sha256"]),
+        (seed_resolved, reloaded["seed_variability"]["sha256"]),
+    )
+    for path, expected_sha in file_sha_checks:
+        if _file_sha(path) != expected_sha:
+            raise DurableLedgerError(
+                f"abort commit marker file-SHA for {str(path)!r} failed re-verification."
+            )
+
+    return DurableFinalizeResult(
+        run_dir=run_dir_resolved,
+        terminal_state=terminal_state.value,
+        terminal_path=terminal_resolved,
+        registered_summary_path=None,
+        final_ledger_path=final_ledger_path,
+        commit_marker_path=marker_path,
+        commit_checksum=commit_checksum,
+    )
+
+
 def finalize_phase2b_durable_outputs(
     *,
     run_dir: str | Path,
@@ -419,15 +629,22 @@ def finalize_phase2b_durable_outputs(
     Reads the sealed terminal, the persisted pre-access ledger snapshot and the D2
     seed-variability report; publishes ``phase2b_registered_summary.json``,
     ``phase2b_final_ledger.json`` and finally ``phase2b_durable_commit.json`` (the
-    marker installed LAST), following the exact publish order of spec §3.1. Opens
-    NO seal and constructs NO outcome store.
+    marker installed LAST), following the exact publish order of spec §3.1. A
+    summary-bearing (``COMPLETE`` / ``INVALID``) terminal takes the full path; an
+    ``ABORTED_AFTER_SEAL`` terminal — which carries no registered summary and no
+    embedded provenance — branches to the REDUCED abort publish
+    (:func:`_finalize_aborted_terminal`, spec §3.3): no registered summary file, a
+    final ledger over the pre-access snapshot binding only the {terminal, seed}
+    file SHAs, and a marker whose deterministic field set omits every summary field.
+    Opens NO seal and constructs NO outcome store.
 
     Parameters
     ----------
     run_dir : str or Path
         The run directory; every input and derived file must be a direct child.
     terminal_path : str or Path
-        The single sealed terminal artifact (COMPLETE / INVALID).
+        The single sealed terminal artifact (``COMPLETE`` / ``INVALID`` /
+        ``ABORTED_AFTER_SEAL``).
     pre_access_ledger_path : str or Path
         The persisted pre-access ledger snapshot (``phase2b_pre_access_ledger.json``).
     seed_variability_path : str or Path
@@ -470,11 +687,6 @@ def finalize_phase2b_durable_outputs(
             f"terminal on disk {scanned_name!r}."
         )
     terminal_state = _TERMINAL_FILENAME_STATE[terminal_resolved.name]
-    if terminal_state not in _SUMMARY_BEARING_STATES:
-        raise DurableLedgerError(
-            f"terminal state {terminal_state.value!r} carries no registered summary; "
-            "the forward-publish finalizer handles only COMPLETE / INVALID."
-        )
 
     # --- Step 1: read + verify the terminal (canonical JSON, exact roster, run id,
     # and the whole-body terminal_payload_checksum via the SHARED canonicalizer).
@@ -533,6 +745,22 @@ def finalize_phase2b_durable_outputs(
         raise DurableLedgerError(
             f"terminal {str(terminal_resolved)!r} terminal_payload_checksum mismatch "
             "(recomputed via the shared canonicalizer)."
+        )
+
+    # --- Branch: an ABORTED_AFTER_SEAL terminal carries NO registered_summary and NO
+    # embedded provenance (spec §3.3), so it takes the REDUCED abort publish, which
+    # derives provenance from the pre-access ledger snapshot, not the terminal. The
+    # shared verification above (path safety, single-terminal scan, canonical JSON,
+    # exact roster, run id and the whole-body payload checksum) has already run.
+    if terminal_state not in _SUMMARY_BEARING_STATES:
+        return _finalize_aborted_terminal(
+            run_dir_resolved=run_dir_resolved,
+            terminal_resolved=terminal_resolved,
+            terminal_body=terminal_body,
+            run_id=run_id,
+            terminal_state=terminal_state,
+            pre_access_resolved=pre_access_resolved,
+            seed_resolved=seed_resolved,
         )
 
     # Inner content checksums the finalizer directly consumes (these ARE sha256_json
@@ -782,7 +1010,14 @@ def _verify_only_recover(
     Re-verifies the marker's canonical form + self-checksum, the run_id / state
     against the sole on-disk terminal, and every recorded file SHA against the
     on-disk regular files. NEVER installs or rewrites; any mismatch fails closed.
+
+    Handles both marker shapes: a summary-bearing (``COMPLETE`` / ``INVALID``)
+    marker binds the published registered summary (checked here) and the result
+    carries its path; an ``ABORTED_AFTER_SEAL`` marker has NO registered-summary
+    field and no summary file (skipped here) and the result's
+    ``registered_summary_path`` is ``None``.
     """
+    summary_bearing = terminal_state in _SUMMARY_BEARING_STATES
     summary_path = run_dir_resolved / REGISTERED_SUMMARY_FILENAME
     final_ledger_path = run_dir_resolved / FINAL_LEDGER_FILENAME
 
@@ -828,12 +1063,19 @@ def _verify_only_recover(
         )
 
     # Every recorded file SHA must match the on-disk regular file (never rewrite).
-    file_sha_checks = (
-        (terminal_path, marker.get("terminal"), "terminal"),
-        (summary_path, marker.get("registered_summary"), "registered summary"),
-        (final_ledger_path, marker.get("final_ledger"), "final ledger"),
-        (pre_access_path, marker.get("pre_access_ledger"), "pre-access ledger"),
-        (seed_path, marker.get("seed_variability"), "seed-variability report"),
+    # The registered-summary leg applies ONLY to the summary-bearing marker shape;
+    # the abort marker carries no such field and no summary file.
+    file_sha_checks = [(terminal_path, marker.get("terminal"), "terminal")]
+    if summary_bearing:
+        file_sha_checks.append(
+            (summary_path, marker.get("registered_summary"), "registered summary")
+        )
+    file_sha_checks.extend(
+        [
+            (final_ledger_path, marker.get("final_ledger"), "final ledger"),
+            (pre_access_path, marker.get("pre_access_ledger"), "pre-access ledger"),
+            (seed_path, marker.get("seed_variability"), "seed-variability report"),
+        ]
     )
     for path, record, label in file_sha_checks:
         expected_sha = record.get("sha256") if isinstance(record, dict) else None
@@ -848,7 +1090,7 @@ def _verify_only_recover(
         run_dir=run_dir_resolved,
         terminal_state=terminal_state.value,
         terminal_path=terminal_path,
-        registered_summary_path=summary_path,
+        registered_summary_path=summary_path if summary_bearing else None,
         final_ledger_path=final_ledger_path,
         commit_marker_path=marker_path,
         commit_checksum=marker[COMMIT_CHECKSUM_FIELD],
@@ -862,14 +1104,15 @@ def recover_phase2b_durable_outputs(*, run_dir: str | Path) -> DurableFinalizeRe
     the presence of the commit marker:
 
     - 0 or ≥2 terminals: fail closed.
-    - A non-summary-bearing (``ABORTED_AFTER_SEAL``) terminal: refused here — its
-      durable recovery is a separate concern.
-    - 1 summary-bearing terminal + NO marker: re-run the §3.1 publish idempotently.
-      Every derived byte is deterministic canonical JSON + file SHAs, so a
-      byte-identical re-derivation reproduces the SAME marker. This is DERIVED-FILE
-      recovery: NO seal is reopened, nothing is re-scored, no terminal re-transitioned.
-    - 1 summary-bearing terminal + a marker: VERIFY ONLY — re-verify the marker's
-      self-checksum, run_id / state, and every recorded file SHA; NEVER rewrite.
+    - 1 terminal + NO marker: re-run the forward publish idempotently — the full
+      §3.1 path for a summary-bearing (``COMPLETE`` / ``INVALID``) terminal, or the
+      reduced §3.3 abort publish for an ``ABORTED_AFTER_SEAL`` terminal. Every
+      derived byte is deterministic canonical JSON + file SHAs, so a byte-identical
+      re-derivation reproduces the SAME marker. This is DERIVED-FILE recovery: NO
+      seal is reopened, nothing is re-scored, no terminal re-transitioned.
+    - 1 terminal + a marker: VERIFY ONLY — re-verify the marker's self-checksum,
+      run_id / state, and every recorded file SHA (the summary leg only for a
+      summary-bearing marker); NEVER rewrite.
 
     In every branch the seed-variability artifact's on-disk regular-file bytes/SHA
     are verified against the pre-access ledger record (spec §3.2): a claimed seed
@@ -895,11 +1138,6 @@ def recover_phase2b_durable_outputs(*, run_dir: str | Path) -> DurableFinalizeRe
     run_dir_resolved = _resolve_run_dir(run_dir)
     terminal_name = _scan_single_terminal(run_dir_resolved)
     terminal_state = _TERMINAL_FILENAME_STATE[terminal_name]
-    if terminal_state not in _SUMMARY_BEARING_STATES:
-        raise DurableLedgerError(
-            f"terminal state {terminal_state.value!r} carries no registered summary; "
-            "summary-bearing recovery handles only COMPLETE / INVALID (fail closed)."
-        )
     terminal_path = run_dir_resolved / terminal_name
     pre_access_path = run_dir_resolved / PRE_ACCESS_LEDGER_FILENAME
     seed_path = run_dir_resolved / DEVELOPMENT_SEED_VARIABILITY_FILENAME
@@ -930,9 +1168,11 @@ def recover_phase2b_durable_outputs(*, run_dir: str | Path) -> DurableFinalizeRe
         marker_present = True
 
     if not marker_present:
-        # Derived-file recovery: re-run §3.1 idempotently. install_or_verify_exact
-        # makes byte-identical re-derivation a no-op and any divergence fail closed.
-        # The full §3.1 verification (incl. the shared terminal canonicalizer) runs.
+        # Derived-file recovery: re-run the forward publish idempotently — the full
+        # §3.1 path for a summary-bearing terminal, the reduced §3.3 abort publish for
+        # an ABORTED_AFTER_SEAL terminal. install_or_verify_exact makes byte-identical
+        # re-derivation a no-op and any divergence fail closed; the full terminal
+        # verification (incl. the shared payload-checksum canonicalizer) always runs.
         return finalize_phase2b_durable_outputs(
             run_dir=run_dir_resolved,
             terminal_path=terminal_path,
