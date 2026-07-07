@@ -347,7 +347,6 @@ def _provenance(manifest: dict, bundle: FrozenPredictionBundle, cfg) -> Phase2bP
         seal_audit_reference="audit.jsonl",
         regime_result_double_sha256="placeholder-double",
         regime_result_single_sha256="placeholder-single",
-        terminal_report_sha256="placeholder-terminal",
     )
 
 

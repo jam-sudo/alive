@@ -528,7 +528,6 @@ def _build_provenance(
         seal_audit_reference=audit_reference,
         regime_result_double_sha256=regime_double.checksum if regime_double is not None else "",
         regime_result_single_sha256=regime_single.checksum if regime_single is not None else "",
-        terminal_report_sha256="",
     )
 
 
