@@ -317,6 +317,48 @@ def test_materialize_without_backing_audit_fails_closed(tmp_path: Path) -> None:
     assert store.sealed_access_count == 0
 
 
+def test_materialize_forged_pair_ids_fails_closed(tmp_path: Path) -> None:
+    """Defense-in-depth on the seal backstop: a claim whose ``run_id`` /
+    ``request_checksum`` / ``audit_reference`` are genuine but whose ``pair_ids``
+    have been swapped for a DIFFERENT in-index set must fail closed, not slice
+    the forged pairs.
+
+    The forged set below keeps every entry inside the store's pair index (so the
+    old raw ``_materialise_pairs`` would happily slice it) but swaps a sealed pair
+    for an in-index NON-sealed calibration pair, so it re-derives a different
+    request checksum than the persisted sealed union.
+    """
+    store, manifest = _build_store(tmp_path)
+    union = _sealed_union(manifest)
+    claim = store.claim_sealed_access("run-real", union)
+
+    non_sealed = _canonical_pairs(manifest, "combo_calibration")  # in index, not sealed
+    assert non_sealed, "fixture must expose an in-index non-sealed pair"
+    forged_pairs = tuple(non_sealed) + tuple(union[:-1])  # in-index, != sealed union
+    assert set(forged_pairs) != set(union)
+    forged = dataclasses.replace(claim, pair_ids=forged_pairs)
+    # The identity fields are untouched, so the three legacy checks all pass.
+    assert forged.run_id == claim.run_id
+    assert forged.request_checksum == claim.request_checksum
+    assert forged.audit_reference == claim.audit_reference
+
+    with pytest.raises(ComposeSealingError):
+        store.materialize_claimed(forged)
+
+
+def test_materialize_genuine_claim_returns_sealed_union(tmp_path: Path) -> None:
+    """Regression: the authenticated materialise path returns exactly the sealed
+    union for a genuine claim (payload sliced from the persisted record)."""
+    store, manifest = _build_store(tmp_path)
+    union = _sealed_union(manifest)
+    claim = store.claim_sealed_access("run-genuine", union)
+    release = store.materialize_claimed(claim)
+    assert set(release.keys()) == set(union)
+    for pid, obs in release.items():
+        assert isinstance(obs, ObservedPair)
+        assert obs.pair_id == pid
+
+
 def test_concurrent_claims_one_audit_one_winner(tmp_path: Path, monkeypatch) -> None:
     manifest = _build_manifest()
     audit_path = tmp_path / "compose_audit.jsonl"

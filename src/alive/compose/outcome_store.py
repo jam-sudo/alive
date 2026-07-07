@@ -565,8 +565,10 @@ class ComposeOutcomeStore:
         Raises
         ------
         ComposeSealingError
-            If the persisted audit is absent, or does not match the claim's
-            ``run_id`` / ``request_checksum`` / ``audit_reference``.
+            If the persisted audit is absent, does not match the claim's
+            ``run_id`` / ``request_checksum`` / ``audit_reference``, or if the
+            claim's ``pair_ids`` do not re-derive the persisted sealed union
+            (the payload selector is authenticated before any row is sliced).
         """
         records = self._read_audit_records()
         if not records:
@@ -587,7 +589,25 @@ class ComposeOutcomeStore:
                 f"{record.get('run_id')!r}). Fail-closed: a mismatched claim cannot "
                 "materialise sealed outcomes."
             )
-        return self._materialise_pairs(list(claim.pair_ids))
+        # Authenticate the PAYLOAD SELECTOR, not just the claim's identity. The
+        # checks above validate run_id/request/reference, but the pairs actually
+        # materialised must be proven to be the sealed union — re-derive the
+        # request checksum from the claim's pair_ids exactly as _write_audit_record
+        # does and require it equals the persisted checksum. Otherwise a claim with
+        # genuine identity strings but forged (in-index) pair_ids could slice
+        # non-sealed rows.
+        claim_sorted = sorted([list(p) for p in claim.pair_ids])
+        if sha256_json(claim_sorted) != record["request_checksum"]:
+            raise ComposeSealingError(
+                "materialize_claimed refused: the claim's pair_ids do not re-derive "
+                "the persisted sealed union (payload-selector checksum mismatch). "
+                "Fail-closed: a mismatched claim cannot materialise sealed outcomes."
+            )
+        # Slice from the AUTHENTICATED source of truth — the persisted record's
+        # pair_ids — so no unauthenticated field feeds the materialised payload.
+        # A genuine claim is unchanged: claim.pair_ids canonicalises to record's.
+        sealed_pairs = [tuple(p) for p in record["pair_ids"]]
+        return self._materialise_pairs(sealed_pairs)
 
     @staticmethod
     def _audit_reference(record: Mapping) -> str:
