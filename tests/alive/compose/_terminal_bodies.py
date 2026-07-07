@@ -30,7 +30,10 @@ def minimal_registered_summary(**overrides: object) -> dict:
         "terminal_state": "COMPLETE",
         "sealed_access_count": 1,
         "sample_counts": {"double": 4, "single": 4},
-        "per_method_aggregate_mse": {"l1_bilinear_identifiable": 0.40, "additive": 0.55},
+        "per_method_aggregate_mse": {
+            "double": {"l1_bilinear_identifiable": 0.40, "additive": 0.55},
+            "single": {"l1_bilinear_identifiable": 0.44, "additive": 0.60},
+        },
         "theta": {"additive": 0.42},
         "simultaneous_lower_bounds": {"additive": 0.10},
         "family_confidence": 0.95,

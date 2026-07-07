@@ -629,7 +629,7 @@ def build_registered_evaluation_summary(
     sealed_access_count: int,
     regime_double: RegimeScore,
     regime_single: RegimeScore,
-    per_method_aggregate_mse: Mapping[str, float | str],
+    per_method_aggregate_mse: Mapping[str, Mapping[str, float | str]],
     final_verdict: ComposeSealedResult,
     integrity: ComposeIntegrityReport,
     family_confidence: float,
@@ -661,8 +661,11 @@ def build_registered_evaluation_summary(
         verdict input). Only sample counts, checksums and the double-regime
         secondary GI block are read; per-pair arrays are never embedded.
     per_method_aggregate_mse : Mapping
-        ``method -> mean(pair_errors[method])`` for the headline (double) regime,
-        computed ONCE inside the protected evaluation.
+        ``{"double": {method -> mean(pair_errors[method])}, "single": {...}}`` —
+        the per-method aggregate MSE for BOTH regimes, computed ONCE inside the
+        protected evaluation. ``double`` is the headline / verdict-linked regime;
+        ``single`` is the registered secondary (CLAUDE.md §10). Each regime is
+        scored INDEPENDENTLY over its own pairs and the two are NEVER pooled.
     final_verdict : ComposeSealedResult
         The FINAL sealed verdict (swapped to ``INVALID`` on a post-access
         inconsistency). Its axes and clauses are reported verbatim.
@@ -693,12 +696,15 @@ def build_registered_evaluation_summary(
             "single": int(regime_single.sample_count),
         },
         "per_method_aggregate_mse": {
-            method: (
-                per_method_aggregate_mse[method]
-                if isinstance(per_method_aggregate_mse[method], str)
-                else _finite_or_sentinel(float(per_method_aggregate_mse[method]))
-            )
-            for method in sorted(per_method_aggregate_mse)
+            regime: {
+                method: (
+                    regime_mse[method]
+                    if isinstance(regime_mse[method], str)
+                    else _finite_or_sentinel(float(regime_mse[method]))
+                )
+                for method in sorted(regime_mse)
+            }
+            for regime, regime_mse in sorted(per_method_aggregate_mse.items())
         },
         "theta": {c: _finite_or_sentinel(bounds.theta[c]) for c in bounds.comparators},
         "simultaneous_lower_bounds": {
@@ -1519,9 +1525,19 @@ def _evaluate_inside_boundary(
     # Aggregates are computed ONCE HERE inside the protected evaluation (spec §2.1);
     # the summary exporter only COPIES them and never recomputes. per-pair error
     # arrays and per-pair CIs are NEVER embedded — only the per-method mean MSE.
-    per_method_aggregate_mse: dict[str, float | str] = {
-        method: _finite_or_sentinel(float(np.mean(regime_double.pair_errors[method])))
-        for method in sorted(regime_double.pair_errors)
+    # Reported for BOTH regimes, regime-labeled and scored INDEPENDENTLY (never
+    # pooled): double = headline / verdict-linked, single = registered secondary
+    # (CLAUDE.md §10). Each embedded float passes _finite_or_sentinel so a
+    # degenerate mean becomes the sentinel string, never a summary-write abort.
+    per_method_aggregate_mse: dict[str, dict[str, float | str]] = {
+        "double": {
+            method: _finite_or_sentinel(float(np.mean(regime_double.pair_errors[method])))
+            for method in sorted(regime_double.pair_errors)
+        },
+        "single": {
+            method: _finite_or_sentinel(float(np.mean(regime_single.pair_errors[method])))
+            for method in sorted(regime_single.pair_errors)
+        },
     }
     # evaluation_payload_checksum binds the regime/bounds scoring results directly
     # after scoring (distinct from final_result_checksum, which binds identity).

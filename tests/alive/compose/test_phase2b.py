@@ -969,6 +969,14 @@ def test_complete_terminal_embeds_summary_and_final_result_checksum(tmp_path):
         "seed_variability_report_checksum",
     }
     assert summ["gi_structure_recovery"] == "NOT_EVALUABLE"
+    # per_method_aggregate_mse is a regime-labeled mapping (mirrors sample_counts):
+    # both the double (headline / verdict-linked) AND single (registered secondary,
+    # §10) regimes are present, regime-labeled, scored INDEPENDENTLY and NEVER
+    # pooled into one flat method->mse map.
+    pmm = summ["per_method_aggregate_mse"]
+    assert set(pmm) == {"double", "single"}
+    assert set(pmm["double"]) == set(pmm["single"])
+    assert pmm["single"] != pmm["double"]
     # no per-pair error array or per-pair CI leaks into the terminal payload.
     assert not any("per_pair" in k or k.endswith("_ci") for k in _flatten_keys(body))
 
@@ -985,6 +993,56 @@ def test_complete_terminal_embeds_summary_and_final_result_checksum(tmp_path):
     )
     # Phase2bResult.result_checksum IS the layered final_result_checksum.
     assert result.result_checksum == body["final_result_checksum"]
+
+
+def test_per_method_aggregate_mse_reports_both_regimes_unpooled(tmp_path):
+    # §10 registered-secondary completeness: the summary must report the per-method
+    # aggregate MSE for BOTH the double-unseen (headline / verdict-linked) AND the
+    # single-unseen (registered secondary) regimes — regime-labeled, scored
+    # INDEPENDENTLY, and NEVER pooled. Under-reporting only the double regime would
+    # silently drop the §10 registered secondary.
+    kit = _make_run(tmp_path)
+    res = run_phase2b_fixture(**_fixture_kwargs(kit))
+    assert res.terminal_state == TerminalState.COMPLETE
+
+    body = _read_terminal(kit["run_dir"], "complete")
+    per_method = body["registered_summary"]["per_method_aggregate_mse"]
+
+    # regime-labeled mapping mirroring sample_counts: {"double": {...}, "single": {...}}.
+    assert set(per_method) == {"double", "single"}
+    assert isinstance(per_method["double"], dict)
+    assert isinstance(per_method["single"], dict)
+
+    # both regimes carry the SAME (full) method roster; per-method, never per-pair.
+    assert set(per_method["double"]) == set(per_method["single"])
+    assert set(per_method["single"]) == set(res.regime_single.pair_errors)
+
+    # each embedded value is the INDEPENDENT per-regime mean over THAT regime's own
+    # pair_errors — proving it is regime-labeled, aggregate-scalar and NOT pooled.
+    for method in sorted(res.regime_single.pair_errors):
+        expected_double = float(np.mean(res.regime_double.pair_errors[method]))
+        expected_single = float(np.mean(res.regime_single.pair_errors[method]))
+        assert per_method["double"][method] == pytest.approx(expected_double)
+        assert per_method["single"][method] == pytest.approx(expected_single)
+        # a finite aggregate scalar, never a per-pair array.
+        assert isinstance(per_method["single"][method], float)
+        assert np.isfinite(per_method["single"][method])
+        # NOT pooled: a mean over the union of both regimes would differ from the
+        # single-regime mean (the regimes score disjoint pairs).
+        pooled = float(
+            np.mean(
+                np.concatenate(
+                    [
+                        res.regime_double.pair_errors[method],
+                        res.regime_single.pair_errors[method],
+                    ]
+                )
+            )
+        )
+        assert per_method["single"][method] != pytest.approx(pooled)
+
+    # single is a DISTINCT dict from double (independent regimes).
+    assert per_method["single"] != per_method["double"]
 
 
 def test_invalid_final_result_checksum_differs_from_complete(tmp_path):
