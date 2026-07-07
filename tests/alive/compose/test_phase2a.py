@@ -594,6 +594,53 @@ def test_perturbation_mean_uses_calibration_double_shifts_only():
         )
 
 
+def test_oof_fold_manifest_shares_one_checksum_across_bundle_lock_ledger_disk(tmp_path):
+    # The persisted OOF fold manifest checksum is bound identically into the frozen
+    # bundle diagnostics, the method lock, the ledger artifact and the on-disk
+    # manifest — one checksum, four surfaces (D2 Task 1).
+    from alive.compose.select import OOFFoldManifest
+
+    rng = np.random.default_rng(41)
+    inst = _build_instance(rng)
+    out = tmp_path / "compose" / "oof_fold_manifest.json"
+    res = run_phase2a_fixture(
+        _inputs(inst), _store(inst), expected_hashes=_HASHES, oof_manifest_path=out
+    )
+    assert res.futility_status == "CONTINUE"
+    checksum = res.oof_manifest.manifest_checksum
+    assert len(checksum) == 64
+    assert res.futility.oof_manifest.manifest_checksum == checksum
+    # bundle diagnostics
+    assert res.bundle.dev_diagnostics["oof_fold_manifest_checksum"] == checksum
+    res.bundle.verify()
+    # method lock
+    assert res.method_lock["oof_fold_manifest_checksum"] == checksum
+    # ledger artifact
+    assert res.ledger.artifact_sha("phase2a_oof_fold_manifest") == checksum
+    # on-disk manifest loads, verifies and matches
+    assert out.exists()
+    loaded = OOFFoldManifest.load(out)
+    assert loaded.manifest_checksum == checksum
+    # the manifest describes the calibration design of this run
+    assert loaded.calibration_pair_ids == tuple(tuple(p) for p in inst["cal_pairs_id"])
+
+
+def test_oof_fold_manifest_returned_in_memory_on_futility(tmp_path):
+    # On a futility stop the manifest is still returned in memory, but NOT written
+    # and NOT bound into a bundle/lock/ledger (there is no bundle on futility).
+    rng = np.random.default_rng(42)
+    inst = _build_instance(rng)
+    store = _store(inst, combo_calibration_eps=inst["additive_cal"])  # forces theta<=0
+    out = tmp_path / "futility_manifest.json"
+    res = run_phase2a_fixture(_inputs(inst), store, expected_hashes=_HASHES, oof_manifest_path=out)
+    assert res.futility_status == "FUTILITY_STOPPED"
+    assert res.bundle is None
+    assert res.method_lock is None
+    assert res.oof_manifest is not None
+    assert len(res.oof_manifest.manifest_checksum) == 64
+    assert not out.exists()  # futility writes no manifest
+
+
 def test_bundle_written_once(tmp_path):
     rng = np.random.default_rng(4)
     inst = _build_instance(rng)

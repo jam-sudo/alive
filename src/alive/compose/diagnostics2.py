@@ -43,7 +43,7 @@ import numpy as np
 from alive.compose.gates import GateResult, measurability_gate
 from alive.compose.identify import RankReport, rank_diagnostics
 from alive.compose.operator import design_matrix
-from alive.compose.select import ModelFactory, select_hyperparams
+from alive.compose.select import ModelFactory, OOFFoldManifest, select_hyperparams
 
 #: Status values this checkpoint may emit. Deliberately disjoint from the sealed
 #: verdict axis ({GI_LEARNABLE_WIN, PARTIAL, NO_DISTINCT_WIN, INVALID}) so a
@@ -89,6 +89,12 @@ class FutilityResult:
         The total factor dimension selected by gene-disjoint OOF.
     selected_lambda
         The ridge regularization selected by gene-disjoint OOF.
+    oof_manifest
+        The canonical, checksummed record of the EXACT gene-disjoint OOF folds
+        this checkpoint's single selection call built (never a rebuilt fold set).
+        Present on both CONTINUE and FUTILITY_STOPPED — a futility stop still
+        returns the manifest in memory (it just produces no sealed-prediction
+        bundle).
     failures
         Human-readable reasons the checkpoint stopped (empty iff ``CONTINUE``).
     """
@@ -102,6 +108,7 @@ class FutilityResult:
     oof_theta: float
     selected_k_total: int
     selected_lambda: float
+    oof_manifest: OOFFoldManifest | None = None
     failures: tuple[str, ...] = field(default=())
 
 
@@ -262,5 +269,6 @@ def real_calibration_diagnostics(
         oof_theta=oof_theta,
         selected_k_total=selected_k_total,
         selected_lambda=selected_lambda,
+        oof_manifest=selection.oof_manifest,
         failures=tuple(failures),
     )
