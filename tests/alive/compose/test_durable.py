@@ -22,9 +22,14 @@ from pathlib import Path
 import pytest
 
 from alive.compose.durable import (  # noqa: E402  (module under test — imported last)
+    DURABLE_COMMIT_FILENAME,
+    FINAL_LEDGER_FILENAME,
+    REGISTERED_SUMMARY_FILENAME,
     DurableFinalizeResult,
     DurableLedgerError,
     finalize_phase2b_durable_outputs,
+    install_or_verify_exact,
+    recover_phase2b_durable_outputs,
 )
 from alive.compose.provenance2 import (
     PRE_ACCESS_LEDGER_FILENAME,
@@ -82,12 +87,12 @@ def _provenance() -> Phase2bProvenance:
     )
 
 
-def _registered_summary() -> dict:
+def _registered_summary(state: str = "COMPLETE") -> dict:
     """A minimal outcome-free registered summary (finite floats only, no per-pair)."""
     return {
         "protocol": _PROTOCOL,
         "run_id": _RUN_ID,
-        "terminal_state": "COMPLETE",
+        "terminal_state": state,
         "sealed_access_count": 1,
         "sample_counts": {"double": 4, "single": 4},
         "per_method_aggregate_mse": {"l1_bilinear_identifiable": 0.40, "additive": 0.55},
@@ -112,8 +117,18 @@ def _registered_summary() -> dict:
     }
 
 
-def _write_seed_variability(run_dir: Path) -> tuple[Path, str, str]:
-    """Write a synthetic seed-variability report with a self-excluding checksum."""
+def _write_seed_variability(
+    run_dir: Path, *, break_self_checksum: bool = False
+) -> tuple[Path, str, str]:
+    """Write a synthetic seed-variability report with a self-excluding checksum.
+
+    Mirrors the EXACT self-checksum derivation of
+    :func:`alive.compose.seed_variability.development_seed_variability`:
+    ``report_checksum == sha256_json(payload_without_report_checksum)``. When
+    ``break_self_checksum`` is set the stored ``report_checksum`` is inconsistent
+    with the payload (used to exercise the M1 self-checksum hardening) while the
+    on-disk byte SHA still round-trips into the pre-access ledger.
+    """
     payload = {
         "schema": "compose_development_seed_variability_v1",
         "protocol": _PROTOCOL,
@@ -121,12 +136,13 @@ def _write_seed_variability(run_dir: Path) -> tuple[Path, str, str]:
         "methods": {"gears": {"seed_mse": [0.1, 0.2]}, "cpa": {"seed_mse": [0.3, 0.4]}},
     }
     report_checksum = sha256_json(payload)
-    doc = {**payload, "report_checksum": report_checksum}
+    stored_checksum = ("f" * 64) if break_self_checksum else report_checksum
+    doc = {**payload, "report_checksum": stored_checksum}
     text = json.dumps(doc, sort_keys=True, separators=(",", ":"))
     path = run_dir / DEVELOPMENT_SEED_VARIABILITY_FILENAME
     path.write_text(text, encoding="utf-8")
     byte_sha = hashlib.sha256(text.encode("utf-8")).hexdigest()
-    return path, byte_sha, report_checksum
+    return path, byte_sha, stored_checksum
 
 
 def _persist_pre_access_ledger(
@@ -151,16 +167,26 @@ def _persist_pre_access_ledger(
 
 
 def _write_complete_terminal(
-    run_dir: Path, *, tmp_path: Path, provenance: Phase2bProvenance, pre_access_sha: str
+    run_dir: Path,
+    *,
+    tmp_path: Path,
+    provenance: Phase2bProvenance,
+    pre_access_sha: str,
+    state: str = "COMPLETE",
 ) -> Path:
-    """Drive a real ``Phase2bTerminal`` to write a genuine v2 COMPLETE terminal."""
-    summary = _registered_summary()
+    """Drive a real ``Phase2bTerminal`` to write a genuine v2 summary-bearing terminal.
+
+    ``state`` selects the summary-bearing terminal to write (``"COMPLETE"`` or
+    ``"INVALID"``); both share :data:`_COMPLETE_INVALID_STATE_FIELDS`, so the body
+    layout is identical and only the terminal writer method / bound state differ.
+    """
+    summary = _registered_summary(state)
     registered_summary_checksum = sha256_json(summary)
     embedded = provenance.to_dict()
     provenance_checksum = provenance.self_checksum
     final_result_checksum = sha256_json(
         {
-            "terminal_state": "COMPLETE",
+            "terminal_state": state,
             "final_verdict_checksum": "2" * 64,
             "registered_summary_checksum": registered_summary_checksum,
             "evaluation_payload_checksum": "1" * 64,
@@ -193,21 +219,32 @@ def _write_complete_terminal(
     term.attempt_access()
     audit_path.write_text(json.dumps({"run_id": _RUN_ID, "pair_ids": []}) + "\n", encoding="utf-8")
     term.confirm_durable_access("durable-audit-reference-xyz")
+    if state == "INVALID":
+        term.invalid(body)
+        return run_dir / Phase2bTerminal.INVALID_ARTIFACT
     term.complete(body)
     return run_dir / Phase2bTerminal.COMPLETE_ARTIFACT
 
 
-def _build_scenario(tmp_path: Path) -> dict:
+def _build_scenario(
+    tmp_path: Path, *, state: str = "COMPLETE", break_seed_self_checksum: bool = False
+) -> dict:
     run_dir = tmp_path / "run"
     run_dir.mkdir(parents=True, exist_ok=True)
     provenance = _provenance()
-    seed_path, seed_byte_sha, seed_report_checksum = _write_seed_variability(run_dir)
+    seed_path, seed_byte_sha, seed_report_checksum = _write_seed_variability(
+        run_dir, break_self_checksum=break_seed_self_checksum
+    )
     pre_access_path = _persist_pre_access_ledger(
         run_dir, provenance=provenance, seed_byte_sha=seed_byte_sha
     )
     pre_access_sha = hashlib.sha256(pre_access_path.read_bytes()).hexdigest()
     terminal_path = _write_complete_terminal(
-        run_dir, tmp_path=tmp_path, provenance=provenance, pre_access_sha=pre_access_sha
+        run_dir,
+        tmp_path=tmp_path,
+        provenance=provenance,
+        pre_access_sha=pre_access_sha,
+        state=state,
     )
     return {
         "run_dir": run_dir,
@@ -347,13 +384,24 @@ def test_published_summary_has_no_per_pair_arrays_or_ci(tmp_path: Path) -> None:
     _walk(published)
 
 
-def test_second_finalize_is_write_once_and_fails_closed(tmp_path: Path) -> None:
-    """Forward publish is write-once (idempotent recovery is Task 6): a second
-    call over already-published derived files fails closed, never overwriting."""
+def test_second_finalize_is_idempotent_noop(tmp_path: Path) -> None:
+    """Forward publish is now idempotent (Task 6): a second call over
+    byte-identical derived files re-verifies and returns the SAME marker, never
+    a write-once ``FileExistsError`` and never an overwrite."""
     scenario = _build_scenario(tmp_path)
-    _finalize(scenario)
-    with pytest.raises(DurableLedgerError):
-        _finalize(scenario)
+    first = _finalize(scenario)
+    summary_before = first.registered_summary_path.read_bytes()
+    ledger_before = first.final_ledger_path.read_bytes()
+    marker_before = first.commit_marker_path.read_bytes()
+
+    second = _finalize(scenario)
+
+    assert second.commit_checksum == first.commit_checksum
+    assert second.commit_marker_path == first.commit_marker_path
+    # No overwrite: every derived file is byte-for-byte unchanged.
+    assert first.registered_summary_path.read_bytes() == summary_before
+    assert first.final_ledger_path.read_bytes() == ledger_before
+    assert first.commit_marker_path.read_bytes() == marker_before
 
 
 def test_symlinked_terminal_is_rejected(tmp_path: Path) -> None:
@@ -375,3 +423,289 @@ def test_symlinked_terminal_is_rejected(tmp_path: Path) -> None:
             pre_access_ledger_path=scenario["pre_access_path"],
             seed_variability_path=scenario["seed_path"],
         )
+
+
+def test_roster_named_symlink_terminal_is_rejected(tmp_path: Path) -> None:
+    """M3: a ROSTER-NAMED terminal that is itself a symlink is rejected by the
+    symlink guard, isolated from the roster/scan name checks.
+
+    The prior test names the symlink OUTSIDE the roster, so the roster check could
+    fire first. Here ``terminal_complete.json`` (a roster name) IS the symlink, so
+    only the symlink guard can reject it — proving the guard, not the roster check.
+    """
+    scenario = _build_scenario(tmp_path)
+    run_dir = scenario["run_dir"]
+    # Move the real terminal to a non-roster regular child, then re-create the
+    # roster name terminal_complete.json AS a symlink pointing at that child.
+    backing = run_dir / "terminal_real_backing.json"
+    scenario["terminal_path"].rename(backing)
+    roster_link = run_dir / Phase2bTerminal.COMPLETE_ARTIFACT
+    roster_link.symlink_to(backing)
+
+    # Forward finalize resolves the caller-supplied roster-named symlink -> rejected.
+    with pytest.raises(DurableLedgerError):
+        finalize_phase2b_durable_outputs(
+            run_dir=run_dir,
+            terminal_path=roster_link,
+            pre_access_ledger_path=scenario["pre_access_path"],
+            seed_variability_path=scenario["seed_path"],
+        )
+    # Independent recovery scan must ALSO reject the roster-named symlink.
+    with pytest.raises(DurableLedgerError):
+        recover_phase2b_durable_outputs(run_dir=run_dir)
+
+
+# ---------------------------------------------------------------------------
+# M2: INVALID forward publish (shares the COMPLETE/INVALID state roster).
+# ---------------------------------------------------------------------------
+
+
+def test_finalize_publishes_invalid_terminal(tmp_path: Path) -> None:
+    """An INVALID terminal publishes the three derived files and the marker binds
+    every file SHA (closes the untested-INVALID-path gap)."""
+    scenario = _build_scenario(tmp_path, state="INVALID")
+    result = _finalize(scenario)
+
+    assert result.terminal_state == "INVALID"
+    run_dir = scenario["run_dir"]
+    summary_path = run_dir / REGISTERED_SUMMARY_FILENAME
+    final_ledger_path = run_dir / FINAL_LEDGER_FILENAME
+    marker_path = run_dir / DURABLE_COMMIT_FILENAME
+    for p in (summary_path, final_ledger_path, marker_path):
+        assert p.is_file()
+
+    marker = json.loads(marker_path.read_text(encoding="utf-8"))
+    assert marker["terminal_state"] == "INVALID"
+    assert marker["terminal"]["filename"] == Phase2bTerminal.INVALID_ARTIFACT
+    assert marker["terminal"]["sha256"] == _file_sha(scenario["terminal_path"])
+    assert marker["registered_summary"]["sha256"] == _file_sha(summary_path)
+    assert marker["final_ledger"]["sha256"] == _file_sha(final_ledger_path)
+    assert marker["pre_access_ledger"]["sha256"] == _file_sha(scenario["pre_access_path"])
+    assert marker["seed_variability"]["sha256"] == _file_sha(scenario["seed_path"])
+    core = {k: v for k, v in marker.items() if k != "commit_checksum"}
+    assert sha256_json(core) == marker["commit_checksum"] == result.commit_checksum
+
+    # The published summary is the INVALID summary copied byte-faithfully.
+    published = json.loads(summary_path.read_text(encoding="utf-8"))
+    assert published["terminal_state"] == "INVALID"
+
+
+# ---------------------------------------------------------------------------
+# Part A: install_or_verify_exact (spec §3.2).
+# ---------------------------------------------------------------------------
+
+
+def test_install_or_verify_exact_absent_installs(tmp_path: Path) -> None:
+    path = tmp_path / "durable.json"
+    install_or_verify_exact(path, "hello-durable")
+    assert path.read_text(encoding="utf-8") == "hello-durable"
+
+
+def test_install_or_verify_exact_identical_is_noop(tmp_path: Path) -> None:
+    path = tmp_path / "durable.json"
+    path.write_text("hello-durable", encoding="utf-8")
+    inode_before = path.stat().st_ino
+
+    install_or_verify_exact(path, "hello-durable")  # no error
+
+    assert path.read_text(encoding="utf-8") == "hello-durable"
+    # A no-op keeps the SAME inode; an atomic re-install would swap it.
+    assert path.stat().st_ino == inode_before
+
+
+def test_install_or_verify_exact_different_fails_closed(tmp_path: Path) -> None:
+    path = tmp_path / "durable.json"
+    path.write_text("original", encoding="utf-8")
+    with pytest.raises(DurableLedgerError):
+        install_or_verify_exact(path, "DIFFERENT")
+    # The pre-existing file is never overwritten.
+    assert path.read_text(encoding="utf-8") == "original"
+
+
+# ---------------------------------------------------------------------------
+# Part B: recover_phase2b_durable_outputs (spec §3.2).
+# ---------------------------------------------------------------------------
+
+
+def test_recover_from_pristine_run_dir_publishes(tmp_path: Path) -> None:
+    """Recovery on a never-finalized run (1 terminal, no derived files, no marker)
+    performs the §3.1 publish and installs the marker (opens NO seal)."""
+    scenario = _build_scenario(tmp_path)
+    result = recover_phase2b_durable_outputs(run_dir=scenario["run_dir"])
+
+    run_dir = scenario["run_dir"]
+    assert (run_dir / REGISTERED_SUMMARY_FILENAME).is_file()
+    assert (run_dir / FINAL_LEDGER_FILENAME).is_file()
+    marker = json.loads((run_dir / DURABLE_COMMIT_FILENAME).read_text(encoding="utf-8"))
+    core = {k: v for k, v in marker.items() if k != "commit_checksum"}
+    assert sha256_json(core) == marker["commit_checksum"] == result.commit_checksum
+
+
+def test_recover_marker_absent_after_summary_only_reproduces_marker(tmp_path: Path) -> None:
+    """Crash boundary (a): the summary was written but neither the final ledger nor
+    the marker. Recovery re-derives byte-identically and reproduces the SAME marker
+    without reopening the seal; the surviving summary is verify-only."""
+    scenario = _build_scenario(tmp_path)
+    reference = _finalize(scenario)
+    expected_marker = reference.commit_marker_path.read_bytes()
+    expected_summary = reference.registered_summary_path.read_bytes()
+    summary_inode = reference.registered_summary_path.stat().st_ino
+
+    # Simulate the crash: keep the summary, drop the final ledger + marker.
+    reference.final_ledger_path.unlink()
+    reference.commit_marker_path.unlink()
+
+    recovered = recover_phase2b_durable_outputs(run_dir=scenario["run_dir"])
+
+    assert recovered.commit_checksum == reference.commit_checksum
+    assert recovered.commit_marker_path.read_bytes() == expected_marker
+    # The surviving byte-identical summary is verified, never rewritten (same inode).
+    assert recovered.registered_summary_path.read_bytes() == expected_summary
+    assert recovered.registered_summary_path.stat().st_ino == summary_inode
+    assert recovered.final_ledger_path.is_file()
+
+
+def test_recover_marker_absent_after_final_ledger_reproduces_marker(tmp_path: Path) -> None:
+    """Crash boundary (b): the summary + final ledger were written but not the
+    marker. Recovery reproduces the SAME marker (the whole point of ordering it
+    last)."""
+    scenario = _build_scenario(tmp_path)
+    reference = _finalize(scenario)
+    expected_marker = reference.commit_marker_path.read_bytes()
+    reference.commit_marker_path.unlink()
+
+    recovered = recover_phase2b_durable_outputs(run_dir=scenario["run_dir"])
+
+    assert recovered.commit_marker_path.read_bytes() == expected_marker
+    assert recovered.commit_checksum == reference.commit_checksum
+
+
+def test_recover_mismatching_partial_summary_fails_closed(tmp_path: Path) -> None:
+    """A surviving partial derived file whose bytes DIFFER from the re-derived
+    intended bytes fails closed (install_or_verify_exact never overwrites)."""
+    scenario = _build_scenario(tmp_path)
+    reference = _finalize(scenario)
+    reference.final_ledger_path.unlink()
+    reference.commit_marker_path.unlink()
+    # Corrupt the surviving summary so it no longer matches the re-derived bytes.
+    reference.registered_summary_path.write_bytes(b'{"tampered":true}')
+
+    with pytest.raises(DurableLedgerError):
+        recover_phase2b_durable_outputs(run_dir=scenario["run_dir"])
+
+
+def test_recover_marker_present_is_verify_only(tmp_path: Path) -> None:
+    """A present marker is verified only: nothing is rewritten (same inodes / bytes)."""
+    scenario = _build_scenario(tmp_path)
+    reference = _finalize(scenario)
+    summary_inode = reference.registered_summary_path.stat().st_ino
+    ledger_inode = reference.final_ledger_path.stat().st_ino
+    marker_inode = reference.commit_marker_path.stat().st_ino
+    marker_before = reference.commit_marker_path.read_bytes()
+
+    recovered = recover_phase2b_durable_outputs(run_dir=scenario["run_dir"])
+
+    assert recovered.commit_checksum == reference.commit_checksum
+    assert recovered.terminal_state == "COMPLETE"
+    assert reference.registered_summary_path.stat().st_ino == summary_inode
+    assert reference.final_ledger_path.stat().st_ino == ledger_inode
+    assert reference.commit_marker_path.stat().st_ino == marker_inode
+    assert reference.commit_marker_path.read_bytes() == marker_before
+
+
+def test_recover_is_idempotent_across_repeats(tmp_path: Path) -> None:
+    """Recovery is idempotent: the first call publishes (marker absent), the second
+    verifies only (marker present) and never rewrites the marker."""
+    scenario = _build_scenario(tmp_path)
+    first = recover_phase2b_durable_outputs(run_dir=scenario["run_dir"])
+    marker_bytes = first.commit_marker_path.read_bytes()
+    marker_inode = first.commit_marker_path.stat().st_ino
+
+    second = recover_phase2b_durable_outputs(run_dir=scenario["run_dir"])
+
+    assert second.commit_checksum == first.commit_checksum
+    assert first.commit_marker_path.read_bytes() == marker_bytes
+    assert first.commit_marker_path.stat().st_ino == marker_inode
+
+
+def test_recover_marker_present_tampered_derived_file_fails_closed(tmp_path: Path) -> None:
+    """A tampered derived file under a present marker fails the verify-only path."""
+    scenario = _build_scenario(tmp_path)
+    reference = _finalize(scenario)
+    # Tamper the final ledger AFTER the marker bound its SHA.
+    reference.final_ledger_path.write_bytes(b'{"tampered":true}')
+
+    with pytest.raises(DurableLedgerError):
+        recover_phase2b_durable_outputs(run_dir=scenario["run_dir"])
+
+
+def test_recover_zero_terminals_fails_closed(tmp_path: Path) -> None:
+    scenario = _build_scenario(tmp_path)
+    scenario["terminal_path"].unlink()
+    with pytest.raises(DurableLedgerError):
+        recover_phase2b_durable_outputs(run_dir=scenario["run_dir"])
+
+
+def test_recover_two_terminals_fails_closed(tmp_path: Path) -> None:
+    scenario = _build_scenario(tmp_path)
+    run_dir = scenario["run_dir"]
+    # A second roster-named terminal (regular file) -> exactly-one scan fails.
+    (run_dir / Phase2bTerminal.INVALID_ARTIFACT).write_bytes(scenario["terminal_path"].read_bytes())
+    with pytest.raises(DurableLedgerError):
+        recover_phase2b_durable_outputs(run_dir=run_dir)
+
+
+def test_recover_aborted_terminal_is_refused(tmp_path: Path) -> None:
+    """ABORTED_AFTER_SEAL recovery is a separate concern (Task 6B); summary-bearing
+    recovery refuses a non-summary-bearing terminal (fail closed)."""
+    scenario = _build_scenario(tmp_path)
+    run_dir = scenario["run_dir"]
+    scenario["terminal_path"].unlink()
+    (run_dir / Phase2bTerminal.ABORTED_ARTIFACT).write_text(
+        json.dumps({"terminal_state": "ABORTED_AFTER_SEAL"}, sort_keys=True), encoding="utf-8"
+    )
+    with pytest.raises(DurableLedgerError):
+        recover_phase2b_durable_outputs(run_dir=run_dir)
+
+
+# ---------------------------------------------------------------------------
+# Seed-variability cross-check (spec §3.2:199-200) + M1 self-checksum hardening.
+# ---------------------------------------------------------------------------
+
+
+def test_recover_seed_absent_fails_closed(tmp_path: Path) -> None:
+    """A pre-access ledger that claims a seed digest whose file is ABSENT fails
+    closed (no marker), even with the marker already present."""
+    scenario = _build_scenario(tmp_path)
+    _finalize(scenario)
+    scenario["seed_path"].unlink()
+    with pytest.raises(DurableLedgerError):
+        recover_phase2b_durable_outputs(run_dir=scenario["run_dir"])
+
+
+def test_recover_seed_bytes_differ_fails_closed(tmp_path: Path) -> None:
+    """A seed report whose bytes DIFFER from the pre-access ledger digest fails
+    closed (unconditional cross-check), even with the marker already present."""
+    scenario = _build_scenario(tmp_path)
+    _finalize(scenario)
+    scenario["seed_path"].write_text(
+        json.dumps({"schema": "x", "report_checksum": "z"}, sort_keys=True), encoding="utf-8"
+    )
+    with pytest.raises(DurableLedgerError):
+        recover_phase2b_durable_outputs(run_dir=scenario["run_dir"])
+
+
+def test_finalize_rejects_seed_self_checksum_mismatch(tmp_path: Path) -> None:
+    """M1: a seed report whose report_checksum != sha256_json(payload_without_checksum)
+    fails the forward publish even though its byte SHA still matches the pre-access
+    ledger digest."""
+    scenario = _build_scenario(tmp_path, break_seed_self_checksum=True)
+    with pytest.raises(DurableLedgerError):
+        _finalize(scenario)
+
+
+def test_recover_rejects_seed_self_checksum_mismatch(tmp_path: Path) -> None:
+    """M1: the seed self-checksum is validated unconditionally in recovery."""
+    scenario = _build_scenario(tmp_path, break_seed_self_checksum=True)
+    with pytest.raises(DurableLedgerError):
+        recover_phase2b_durable_outputs(run_dir=scenario["run_dir"])
