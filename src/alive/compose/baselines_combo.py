@@ -292,6 +292,40 @@ class BaselineAdapter:
     name: str
     backend: object | None = None
 
+    def spawn(self, *, seed: int) -> "BaselineAdapter":
+        """Return a fresh adapter wrapping a freshly spawned backend for one seed.
+
+        D2 requires an isolated backend per ``(method, seed, fold)`` job, so the
+        wrapped backend MUST expose the ``spawn(*, seed)`` fresh-instance contract.
+        A ``None`` backend, or a backend without a callable ``spawn`` — e.g. a
+        test-only stub — is rejected here, *before any fit*, so a non-spawnable
+        backend can never enter a scientific seed-variability run.
+
+        Parameters
+        ----------
+        seed : int
+            The seed forwarded to the wrapped backend's ``spawn``.
+
+        Returns
+        -------
+        BaselineAdapter
+            A new adapter with the same ``name`` wrapping
+            ``backend.spawn(seed=seed)``.
+
+        Raises
+        ------
+        TypeError
+            If the wrapped backend is ``None`` or does not expose a callable
+            ``spawn`` — the scientific D2 rejection of a non-spawnable backend.
+        """
+        backend = self.backend
+        if backend is None or not callable(getattr(backend, "spawn", None)):
+            raise TypeError(
+                f"{self.name} adapter requires a backend exposing a callable "
+                f"spawn(*, seed); got {type(backend).__name__}"
+            )
+        return BaselineAdapter(name=self.name, backend=backend.spawn(seed=seed))
+
     def predict(
         self,
         context: BaselineTrainingContext,

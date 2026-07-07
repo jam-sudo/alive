@@ -660,6 +660,42 @@ class SubprocessBaselineBackend:
     _payload: dict | None = field(default=None, init=False, repr=False)
     _last_execution_manifest: dict | None = field(default=None, init=False, repr=False)
 
+    def spawn(self, *, seed: int) -> SubprocessBaselineBackend:
+        """Return a fresh, unconfigured backend with identical execution identity.
+
+        D2 runs each ``(method, seed, fold)`` job on its own backend instance so
+        the mutable ``_payload`` / ``_last_execution_manifest`` state cannot bleed
+        across folds. This copies only the immutable execution identity — ``name``,
+        the resolved executable / worker paths, the import name, and the
+        keyword-only ``approved_artifacts_root`` / ``expected_response_artifact_sha256``
+        / ``execution_identity_lock`` — sets the requested ``seed``, and leaves the
+        new instance **unconfigured**: its ``init=False`` cache fields
+        (``_available``, ``_payload``, ``_last_execution_manifest``) start at their
+        ``None`` defaults. ``self`` is never mutated.
+
+        Parameters
+        ----------
+        seed : int
+            The seed the fresh backend serializes into its worker payload and
+            binds into its provenance manifest.
+
+        Returns
+        -------
+        SubprocessBaselineBackend
+            A new, unconfigured backend sharing no mutable payload / manifest
+            state with ``self``.
+        """
+        return SubprocessBaselineBackend(
+            name=self.name,
+            env_python=self.env_python,
+            worker_script=self.worker_script,
+            import_name=self.import_name,
+            seed=int(seed),
+            approved_artifacts_root=self.approved_artifacts_root,
+            expected_response_artifact_sha256=self.expected_response_artifact_sha256,
+            execution_identity_lock=self.execution_identity_lock,
+        )
+
     def configure_payload(self, payload: Mapping[str, object]) -> None:
         """Bind a validated fit-role payload before Phase-2a prediction."""
         candidate = dict(payload)
