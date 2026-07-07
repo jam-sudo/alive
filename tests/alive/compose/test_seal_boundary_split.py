@@ -3,10 +3,10 @@
 TDD order: written FIRST (RED), then the implementation makes them GREEN.
 
 Prerequisite Task 0 restructures THE one-time-seal consumption boundary. The old
-``evaluate_sealed_once`` conflated an in-memory ``claim_access`` (the terminal
-went ``ACCESS_CLAIMED`` in memory) with the durable audit write. A crash in
-between wrote a FALSE ``ABORTED_AFTER_SEAL`` with ``sealed_access_count == 0`` —
-a recorded seal consumption that never happened.
+``evaluate_sealed_once`` conflated an in-memory one-step claim (the terminal went
+``ACCESS_CLAIMED`` in memory) with the durable audit write. A crash in between
+wrote a FALSE ``ABORTED_AFTER_SEAL`` with ``sealed_access_count == 0`` — a
+recorded seal consumption that never happened.
 
 The consumption boundary is split into two store operations:
 
@@ -146,7 +146,18 @@ def _ledger() -> RunLedger:
 
 def _terminal(run_dir: Path, *, audit_path: Path | None) -> Phase2bTerminal:
     run_dir.mkdir(parents=True, exist_ok=True)
-    return Phase2bTerminal(run_dir, ledger=_ledger(), audit_path=audit_path)
+    # Supply the full v2 identity roster: a terminal write fails closed on a null
+    # run identity (Task 4H Part 1), so any test that reaches COMPLETE/ABORTED must
+    # carry the pre-access provenance identity. Pre-claim-only tests are unaffected.
+    return Phase2bTerminal(
+        run_dir,
+        ledger=_ledger(),
+        audit_path=audit_path,
+        protocol="COMPOSE-K562-v1",
+        run_id="deadbeefdeadbeef",
+        pre_access_ledger_sha256="c" * 64,
+        pre_access_provenance_checksum="d" * 64,
+    )
 
 
 def _existing_terminal_artifacts(run_dir: Path) -> list[Path]:

@@ -35,9 +35,10 @@ State machine::
                               aborted(...) / protect finally--> ABORTED_AFTER_SEAL
 
 An exception in ``ACCESS_ATTEMPTED`` (before the durable audit) writes NO terminal
-— the seal was never consumed. The deprecated :meth:`Phase2bTerminal.claim_access`
-alias (``PREPARED -> ACCESS_CLAIMED`` in one step, no durable reference) is
-retained ONLY for terminal unit tests and must not be used on the seal-open path.
+— the seal was never consumed. The deprecated one-step in-memory claim
+(``PREPARED -> ACCESS_CLAIMED`` with no durable reference) was RETIRED in D1 Task
+4H; the ONLY route to ``ACCESS_CLAIMED`` is :meth:`Phase2bTerminal.attempt_access`
+then :meth:`Phase2bTerminal.confirm_durable_access` (a VERIFIED durable reference).
 
 Single ownership is enforced with an exclusive lock file created via
 ``os.open(..., O_CREAT | O_EXCL | O_WRONLY)`` BEFORE any preflight: a concurrent
@@ -351,6 +352,24 @@ _COMMON_TERMINAL_FIELDS = frozenset(
     }
 )
 
+#: The subset of :data:`_COMMON_TERMINAL_FIELDS` whose VALUE must be a non-empty
+#: string, not merely present (CLAUDE.md §11). These are the run-identity anchors:
+#: a seal artifact recorded with a null/empty protocol, run id, seal reference or
+#: pre-access provenance identity is un-attributable and must NEVER be written
+#: (fail closed). Deliberately EXCLUDES ``schema`` (a writer-injected constant),
+#: ``terminal_state`` (an enum value validated by the filename↔state check) and
+#: ``sealed_access_count`` (an int; ``0`` is a valid value and the count is
+#: prevented structurally by the durable-audit path, not here).
+_REQUIRED_NONEMPTY_IDENTITY_FIELDS = frozenset(
+    {
+        "protocol",
+        "run_id",
+        "seal_audit_reference",
+        "pre_access_ledger_sha256",
+        "pre_access_provenance_checksum",
+    }
+)
+
 
 def canonicalize_terminal_checksum_input(value: object) -> object:
     """Canonicalise a terminal payload value for ``terminal_payload_checksum``.
@@ -575,11 +594,13 @@ class Phase2bTerminal:
         These two common fields — the SHA-256 of the persisted pre-access ledger
         file and the self-excluding checksum of the pre-access provenance payload —
         are only available AFTER the pre-access ledger is persisted, which is after
-        construction but BEFORE the seal-open block. They are terminal-INSTANCE
+        :meth:`acquire` but BEFORE :meth:`attempt_access`. They are terminal-INSTANCE
         state (not per-call) so that an ``ABORTED_AFTER_SEAL`` written from the
         protection boundary (which has no caller payload) still emits the full
-        common identity roster. Must be called before the terminal reaches
-        ``ACCESS_CLAIMED``.
+        common identity roster. Only valid from ``PREPARED`` (exactly the production
+        call site: after ``acquire`` and the pre-access ledger persist, before
+        ``attempt_access``) — binding from any other state, including the pre-audit
+        ``ACCESS_ATTEMPTED`` window, is refused.
 
         Parameters
         ----------
@@ -591,25 +612,14 @@ class Phase2bTerminal:
         Raises
         ------
         TerminalError
-            If called once the seal-open block has been entered (state is
-            ``ACCESS_CLAIMED`` or terminal).
+            If called from any state other than ``PREPARED``.
         """
-        if self._state in (
-            TerminalState.ACCESS_CLAIMED,
-            TerminalState.COMPLETE,
-            TerminalState.INVALID,
-            TerminalState.ABORTED_AFTER_SEAL,
-        ):
-            current = self._state.value if self._state is not None else None
-            raise TerminalError(
-                "bind_pre_access must be called before the seal-open block; "
-                f"current state is {current!r}."
-            )
+        self._require_state(TerminalState.PREPARED, "bind_pre_access")
         self._pre_access_ledger_sha256 = pre_access_ledger_sha256
         self._pre_access_provenance_checksum = pre_access_provenance_checksum
 
     # ------------------------------------------------------------------
-    # Lifecycle: acquire -> claim_access
+    # Lifecycle: acquire -> attempt_access -> confirm_durable_access
     # ------------------------------------------------------------------
 
     def acquire(self) -> None:
@@ -725,24 +735,12 @@ class Phase2bTerminal:
         self._audit_reference = audit_reference
         self._state = TerminalState.ACCESS_CLAIMED
 
-    def claim_access(self) -> None:
-        """DEPRECATED in-memory claim (``PREPARED -> ACCESS_CLAIMED``).
-
-        Retained ONLY as a backward-compatible alias for terminal unit tests that
-        exercise the write/verify/ledger discipline in isolation (with no outcome
-        store). It transitions straight to ``ACCESS_CLAIMED`` WITHOUT a durable
-        audit reference and MUST NOT be used on the seal-open path — the real path
-        uses :meth:`attempt_access` then :meth:`confirm_durable_access`, so the
-        terminal never reaches ``ACCESS_CLAIMED`` without a durable audit. Only
-        valid from :attr:`TerminalState.PREPARED`.
-
-        Raises
-        ------
-        TerminalError
-            If called from any state other than ``PREPARED``.
-        """
-        self._require_state(TerminalState.PREPARED, "claim_access")
-        self._state = TerminalState.ACCESS_CLAIMED
+    # NOTE: the deprecated in-memory one-step claim (``PREPARED -> ACCESS_CLAIMED``
+    # with no durable audit reference) was RETIRED in D1 Task 4H. It was the only
+    # way to reach a terminal write with a null run identity; removing it lets
+    # ``_validate_terminal_roster`` fail closed on an empty identity. The ONLY route
+    # to ``ACCESS_CLAIMED`` is now :meth:`attempt_access` then
+    # :meth:`confirm_durable_access` (a VERIFIED durable audit reference).
 
     # ------------------------------------------------------------------
     # Terminal transitions
@@ -875,8 +873,8 @@ class Phase2bTerminal:
     def protect(self, *, stage: str = "scoring", preflight_checksums: Mapping | None = None):
         """Context manager guaranteeing a terminal artifact on every post-claim exit.
 
-        Must be entered only after :meth:`claim_access`. Wraps the protected block
-        in ``try/except/finally``:
+        Must be entered only after :meth:`confirm_durable_access` (state
+        ``ACCESS_CLAIMED``). Wraps the protected block in ``try/except/finally``:
 
         * on any exception → :meth:`aborted` (recording the exception class, a
           scrubbed message and the stage) then RE-RAISE the original exception;
@@ -886,7 +884,7 @@ class Phase2bTerminal:
 
         If a terminal (``complete`` / ``invalid``) was written inside the block,
         the ``finally`` clause is a no-op — there is always exactly one terminal
-        artifact. Entering before ``claim_access`` raises (the seal is not open,
+        artifact. Entering before ``ACCESS_CLAIMED`` raises (the seal is not open,
         so no terminal record is owed).
 
         Parameters
@@ -904,7 +902,7 @@ class Phase2bTerminal:
         Raises
         ------
         TerminalError
-            If entered before :meth:`claim_access`.
+            If entered before :meth:`confirm_durable_access`.
         """
         return _ProtectBoundary(self, stage=stage, preflight_checksums=preflight_checksums)
 
@@ -919,7 +917,7 @@ class Phase2bTerminal:
 
         Convenience wrapper around :meth:`protect`. Re-raises any exception ``fn``
         raises (after recording the abort artifact). Refuses if called before
-        :meth:`claim_access`.
+        :meth:`confirm_durable_access`.
 
         Parameters
         ----------
@@ -938,7 +936,7 @@ class Phase2bTerminal:
         Raises
         ------
         TerminalError
-            If called before :meth:`claim_access`.
+            If called before :meth:`confirm_durable_access`.
         """
         with self.protect(stage=stage, preflight_checksums=preflight_checksums):
             return fn()
@@ -1079,7 +1077,11 @@ class Phase2bTerminal:
         """Validate an assembled body against the exact ``common ∪ state`` roster.
 
         Every common identity field must be present (a missing one means the
-        injection failed). Every terminal state now has a FIXED state roster
+        injection failed). Additionally, every field in
+        :data:`_REQUIRED_NONEMPTY_IDENTITY_FIELDS` must carry a NON-EMPTY value —
+        presence alone is not enough: a ``None`` or blank run-identity anchor fails
+        CLOSED (the seal artifact is un-attributable and must never be written,
+        CLAUDE.md §11). Every terminal state now has a FIXED state roster
         (``COMPLETE`` / ``INVALID`` share :data:`_COMPLETE_INVALID_STATE_FIELDS`;
         ``ABORTED_AFTER_SEAL`` its own), so the body must carry exactly
         ``common ∪ state`` — an unknown OR missing state field raises. The
@@ -1089,8 +1091,8 @@ class Phase2bTerminal:
         Raises
         ------
         TerminalError
-            On a missing common field, or (fixed-roster states) an unknown or
-            missing state field.
+            On a missing common field, a null/empty required-identity value, or
+            (fixed-roster states) an unknown or missing state field.
         """
         present = set(body.keys())
         missing_common = _COMMON_TERMINAL_FIELDS - present
@@ -1099,6 +1101,20 @@ class Phase2bTerminal:
                 f"terminal body for state {state.value!r} is missing required common "
                 f"field(s) {sorted(missing_common)!r}."
             )
+        # Fail CLOSED on a null/empty run-identity anchor: presence is not enough —
+        # a ``None`` or blank protocol / run id / seal reference / pre-access
+        # provenance identity means the seal artifact is un-attributable and MUST
+        # NOT be recorded (CLAUDE.md §11). This is the canary that stops a future
+        # refactor dropping / reordering ``bind_pre_access`` from silently emitting
+        # a null-identity seal artifact.
+        for field in _REQUIRED_NONEMPTY_IDENTITY_FIELDS:
+            value = body.get(field)
+            if value is None or (isinstance(value, str) and not value.strip()):
+                raise TerminalError(
+                    f"terminal body for state {state.value!r} carries an empty identity "
+                    f"field {field!r} (value {value!r}); the seal cannot be recorded with "
+                    "an empty identity — the run would be un-attributable."
+                )
         state_keys = _STATE_TERMINAL_FIELDS[state]
         if state_keys is None:
             return
@@ -1194,7 +1210,7 @@ class _ProtectBoundary:
             current = self._owner.state.value if self._owner.state is not None else None
             raise TerminalError(
                 "protect() may only wrap post-claim work; current state is "
-                f"{current!r} (call claim_access() first)."
+                f"{current!r} (reach ACCESS_CLAIMED via confirm_durable_access first)."
             )
         return self._owner
 
