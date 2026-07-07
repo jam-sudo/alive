@@ -1197,8 +1197,7 @@ def test_preaccess_fixture_binds_bounded_report(tmp_path):
     _preaccess_seed_variability(
         run_dir=kit["run_dir"],
         ledger=kit["ledger"],
-        run_id=kit["bundle"].run_id,
-        response_space_checksum=kit["bundle"].response_space_checksum,
+        frozen_bundle=kit["bundle"],
         config=kit["cfg"],
         fixture_execution=True,
         seed_variability=None,
@@ -1215,8 +1214,7 @@ def test_preaccess_scientific_requires_seed_variability_inputs(tmp_path):
         _preaccess_seed_variability(
             run_dir=kit["run_dir"],
             ledger=kit["ledger"],
-            run_id=kit["bundle"].run_id,
-            response_space_checksum=kit["bundle"].response_space_checksum,
+            frozen_bundle=kit["bundle"],
             config=kit["cfg"],
             fixture_execution=False,
             seed_variability=None,

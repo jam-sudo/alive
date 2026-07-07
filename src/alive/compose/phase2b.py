@@ -76,6 +76,7 @@ from alive.compose.provenance2 import (
 from alive.compose.response import ResponseSpace, verify_response_artifact
 from alive.compose.scoring2 import RegimeScore, score_regime
 from alive.compose.seed_variability import (
+    SeedVariabilityPreflightError,
     SeedVariabilityReport,
     SeedVariabilityReportError,
     bind_development_seed_variability,
@@ -814,8 +815,7 @@ def _preaccess_seed_variability(
     *,
     run_dir: str | Path,
     ledger: RunLedger,
-    run_id: str,
-    response_space_checksum: str,
+    frozen_bundle: FrozenPredictionBundle,
     config: ComposePhase2Config,
     fixture_execution: bool,
     seed_variability: SeedVariabilityPreflightInputs | None,
@@ -830,14 +830,26 @@ def _preaccess_seed_variability(
     synthetic fixture path builds a bounded report and runs the bounded check, so
     it never silently skips the step either. Opens NO seal.
 
+    The ``frozen_bundle`` is the TRUST ROOT for the OOF fold layout: its
+    ``dev_diagnostics["oof_fold_manifest_checksum"]`` (bound into the
+    self-verifying bundle checksum by D2 Task 1) is the authoritative digest that
+    BOTH the loaded :class:`OOFFoldManifest` and the report's bound OOF-manifest
+    checksum must equal. The caller-supplied
+    ``seed_variability.oof_manifest_checksum`` is retained only as an additional
+    defense-in-depth check; it is never the authority.
+
     Raises
     ------
     Phase2bError
-        On a missing scientific input or an OOF-manifest load / checksum mismatch.
+        On a missing scientific input or a caller-side OOF-manifest load / checksum
+        mismatch.
     SeedVariabilityReportError, SeedVariabilityPreflightError
-        On a write-once collision, a byte-SHA / ledger conflict, or any
-        verification failure (all PRE-ACCESS; the seal stays CLOSED).
+        On an absent authoritative bundle digest, an OOF layout that does not bind
+        to the frozen bundle, a write-once collision, a byte-SHA / ledger conflict,
+        or any verification failure (all PRE-ACCESS; the seal stays CLOSED).
     """
+    run_id = frozen_bundle.run_id
+    response_space_checksum = frozen_bundle.response_space_checksum
     if fixture_execution:
         report = build_bounded_fixture_seed_variability_report(
             run_id=run_id,
@@ -858,14 +870,33 @@ def _preaccess_seed_variability(
             "OOF fold manifest (path + checksum); refusing to open the seal without the "
             "pre-access artifact"
         )
+    # The frozen bundle is the authority for the development OOF fold layout: read
+    # its bound checksum FIRST and fail closed if it is absent (should not happen
+    # post D2 Task 1, which binds it into the self-verifying bundle checksum).
+    try:
+        expected_oof = str(frozen_bundle.dev_diagnostics["oof_fold_manifest_checksum"])
+    except KeyError as exc:
+        raise SeedVariabilityPreflightError(
+            "frozen bundle dev_diagnostics is missing the authoritative "
+            "'oof_fold_manifest_checksum'; refusing to open the seal"
+        ) from exc
     try:
         oof_manifest = OOFFoldManifest.load(seed_variability.oof_manifest_path)
     except OOFFoldManifestError as exc:
         raise Phase2bError(f"failed to load the OOF fold manifest: {exc}") from exc
+    # Defense-in-depth: the caller-supplied value must still match the on-disk
+    # manifest, but it is NOT the authority.
     if oof_manifest.manifest_checksum != seed_variability.oof_manifest_checksum:
         raise Phase2bError(
             "OOF fold manifest checksum does not match the verified value: "
             f"{oof_manifest.manifest_checksum!r} != {seed_variability.oof_manifest_checksum!r}"
+        )
+    # Authority: the loaded manifest MUST bind to the frozen bundle's OOF digest.
+    if oof_manifest.manifest_checksum != expected_oof:
+        raise SeedVariabilityPreflightError(
+            "loaded OOF fold manifest checksum "
+            f"{oof_manifest.manifest_checksum!r} != the frozen bundle's authoritative "
+            f"oof_fold_manifest_checksum {expected_oof!r}"
         )
     try:
         report = SeedVariabilityReport.load(seed_variability.report_source_path)
@@ -873,6 +904,14 @@ def _preaccess_seed_variability(
         raise Phase2bError(
             f"failed to load the development seed-variability report: {exc}"
         ) from exc
+    # Authority: the report's bound OOF-manifest checksum MUST also equal the
+    # frozen bundle's digest BEFORE the report is bound into the ledger.
+    if report.oof_manifest_checksum != expected_oof:
+        raise SeedVariabilityPreflightError(
+            "development seed-variability report OOF-manifest checksum "
+            f"{report.oof_manifest_checksum!r} != the frozen bundle's authoritative "
+            f"oof_fold_manifest_checksum {expected_oof!r}"
+        )
     path, _sha = bind_development_seed_variability(
         run_dir=run_dir,
         ledger=ledger,
@@ -956,8 +995,7 @@ def _run_phase2b_core(
     _preaccess_seed_variability(
         run_dir=run_dir,
         ledger=ledger,
-        run_id=frozen_bundle.run_id,
-        response_space_checksum=frozen_bundle.response_space_checksum,
+        frozen_bundle=frozen_bundle,
         config=config,
         fixture_execution=fixture_execution,
         seed_variability=seed_variability,

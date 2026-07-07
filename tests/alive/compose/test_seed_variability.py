@@ -788,6 +788,10 @@ import dataclasses  # noqa: E402
 
 from alive.compose.config2 import load_compose_phase2_config  # noqa: E402
 from alive.compose.outcome_store import ComposeOutcomeStore  # noqa: E402
+from alive.compose.phase2b import (  # noqa: E402
+    SeedVariabilityPreflightInputs,
+    _preaccess_seed_variability,
+)
 from alive.compose.provenance2 import PROTOCOL  # noqa: E402
 
 _DETERMINISTIC = {
@@ -1436,3 +1440,110 @@ def test_preflight_ledger_missing_entry_fails_closed(tmp_path):
     kwargs = _verify_kwargs(fx, cfg, empty, run_dir)
     with pytest.raises(SeedVariabilityPreflightError):
         verify_seed_variability_for_preflight(**kwargs)
+
+
+# =========================================================================== #
+# D2 Task 6 (fix pass) — frozen bundle is the OOF-manifest TRUST ROOT and two
+# cheap verifier fail-closed legs.
+# =========================================================================== #
+
+
+@dataclasses.dataclass(frozen=True)
+class _BundleStub:
+    """Minimal stand-in for the fields ``_preaccess_seed_variability`` reads.
+
+    Exposes ONLY the run identity, response-space checksum and ``dev_diagnostics``
+    (which carries the authoritative ``oof_fold_manifest_checksum``) that the
+    pre-access gate consults on a :class:`FrozenPredictionBundle`.
+    """
+
+    run_id: str
+    response_space_checksum: str
+    dev_diagnostics: dict
+
+
+def test_preaccess_rejects_oof_layout_not_bound_to_frozen_bundle(tmp_path):
+    # A report + OOF manifest that are INTERNALLY self-consistent but describe a
+    # DIFFERENT OOF layout than the frozen bundle's authoritative digest are
+    # rejected at preflight (seal CLOSED) — even though the CALLER passes that
+    # different manifest's own matching checksum (the defense-in-depth leg passes).
+    fx = _fixture(tmp_path)
+    cfg = _config()
+    report = _complete_report(fx, cfg)
+    run_dir = _run_dir(tmp_path)
+    ledger = _d2_ledger(fx, cfg)
+
+    manifest = fx["manifest"]
+    oof_path = tmp_path / "source_oof_manifest.json"
+    manifest.write_once(oof_path)
+    report_src = tmp_path / "source_report.json"
+    report.write_once(report_src)
+
+    # the frozen bundle is the TRUST ROOT and binds a DIFFERENT OOF layout.
+    authoritative_oof = hashlib.sha256(b"a-different-authoritative-oof-layout").hexdigest()
+    assert authoritative_oof != manifest.manifest_checksum
+    bundle = _BundleStub(
+        run_id=fx["inputs"].run_id,
+        response_space_checksum=fx["inputs"].response_space_checksum,
+        dev_diagnostics={"oof_fold_manifest_checksum": authoritative_oof},
+    )
+    inputs = SeedVariabilityPreflightInputs(
+        oof_manifest_path=oof_path,
+        oof_manifest_checksum=manifest.manifest_checksum,  # matches the on-disk manifest
+        report_source_path=report_src,
+        report_checksum=report.report_checksum,
+    )
+
+    with pytest.raises(SeedVariabilityPreflightError):
+        _preaccess_seed_variability(
+            run_dir=run_dir,
+            ledger=ledger,
+            frozen_bundle=bundle,
+            config=cfg,
+            fixture_execution=False,
+            seed_variability=inputs,
+        )
+    # fail closed BEFORE any bind: nothing was written into the run directory.
+    assert not (run_dir / DEVELOPMENT_SEED_VARIABILITY_FILENAME).exists()
+
+
+def _mutate_out_of_range(report: SeedVariabilityReport) -> SeedVariabilityReport:
+    bad = dataclasses.replace(report.fold_execution_records[0], fold=999)
+    return dataclasses.replace(
+        report, fold_execution_records=(bad, *report.fold_execution_records[1:])
+    )
+
+
+def _drop_one_record(report: SeedVariabilityReport) -> SeedVariabilityReport:
+    return dataclasses.replace(
+        report, fold_execution_records=tuple(report.fold_execution_records[:-1])
+    )
+
+
+@pytest.mark.parametrize("mutate", [_mutate_out_of_range, _drop_one_record])
+def test_preflight_fold_execution_record_defect_fails_closed(tmp_path, mutate):
+    # The verifier fails closed on a fold-execution-consistency defect: a record
+    # whose (method, seed, fold) is out of range, or a missing record (count guard).
+    # Each mutation re-derives the report self-checksum (so the strict load passes)
+    # yet trips a fold-execution binding/range/count leg.
+    fx = _fixture(tmp_path)
+    cfg = _config()
+    tampered = mutate(_complete_report(fx, cfg))
+    run_dir = _run_dir(tmp_path)
+    ledger = _d2_ledger(fx, cfg)
+    bind_development_seed_variability(run_dir=run_dir, ledger=ledger, report=tampered)
+    with pytest.raises(SeedVariabilityPreflightError):
+        verify_seed_variability_for_preflight(**_verify_kwargs(fx, cfg, ledger, run_dir))
+
+
+def test_preflight_directory_at_report_path_fails_closed(tmp_path):
+    # A DIRECTORY at the report path (not a symlink, not missing) is rejected
+    # fail-closed by the is_file() regular-file guard, before any ledger read.
+    fx = _fixture(tmp_path)
+    cfg = _config()
+    run_dir = _run_dir(tmp_path)
+    ledger = _d2_ledger(fx, cfg)
+    (run_dir / DEVELOPMENT_SEED_VARIABILITY_FILENAME).mkdir()
+    ledger.record_artifact(DEVELOPMENT_SEED_VARIABILITY_LEDGER_ARTIFACT, "0" * 64)
+    with pytest.raises(SeedVariabilityPreflightError):
+        verify_seed_variability_for_preflight(**_verify_kwargs(fx, cfg, ledger, run_dir))
