@@ -1053,3 +1053,92 @@ def test_non_finite_statistic_is_rejected(tmp_path):
     bad_summary = dataclasses.replace(report.summaries[0], mean=float("nan"))
     with pytest.raises(SeedVariabilityReportError):
         dataclasses.replace(report, summaries=(bad_summary, *report.summaries[1:]))
+
+
+# --------------------------------------------------------------------------- #
+# whole-call-failure guarantees: a STRUCTURAL/contract/leakage defect RAISES the
+# whole call — it is NEVER laundered into an INCOMPLETE report (Fix pass).
+# --------------------------------------------------------------------------- #
+class _NonSpawnableBackend:
+    """A seam-shaped backend that is NOT spawnable (no callable ``spawn``).
+
+    It exposes ``is_available`` / ``configure_payload`` / ``predict`` /
+    ``provenance_manifest`` like a real backend but deliberately omits ``spawn``,
+    so the scientific entry must reject it UP FRONT as a structural contract
+    defect (Task 2: a backend without spawn is rejected BEFORE fitting) rather
+    than launder it into per-fold spawn failures -> INCOMPLETE.
+    """
+
+    is_available = True
+
+    def configure_payload(self, payload):  # pragma: no cover - must never run
+        raise AssertionError("configure_payload must not run for a non-spawnable backend")
+
+    def predict(self, context, pair_ids, response_dim):  # pragma: no cover - must never run
+        raise AssertionError("predict must not run for a non-spawnable backend")
+
+    @property
+    def provenance_manifest(self):  # pragma: no cover - must never run
+        raise AssertionError("provenance must not run for a non-spawnable backend")
+
+
+@pytest.mark.parametrize("bad_backend", [None, _NonSpawnableBackend()])
+def test_non_spawnable_adapter_raises_whole_call_before_fitting(tmp_path, bad_backend):
+    fx = _fixture(tmp_path)
+    truth = _delta_truth_by_pair(fx)
+    # roster keys stay exactly {gears, cpa} (the roster-set gate passes); gears'
+    # backend is non-spawnable, so the spawn-capability gate must FAIL THE WHOLE
+    # CALL up front, never yield an INCOMPLETE report from caught spawn failures.
+    cpa, _rc, _bc = _adapter(_exact_truth_pred_fn(truth), name="cpa")
+    adapters = {"gears": BaselineAdapter(name="gears", backend=bad_backend), "cpa": cpa}
+    with pytest.raises(SeedVariabilityContractError):
+        _entry(fx, adapters, _config())
+    # rejected BEFORE any fold artifact is written (fail-closed up front).
+    fold_dir = Path(fx["base_spec"].path).parent / "d2_seed_variability_folds"
+    assert not fold_dir.exists() or list(fold_dir.glob("*.h5ad")) == []
+
+
+def test_build_fold_job_failure_raises_whole_call_not_incomplete(tmp_path):
+    fx = _fixture(tmp_path)
+    truth = _delta_truth_by_pair(fx)
+    n = len(fx["cal_pairs_id"])
+    # Corrupt eps_split_a to a wrong row count. This PASSES the orchestration
+    # contract and _build_delta_truth (which check the cal-pair IDs / additive_cal
+    # / combo_calibration_eps, not eps_split_a) but trips _verify_alignment INSIDE
+    # build_fold_job -> FoldJobError. A build/contract (leakage-guard) failure must
+    # RAISE the whole call, never be laundered into an INCOMPLETE report.
+    fx["inputs"] = dataclasses.replace(fx["inputs"], eps_split_a=np.zeros((n - 1, _P)))
+    adapters = _adapters(_exact_truth_pred_fn(truth))
+    with pytest.raises(FoldJobError):
+        _entry(fx, adapters, _config())
+
+
+def test_dev_store_checksum_mismatch_raises_whole_call(tmp_path):
+    fx = _fixture(tmp_path)
+    truth = _delta_truth_by_pair(fx)
+    store = fx["store"]
+    # Tamper the bound content_checksum so it no longer matches the store content:
+    # the orchestration contract must FAIL THE WHOLE CALL (dev-store integrity),
+    # never produce an INCOMPLETE report.
+    object.__setattr__(store, "content_checksum", "0" * 64)
+    adapters = _adapters(_exact_truth_pred_fn(truth))
+    with pytest.raises(SeedVariabilityContractError):
+        _entry(fx, adapters, _config())
+
+
+def test_store_pair_misalignment_raises_whole_call(tmp_path):
+    fx = _fixture(tmp_path)
+    truth = _delta_truth_by_pair(fx)
+    cal = fx["cal_pairs_id"]
+    eps = fx["eps_cal"]
+    # A valid dev store on its own, but its pair ORDER disagrees with
+    # inputs.cal_pair_ids -> the orchestration-contract pair-ID / coverage
+    # alignment path -> WHOLE-CALL raise (never an INCOMPLETE report).
+    misaligned = DevelopmentOutcomeStore(
+        combo_calibration_eps=eps[::-1],
+        combo_calibration_pair_ids=tuple(reversed(cal)),
+        access_audit=fx["store"].access_audit,
+    )
+    adapters = _adapters(_exact_truth_pred_fn(truth))
+    with pytest.raises(SeedVariabilityContractError):
+        _entry(fx, adapters, _config(), development_outcome_store=misaligned)

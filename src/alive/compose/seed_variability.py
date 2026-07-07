@@ -838,8 +838,9 @@ class SeedVariabilityContractError(ValueError):
     Covers the store-type gate (a non-:class:`DevelopmentOutcomeStore` such as a
     sealed :class:`~alive.compose.outcome_store.ComposeOutcomeStore`, an array, a
     dict, a path or an arbitrary object), an adapter roster that is not exactly
-    ``{"gears", "cpa"}``, a config↔manifest↔inputs inequality (split seed, fold
-    count, registered seeds, tolerance), a pair-ID misalignment, and a development
+    ``{"gears", "cpa"}``, an adapter whose backend is not spawnable (no callable
+    ``spawn``), a config↔manifest↔inputs inequality (split seed, fold count,
+    registered seeds, tolerance), a pair-ID misalignment, and a development
     outcome store whose ``content_checksum`` no longer verifies. Every such
     violation FAILS THE WHOLE CALL — it is never laundered into a failed-seed
     result.
@@ -1490,9 +1491,9 @@ def development_seed_variability(
     only a SCRUBBED exception class name, keeps the seed in the roster, and marks
     the whole report ``INCOMPLETE``. ``BaseException`` is never caught. Internal
     contract/provenance violations (the store-type gate, an adapter roster that is
-    not ``{gears, cpa}``, a config↔manifest↔inputs inequality, a coverage/pair
-    misalignment, or a fold-job leakage/contract failure) FAIL THE WHOLE CALL and
-    are never laundered into a failed-seed result.
+    not ``{gears, cpa}``, a non-spawnable adapter backend, a config↔manifest↔inputs
+    inequality, a coverage/pair misalignment, or a fold-job leakage/contract
+    failure) FAIL THE WHOLE CALL and are never laundered into a failed-seed result.
 
     Parameters
     ----------
@@ -1549,6 +1550,18 @@ def development_seed_variability(
     for name, adapter in baseline_adapters.items():
         if not isinstance(adapter, BaselineAdapter) or adapter.name != name:
             raise SeedVariabilityContractError(f"invalid baseline adapter for {name!r}")
+        # spawn-capability gate — a non-spawnable backend is a STRUCTURAL/contract
+        # defect (Task 2: "a backend without spawn is rejected by the scientific
+        # entry BEFORE fitting"), so it FAILS THE WHOLE CALL up front rather than
+        # being laundered into per-fold spawn failures -> INCOMPLETE. Mirrors the
+        # positive form of the check BaselineAdapter.spawn itself uses.
+        backend = adapter.backend
+        if backend is None or not callable(getattr(backend, "spawn", None)):
+            raise SeedVariabilityContractError(
+                f"baseline adapter {name!r} backend is not spawnable; requires a "
+                f"backend exposing a callable spawn(*, seed), got "
+                f"{type(backend).__name__}"
+            )
 
     # 3. config <-> manifest <-> inputs <-> store contract (whole-call on mismatch).
     _verify_orchestration_contract(
