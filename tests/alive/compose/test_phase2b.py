@@ -44,6 +44,12 @@ from alive.compose.config2 import (
     load_compose_phase2_config,
 )
 from alive.compose.datacard import compute_compose_run_id
+from alive.compose.durable import (
+    COMMIT_CHECKSUM_FIELD,
+    DURABLE_COMMIT_FILENAME,
+    DurableLedgerError,
+    recover_phase2b_durable_outputs,
+)
 from alive.compose.freeze import FrozenPredictionBundle
 from alive.compose.outcome_store import ComposeOutcomeStore, ComposeSealingError
 from alive.compose.preflight import PreflightError
@@ -1384,3 +1390,116 @@ def test_run_phase2b_partial_seed_inputs_rejected(tmp_path):
             oof_manifest_path=tmp_path / "oof.json",  # only one of four supplied
         )
     assert kit["store"].sealed_access_count == 0
+
+
+# ===========================================================================
+# D1 Task 7: durable finalize wired into run_phase2b (normal / abort)
+# ===========================================================================
+
+
+def test_complete_run_publishes_verified_durable_commit_marker(tmp_path):
+    # NORMAL path: after the terminal is written and the protection context has
+    # exited, the durable finalizer publishes a commit marker and the frozen
+    # Phase2bResult carries its checksum + path.
+    kit = _make_run(tmp_path)
+    res = run_phase2b_fixture(**_fixture_kwargs(kit))
+    run_dir = kit["run_dir"]
+
+    assert res.terminal_state == TerminalState.COMPLETE
+    # exactly one terminal (COMPLETE) — the marker is NOT a terminal artifact.
+    assert _terminal_artifacts(run_dir) == [run_dir / Phase2bTerminal.COMPLETE_ARTIFACT]
+
+    marker_path = run_dir / DURABLE_COMMIT_FILENAME
+    assert marker_path.is_file()
+    assert res.durable_commit_checksum is not None
+    assert res.durable_commit_path == str(marker_path)
+
+    # the marker's self-excluding checksum recomputes (verified marker).
+    marker = json.loads(marker_path.read_text(encoding="utf-8"))
+    core = {k: v for k, v in marker.items() if k != COMMIT_CHECKSUM_FIELD}
+    assert marker[COMMIT_CHECKSUM_FIELD] == res.durable_commit_checksum
+    assert sha256_json(core) == res.durable_commit_checksum
+
+    # a marker-present recovery re-verifies every published file (verify-only).
+    recovered = recover_phase2b_durable_outputs(run_dir=run_dir)
+    assert recovered.commit_checksum == res.durable_commit_checksum
+
+
+def test_abort_publishes_durable_marker_and_reraises_original(tmp_path):
+    # ABORT path: an exception inside the protection boundary → protect writes the
+    # ABORTED terminal and re-raises; the SAME finalizer then publishes the reduced
+    # abort marker. The ORIGINAL evaluation exception propagates unchanged.
+    kit = _make_run(tmp_path)
+    burner = _RaisingAfterClaimStore(kit["store"])
+    kwargs = _fixture_kwargs(kit)
+    kwargs["outcome_store"] = burner
+    with pytest.raises(RuntimeError, match="synthetic materialisation failure"):
+        run_phase2b_fixture(**kwargs)
+
+    run_dir = kit["run_dir"]
+    # the seal was consumed once; exactly one terminal (ABORTED).
+    assert kit["store"].sealed_access_count == 1
+    assert _terminal_artifacts(run_dir) == [run_dir / Phase2bTerminal.ABORTED_ARTIFACT]
+
+    # the abort marker was published and re-verifies.
+    marker_path = run_dir / DURABLE_COMMIT_FILENAME
+    assert marker_path.is_file()
+    recover_phase2b_durable_outputs(run_dir=run_dir)
+
+
+def test_abort_finalize_failure_does_not_mask_original_exception(tmp_path, monkeypatch):
+    # A finalizer that ITSELF raises on the abort path must NOT replace the original
+    # evaluation exception (it is attached as a note) and must leave NO commit
+    # marker (a missing marker signals an incomplete durable export).
+    kit = _make_run(tmp_path)
+    burner = _RaisingAfterClaimStore(kit["store"])
+    kwargs = _fixture_kwargs(kit)
+    kwargs["outcome_store"] = burner
+
+    def _boom(**_kwargs):
+        raise DurableLedgerError("synthetic durable finalize failure")
+
+    monkeypatch.setattr("alive.compose.phase2b.finalize_phase2b_durable_outputs", _boom)
+
+    with pytest.raises(RuntimeError, match="synthetic materialisation failure") as excinfo:
+        run_phase2b_fixture(**kwargs)
+
+    # the original evaluation exception is preserved; the finalize failure is a note.
+    notes = getattr(excinfo.value, "__notes__", [])
+    assert any("finalize" in note for note in notes)
+
+    run_dir = kit["run_dir"]
+    # no commit marker (incomplete export) but the abort terminal is untouched.
+    assert not (run_dir / DURABLE_COMMIT_FILENAME).exists()
+    assert _terminal_artifacts(run_dir) == [run_dir / Phase2bTerminal.ABORTED_ARTIFACT]
+
+
+def test_pre_audit_failure_does_not_finalize(tmp_path, monkeypatch):
+    # A pre-audit failure (here a preflight checksum mismatch) happens BEFORE the
+    # seal is claimed: no terminal exists, so the durable finalizer is NEVER called
+    # and no marker is published.
+    kit = _make_run(tmp_path)
+    bad_ledger = RunLedger(
+        run_id=kit["bundle"].run_id,
+        config_sha256=kit["cfg"].config_sha256,
+        environment=_environment(),
+    )
+    bad_ledger.record_artifact("pair_manifest", kit["manifest"]["checksum"])
+    bad_ledger.record_artifact("response_space", kit["bundle"].response_space_checksum)
+    bad_ledger.record_artifact("factor_bank", kit["bundle"].factor_checksum)
+    bad_ledger.record_artifact("model", kit["bundle"].model_checksum)
+    bad_ledger.record_artifact("frozen_prediction_bundle", "WRONG-SHA")
+
+    def _must_not_run(**_kwargs):
+        raise AssertionError("finalize must NOT run on a pre-audit failure")
+
+    monkeypatch.setattr("alive.compose.phase2b.finalize_phase2b_durable_outputs", _must_not_run)
+
+    kwargs = _fixture_kwargs(kit)
+    kwargs["ledger"] = bad_ledger
+    with pytest.raises(PreflightError):
+        run_phase2b_fixture(**kwargs)
+
+    assert kit["store"].sealed_access_count == 0
+    assert _terminal_artifacts(kit["run_dir"]) == []
+    assert not (kit["run_dir"] / DURABLE_COMMIT_FILENAME).exists()

@@ -49,7 +49,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import numpy as np
@@ -60,6 +60,7 @@ from alive.compose.config2 import (
     ScientificModeError,
     assert_scientific_mode_allowed,
 )
+from alive.compose.durable import finalize_phase2b_durable_outputs
 from alive.compose.freeze import FrozenPredictionBundle
 from alive.compose.outcome_store import ComposeOutcomeStore, ObservedPair, SealedAccessClaim
 from alive.compose.preflight import EvaluationLock, run_preflight
@@ -77,6 +78,7 @@ from alive.compose.provenance2 import (
 from alive.compose.response import ResponseSpace, verify_response_artifact
 from alive.compose.scoring2 import RegimeScore, score_regime
 from alive.compose.seed_variability import (
+    DEVELOPMENT_SEED_VARIABILITY_FILENAME,
     DEVELOPMENT_SEED_VARIABILITY_LEDGER_ARTIFACT,
     SeedVariabilityPreflightError,
     SeedVariabilityReport,
@@ -113,6 +115,50 @@ _FIXTURE_MAX_RESPONSE_DIM = 256
 
 #: The audit-claim stage label recorded if the protected block aborts.
 _PROTECT_STAGE = "sealed_evaluation"
+
+#: Terminal lifecycle state -> the on-disk terminal artifact filename the terminal
+#: writer produces for it. Used to hand the durable finalizer the exact terminal
+#: path on the normal / INVALID path (the finalizer re-scans and cross-checks it).
+_TERMINAL_STATE_ARTIFACT: dict[TerminalState, str] = {
+    TerminalState.COMPLETE: Phase2bTerminal.COMPLETE_ARTIFACT,
+    TerminalState.INVALID: Phase2bTerminal.INVALID_ARTIFACT,
+    TerminalState.ABORTED_AFTER_SEAL: Phase2bTerminal.ABORTED_ARTIFACT,
+}
+
+
+def _durable_inputs_present(run_dir: Path) -> bool:
+    """Return ``True`` iff both durable-finalize inputs are regular files in ``run_dir``.
+
+    The durable finalizer (:func:`~alive.compose.durable.finalize_phase2b_durable_outputs`)
+    consumes the persisted pre-access ledger snapshot and the D2 development
+    seed-variability report. Both are written on every path that reaches the seal
+    (``persist_pre_access_ledger`` + ``_preaccess_seed_variability``), so their
+    presence gates the finalize: a run that never got that far (a pure pre-access
+    failure) does not crash demanding a finalize.
+    """
+    return (run_dir / PRE_ACCESS_LEDGER_FILENAME).is_file() and (
+        run_dir / DEVELOPMENT_SEED_VARIABILITY_FILENAME
+    ).is_file()
+
+
+def _terminal_file_path(run_dir: Path) -> Path | None:
+    """Return the single terminal artifact path in ``run_dir``, or ``None``.
+
+    Independently scans the run directory for the three terminal filenames. Returns
+    the sole match, or ``None`` if zero or more than one exist. On the abort path
+    this gates the finalize on a post-seal terminal actually being present (a
+    pre-audit failure leaves none, so no finalize is owed).
+    """
+    present = [
+        run_dir / name
+        for name in (
+            Phase2bTerminal.COMPLETE_ARTIFACT,
+            Phase2bTerminal.INVALID_ARTIFACT,
+            Phase2bTerminal.ABORTED_ARTIFACT,
+        )
+        if (run_dir / name).is_file()
+    ]
+    return present[0] if len(present) == 1 else None
 
 
 class Phase2bError(RuntimeError):
@@ -159,6 +205,17 @@ class Phase2bResult:
         result never reuses the normal verdict payload checksum.
     ledger : RunLedger
         The write-once ledger carrying the terminal artifact's hash.
+    durable_commit_checksum : str or None
+        The self-excluding ``commit_checksum`` of the durable commit marker
+        published by :func:`~alive.compose.durable.finalize_phase2b_durable_outputs`
+        AFTER the terminal was written and the protection context exited (spec
+        §3.3). ``None`` until finalize succeeds; a ``None`` value on a returned
+        result therefore signals no verified durable export. The abort path never
+        returns a :class:`Phase2bResult` (its marker, if published, lives only on
+        disk), so this field is populated only on the normal / INVALID path.
+    durable_commit_path : str or None
+        The filesystem path of the published durable commit marker (companion to
+        :attr:`durable_commit_checksum`); ``None`` until finalize succeeds.
     """
 
     run_id: str
@@ -170,6 +227,8 @@ class Phase2bResult:
     provenance_checksum: str
     result_checksum: str
     ledger: RunLedger
+    durable_commit_checksum: str | None = None
+    durable_commit_path: str | None = None
 
 
 # --------------------------------------------------------------------------- #
@@ -1219,9 +1278,19 @@ def _run_phase2b_core(
     # are the only two common-roster fields not known at construction). Binding
     # BEFORE the seal-open block guarantees an ABORT written from the protection
     # boundary still emits the full common identity roster (CLAUDE.md §11).
+    # Bind the pre-access provenance SUBSET checksum (the value persisted into the
+    # write-once pre-access ledger under PRE_ACCESS_PROVENANCE_ARTIFACT by
+    # record_pre_access_provenance, i.e. provenance.pre_access_checksum), NOT the
+    # full self_checksum. The durable finalizer's ABORTED branch — which has no
+    # embedded provenance to recompute a subset from — cross-checks the terminal's
+    # pre_access_provenance_checksum DIRECTLY against that persisted subset checksum
+    # (the non-circular binding); the COMPLETE/INVALID branch recomputes the subset
+    # from the embedded provenance instead, so the discrepancy only surfaced on the
+    # abort path. This matches the terminal writer's documented use (see
+    # tests/alive/compose/test_durable.py _write_aborted_terminal).
     terminal.bind_pre_access(
         pre_access_ledger_sha256=sha256_file(run_dir / PRE_ACCESS_LEDGER_FILENAME),
-        pre_access_provenance_checksum=pre_access_provenance.self_checksum,
+        pre_access_provenance_checksum=pre_access_provenance.pre_access_checksum,
     )
 
     # --- Step 5: attempt access, claim the DURABLE seal, then confirm. --------
@@ -1230,33 +1299,85 @@ def _run_phase2b_core(
     # owed yet); a failure BEFORE the durable claim leaves NO terminal and
     # sealed_access_count == 0. Only the VERIFIED durable audit reference advances
     # the terminal to ACCESS_CLAIMED, after which every exit writes one terminal.
-    terminal.attempt_access()
-    union = list(lock.pair_ids_double_unseen) + list(lock.pair_ids_single_unseen)
-    claim = outcome_store.claim_sealed_access(lock.run_id, union)
-    terminal.confirm_durable_access(claim.audit_reference)
-
+    #
+    # D1 §3.3 durable finalize wiring: the seal-open sequence + the protection
+    # boundary run inside a single top-level try/except BaseException. On ANY
+    # exception the except owner locates the terminal that ``protect`` left and
+    # calls the SAME finalizer ONCE — but ONLY if a post-seal terminal file
+    # actually exists (a pre-audit failure leaves none → SKIP, seal never opened).
+    # It then re-raises with a BARE ``raise`` preserving the original traceback; a
+    # finalize failure here is attached as an exception note (it does NOT replace
+    # the original evaluation exception) and leaves no marker (incomplete export).
+    # The NORMAL / INVALID finalize is OUTSIDE the except so its own failure never
+    # re-enters the abort finalize; it runs exactly ONCE after ``protect`` exits
+    # (no outcome-bearing evaluation frame is active) and is attached to the frozen
+    # result via ``dataclasses.replace``.
     result_box: dict[str, object] = {}
-    with terminal.protect(stage=_PROTECT_STAGE, preflight_checksums=preflight_checksums):
-        _evaluate_inside_boundary(
-            terminal=terminal,
-            outcome_store=outcome_store,
-            claim=claim,
-            lock=lock,
-            frozen_bundle=frozen_bundle,
-            pair_manifest=pair_manifest,
-            config=config,
-            response_space=response_space,
-            control_mean=control_mean,
-            recomputed_run_id=recomputed_run_id,
-            audit_reference=audit_reference,
-            git_clean=git_clean,
-            provenance_tamper=provenance_tamper,
-            provenance_inputs=provenance_inputs,
-            fixture_execution=fixture_execution,
-            result_box=result_box,
-        )
+    try:
+        terminal.attempt_access()
+        union = list(lock.pair_ids_double_unseen) + list(lock.pair_ids_single_unseen)
+        claim = outcome_store.claim_sealed_access(lock.run_id, union)
+        terminal.confirm_durable_access(claim.audit_reference)
 
-    return result_box["result"]  # type: ignore[return-value]
+        with terminal.protect(stage=_PROTECT_STAGE, preflight_checksums=preflight_checksums):
+            _evaluate_inside_boundary(
+                terminal=terminal,
+                outcome_store=outcome_store,
+                claim=claim,
+                lock=lock,
+                frozen_bundle=frozen_bundle,
+                pair_manifest=pair_manifest,
+                config=config,
+                response_space=response_space,
+                control_mean=control_mean,
+                recomputed_run_id=recomputed_run_id,
+                audit_reference=audit_reference,
+                git_clean=git_clean,
+                provenance_tamper=provenance_tamper,
+                provenance_inputs=provenance_inputs,
+                fixture_execution=fixture_execution,
+                result_box=result_box,
+            )
+        result: Phase2bResult = result_box["result"]  # type: ignore[assignment]
+    except BaseException as exc:
+        # Abort path: protect wrote ABORTED (or a pre-audit failure wrote no
+        # terminal). Finalize ONLY when a post-seal terminal file exists AND the
+        # durable inputs are present; a finalize failure is noted, never masking.
+        aborted_terminal = _terminal_file_path(run_dir)
+        if _durable_inputs_present(run_dir) and aborted_terminal is not None:
+            try:
+                finalize_phase2b_durable_outputs(
+                    run_dir=run_dir,
+                    terminal_path=aborted_terminal,
+                    pre_access_ledger_path=run_dir / PRE_ACCESS_LEDGER_FILENAME,
+                    seed_variability_path=run_dir / DEVELOPMENT_SEED_VARIABILITY_FILENAME,
+                )
+            except BaseException as fin_exc:  # noqa: BLE001 - noted, never masking
+                exc.add_note(
+                    "durable finalize failed on abort (incomplete durable export; "
+                    f"commit marker absent): {fin_exc!r}"
+                )
+        raise
+
+    # --- Normal / INVALID path: exactly one terminal was written inside protect. -
+    # Finalize ONCE after the boundary exited, then bind the verified commit marker
+    # onto the frozen result. A finalize failure here PROPAGATES as a clear
+    # DurableLedgerError (the seal is consumed + terminal on disk → recoverable),
+    # so the operator learns the export is incomplete rather than it passing silently.
+    if _durable_inputs_present(run_dir):
+        terminal_path = run_dir / _TERMINAL_STATE_ARTIFACT[result.terminal_state]
+        commit = finalize_phase2b_durable_outputs(
+            run_dir=run_dir,
+            terminal_path=terminal_path,
+            pre_access_ledger_path=run_dir / PRE_ACCESS_LEDGER_FILENAME,
+            seed_variability_path=run_dir / DEVELOPMENT_SEED_VARIABILITY_FILENAME,
+        )
+        result = replace(
+            result,
+            durable_commit_checksum=commit.commit_checksum,
+            durable_commit_path=str(commit.commit_marker_path),
+        )
+    return result
 
 
 def _evaluate_inside_boundary(
