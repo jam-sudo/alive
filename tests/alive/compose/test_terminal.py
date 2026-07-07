@@ -43,6 +43,7 @@ from alive.provenance import (
     RunLedger,
     sha256_json,
 )
+from tests.alive.compose._terminal_bodies import minimal_v2_terminal_body
 
 # ---------------------------------------------------------------------------
 # Synthetic fixtures — tiny, deterministic, no real data.
@@ -70,15 +71,12 @@ def _ledger() -> RunLedger:
 
 
 def _payload() -> dict:
-    """A small, outcome-free report payload (verdict-style summary only)."""
-    return {
-        "protocol": "COMPOSE-K562-v1",
-        "verdict": "NO_DISTINCT_WIN",
-        "regime_double_metric": 0.42,
-        "regime_single_metric": 0.31,
-        "method_roster": ["operator", "additive", "gears"],
-        "preflight_checksums": {"pair_manifest": "a" * 64},
-    }
+    """A minimal VALID v2 COMPLETE state-roster body (spec §2.1).
+
+    D1 Task 3 closed the COMPLETE / INVALID roster, so the outcome-free report is
+    now exactly the registered summary + embedded provenance + layered checksums.
+    """
+    return minimal_v2_terminal_body()
 
 
 def _terminal(tmp_path: Path, *, audit_path: Path | None = None) -> Phase2bTerminal:
@@ -121,15 +119,14 @@ def _durably_claimed_terminal(
 
 
 def _v2_complete_payload(**overrides: object) -> dict:
-    """A tiny outcome-free COMPLETE report payload (state-specific content only).
+    """A minimal VALID v2 COMPLETE state-roster body (state-specific content only).
 
     The identity roster is injected by the terminal writer from instance state;
-    this payload supplies only the state-specific summary. ``theta`` is a finite
-    float by default so a test can override it with a non-finite value.
+    this body supplies only the state-specific summary + checksums. ``overrides``
+    are applied to the embedded summary, so ``theta`` is a finite float by default
+    and a test can override it with a non-finite value.
     """
-    payload: dict = {"verdict": "NO_DISTINCT_WIN", "theta": 0.42, "n_pairs": 12}
-    payload.update(overrides)
-    return payload
+    return minimal_v2_terminal_body(**overrides)
 
 
 def _terminal_artifact_paths(run_dir: Path) -> list[Path]:
@@ -184,8 +181,9 @@ def test_complete_happy_path_writes_canonical_json_and_ledger(tmp_path: Path) ->
         "terminal_payload_checksum",
     ):
         assert k in body
-    assert body["verdict"] == payload["verdict"]
-    assert body["method_roster"] == payload["method_roster"]
+    # the state-specific v2 roster survives verbatim (spec §2.1).
+    assert body["registered_summary"] == payload["registered_summary"]
+    assert body["final_result_checksum"] == payload["final_result_checksum"]
 
     # Self-excluding checksum recomputes via the shared canonicalizer.
     checksum_input = canonicalize_terminal_checksum_input(
@@ -273,15 +271,17 @@ def test_invalid_path_writes_artifact_and_ledger(tmp_path: Path) -> None:
     term.acquire()
     term.claim_access()
 
-    term.invalid("post-access checksum mismatch", evidence={"observed": "x", "expected": "y"})
+    invalid_body = minimal_v2_terminal_body(terminal_state="INVALID")
+    term.invalid(invalid_body)
     assert term.state is TerminalState.INVALID
 
     artifact = run_dir / Phase2bTerminal.INVALID_ARTIFACT
     assert artifact.exists()
     body = json.loads(artifact.read_text(encoding="utf-8"))
     assert body["terminal_state"] == TerminalState.INVALID.value
-    assert body["reason"] == "post-access checksum mismatch"
-    assert body["evidence"] == {"observed": "x", "expected": "y"}
+    # INVALID carries the SAME state roster as COMPLETE (spec §2.1), not reason/evidence.
+    assert body["registered_summary"] == invalid_body["registered_summary"]
+    assert body["final_result_checksum"] == invalid_body["final_result_checksum"]
 
     assert term.ledger.verify_file(Phase2bTerminal.INVALID_ARTIFACT, artifact) is True
 
@@ -290,7 +290,7 @@ def test_invalid_only_valid_from_access_claimed(tmp_path: Path) -> None:
     term = _terminal(tmp_path)
     term.acquire()
     with pytest.raises(TerminalError):
-        term.invalid("too early")
+        term.invalid(minimal_v2_terminal_body(terminal_state="INVALID"))
     assert _existing_terminal_artifacts(term.run_dir) == []
 
 
@@ -543,8 +543,12 @@ def test_invalid_rejects_array_evidence(tmp_path: Path) -> None:
     term.acquire()
     term.claim_access()
 
+    # A raw array anywhere in the INVALID body is rejected by the guard (step 1),
+    # BEFORE the roster check, so no artifact is written.
+    body = minimal_v2_terminal_body(terminal_state="INVALID")
+    body["registered_summary"]["leaked_array"] = np.zeros(5)
     with pytest.raises(TerminalError):
-        term.invalid("reason", evidence={"leaked": np.zeros(5)})
+        term.invalid(body)
 
     assert _existing_terminal_artifacts(term.run_dir) == []
 
@@ -554,7 +558,7 @@ def test_small_numeric_metrics_are_allowed(tmp_path: Path) -> None:
     term = _terminal(tmp_path)
     term.acquire()
     term.claim_access()
-    term.complete({"a": 1.0, "b": 2.0, "c": [0.1, 0.2, 0.3]})
+    term.complete(minimal_v2_terminal_body(small_metric_list=[0.1, 0.2, 0.3]))
     assert term.state is TerminalState.COMPLETE
 
 
@@ -655,7 +659,7 @@ def test_invalid_then_complete_is_blocked(tmp_path: Path) -> None:
     term = _terminal(tmp_path)
     term.acquire()
     term.claim_access()
-    term.invalid("first terminal")
+    term.invalid(minimal_v2_terminal_body(terminal_state="INVALID"))
 
     with pytest.raises(TerminalError):
         term.complete(_payload())

@@ -397,6 +397,28 @@ def _terminal_artifacts(run_dir: Path) -> list[Path]:
     ]
 
 
+def _read_terminal(run_dir: Path, which: str) -> dict:
+    """Load a written terminal artifact body (``"complete"`` or ``"invalid"``)."""
+    name = {
+        "complete": Phase2bTerminal.COMPLETE_ARTIFACT,
+        "invalid": Phase2bTerminal.INVALID_ARTIFACT,
+    }[which]
+    return json.loads((run_dir / name).read_text(encoding="utf-8"))
+
+
+def _flatten_keys(obj) -> list[str]:
+    """Every mapping key at any nesting depth (for per-pair / *_ci leakage checks)."""
+    keys: list[str] = []
+    if isinstance(obj, dict):
+        for key, value in obj.items():
+            keys.append(key)
+            keys.extend(_flatten_keys(value))
+    elif isinstance(obj, (list, tuple)):
+        for value in obj:
+            keys.extend(_flatten_keys(value))
+    return keys
+
+
 # ===========================================================================
 # Happy path
 # ===========================================================================
@@ -909,9 +931,76 @@ def test_terminal_and_ledger_hashes_round_trip(tmp_path):
     # the ledger recorded the terminal artifact under its canonical name.
     assert res.ledger.artifact_sha(Phase2bTerminal.COMPLETE_ARTIFACT) == file_sha
     assert res.ledger.verify_file(Phase2bTerminal.COMPLETE_ARTIFACT, complete)
-    # the result's recorded checksums are present in the persisted body.
-    assert body["sealed_verdict_checksum"] == res.sealed_verdict.checksum
+    # the result's recorded checksums are present in the persisted body. The
+    # sealed verdict checksum is now the top-level state field final_verdict_checksum
+    # (COMPLETE: the final verdict IS the sealed verdict).
+    assert body["final_verdict_checksum"] == res.sealed_verdict.checksum
     assert res.result_checksum  # non-empty
+
+
+# ===========================================================================
+# 13b. COMPLETE terminal embeds the outcome-free registered summary + the
+#      layered final_result_checksum; INVALID differs from COMPLETE (D1 Task 3)
+# ===========================================================================
+
+
+def test_complete_terminal_embeds_summary_and_final_result_checksum(tmp_path):
+    kit = _make_run(tmp_path)
+    result = run_phase2b_fixture(**_fixture_kwargs(kit))
+    assert result.terminal_state == TerminalState.COMPLETE
+
+    body = _read_terminal(kit["run_dir"], "complete")
+    summ = body["registered_summary"]
+    assert set(summ) >= {
+        "per_method_aggregate_mse",
+        "theta",
+        "simultaneous_lower_bounds",
+        "family_confidence",
+        "bootstrap_replicates",
+        "gi_explained_interval",
+        "gi_structure_recovery",
+        "sample_counts",
+        "seed_variability_report_checksum",
+    }
+    assert summ["gi_structure_recovery"] == "NOT_EVALUABLE"
+    # no per-pair error array or per-pair CI leaks into the terminal payload.
+    assert not any("per_pair" in k or k.endswith("_ci") for k in _flatten_keys(body))
+
+    # the inner content checksums bind their in-process dicts.
+    assert body["registered_summary_checksum"] == sha256_json(summ)
+    assert body["final_result_checksum"] == sha256_json(
+        {
+            "terminal_state": body["terminal_state"],
+            "final_verdict_checksum": body["final_verdict_checksum"],
+            "registered_summary_checksum": body["registered_summary_checksum"],
+            "evaluation_payload_checksum": body["evaluation_payload_checksum"],
+            "provenance_checksum": body["provenance_checksum"],
+        }
+    )
+    # Phase2bResult.result_checksum IS the layered final_result_checksum.
+    assert result.result_checksum == body["final_result_checksum"]
+
+
+def test_invalid_final_result_checksum_differs_from_complete(tmp_path):
+    # A clean COMPLETE run and a post-access-tampered INVALID run from the SAME
+    # inputs must not share a final_result_checksum (terminal_state + final
+    # verdict differ), and INVALID must not reuse the normal verdict checksum.
+    kit_c = _make_run(tmp_path / "complete")
+    complete = run_phase2b_fixture(**_fixture_kwargs(kit_c))
+    assert complete.terminal_state == TerminalState.COMPLETE
+
+    kit_i = _make_run(tmp_path / "invalid")
+    tampered = dataclasses.replace(kit_i["provenance"], processed_sha256="TAMPERED-AFTER-REGISTER")
+    invalid = run_phase2b_fixture(
+        **_fixture_kwargs(kit_i),
+        _tamper_provenance_after_register=tampered,
+    )
+    assert invalid.terminal_state == TerminalState.INVALID
+
+    assert invalid.result_checksum != complete.result_checksum
+    inv_body = _read_terminal(kit_i["run_dir"], "invalid")
+    assert inv_body["terminal_state"] == TerminalState.INVALID.value
+    assert inv_body["final_result_checksum"] == invalid.result_checksum
 
 
 # ===========================================================================

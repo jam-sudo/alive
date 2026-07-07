@@ -47,6 +47,7 @@ only. Real execution remains blocked until the owner activation commit and every
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -76,6 +77,7 @@ from alive.compose.provenance2 import (
 from alive.compose.response import ResponseSpace, verify_response_artifact
 from alive.compose.scoring2 import RegimeScore, score_regime
 from alive.compose.seed_variability import (
+    DEVELOPMENT_SEED_VARIABILITY_LEDGER_ARTIFACT,
     SeedVariabilityPreflightError,
     SeedVariabilityReport,
     SeedVariabilityReportError,
@@ -151,7 +153,10 @@ class Phase2bResult:
     provenance_checksum : str
         The COMPLETE provenance record's self-checksum.
     result_checksum : str
-        The self-excluding checksum over the terminal report payload.
+        The layered ``final_result_checksum`` — ``sha256_json`` over exactly
+        ``{terminal_state, final_verdict_checksum, registered_summary_checksum,
+        evaluation_payload_checksum, provenance_checksum}`` (spec §2.1). An INVALID
+        result never reuses the normal verdict payload checksum.
     ledger : RunLedger
         The write-once ledger carrying the terminal artifact's hash.
     """
@@ -531,46 +536,136 @@ def _build_provenance(
     )
 
 
-def _terminal_payload(
+#: Sentinel substituted for any non-finite embedded float. A ``NaN`` / ``Infinity``
+#: anywhere in the registered summary would make the shared terminal canonicalizer
+#: REFUSE the write (a latent forced abort on the seal path), so the summary carries
+#: only finite floats or this string sentinel (spec §2, CLAUDE.md §5 / §10.10 —
+#: report the degenerate value honestly, never a silent NaN).
+_NON_FINITE_SENTINEL = "NON_FINITE"
+
+#: The Phase-2 GI-structure recovery is deferred; the summary reports the fixed
+#: sentinel string, never a number (mirrors the secondary block's gi_structure).
+_GI_STRUCTURE_RECOVERY = "NOT_EVALUABLE"
+
+
+def _finite_or_sentinel(value: float) -> float | str:
+    """Return ``float(value)`` when finite, else :data:`_NON_FINITE_SENTINEL`.
+
+    Every float embedded in the registered summary must be finite or a string
+    sentinel; otherwise :meth:`~alive.compose.terminal.Phase2bTerminal._write_terminal`
+    (via ``canonicalize_terminal_checksum_input``) refuses a legitimate COMPLETE /
+    INVALID write. Thetas are already gated finite on the COMPLETE path; this guards
+    the remaining embedded aggregates (per-method MSE, GI point/interval) so a
+    degenerate value can never silently force an abort.
+    """
+    number = float(value)
+    return number if math.isfinite(number) else _NON_FINITE_SENTINEL
+
+
+def build_registered_evaluation_summary(
     *,
+    protocol: str,
     run_id: str,
-    verdict: ComposeSealedResult,
+    terminal_state: str,
+    sealed_access_count: int,
     regime_double: RegimeScore,
     regime_single: RegimeScore,
-    lock: EvaluationLock,
-    provenance: Phase2bProvenance,
-    sealed_access_count: int,
+    per_method_aggregate_mse: Mapping[str, float | str],
+    final_verdict: ComposeSealedResult,
+    integrity: ComposeIntegrityReport,
+    family_confidence: float,
+    bootstrap_replicates: int,
+    bundle_checksum: str,
+    manifest_checksum: str,
+    provenance_checksum: str,
+    seed_variability_report_checksum: str,
 ) -> dict:
-    """Build the outcome-free terminal report payload (summaries / hashes only).
+    """Build the outcome-free ``RegisteredEvaluationSummary`` ONCE (spec §2.1).
 
-    Carries NO raw observed cell matrix and NO per-cell vector — only scalar
-    summaries, verdict axes, pair counts and content checksums. The terminal
-    writer's raw-outcome backstop guards this before any byte is written; the
-    orchestrator OWNS the no-raw-outcome property by constructing only summaries.
+    Constructed inside the protected evaluation AFTER the final terminal state and
+    final verdict are decided (for ``INVALID`` the verdict is already swapped to
+    ``INVALID``). Carries ONLY scalar summaries, per-method / per-comparator
+    aggregates, verdict axes/clauses, the integrity disclaimer and content
+    checksums — NO per-pair error array, NO per-pair CI, NO raw cell/count matrix.
+    Aggregate values (``per_method_aggregate_mse``) are computed ONCE in the
+    protected evaluation and COPIED in here; this exporter never recomputes them.
+
+    Every embedded float is passed through :func:`_finite_or_sentinel` so the
+    shared terminal canonicalizer can never refuse the write on a non-finite value.
+
+    Parameters
+    ----------
+    protocol, run_id, terminal_state, sealed_access_count
+        Common run identity echoed into the summary.
+    regime_double, regime_single : RegimeScore
+        The two independently-scored regimes (double-unseen is the headline / sole
+        verdict input). Only sample counts, checksums and the double-regime
+        secondary GI block are read; per-pair arrays are never embedded.
+    per_method_aggregate_mse : Mapping
+        ``method -> mean(pair_errors[method])`` for the headline (double) regime,
+        computed ONCE inside the protected evaluation.
+    final_verdict : ComposeSealedResult
+        The FINAL sealed verdict (swapped to ``INVALID`` on a post-access
+        inconsistency). Its axes and clauses are reported verbatim.
+    integrity : ComposeIntegrityReport
+        The structural integrity self-check; its ``disclaimer`` is embedded.
+    family_confidence, bootstrap_replicates
+        The registered family confidence and bootstrap replicate count.
+    bundle_checksum, manifest_checksum, provenance_checksum,
+    seed_variability_report_checksum : str
+        The bundle / manifest / provenance / pre-seal seed-variability content
+        checksums (regime-result + bounds checksums are read from the regimes).
+
+    Returns
+    -------
+    dict
+        The canonical outcome-free registered summary payload.
     """
+    bounds = regime_double.bounds
+    secondary = regime_double.secondary
+    gi_lower, gi_upper = secondary.gi_explained_interval
     return {
-        "protocol": "COMPOSE-K562-v1",
+        "protocol": protocol,
         "run_id": run_id,
+        "terminal_state": terminal_state,
         "sealed_access_count": int(sealed_access_count),
-        "sealed_axis": verdict.sealed_axis.value,
-        "method_axis": verdict.method_axis.value,
-        "sealed_verdict_checksum": verdict.checksum,
-        "verdict_clauses": {k: bool(v) for k, v in verdict.clauses.items()},
-        "double_unseen": {
-            "regime": regime_double.regime,
-            "sample_count": int(regime_double.sample_count),
-            "result_checksum": regime_double.checksum,
-            "bounds_checksum": regime_double.bounds.checksum,
+        "sample_counts": {
+            "double": int(regime_double.sample_count),
+            "single": int(regime_single.sample_count),
         },
-        "single_unseen": {
-            "regime": regime_single.regime,
-            "sample_count": int(regime_single.sample_count),
-            "result_checksum": regime_single.checksum,
-            "bounds_checksum": regime_single.bounds.checksum,
+        "per_method_aggregate_mse": {
+            method: (
+                per_method_aggregate_mse[method]
+                if isinstance(per_method_aggregate_mse[method], str)
+                else _finite_or_sentinel(float(per_method_aggregate_mse[method]))
+            )
+            for method in sorted(per_method_aggregate_mse)
         },
-        "bundle_checksum": lock.bundle_checksum,
-        "manifest_checksum": lock.manifest_checksum,
-        "provenance_checksum": provenance.self_checksum,
+        "theta": {c: _finite_or_sentinel(bounds.theta[c]) for c in bounds.comparators},
+        "simultaneous_lower_bounds": {
+            c: _finite_or_sentinel(bounds.lower[c]) for c in bounds.comparators
+        },
+        "family_confidence": _finite_or_sentinel(family_confidence),
+        "bootstrap_replicates": int(bootstrap_replicates),
+        "gi_explained_point": _finite_or_sentinel(secondary.gi_explained_point),
+        "gi_explained_interval": [
+            _finite_or_sentinel(gi_lower),
+            _finite_or_sentinel(gi_upper),
+        ],
+        "gi_structure_recovery": _GI_STRUCTURE_RECOVERY,
+        "sealed_axis": final_verdict.sealed_axis.value,
+        "method_axis": final_verdict.method_axis.value,
+        "verdict_clauses": {
+            k: bool(final_verdict.clauses[k]) for k in sorted(final_verdict.clauses)
+        },
+        "integrity_disclaimer": integrity.disclaimer,
+        "bundle_checksum": bundle_checksum,
+        "manifest_checksum": manifest_checksum,
+        "provenance_checksum": provenance_checksum,
+        "regime_result_double_checksum": regime_double.checksum,
+        "regime_result_single_checksum": regime_single.checksum,
+        "bounds_checksum": bounds.checksum,
+        "seed_variability_report_checksum": seed_variability_report_checksum,
     }
 
 
@@ -1299,35 +1394,39 @@ def _evaluate_inside_boundary(
         },
     )
 
-    # --- Step 12: write the terminal result + ledger entries ONCE. -------------
-    payload = _terminal_payload(
-        run_id=lock.run_id,
-        verdict=verdict,
-        regime_double=regime_double,
-        regime_single=regime_single,
-        lock=lock,
-        provenance=provenance,
-        sealed_access_count=outcome_store.sealed_access_count,
+    # --- Step 12: build the outcome-free summary + layered checksums ONCE. ------
+    # Aggregates are computed ONCE HERE inside the protected evaluation (spec §2.1);
+    # the summary exporter only COPIES them and never recomputes. per-pair error
+    # arrays and per-pair CIs are NEVER embedded — only the per-method mean MSE.
+    per_method_aggregate_mse: dict[str, float | str] = {
+        method: _finite_or_sentinel(float(np.mean(regime_double.pair_errors[method])))
+        for method in sorted(regime_double.pair_errors)
+    }
+    # evaluation_payload_checksum binds the regime/bounds scoring results directly
+    # after scoring (distinct from final_result_checksum, which binds identity).
+    evaluation_payload_checksum = sha256_json(
+        {
+            "double_regime_checksum": regime_double.checksum,
+            "single_regime_checksum": regime_single.checksum,
+            "double_bounds_checksum": regime_double.bounds.checksum,
+            "single_bounds_checksum": regime_single.bounds.checksum,
+        }
     )
-    result_checksum = sha256_json(payload)
-    payload["result_checksum"] = result_checksum
+    # Source the ALREADY-VERIFIED pre-seal seed-variability report checksum from the
+    # write-once ledger (bound + verified pre-access); never recomputed here.
+    seed_variability_report_checksum = terminal.ledger.artifact_sha(
+        DEVELOPMENT_SEED_VARIABILITY_LEDGER_ARTIFACT
+    )
 
+    # Decide the FINAL terminal state + FINAL verdict BEFORE building the summary.
+    # For INVALID the verdict is swapped to INVALID first (spec §2.1), so the
+    # summary and every checksum bind the swapped verdict — never the normal one.
     if post_status is PostAccessStatus.OK:
-        terminal.complete(payload)
         final_verdict = verdict
         terminal_state = TerminalState.COMPLETE
     else:
-        terminal.invalid(
-            "post-access provenance / audit consistency check failed",
-            evidence={
-                "run_id": lock.run_id,
-                "provenance_checksum": expected_provenance_checksum,
-                "result_checksum": result_checksum,
-                "post_access_status": post_status.value,
-            },
-        )
-        # A post-access inconsistency dominates: the sealed axis is INVALID and
-        # the result is not trustworthy (CLAUDE.md §6 / §11).
+        # A post-access inconsistency dominates: the sealed axis is INVALID and the
+        # result is not trustworthy (CLAUDE.md §6 / §11).
         final_verdict = ComposeSealedResult(
             sealed_axis=SealedAxis.INVALID,
             method_axis=verdict.method_axis,
@@ -1335,6 +1434,54 @@ def _evaluate_inside_boundary(
             evidence={**verdict.evidence, "post_access_status": post_status.value},
         )
         terminal_state = TerminalState.INVALID
+
+    summary = build_registered_evaluation_summary(
+        protocol=provenance.protocol,
+        run_id=lock.run_id,
+        terminal_state=terminal_state.value,
+        sealed_access_count=outcome_store.sealed_access_count,
+        regime_double=regime_double,
+        regime_single=regime_single,
+        per_method_aggregate_mse=per_method_aggregate_mse,
+        final_verdict=final_verdict,
+        integrity=integrity,
+        family_confidence=config.family_confidence,
+        bootstrap_replicates=config.bootstrap_replicates,
+        bundle_checksum=lock.bundle_checksum,
+        manifest_checksum=lock.manifest_checksum,
+        provenance_checksum=expected_provenance_checksum,
+        seed_variability_report_checksum=seed_variability_report_checksum,
+    )
+    registered_summary_checksum = sha256_json(summary)
+    final_verdict_checksum = final_verdict.checksum
+    # final_result_checksum binds EXACTLY these five identity fields (spec §2.1).
+    final_result_checksum = sha256_json(
+        {
+            "terminal_state": terminal_state.value,
+            "final_verdict_checksum": final_verdict_checksum,
+            "registered_summary_checksum": registered_summary_checksum,
+            "evaluation_payload_checksum": evaluation_payload_checksum,
+            "provenance_checksum": expected_provenance_checksum,
+        }
+    )
+
+    # The v2 COMPLETE / INVALID body: exactly the state-specific roster (spec §2.1).
+    # The whole-body terminal_payload_checksum is computed by the terminal writer;
+    # these are the inner content checksums over specific in-process dicts.
+    body = {
+        "registered_summary": summary,
+        "registered_summary_checksum": registered_summary_checksum,
+        "final_verdict_checksum": final_verdict_checksum,
+        "terminal_embedded_provenance": provenance.to_dict(),
+        "provenance_checksum": expected_provenance_checksum,
+        "evaluation_payload_checksum": evaluation_payload_checksum,
+        "final_result_checksum": final_result_checksum,
+    }
+
+    if terminal_state is TerminalState.COMPLETE:
+        terminal.complete(body)
+    else:
+        terminal.invalid(body)
 
     result_box["result"] = Phase2bResult(
         run_id=lock.run_id,
@@ -1344,7 +1491,7 @@ def _evaluate_inside_boundary(
         terminal_state=terminal_state,
         sealed_access_count=outcome_store.sealed_access_count,
         provenance_checksum=expected_provenance_checksum,
-        result_checksum=result_checksum,
+        result_checksum=final_result_checksum,
         ledger=terminal.ledger,
     )
 

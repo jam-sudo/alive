@@ -414,16 +414,34 @@ def canonicalize_terminal_checksum_input(value: object) -> object:
     )
 
 
-#: State-specific exact field rosters. ``INVALID`` and ``ABORTED_AFTER_SEAL`` carry
-#: a FIXED set of state fields validated exactly against ``common ∪ state`` (missing
-#: OR unknown key → :class:`TerminalError`). ``COMPLETE`` is OPEN at this milestone:
-#: its state-specific content is the caller's outcome-free report payload spread at
-#: top level and is not yet a fixed roster (the exact COMPLETE roster lands when that
-#: payload is restructured into a registered summary). Even for ``COMPLETE`` the
-#: common identity roster is still required present.
+#: The exact state-specific roster shared by ``COMPLETE`` and ``INVALID`` (spec
+#: §2.1). Both terminals carry the outcome-free registered evaluation summary and
+#: its canonical embedded provenance PLUS the four layered content checksums. An
+#: ``INVALID`` terminal builds the same summary AFTER the verdict is swapped to
+#: ``INVALID`` (so ``final_verdict_checksum`` / ``final_result_checksum`` differ),
+#: never reusing the normal verdict payload checksum. There is no free-form
+#: ``reason`` / ``evidence`` roster any more: the reason lives inside the summary
+#: (the swapped verdict clauses / evidence) and is bound by the checksums.
+_COMPLETE_INVALID_STATE_FIELDS = frozenset(
+    {
+        "registered_summary",
+        "registered_summary_checksum",
+        "final_verdict_checksum",
+        "terminal_embedded_provenance",
+        "provenance_checksum",
+        "evaluation_payload_checksum",
+        "final_result_checksum",
+    }
+)
+
+#: State-specific exact field rosters. Every terminal state now carries a FIXED set
+#: of state fields validated exactly against ``common ∪ state`` (missing OR unknown
+#: key → :class:`TerminalError`). ``COMPLETE`` / ``INVALID`` share
+#: :data:`_COMPLETE_INVALID_STATE_FIELDS`; ``ABORTED_AFTER_SEAL`` keeps its own
+#: minimal abort roster (Task 4 owns the v2 ABORTED body).
 _STATE_TERMINAL_FIELDS: dict[TerminalState, frozenset[str] | None] = {
-    TerminalState.COMPLETE: None,
-    TerminalState.INVALID: frozenset({"reason", "evidence"}),
+    TerminalState.COMPLETE: _COMPLETE_INVALID_STATE_FIELDS,
+    TerminalState.INVALID: _COMPLETE_INVALID_STATE_FIELDS,
     TerminalState.ABORTED_AFTER_SEAL: frozenset(
         {"exception_class", "message", "stage", "preflight_checksums", "audit_reference"}
     ),
@@ -749,35 +767,34 @@ class Phase2bTerminal:
         self._write_terminal(self.COMPLETE_ARTIFACT, body, payload_to_guard=report_payload)
         self._state = TerminalState.COMPLETE
 
-    def invalid(self, reason: str, *, evidence: Mapping | None = None) -> None:
+    def invalid(self, report_payload: Mapping | dict) -> None:
         """Write the ``INVALID`` terminal artifact (``CLAIMED -> INVALID``).
 
-        Same write/verify/ledger discipline as :meth:`complete`. Used when the
-        seal is already consumed but a post-access inconsistency was detected, so
-        the result is not trustworthy. Only valid from ``ACCESS_CLAIMED``.
+        Same write/verify/ledger discipline and the SAME state roster as
+        :meth:`complete` (spec §2.1): the seal is already consumed but a
+        post-access inconsistency was detected, so the caller builds the registered
+        evaluation summary AFTER swapping the verdict to ``INVALID`` and hands the
+        full v2 report body here. Only valid from ``ACCESS_CLAIMED``.
 
         Parameters
         ----------
-        reason : str
-            Human-readable reason the run is invalid.
-        evidence : Mapping or None, optional
-            Optional outcome-free evidence (checksums, ids). Guarded for raw
-            outcomes before writing.
+        report_payload : Mapping
+            The outcome-free INVALID report — exactly the
+            :data:`_COMPLETE_INVALID_STATE_FIELDS` state fields (the registered
+            summary + embedded provenance + the four layered checksums). Guarded
+            for raw outcomes before writing.
 
         Raises
         ------
         TerminalError
-            If not in ``ACCESS_CLAIMED``, if the evidence carries raw outcomes, or
-            if the destination already exists (write-once).
+            If not in ``ACCESS_CLAIMED``, if the payload carries raw outcomes, if it
+            does not match the exact ``common ∪ state`` roster, or if the
+            destination already exists (write-once).
         """
         self._require_state(TerminalState.ACCESS_CLAIMED, "invalid")
-        evidence = dict(evidence) if evidence is not None else {}
-        body = {
-            "terminal_state": TerminalState.INVALID.value,
-            "reason": reason,
-            "evidence": evidence,
-        }
-        self._write_terminal(self.INVALID_ARTIFACT, body, payload_to_guard=evidence)
+        body = dict(report_payload)
+        body["terminal_state"] = TerminalState.INVALID.value
+        self._write_terminal(self.INVALID_ARTIFACT, body, payload_to_guard=report_payload)
         self._state = TerminalState.INVALID
 
     def aborted(
@@ -1051,13 +1068,12 @@ class Phase2bTerminal:
         """Validate an assembled body against the exact ``common ∪ state`` roster.
 
         Every common identity field must be present (a missing one means the
-        injection failed). For states with a FIXED state roster (``INVALID`` /
-        ``ABORTED_AFTER_SEAL``) the body must carry exactly ``common ∪ state`` — an
-        unknown OR missing state field raises. ``COMPLETE`` is OPEN at this
-        milestone (its report payload is spread and not yet a fixed roster), so only
-        the common-present check applies. The self-excluding
-        ``terminal_payload_checksum`` is inserted AFTER this check and is not part
-        of the validated roster.
+        injection failed). Every terminal state now has a FIXED state roster
+        (``COMPLETE`` / ``INVALID`` share :data:`_COMPLETE_INVALID_STATE_FIELDS`;
+        ``ABORTED_AFTER_SEAL`` its own), so the body must carry exactly
+        ``common ∪ state`` — an unknown OR missing state field raises. The
+        self-excluding ``terminal_payload_checksum`` is inserted AFTER this check and
+        is not part of the validated roster.
 
         Raises
         ------

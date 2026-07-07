@@ -56,6 +56,7 @@ from alive.provenance import (
     RunLedger,
     sha256_json,
 )
+from tests.alive.compose._terminal_bodies import minimal_v2_terminal_body
 
 # ---------------------------------------------------------------------------
 # Synthetic outcome-store fixtures (mirrors test_outcome_store.py)
@@ -475,7 +476,8 @@ def test_happy_path_claim_confirm_materialize_complete(tmp_path: Path) -> None:
     assert term.state is TerminalState.ACCESS_CLAIMED
     with term.protect(stage="scoring"):
         release = store.materialize_claimed(claim)
-        term.complete({"verdict": "X", "n_pairs": len(release)})
+        assert len(release) > 0  # the union of both sealed roles was materialised
+        term.complete(minimal_v2_terminal_body())
     assert term.state is TerminalState.COMPLETE
     assert store.sealed_access_count == 1
     assert _existing_terminal_artifacts(run_dir) == [run_dir / Phase2bTerminal.COMPLETE_ARTIFACT]
@@ -522,7 +524,7 @@ def test_process_restart_second_run_refuses(tmp_path: Path) -> None:
     claim = _open_seal(term_a, store_a, "run-1", union)
     with term_a.protect(stage="scoring"):
         store_a.materialize_claimed(claim)
-        term_a.complete({"ok": True})
+        term_a.complete(minimal_v2_terminal_body())
     assert store_a.sealed_access_count == 1
 
     # Fresh store + fresh terminal (new run dir) on the SAME audit path: the
