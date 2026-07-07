@@ -92,20 +92,23 @@ frozen bundle checksum, clean tree와 confirmation token을 재검증해야 한�
 
 ### 2.4 내구 artifact와 보고
 
-- pre-access snapshot 외에 terminal 전이가 반영된 **최종 ledger**를 원자적 write-once 파일로 내보내고
+- pre-access snapshot 외에 terminal 전이가 반영된 **최종 ledger**를 write-once 파일로 내보내고
   재독출 검증하는 구현이 필요하다. 현재 `Phase2bResult.ledger`는 프로세스 메모리 객체다.
-- terminal 보호 경계 안에서 결과를 잃지 않도록 registered aggregate summaries를 내구 저장한다.
+- terminal artifact를 권위 있는 recovery source로 삼아 registered aggregate summary와 final ledger를
+  파생하고, 두 파일과 terminal SHA를 결속한 단일 durable commit marker를 마지막에 원자적으로 설치한다.
+  Marker가 없으면 seal은 소비됐더라도 durable export는 미완료이며 recovery-only 경로로 복구한다.
   필수 항목은 per-method aggregate error, theta, simultaneous lower bounds, GI-explained secondary interval,
   sample counts, integrity clauses, audit/checksums다.
 - 현재 등록 추론은 pair-resampled **aggregate simultaneous bound**다. 등록되지 않은 “per-pair CI”를
   사후 생성하거나 verdict 근거로 사용하지 않는다.
 - seed-variability 계약을 명시적으로 해결한다. CLAUDE.md §10은 seed variability 보고를 요구하고,
-  stochastic learned comparator(`gears`, `cpa`, `l3_hypernetwork`)의 seed 민감도는 non-sealed
+  외부 seed로 재적합 가능한 stochastic learned comparator(`gears`, `cpa`)의 seed 민감도는 non-sealed
   development role에서 실제로 평가 가능하므로 이를 `gi_structure_recovery`처럼 `NOT_EVALUABLE`로 처리하지
   않는다. seed별 재적합으로 development-phase seed-variability 요약(comparator별 error spread)을 산출·보고하는
   구현이 **§2 release blocker**다. 이 분석은 non-sealed role에서만 수행하며 seal을 다시 열지 않는다.
-- deterministic component는 단일 실행으로 충분함을 명시한다. identifiable L1 headline operator와 `additive`,
-  `id_only` baseline은 구성상 seed-불변이고, 일회성 sealed open은 method별 단일 seed로 적합한다. 이 single-shot
+- deterministic component는 단일 실행으로 충분함을 명시한다. 현재 L1/L2/L3/ID-only와 `additive`,
+  `no_change`, `perturbation_mean`은 구성상 seed-불변이다(L3는 module-fixed seed). 일회성 sealed open은
+  method별 동결 prediction만 소비한다. 이 single-shot
   성격을 결과에 명시하되, stochastic comparator의 development seed-variability 보고를 대체하는 근거로 쓰지 않는다.
 - `gi_structure_recovery`는 현재 `NOT_EVALUABLE`이며 그대로 보고한다.
 
@@ -166,6 +169,22 @@ provenance_inputs = build_activation_provenance_inputs(
 builder가 생성한 digest/revision 및 `environment.python_version/platform/git_commit`이 upstream ledger와
 일치해야 한다. worker-specific resource/config digest도 §2 구현 후 provenance에 포함돼야 한다.
 
+**Activation evidence lineage 주의 (2026-07-06).** 현재 committed `real_norman_phi_rank_report.json`·
+`real_norman_detectable_effect_report.json`은 canonical `config_sha256=d8c65ac4…`, `activation=BLOCKED`,
+git `79b01e0`/`82a9c83`를 내장한 **pre-activation development snapshot**이다. 현재 active config의
+authoritative canonical digest는 `config_sha256 = sha256_json(raw) = a4700194…`
+(`load_compose_phase2_config`, config2.py:692)로 evidence값(`d8c65ac4…`)과 다르다 — activation flip
+(`d507a09`) 이후에도 config parsed 구조가 A2 task 5(`42d71ce`: gears/cpa에 `prediction_representation`·
+`approximation_bias_report_sha256` 추가)에서 바뀌어 canonical digest가 재차 이동했다. (raw file-bytes sha는
+canonical `config_sha256`과 다른 값이니 lineage 비교에는 쓰지 않는다.) `ActivationRecord`는 evidence 파일
+*bytes*를 recorded hash에 대조할 뿐 파일 내부 config_sha를 검사하지 않으므로(`config2.py`) old-config
+evidence로도 기계적으로는 통과하나, 그럴 경우 일회성 seal의 activation lineage가 pre-activation·pre-A2
+snapshot에 결속된다. 따라서 §2.5의 "config digest가 바뀌면 evidence 결속 재생성" 규칙은 **이미 발효**됐다:
+pod에서 real Norman data로 두 evidence를 현재 active config(`a4700194…`) 하에 **재생성**하고, 아직 null인
+requirement(config `power_status`, GEARS/CPA `environment_status`, GEARS `approximation_bias_report_sha256`)를
+실데이터로 확립해 모든 ActivationRecord requirement가 active run identity에 결속된 non-empty evidence hash를
+갖도록 한다. rank/power/bias는 어차피 pod-only Norman data가 필요하므로 재생성은 자연스러운 pod 단계다.
+
 ## 5. Phase-2a — seal closed
 
 1. production driver의 `preflight`를 실행하고 모든 digest, role count, pair alignment, response dimension,
@@ -202,18 +221,22 @@ production driver가 내부적으로 다음 순서를 강제해야 한다.
 
 1. activation evidence 파일과 clean SHA 재검증.
 2. `run_phase2b` preflight와 composite upstream gate.
-3. pre-access provenance subset을 `phase2b_pre_access_ledger.json`에 원자적 write-once 저장하고 재독출.
+3. pre-access provenance payload+checksum과 seed-variability artifact의 실제 file SHA를
+   `phase2b_pre_access_ledger.json`에 원자적 write-once 저장하고 재독출.
 4. `claim_access()` 후 double/single union을 한 번에 materialize.
 5. 두 regime을 분리 채점하고 double-unseen만 verdict에 사용.
 6. on-disk pre-access checksum, seal audit run/request checksum, result checksums 교차검증.
-7. 정확히 하나의 terminal artifact(`COMPLETE`, `INVALID`, `ABORTED_AFTER_SEAL`) 기록.
-8. §2.4의 최종 ledger와 registered summary artifact를 원자적 write-once로 저장·재독출.
+7. complete provenance payload를 내장하고 terminal SHA를 내부 provenance에서 제외한 비순환 구조로
+   정확히 하나의 terminal artifact(`COMPLETE`, `INVALID`, `ABORTED_AFTER_SEAL`) 기록.
+8. §2.4의 finalizer로 registered summary와 최종 ledger를 write-once 저장·재독출하고, terminal/summary/
+   ledger SHA를 결속한 durable commit marker를 마지막에 설치·검증한다.
 
 `INVALID`나 `ABORTED_AFTER_SEAL`도 seal 소비 결과다. 수정 후 재실행하지 않는다.
 
 ## 8. 결과 회수와 보고
 
-- terminal, pre/final ledger, bundle/method lock, provenance, audit, registered summaries와 모든 manifest를
+- terminal, pre/final ledger, durable commit marker, bundle/method lock, provenance, audit, registered
+  summaries와 모든 manifest를
   object storage에 업로드한다.
 - 각 파일의 SHA-256 manifest를 별도로 저장하고 fresh download로 검증한다.
 - 보고에는 primary 방향, theta와 simultaneous bounds, registered secondary, sample counts,
