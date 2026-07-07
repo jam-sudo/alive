@@ -54,16 +54,22 @@ from alive.compose.provenance2 import (
 )
 from alive.compose.response import fit_response_space
 from alive.compose.scoring2 import RegimeScore
+from alive.compose.seed_variability import (
+    DEVELOPMENT_SEED_VARIABILITY_FILENAME,
+    DEVELOPMENT_SEED_VARIABILITY_LEDGER_ARTIFACT,
+)
 from alive.compose.split import build_split_manifest
 from alive.compose.terminal import Phase2bTerminal, TerminalState
 from alive.compose.verdict2 import MethodAxis, SealedAxis
-from alive.provenance import EnvironmentInfo, RunLedger, sha256_json
+from alive.provenance import EnvironmentInfo, RunLedger, sha256_file, sha256_json
 
 from alive.compose.phase2b import (  # isort: skip
     ActivationProvenanceInputs,
     Phase2bError,
     Phase2bResult,
     _build_provenance,
+    _preaccess_seed_variability,
+    _run_phase2b_core,
     build_activation_provenance_inputs,
     run_phase2b,
     run_phase2b_fixture,
@@ -1151,3 +1157,111 @@ def test_build_activation_provenance_inputs_hashes_real_files(tmp_path):
     assert inputs.cpa_revision == "0.7.2"
     assert len(inputs.dependency_lock_sha256) == 64
     assert inputs.git_commit == _environment().git_commit
+
+
+# ===========================================================================
+# D2 Task 6 — pre-access seed-variability binding wired into Phase-2b preflight
+# ===========================================================================
+
+
+def _scientific_response_artifact():
+    """A response artifact carrying the combined checksum the scientific path needs."""
+    from alive.compose.response import verify_response_artifact
+
+    space, control_mean = _response_space()
+    _, _, checksum = verify_response_artifact(space, control_mean)
+    return {"response_space": space, "control_mean": control_mean, "checksum": checksum}
+
+
+def test_fixture_path_binds_seed_variability_before_persist(tmp_path):
+    # The bounded fixture path is NOT a silent bypass: it writes the report ONCE
+    # and records its byte SHA into the write-once ledger BEFORE the pre-access
+    # snapshot, so the persisted snapshot carries the artifact.
+    kit = _make_run(tmp_path)
+    res = run_phase2b_fixture(**_fixture_kwargs(kit))
+
+    report_path = kit["run_dir"] / DEVELOPMENT_SEED_VARIABILITY_FILENAME
+    assert report_path.is_file()
+    recorded = res.ledger.artifact_sha(DEVELOPMENT_SEED_VARIABILITY_LEDGER_ARTIFACT)
+    assert recorded == sha256_file(report_path)
+    # recorded BEFORE persist_pre_access_ledger -> present in the durable snapshot.
+    snapshot = RunLedger.read(kit["run_dir"] / PRE_ACCESS_LEDGER_FILENAME)
+    assert snapshot.artifact_sha(DEVELOPMENT_SEED_VARIABILITY_LEDGER_ARTIFACT) == recorded
+    # the run still completes normally (one sealed access, COMPLETE terminal).
+    assert res.sealed_access_count == 1
+    assert res.terminal_state == TerminalState.COMPLETE
+
+
+def test_preaccess_fixture_binds_bounded_report(tmp_path):
+    kit = _make_run(tmp_path)
+    _preaccess_seed_variability(
+        run_dir=kit["run_dir"],
+        ledger=kit["ledger"],
+        run_id=kit["bundle"].run_id,
+        response_space_checksum=kit["bundle"].response_space_checksum,
+        config=kit["cfg"],
+        fixture_execution=True,
+        seed_variability=None,
+    )
+    assert (kit["run_dir"] / DEVELOPMENT_SEED_VARIABILITY_FILENAME).is_file()
+    assert kit["ledger"].artifact_sha(DEVELOPMENT_SEED_VARIABILITY_LEDGER_ARTIFACT)
+
+
+def test_preaccess_scientific_requires_seed_variability_inputs(tmp_path):
+    # The scientific branch cannot be silently bypassed: with no seed-variability
+    # inputs it FAILS CLOSED (before any seal access).
+    kit = _make_run(tmp_path)
+    with pytest.raises(Phase2bError, match="seed-variability"):
+        _preaccess_seed_variability(
+            run_dir=kit["run_dir"],
+            ledger=kit["ledger"],
+            run_id=kit["bundle"].run_id,
+            response_space_checksum=kit["bundle"].response_space_checksum,
+            config=kit["cfg"],
+            fixture_execution=False,
+            seed_variability=None,
+        )
+
+
+def test_scientific_core_missing_seed_report_leaves_seal_closed(tmp_path):
+    # Drive _run_phase2b_core on the SCIENTIFIC path with no seed-variability
+    # inputs: the pre-access seed-variability gate raises BEFORE any seal access,
+    # so the seal stays CLOSED and NO terminal artifact is written.
+    kit = _make_run(tmp_path, fixture_store=True)
+    with pytest.raises(Phase2bError, match="seed-variability"):
+        _run_phase2b_core(
+            run_dir=kit["run_dir"],
+            outcome_store=kit["store"],
+            frozen_bundle=kit["bundle"],
+            pair_manifest=kit["manifest"],
+            response_artifact=_scientific_response_artifact(),
+            config=kit["cfg"],
+            ledger=kit["ledger"],
+            fixture_execution=False,
+            git_clean=True,
+            provenance_tamper=None,
+            provenance_inputs=None,
+            seed_variability=None,
+        )
+    assert kit["store"].sealed_access_count == 0
+    assert _terminal_artifacts(kit["run_dir"]) == []
+
+
+def test_run_phase2b_partial_seed_inputs_rejected(tmp_path):
+    # The scientific entry refuses a partial seed-variability input set (all four
+    # of oof_manifest_path/checksum + report_path/checksum, or none).
+    kit = _make_run(tmp_path, fixture_store=False)
+    with pytest.raises(Phase2bError, match="together"):
+        run_phase2b(
+            run_dir=kit["run_dir"],
+            outcome_store=kit["store"],
+            frozen_bundle=kit["bundle"],
+            pair_manifest=kit["manifest"],
+            response_artifact=kit["response_artifact"],
+            config=kit["cfg"],
+            ledger=kit["ledger"],
+            activation_record=_activation_record(kit["cfg"]),
+            git_is_clean=True,
+            oof_manifest_path=tmp_path / "oof.json",  # only one of four supplied
+        )
+    assert kit["store"].sealed_access_count == 0

@@ -34,6 +34,8 @@ from alive.compose.phase2a import (
 )
 from alive.compose.response import fit_response_space, verify_response_artifact
 from alive.compose.seed_variability import (
+    DEVELOPMENT_SEED_VARIABILITY_FILENAME,
+    DEVELOPMENT_SEED_VARIABILITY_LEDGER_ARTIFACT,
     CoverageReport,
     FoldExecutionError,
     FoldExecutionRecord,
@@ -43,18 +45,26 @@ from alive.compose.seed_variability import (
     SeedAssemblyError,
     SeedComparatorSummary,
     SeedVariabilityContractError,
+    SeedVariabilityPreflightError,
     SeedVariabilityReport,
     SeedVariabilityReportError,
     SeedVariabilityStatus,
     assemble_seed_scalar,
+    bind_development_seed_variability,
     build_fold_job,
     development_seed_variability,
     restrict_development_store,
     run_fold_job,
+    verify_seed_variability_for_preflight,
 )
 from alive.compose.select import (
     OOFFoldManifest,
     build_gene_disjoint_folds,
+)
+from alive.provenance import (
+    EnvironmentInfo,
+    RunLedger,
+    sha256_file,
 )
 
 _RAW = "raw-shared-d2"
@@ -1142,3 +1152,287 @@ def test_store_pair_misalignment_raises_whole_call(tmp_path):
     adapters = _adapters(_exact_truth_pred_fn(truth))
     with pytest.raises(SeedVariabilityContractError):
         _entry(fx, adapters, _config(), development_outcome_store=misaligned)
+
+
+# =========================================================================== #
+# D2 Task 6 — pre-access ledger binding + Phase-2b preflight verification
+# =========================================================================== #
+#
+# Deterministic stubs only: NO gears/cpa, NO seal. The bound report is written
+# ONCE as development_seed_variability.json; the verifier fails closed on any
+# absence / tamper / identity / roster / OOF / binding / byte-SHA mismatch.
+
+
+def _d2_env() -> EnvironmentInfo:
+    return EnvironmentInfo(
+        python_version="t",
+        platform="t",
+        git_commit="0" * 40,
+        lockfile_sha256="l",
+        registered_seeds=(11, 23, 37),
+    )
+
+
+def _d2_ledger(fx, cfg) -> RunLedger:
+    return RunLedger(
+        run_id=fx["inputs"].run_id, config_sha256=cfg.config_sha256, environment=_d2_env()
+    )
+
+
+def _complete_report(fx, cfg) -> SeedVariabilityReport:
+    truth = _delta_truth_by_pair(fx)
+    report = _entry(fx, _adapters(_exact_truth_pred_fn(truth)), cfg)
+    assert report.status is SeedVariabilityStatus.COMPLETE
+    return report
+
+
+def _run_dir(tmp_path: Path) -> Path:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    return run_dir
+
+
+def _verify_kwargs(fx, cfg, ledger, run_dir):
+    return dict(
+        report_path=Path(run_dir) / DEVELOPMENT_SEED_VARIABILITY_FILENAME,
+        run_dir=run_dir,
+        ledger=ledger,
+        expected_protocol=PROTOCOL,
+        expected_run_id=fx["inputs"].run_id,
+        expected_config_sha256=cfg.config_sha256,
+        expected_registered_seeds=(11, 23, 37),
+        oof_manifest=fx["manifest"],
+        expected_response_space_checksum=fx["inputs"].response_space_checksum,
+        expected_base_fit_role_sha256=fx["base_spec"].sha256,
+        expected_dev_store_checksum=fx["store"].content_checksum,
+    )
+
+
+def test_preflight_verify_passes_for_bound_complete_report(tmp_path):
+    fx = _fixture(tmp_path)
+    cfg = _config()
+    report = _complete_report(fx, cfg)
+    run_dir = _run_dir(tmp_path)
+    ledger = _d2_ledger(fx, cfg)
+
+    canonical, byte_sha = bind_development_seed_variability(
+        run_dir=run_dir, ledger=ledger, report=report
+    )
+    assert canonical == run_dir / DEVELOPMENT_SEED_VARIABILITY_FILENAME
+    assert canonical.is_file()
+    # recorded into the ledger under the canonical artifact name (before any persist).
+    assert ledger.artifact_sha(DEVELOPMENT_SEED_VARIABILITY_LEDGER_ARTIFACT) == byte_sha
+
+    verified = verify_seed_variability_for_preflight(**_verify_kwargs(fx, cfg, ledger, run_dir))
+    assert isinstance(verified, SeedVariabilityReport)
+    assert verified.report_checksum == report.report_checksum
+
+
+def test_bind_records_before_persist_and_is_write_once(tmp_path):
+    fx = _fixture(tmp_path)
+    cfg = _config()
+    report = _complete_report(fx, cfg)
+    run_dir = _run_dir(tmp_path)
+    ledger = _d2_ledger(fx, cfg)
+
+    _canonical, byte_sha = bind_development_seed_variability(
+        run_dir=run_dir, ledger=ledger, report=report
+    )
+    # the artifact is recorded into the ledger BEFORE any persist snapshot exists.
+    assert ledger.artifact_sha(DEVELOPMENT_SEED_VARIABILITY_LEDGER_ARTIFACT) == byte_sha
+    # a second write to the SAME run_dir (a re-write / post-persist mutation) fails closed.
+    with pytest.raises(SeedVariabilityReportError):
+        bind_development_seed_variability(run_dir=run_dir, ledger=ledger, report=report)
+
+
+def test_bind_byte_sha_mismatch_fails_closed(tmp_path):
+    fx = _fixture(tmp_path)
+    cfg = _config()
+    report = _complete_report(fx, cfg)
+    run_dir = _run_dir(tmp_path)
+    ledger = _d2_ledger(fx, cfg)
+    with pytest.raises(SeedVariabilityPreflightError):
+        bind_development_seed_variability(
+            run_dir=run_dir, ledger=ledger, report=report, expected_report_checksum="0" * 64
+        )
+
+
+def test_preflight_missing_file_fails_closed(tmp_path):
+    fx = _fixture(tmp_path)
+    cfg = _config()
+    run_dir = _run_dir(tmp_path)
+    ledger = _d2_ledger(fx, cfg)
+    ledger.record_artifact(DEVELOPMENT_SEED_VARIABILITY_LEDGER_ARTIFACT, "0" * 64)
+    with pytest.raises(SeedVariabilityPreflightError):
+        verify_seed_variability_for_preflight(**_verify_kwargs(fx, cfg, ledger, run_dir))
+
+
+def test_preflight_symlink_fails_closed(tmp_path):
+    fx = _fixture(tmp_path)
+    cfg = _config()
+    report = _complete_report(fx, cfg)
+    run_dir = _run_dir(tmp_path)
+    ledger = _d2_ledger(fx, cfg)
+    real = tmp_path / "real_report.json"
+    report.write_once(real)
+    link = run_dir / DEVELOPMENT_SEED_VARIABILITY_FILENAME
+    link.symlink_to(real)
+    ledger.record_artifact(DEVELOPMENT_SEED_VARIABILITY_LEDGER_ARTIFACT, sha256_file(real))
+    with pytest.raises(SeedVariabilityPreflightError):
+        verify_seed_variability_for_preflight(**_verify_kwargs(fx, cfg, ledger, run_dir))
+
+
+def test_preflight_non_direct_child_fails_closed(tmp_path):
+    fx = _fixture(tmp_path)
+    cfg = _config()
+    report = _complete_report(fx, cfg)
+    run_dir = _run_dir(tmp_path)
+    sub = run_dir / "sub"
+    sub.mkdir()
+    nested = sub / DEVELOPMENT_SEED_VARIABILITY_FILENAME
+    report.write_once(nested)
+    ledger = _d2_ledger(fx, cfg)
+    ledger.record_artifact(DEVELOPMENT_SEED_VARIABILITY_LEDGER_ARTIFACT, sha256_file(nested))
+    kwargs = _verify_kwargs(fx, cfg, ledger, run_dir)
+    kwargs["report_path"] = nested
+    with pytest.raises(SeedVariabilityPreflightError):
+        verify_seed_variability_for_preflight(**kwargs)
+
+
+def test_preflight_incomplete_status_fails_closed(tmp_path):
+    fx = _fixture(tmp_path)
+    cfg = _config()
+    truth = _delta_truth_by_pair(fx)
+
+    def _fail_23(payload, pair_ids, response_dim):
+        if _seed_from_payload(payload) == 23:
+            raise RuntimeError("boom")
+        return {p: np.asarray(truth[p], dtype=float) for p in pair_ids}
+
+    report = _entry(fx, _adapters(_fail_23), cfg)
+    assert report.status is SeedVariabilityStatus.INCOMPLETE
+    run_dir = _run_dir(tmp_path)
+    ledger = _d2_ledger(fx, cfg)
+    bind_development_seed_variability(run_dir=run_dir, ledger=ledger, report=report)
+    with pytest.raises(SeedVariabilityPreflightError):
+        verify_seed_variability_for_preflight(**_verify_kwargs(fx, cfg, ledger, run_dir))
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        {"expected_protocol": "OTHER-PROTOCOL"},
+        {"expected_run_id": "wrong-run-id"},
+        {"expected_config_sha256": "0" * 64},
+        {"expected_registered_seeds": (11, 23, 38)},
+        {"expected_method_roster": frozenset({"gears", "foo"})},
+    ],
+)
+def test_preflight_identity_or_roster_mismatch_fails_closed(tmp_path, override):
+    fx = _fixture(tmp_path)
+    cfg = _config()
+    report = _complete_report(fx, cfg)
+    run_dir = _run_dir(tmp_path)
+    ledger = _d2_ledger(fx, cfg)
+    bind_development_seed_variability(run_dir=run_dir, ledger=ledger, report=report)
+    kwargs = _verify_kwargs(fx, cfg, ledger, run_dir)
+    kwargs.update(override)
+    with pytest.raises(SeedVariabilityPreflightError):
+        verify_seed_variability_for_preflight(**kwargs)
+
+
+def test_preflight_oof_manifest_checksum_mismatch_fails_closed(tmp_path):
+    fx = _fixture(tmp_path)
+    cfg = _config()
+    report = _complete_report(fx, cfg)
+    run_dir = _run_dir(tmp_path)
+    ledger = _d2_ledger(fx, cfg)
+    bind_development_seed_variability(run_dir=run_dir, ledger=ledger, report=report)
+    kwargs = _verify_kwargs(fx, cfg, ledger, run_dir)
+    kwargs["oof_manifest"] = dataclasses.replace(fx["manifest"], manifest_checksum="0" * 64)
+    with pytest.raises(SeedVariabilityPreflightError):
+        verify_seed_variability_for_preflight(**kwargs)
+
+
+def test_preflight_covered_checksum_mismatch_fails_closed(tmp_path):
+    fx = _fixture(tmp_path)
+    cfg = _config()
+    report = _complete_report(fx, cfg)
+    run_dir = _run_dir(tmp_path)
+    ledger = _d2_ledger(fx, cfg)
+    bind_development_seed_variability(run_dir=run_dir, ledger=ledger, report=report)
+    m = fx["manifest"]
+    # keep the same manifest_checksum (so the OOF-checksum leg passes) but swap the
+    # covered / uncovered ID lists -> the covered/uncovered digest recompute differs.
+    swapped = dataclasses.replace(
+        m,
+        covered_pair_ids=m.uncovered_pair_ids,
+        uncovered_pair_ids=m.covered_pair_ids,
+        manifest_checksum=m.manifest_checksum,
+    )
+    kwargs = _verify_kwargs(fx, cfg, ledger, run_dir)
+    kwargs["oof_manifest"] = swapped
+    with pytest.raises(SeedVariabilityPreflightError):
+        verify_seed_variability_for_preflight(**kwargs)
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        {"expected_response_space_checksum": "wrong-response"},
+        {"expected_base_fit_role_sha256": "sha256:" + "0" * 64},
+        {"expected_dev_store_checksum": "0" * 64},
+    ],
+)
+def test_preflight_binding_mismatch_fails_closed(tmp_path, override):
+    fx = _fixture(tmp_path)
+    cfg = _config()
+    report = _complete_report(fx, cfg)
+    run_dir = _run_dir(tmp_path)
+    ledger = _d2_ledger(fx, cfg)
+    bind_development_seed_variability(run_dir=run_dir, ledger=ledger, report=report)
+    kwargs = _verify_kwargs(fx, cfg, ledger, run_dir)
+    kwargs.update(override)
+    with pytest.raises(SeedVariabilityPreflightError):
+        verify_seed_variability_for_preflight(**kwargs)
+
+
+def test_preflight_worker_lock_binding_mismatch_fails_closed(tmp_path):
+    fx = _fixture(tmp_path)
+    cfg = _config()
+    report = _complete_report(fx, cfg)
+    # a self-consistent report whose worker_locks no longer bind to the fold records.
+    tampered = dataclasses.replace(report, worker_locks=("deadbeef",))
+    run_dir = _run_dir(tmp_path)
+    ledger = _d2_ledger(fx, cfg)
+    bind_development_seed_variability(run_dir=run_dir, ledger=ledger, report=tampered)
+    with pytest.raises(SeedVariabilityPreflightError):
+        verify_seed_variability_for_preflight(**_verify_kwargs(fx, cfg, ledger, run_dir))
+
+
+def test_preflight_byte_sha_ne_ledger_entry_fails_closed(tmp_path):
+    fx = _fixture(tmp_path)
+    cfg = _config()
+    report = _complete_report(fx, cfg)
+    run_dir = _run_dir(tmp_path)
+    ledger = _d2_ledger(fx, cfg)
+    bind_development_seed_variability(run_dir=run_dir, ledger=ledger, report=report)
+    # a DIFFERENT ledger whose recorded entry does not match the bound file's bytes.
+    ledger2 = _d2_ledger(fx, cfg)
+    ledger2.record_artifact(DEVELOPMENT_SEED_VARIABILITY_LEDGER_ARTIFACT, "1" * 64)
+    kwargs = _verify_kwargs(fx, cfg, ledger2, run_dir)
+    with pytest.raises(SeedVariabilityPreflightError):
+        verify_seed_variability_for_preflight(**kwargs)
+
+
+def test_preflight_ledger_missing_entry_fails_closed(tmp_path):
+    fx = _fixture(tmp_path)
+    cfg = _config()
+    report = _complete_report(fx, cfg)
+    run_dir = _run_dir(tmp_path)
+    ledger = _d2_ledger(fx, cfg)
+    bind_development_seed_variability(run_dir=run_dir, ledger=ledger, report=report)
+    empty = _d2_ledger(fx, cfg)  # no development_seed_variability entry recorded
+    kwargs = _verify_kwargs(fx, cfg, empty, run_dir)
+    with pytest.raises(SeedVariabilityPreflightError):
+        verify_seed_variability_for_preflight(**kwargs)

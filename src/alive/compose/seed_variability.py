@@ -63,7 +63,13 @@ from alive.compose.phase2a import (
 from alive.compose.provenance2 import PROTOCOL
 from alive.compose.select import OOFFoldManifest
 from alive.io import atomic_write_once
-from alive.provenance import sha256_json
+from alive.provenance import (
+    DuplicateArtifactError,
+    LedgerError,
+    RunLedger,
+    sha256_file,
+    sha256_json,
+)
 
 _CONTROL_TOKEN = "control"
 _COMBO_SEP = "_"
@@ -1691,4 +1697,401 @@ def development_seed_variability(
         summaries=tuple(summaries),
         fold_execution_records=tuple(all_records),
         status=status,
+    )
+
+
+# =========================================================================== #
+# D2 Task 6 — pre-access ledger binding + Phase-2b preflight verification
+# =========================================================================== #
+#
+# The development seed-variability report is a DEVELOPMENT-role, outcome-free
+# artifact. Task 6 (a) writes it ONCE as ``development_seed_variability.json`` and
+# binds its byte SHA into the write-once pre-access ledger, and (b) verifies that
+# bound report in the SCIENTIFIC Phase-2b preflight, failing closed (seal stays
+# CLOSED) if it is absent / tampered / INCOMPLETE / misbound. This is PRE-ACCESS
+# only: it runs BEFORE any seal access and opens NO seal.
+
+#: Exact filename the report is written under inside the run directory.
+DEVELOPMENT_SEED_VARIABILITY_FILENAME = "development_seed_variability.json"
+
+#: Canonical write-once ledger artifact name the report's byte SHA is recorded under.
+DEVELOPMENT_SEED_VARIABILITY_LEDGER_ARTIFACT = "development_seed_variability"
+
+
+class SeedVariabilityPreflightError(ValueError):
+    """Raised on any pre-access seed-variability binding / verification failure.
+
+    Every path fails closed (the seal stays CLOSED): a missing / symlinked /
+    non-direct-child report file, a tampered or non-``COMPLETE`` report, a
+    protocol / run / config identity mismatch, a method- or seed-roster mismatch,
+    an OOF-manifest or covered/uncovered checksum mismatch, a response /
+    fit-role / dev-store / worker-lock / fold-execution binding mismatch, or a
+    report byte SHA that does not equal the pre-access ledger entry. It opens NO
+    seal — it is a PRE-ACCESS failure, never an ``ABORTED_AFTER_SEAL``.
+    """
+
+
+def bind_development_seed_variability(
+    *,
+    run_dir: str | Path,
+    ledger: RunLedger,
+    report: SeedVariabilityReport,
+    expected_report_checksum: str | None = None,
+    ledger_artifact_name: str = DEVELOPMENT_SEED_VARIABILITY_LEDGER_ARTIFACT,
+) -> tuple[Path, str]:
+    """Write the report once and record its byte SHA into the pre-access ledger.
+
+    Serialises ``report`` as the exact ``development_seed_variability.json`` file
+    (a direct child of ``run_dir``) via the write-once path, computes the file's
+    byte SHA, and records it into ``ledger`` under ``ledger_artifact_name`` BEFORE
+    any :func:`~alive.compose.provenance2.persist_pre_access_ledger` snapshot. It
+    NEVER overwrites an existing report and NEVER mutates an already-persisted
+    snapshot (write-once, CLAUDE.md §11). It opens NO seal.
+
+    Parameters
+    ----------
+    run_dir : str or Path
+        The run directory the report is written into (as a direct child).
+    ledger : RunLedger
+        The in-memory pre-access ledger the byte SHA is recorded into.
+    report : SeedVariabilityReport
+        The verified development seed-variability report to bind.
+    expected_report_checksum : str or None, optional
+        When given, the written file's byte SHA MUST equal it (fail closed).
+    ledger_artifact_name : str, optional
+        The canonical write-once artifact name (default
+        :data:`DEVELOPMENT_SEED_VARIABILITY_LEDGER_ARTIFACT`).
+
+    Returns
+    -------
+    tuple of (Path, str)
+        The written report path and its byte SHA (the recorded ledger value).
+
+    Raises
+    ------
+    SeedVariabilityReportError
+        On a write-once collision (an existing report file).
+    SeedVariabilityPreflightError
+        On a byte-SHA mismatch against ``expected_report_checksum`` or a
+        write-once ledger conflict on ``ledger_artifact_name``.
+    """
+    path = Path(run_dir) / DEVELOPMENT_SEED_VARIABILITY_FILENAME
+    report.write_once(path)  # SeedVariabilityReportError on collision (write-once)
+    byte_sha = sha256_file(path)
+    if expected_report_checksum is not None and byte_sha != expected_report_checksum:
+        raise SeedVariabilityPreflightError(
+            "development seed-variability report byte SHA does not match the verified "
+            f"checksum: got {byte_sha!r}, expected {expected_report_checksum!r}"
+        )
+    try:
+        ledger.record_artifact(ledger_artifact_name, byte_sha)
+    except DuplicateArtifactError as exc:
+        raise SeedVariabilityPreflightError(
+            "write-once violation recording seed-variability artifact "
+            f"{ledger_artifact_name!r}: {exc}"
+        ) from exc
+    return path, byte_sha
+
+
+def _check_direct_child_regular_file(report_path: Path, run_dir: Path) -> None:
+    """Fail closed unless ``report_path`` is a regular direct-child file of ``run_dir``.
+
+    Rejects a symlink, a non-regular / missing path, and any path whose parent is
+    not the run directory (defends against a report smuggled in via a link or a
+    nested directory).
+    """
+    if report_path.is_symlink():
+        raise SeedVariabilityPreflightError(
+            f"seed-variability report {str(report_path)!r} is a symlink; a regular "
+            "direct-child file is required"
+        )
+    if not report_path.is_file():
+        raise SeedVariabilityPreflightError(
+            f"seed-variability report {str(report_path)!r} is not a regular file"
+        )
+    if report_path.parent.resolve() != run_dir.resolve():
+        raise SeedVariabilityPreflightError(
+            f"seed-variability report {str(report_path)!r} is not a direct child of the "
+            f"run directory {str(run_dir)!r}"
+        )
+
+
+def _load_bound_complete_report(
+    report_path: Path, run_dir: Path, ledger: RunLedger, ledger_artifact_name: str
+) -> SeedVariabilityReport:
+    """Shared pre-access checks: direct-child file, strict load, COMPLETE, byte SHA.
+
+    Verifies the report file is a regular direct-child of the run dir, reloads it
+    with the strict schema + embedded self-checksum verification, requires
+    ``COMPLETE`` status, and requires the file's byte SHA to equal the pre-access
+    ledger entry. Fails closed on every step.
+    """
+    _check_direct_child_regular_file(report_path, run_dir)
+    try:
+        report = SeedVariabilityReport.load(report_path)
+    except SeedVariabilityReportError as exc:
+        raise SeedVariabilityPreflightError(
+            f"seed-variability report failed strict load / self-checksum: {exc}"
+        ) from exc
+    if report.status is not SeedVariabilityStatus.COMPLETE:
+        raise SeedVariabilityPreflightError(
+            f"seed-variability report status is {report.status.value!r}, expected 'COMPLETE'"
+        )
+    byte_sha = sha256_file(report_path)
+    try:
+        recorded = ledger.artifact_sha(ledger_artifact_name)
+    except LedgerError as exc:
+        raise SeedVariabilityPreflightError(
+            f"pre-access ledger has no {ledger_artifact_name!r} entry: {exc}"
+        ) from exc
+    if byte_sha != recorded:
+        raise SeedVariabilityPreflightError(
+            f"seed-variability report byte SHA {byte_sha!r} != pre-access ledger entry {recorded!r}"
+        )
+    return report
+
+
+def verify_seed_variability_for_preflight(
+    *,
+    report_path: str | Path,
+    run_dir: str | Path,
+    ledger: RunLedger,
+    expected_protocol: str,
+    expected_run_id: str,
+    expected_config_sha256: str,
+    expected_registered_seeds: Sequence[int],
+    oof_manifest: OOFFoldManifest,
+    expected_method_roster: frozenset[str] = _SEED_LOOP_ROSTER,
+    expected_response_space_checksum: str | None = None,
+    expected_base_fit_role_sha256: str | None = None,
+    expected_dev_store_checksum: str | None = None,
+    ledger_artifact_name: str = DEVELOPMENT_SEED_VARIABILITY_LEDGER_ARTIFACT,
+) -> SeedVariabilityReport:
+    """Fully verify the bound development seed-variability report for Phase-2b preflight.
+
+    The SCIENTIFIC pre-access verifier. It fails closed (raising
+    :class:`SeedVariabilityPreflightError`, leaving the seal CLOSED) unless ALL of
+    the following hold:
+
+    * the report file is a regular DIRECT-CHILD file of ``run_dir`` (not a symlink);
+    * it reloads under the strict schema + embedded self-checksum;
+    * its status is ``COMPLETE``;
+    * its protocol / run id / config-SHA match the run;
+    * its method roster (``{method for summaries}``) equals
+      ``expected_method_roster`` (default ``{gears, cpa}``), the deterministic
+      single-shot roster is disjoint from it, and its registered-seed order equals
+      ``expected_registered_seeds`` (e.g. ``(11, 23, 37)``);
+    * its OOF-manifest checksum equals ``oof_manifest.manifest_checksum`` and its
+      covered / uncovered pair-ID checksums equal the manifest-derived digests;
+    * its response-space, base fit-role artifact and development-store content
+      bindings equal the trusted expected values (when supplied);
+    * its worker-lock set equals the distinct executed worker identities, its
+      fold-scoped fit-role artifact digests bind exactly to the executed folds,
+      and every fold record's ``(method, seed, fold)`` lies within the rosters and
+      the manifest's fold count (with a COMPLETE run executing every combination);
+    * the report file's byte SHA equals the ``development_seed_variability`` entry
+      recorded in the pre-access ledger.
+
+    It opens NO seal and reads NO sealed outcome.
+
+    Parameters
+    ----------
+    report_path : str or Path
+        The bound report path (``<run_dir>/development_seed_variability.json``).
+    run_dir : str or Path
+        The run directory the report must be a direct child of.
+    ledger : RunLedger
+        The pre-access ledger carrying the report's byte SHA.
+    expected_protocol, expected_run_id, expected_config_sha256 : str
+        The trusted run identity (protocol / composite run id / config digest).
+    expected_registered_seeds : sequence of int
+        The exact registered seed order (e.g. ``(11, 23, 37)``).
+    oof_manifest : OOFFoldManifest
+        The verified OOF fold manifest supplying the trusted OOF / coverage
+        digests and the fold count.
+    expected_method_roster : frozenset of str, optional
+        The exact refittable method roster (default ``{gears, cpa}``).
+    expected_response_space_checksum, expected_base_fit_role_sha256, \
+expected_dev_store_checksum : str or None, optional
+        Trusted binding values; when supplied each must match exactly.
+    ledger_artifact_name : str, optional
+        The pre-access ledger artifact name (default
+        :data:`DEVELOPMENT_SEED_VARIABILITY_LEDGER_ARTIFACT`).
+
+    Returns
+    -------
+    SeedVariabilityReport
+        The verified report.
+
+    Raises
+    ------
+    SeedVariabilityPreflightError
+        On any absence / tamper / identity / roster / OOF / binding / byte-SHA
+        mismatch — fail closed, seal CLOSED.
+    """
+    report_path = Path(report_path)
+    run_dir = Path(run_dir)
+    report = _load_bound_complete_report(report_path, run_dir, ledger, ledger_artifact_name)
+
+    # -- run identity ------------------------------------------------------- #
+    if report.protocol != expected_protocol:
+        raise SeedVariabilityPreflightError(
+            f"report protocol {report.protocol!r} != expected {expected_protocol!r}"
+        )
+    if report.run_id != expected_run_id:
+        raise SeedVariabilityPreflightError(
+            f"report run id {report.run_id!r} != expected {expected_run_id!r}"
+        )
+    if report.config_sha256 != expected_config_sha256:
+        raise SeedVariabilityPreflightError(
+            f"report config SHA {report.config_sha256!r} != expected {expected_config_sha256!r}"
+        )
+
+    # -- rosters ------------------------------------------------------------ #
+    seed_roster = tuple(int(s) for s in expected_registered_seeds)
+    if report.registered_seeds != seed_roster:
+        raise SeedVariabilityPreflightError(
+            f"report registered seeds {report.registered_seeds!r} != expected {seed_roster!r}"
+        )
+    roster = set(expected_method_roster)
+    method_roster = {s.method for s in report.summaries}
+    if method_roster != roster:
+        raise SeedVariabilityPreflightError(
+            f"report method roster {sorted(method_roster)} != expected {sorted(roster)}"
+        )
+    if not set(report.deterministic_roster).isdisjoint(roster):
+        raise SeedVariabilityPreflightError(
+            "report deterministic (single-shot) roster overlaps the refittable seed-loop roster"
+        )
+
+    # -- OOF manifest + coverage checksums ---------------------------------- #
+    if report.oof_manifest_checksum != oof_manifest.manifest_checksum:
+        raise SeedVariabilityPreflightError(
+            f"report OOF-manifest checksum {report.oof_manifest_checksum!r} != expected "
+            f"{oof_manifest.manifest_checksum!r}"
+        )
+    covered_checksum = sha256_json([list(p) for p in oof_manifest.covered_pair_ids])
+    uncovered_checksum = sha256_json([list(p) for p in oof_manifest.uncovered_pair_ids])
+    if report.coverage.covered_pair_ids_checksum != covered_checksum:
+        raise SeedVariabilityPreflightError("report covered pair-ID checksum mismatch")
+    if report.coverage.uncovered_pair_ids_checksum != uncovered_checksum:
+        raise SeedVariabilityPreflightError("report uncovered pair-ID checksum mismatch")
+
+    # -- response / fit-role / dev-store bindings (exact when trusted given) - #
+    if (
+        expected_response_space_checksum is not None
+        and report.response_space_checksum != expected_response_space_checksum
+    ):
+        raise SeedVariabilityPreflightError("report response-space checksum mismatch")
+    if (
+        expected_base_fit_role_sha256 is not None
+        and report.base_fit_role_artifact_sha256 != expected_base_fit_role_sha256
+    ):
+        raise SeedVariabilityPreflightError("report base fit-role artifact SHA mismatch")
+    if (
+        expected_dev_store_checksum is not None
+        and report.dev_store_content_checksum != expected_dev_store_checksum
+    ):
+        raise SeedVariabilityPreflightError("report development-store content checksum mismatch")
+
+    # -- worker-lock + fold-execution internal bindings --------------------- #
+    n_folds = int(oof_manifest.n_folds)
+    seed_set = set(seed_roster)
+    for rec in report.fold_execution_records:
+        if rec.method not in roster:
+            raise SeedVariabilityPreflightError(
+                f"fold execution record method {rec.method!r} is not in the roster"
+            )
+        if int(rec.seed) not in seed_set:
+            raise SeedVariabilityPreflightError(
+                f"fold execution record seed {rec.seed!r} is not in the seed roster"
+            )
+        if not (0 <= int(rec.fold) < n_folds):
+            raise SeedVariabilityPreflightError(
+                f"fold execution record fold {rec.fold!r} out of range for {n_folds} folds"
+            )
+    expected_locks = tuple(
+        sorted({r.worker_identity_sha256 for r in report.fold_execution_records})
+    )
+    if report.worker_locks != expected_locks:
+        raise SeedVariabilityPreflightError(
+            "report worker locks do not bind to the distinct executed worker identities"
+        )
+    fold_shas = sorted(r.fold_fit_role_artifact_sha256 for r in report.fold_execution_records)
+    if sorted(report.fold_fit_role_artifact_sha256s) != fold_shas:
+        raise SeedVariabilityPreflightError(
+            "report fold-scoped fit-role artifact digests do not bind to the executed folds"
+        )
+    if len(report.fold_execution_records) != len(roster) * len(seed_roster) * n_folds:
+        raise SeedVariabilityPreflightError(
+            "a COMPLETE report must execute every (method, seed, fold) combination; "
+            f"got {len(report.fold_execution_records)} records, expected "
+            f"{len(roster) * len(seed_roster) * n_folds}"
+        )
+    return report
+
+
+def verify_seed_variability_binding_bounded(
+    *,
+    report_path: str | Path,
+    run_dir: str | Path,
+    ledger: RunLedger,
+    ledger_artifact_name: str = DEVELOPMENT_SEED_VARIABILITY_LEDGER_ARTIFACT,
+) -> SeedVariabilityReport:
+    """Bounded pre-access check for the SYNTHETIC-fixture Phase-2b path.
+
+    Verifies the report is a regular direct-child file, reloads + self-checksums
+    it, requires ``COMPLETE`` status, and requires its byte SHA to equal the
+    pre-access ledger entry. It does NOT run the full scientific identity / roster
+    / OOF / binding cross-checks (the bounded fixture carries no OOF manifest or
+    development-store provenance). It exists so the fixture path never SILENTLY
+    skips the seed-variability step; it opens NO seal.
+    """
+    return _load_bound_complete_report(
+        Path(report_path), Path(run_dir), ledger, ledger_artifact_name
+    )
+
+
+def build_bounded_fixture_seed_variability_report(
+    *,
+    run_id: str,
+    protocol: str,
+    config_sha256: str,
+    registered_seeds: Sequence[int],
+    response_space_checksum: str,
+) -> SeedVariabilityReport:
+    """Build a minimal, bounded ``COMPLETE`` report for the SYNTHETIC-fixture path.
+
+    Carries no fold execution (empty rosters / records); it exists so the bounded
+    fixture Phase-2b path still BINDS + bounded-verifies a seed-variability report
+    rather than silently skipping the step. It is NOT scientific evidence and is
+    never produced on the scientific path.
+    """
+    empty_coverage = CoverageReport(
+        total_pairs=0,
+        covered_count=0,
+        uncovered_count=0,
+        covered_fraction=0.0,
+        uncovered_fraction=0.0,
+        covered_pair_ids_checksum=sha256_json([]),
+        uncovered_pair_ids_checksum=sha256_json([]),
+        uncovered_tolerance=1.0,
+    )
+    return SeedVariabilityReport(
+        schema=_SEED_VARIABILITY_REPORT_SCHEMA,
+        protocol=str(protocol),
+        run_id=str(run_id),
+        config_sha256=str(config_sha256),
+        registered_seeds=tuple(int(s) for s in registered_seeds),
+        deterministic_roster=(),
+        oof_manifest_checksum=sha256_json({"bounded_fixture": str(run_id)}),
+        coverage=empty_coverage,
+        response_space_checksum=str(response_space_checksum),
+        base_fit_role_artifact_sha256="sha256:" + "0" * 64,
+        fold_fit_role_artifact_sha256s=(),
+        dev_store_content_checksum="0" * 64,
+        worker_locks=(),
+        summaries=(),
+        fold_execution_records=(),
+        status=SeedVariabilityStatus.COMPLETE,
     )

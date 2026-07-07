@@ -75,6 +75,15 @@ from alive.compose.provenance2 import (
 )
 from alive.compose.response import ResponseSpace, verify_response_artifact
 from alive.compose.scoring2 import RegimeScore, score_regime
+from alive.compose.seed_variability import (
+    SeedVariabilityReport,
+    SeedVariabilityReportError,
+    bind_development_seed_variability,
+    build_bounded_fixture_seed_variability_report,
+    verify_seed_variability_binding_bounded,
+    verify_seed_variability_for_preflight,
+)
+from alive.compose.select import OOFFoldManifest, OOFFoldManifestError
 from alive.compose.split import verify_split_manifest
 from alive.compose.terminal import Phase2bTerminal, TerminalState
 from alive.compose.verdict2 import (
@@ -582,6 +591,10 @@ def run_phase2b(
     activation_record: ActivationRecord | None,
     git_is_clean: bool | None = None,
     provenance_inputs: ActivationProvenanceInputs | None = None,
+    oof_manifest_path: str | Path | None = None,
+    oof_manifest_checksum: str | None = None,
+    seed_variability_report_path: str | Path | None = None,
+    seed_variability_report_checksum: str | None = None,
 ) -> Phase2bResult:
     """Run the SCIENTIFIC Phase-2b sealed evaluation after activation.
 
@@ -616,6 +629,15 @@ def run_phase2b(
     provenance_inputs : ActivationProvenanceInputs or None, optional
         The activated run's evidence-sourced provenance digests; required to
         populate the scientific provenance on the sealed run.
+    oof_manifest_path, oof_manifest_checksum : str, Path or None, optional
+        The verified OOF fold manifest path and its self-excluding checksum.
+        Required together with the seed-variability report on the scientific
+        path (all four provided, or none).
+    seed_variability_report_path, seed_variability_report_checksum : str, Path \
+or None, optional
+        The development seed-variability report path and its verified byte SHA.
+        The outcome-free pre-access gate binds + verifies this before any seal
+        access; its absence fails closed on the scientific path.
 
     Returns
     -------
@@ -626,7 +648,28 @@ def run_phase2b(
     ------
     alive.compose.config2.ScientificModeError
         If scientific mode is requested but not permitted (the blocked config).
+    Phase2bError
+        If the seed-variability / OOF-manifest inputs are supplied incompletely.
     """
+    provided = (
+        oof_manifest_path,
+        oof_manifest_checksum,
+        seed_variability_report_path,
+        seed_variability_report_checksum,
+    )
+    seed_variability: SeedVariabilityPreflightInputs | None = None
+    if any(v is not None for v in provided):
+        if any(v is None for v in provided):
+            raise Phase2bError(
+                "run_phase2b requires oof_manifest_path/checksum AND "
+                "seed_variability_report_path/checksum together (all four), or none"
+            )
+        seed_variability = SeedVariabilityPreflightInputs(
+            oof_manifest_path=oof_manifest_path,
+            oof_manifest_checksum=oof_manifest_checksum,
+            report_source_path=seed_variability_report_path,
+            report_checksum=seed_variability_report_checksum,
+        )
     assert_scientific_mode_allowed(
         config,
         fixture_mode=False,
@@ -650,6 +693,7 @@ def run_phase2b(
         git_clean=bool(git_is_clean),
         provenance_tamper=None,
         provenance_inputs=provenance_inputs,
+        seed_variability=seed_variability,
     )
 
 
@@ -710,6 +754,7 @@ def run_phase2b_fixture(
         git_clean=True,
         provenance_tamper=_tamper_provenance_after_register,
         provenance_inputs=None,
+        seed_variability=None,
     )
 
 
@@ -736,6 +781,117 @@ def _assert_fixture_payload(bundle: FrozenPredictionBundle) -> None:
         raise Phase2bError("fixture payload exceeds the synthetic/tiny-fixture safety limits")
 
 
+@dataclass(frozen=True)
+class SeedVariabilityPreflightInputs:
+    """Verified OOF-manifest + development seed-variability report handles (D2 Task 6).
+
+    Threaded EXPLICITLY into the SCIENTIFIC :func:`run_phase2b` so the outcome-free
+    pre-access gate can BIND the report into the write-once ledger and VERIFY it
+    BEFORE any seal access. Carries paths + verified checksums only — never an
+    outcome. The bounded synthetic :func:`run_phase2b_fixture` builds its own
+    bounded report and never receives this.
+
+    Attributes
+    ----------
+    oof_manifest_path : str or Path
+        Path to the verified single-call OOF fold manifest JSON.
+    oof_manifest_checksum : str
+        The manifest's verified self-excluding checksum (cross-checked on load).
+    report_source_path : str or Path
+        Path to the development seed-variability report produced by
+        :func:`alive.compose.seed_variability.development_seed_variability`.
+    report_checksum : str
+        The verified byte SHA the bound canonical report must reproduce.
+    """
+
+    oof_manifest_path: str | Path
+    oof_manifest_checksum: str
+    report_source_path: str | Path
+    report_checksum: str
+
+
+def _preaccess_seed_variability(
+    *,
+    run_dir: str | Path,
+    ledger: RunLedger,
+    run_id: str,
+    response_space_checksum: str,
+    config: ComposePhase2Config,
+    fixture_execution: bool,
+    seed_variability: SeedVariabilityPreflightInputs | None,
+) -> None:
+    """Bind + verify the development seed-variability report BEFORE any seal access.
+
+    Writes ``development_seed_variability.json`` into ``run_dir`` and records its
+    byte SHA into the write-once ``ledger`` (BEFORE any pre-access snapshot), then
+    verifies it. On the SCIENTIFIC path (``fixture_execution=False``) the report is
+    REQUIRED — its absence fails closed (seal CLOSED) — and the FULL scientific
+    verifier runs; there is no branch that silently bypasses it. The bounded
+    synthetic fixture path builds a bounded report and runs the bounded check, so
+    it never silently skips the step either. Opens NO seal.
+
+    Raises
+    ------
+    Phase2bError
+        On a missing scientific input or an OOF-manifest load / checksum mismatch.
+    SeedVariabilityReportError, SeedVariabilityPreflightError
+        On a write-once collision, a byte-SHA / ledger conflict, or any
+        verification failure (all PRE-ACCESS; the seal stays CLOSED).
+    """
+    if fixture_execution:
+        report = build_bounded_fixture_seed_variability_report(
+            run_id=run_id,
+            protocol=config.protocol,
+            config_sha256=config.config_sha256,
+            registered_seeds=tuple(config.registered_seeds),
+            response_space_checksum=response_space_checksum,
+        )
+        path, _sha = bind_development_seed_variability(
+            run_dir=run_dir, ledger=ledger, report=report
+        )
+        verify_seed_variability_binding_bounded(report_path=path, run_dir=run_dir, ledger=ledger)
+        return
+
+    if seed_variability is None:
+        raise Phase2bError(
+            "scientific Phase2b requires the verified development seed-variability report and "
+            "OOF fold manifest (path + checksum); refusing to open the seal without the "
+            "pre-access artifact"
+        )
+    try:
+        oof_manifest = OOFFoldManifest.load(seed_variability.oof_manifest_path)
+    except OOFFoldManifestError as exc:
+        raise Phase2bError(f"failed to load the OOF fold manifest: {exc}") from exc
+    if oof_manifest.manifest_checksum != seed_variability.oof_manifest_checksum:
+        raise Phase2bError(
+            "OOF fold manifest checksum does not match the verified value: "
+            f"{oof_manifest.manifest_checksum!r} != {seed_variability.oof_manifest_checksum!r}"
+        )
+    try:
+        report = SeedVariabilityReport.load(seed_variability.report_source_path)
+    except SeedVariabilityReportError as exc:
+        raise Phase2bError(
+            f"failed to load the development seed-variability report: {exc}"
+        ) from exc
+    path, _sha = bind_development_seed_variability(
+        run_dir=run_dir,
+        ledger=ledger,
+        report=report,
+        expected_report_checksum=seed_variability.report_checksum,
+    )
+    verify_seed_variability_for_preflight(
+        report_path=path,
+        run_dir=run_dir,
+        ledger=ledger,
+        expected_protocol=config.protocol,
+        expected_run_id=run_id,
+        expected_config_sha256=config.config_sha256,
+        expected_registered_seeds=tuple(config.registered_seeds),
+        oof_manifest=oof_manifest,
+        expected_response_space_checksum=response_space_checksum,
+    )
+
+
 # --------------------------------------------------------------------------- #
 # shared core — the 12-step sealed-evaluation flow
 # --------------------------------------------------------------------------- #
@@ -754,6 +910,7 @@ def _run_phase2b_core(
     git_clean: bool,
     provenance_tamper: Phase2bProvenance | None,
     provenance_inputs: ActivationProvenanceInputs | None,
+    seed_variability: SeedVariabilityPreflightInputs | None,
 ) -> Phase2bResult:
     """The shared 12-step sealed-evaluation flow (after the public boundary).
 
@@ -787,6 +944,23 @@ def _run_phase2b_core(
     response_space, control_mean, response_artifact_checksum = _resolve_response_artifact(
         response_artifact,
         require_checksum=not fixture_execution,
+    )
+
+    # --- Step 2 (pre-access, outcome-free): bind + verify the development ------
+    # seed-variability report BEFORE any seal access. On the scientific path the
+    # report is REQUIRED (a missing / tampered / INCOMPLETE / misbound report
+    # fails closed here); the fixture path binds + bounded-verifies its own
+    # bounded report. The byte SHA is recorded into the write-once ledger BEFORE
+    # persist_pre_access_ledger below. The seal is untouched; any failure keeps
+    # access_count==0 and leaves NO terminal artifact.
+    _preaccess_seed_variability(
+        run_dir=run_dir,
+        ledger=ledger,
+        run_id=frozen_bundle.run_id,
+        response_space_checksum=frozen_bundle.response_space_checksum,
+        config=config,
+        fixture_execution=fixture_execution,
+        seed_variability=seed_variability,
     )
 
     # --- Step 2 (pre-access, outcome-free): preflight + composite gate. --------
