@@ -32,6 +32,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from alive.compose.outcome_store import ComposeOutcomeStore, ComposeSealingError
+from alive.compose.split import build_split_manifest
 from alive.compose.terminal import (
     Phase2bTerminal,
     TerminalError,
@@ -861,3 +863,158 @@ def test_clean_silent_return_raises_terminal_error_when_abort_write_fails(tmp_pa
             pass  # silent return, no terminal written
 
     assert _last_resort_markers(run_dir), "best-effort last-resort marker not written"
+
+
+# ---------------------------------------------------------------------------
+# ABORTED_AFTER_SEAL over the durable SPLIT-STORE boundary (D1 Task 4).
+#
+# These exercise the real seal-open path — the Task-0 durable split store
+# (`claim_sealed_access` then `confirm_durable_access`), NOT the deprecated
+# in-memory `claim_access()`. They pin the two sides of the count boundary:
+#   * a post-claim abort writes an ABORTED_AFTER_SEAL terminal carrying
+#     `registered_results_status="NOT_AVAILABLE_DUE_TO_ABORT"`, the v2 common
+#     roster, `sealed_access_count == 1` and the exact durable audit reference;
+#   * a PRE-audit failure (before the durable claim writes) leaves count 0 and
+#     writes NO ABORTED terminal — a pre-access failure is not an abort.
+# ---------------------------------------------------------------------------
+
+#: Eligible pairs whose seed/fraction populate BOTH sealed roles (mirrors the
+#: Phase-2b fixture universe).
+_SPLIT_ELIGIBLE_PAIRS: list[tuple[str, str]] = [
+    ("GENEA", "GENEB"),
+    ("GENEA", "GENEC"),
+    ("GENEB", "GENEC"),
+    ("GENEC", "GENED"),
+    ("GENED", "GENEE"),
+    ("GENEE", "GENEF"),
+    ("GENEA", "GENED"),
+    ("GENEB", "GENEF"),
+]
+_SPLIT_SEED = 7
+_SPLIT_CAL_FRACTION = 0.5
+_SPLIT_STORE_RUN_ID = "compose-terminal-run"
+_ROWS_PER_PAIR = 4
+
+
+class _XSource:
+    """Tiny AnnData-like source exposing only an ``.X`` matrix (row-sliceable)."""
+
+    def __init__(self, X: np.ndarray) -> None:
+        self.X = X
+
+
+def _split_manifest() -> dict:
+    """A deterministic split manifest with both sealed roles populated."""
+    return build_split_manifest(
+        _SPLIT_ELIGIBLE_PAIRS, seed=_SPLIT_SEED, calibration_fraction=_SPLIT_CAL_FRACTION
+    )
+
+
+def _exact_sealed_union(manifest: dict) -> list[tuple[str, str]]:
+    """The exact sealed union (double ∪ single) as canonical pair tuples."""
+    union: list[tuple[str, str]] = []
+    for role in ("sealed_double_unseen", "sealed_single_unseen"):
+        union.extend(tuple(p) for p in manifest["roles"][role])
+    return union
+
+
+def _build_split_store(audit_path: Path, manifest: dict) -> ComposeOutcomeStore:
+    """A durable ComposeOutcomeStore over a synthetic source (Task-0 split API)."""
+    all_pairs: list[tuple[str, str]] = []
+    for role in ("combo_calibration", "sealed_double_unseen", "sealed_single_unseen"):
+        all_pairs.extend(tuple(p) for p in manifest["roles"][role])
+    pair_index: dict[tuple[str, str], np.ndarray] = {}
+    cursor = 0
+    for pair in all_pairs:
+        pair_index[pair] = np.arange(cursor, cursor + _ROWS_PER_PAIR, dtype=np.int64)
+        cursor += _ROWS_PER_PAIR
+    source = _XSource(np.ones((cursor, 3), dtype=np.float64))
+    return ComposeOutcomeStore(
+        pair_index=pair_index, source=source, manifest=manifest, audit_path=audit_path
+    )
+
+
+def _terminal_over_audit(
+    tmp_path: Path, audit_path: Path, *, run_id: str = "deadbeefdeadbeef"
+) -> Phase2bTerminal:
+    """A terminal wired to the store's durable audit path with the v2 identity roster."""
+    run_dir = tmp_path / "run"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    return Phase2bTerminal(
+        run_dir,
+        ledger=_ledger(),
+        audit_path=audit_path,
+        protocol="COMPOSE-K562-v1",
+        run_id=run_id,
+        pre_access_ledger_sha256="c" * 64,
+        pre_access_provenance_checksum="d" * 64,
+    )
+
+
+def test_aborted_terminal_has_status_and_no_result(tmp_path: Path) -> None:
+    manifest = _split_manifest()
+    audit_path = tmp_path / "compose_audit.jsonl"
+    store = _build_split_store(audit_path, manifest)
+    term = _terminal_over_audit(tmp_path, audit_path)
+
+    # Real seal-open path: acquire -> attempt -> durable claim -> confirm.
+    term.acquire()
+    term.attempt_access()
+    claim = store.claim_sealed_access(_SPLIT_STORE_RUN_ID, _exact_sealed_union(manifest))
+    term.confirm_durable_access(claim.audit_reference)
+    assert term.state is TerminalState.ACCESS_CLAIMED
+
+    with pytest.raises(RuntimeError):
+        with term.protect(stage="scoring"):
+            raise RuntimeError("boom in scoring")
+
+    assert term.state is TerminalState.ABORTED_AFTER_SEAL
+    body = json.loads((term.run_dir / Phase2bTerminal.ABORTED_ARTIFACT).read_text())
+    assert body["terminal_state"] == "ABORTED_AFTER_SEAL"
+    assert body["sealed_access_count"] == 1
+    assert body["seal_audit_reference"] == claim.audit_reference
+    # The state audit_reference double-ref derives from the same durable reference.
+    assert body["audit_reference"] == claim.audit_reference
+    # The abort carries NO trustworthy registered result — only the status marker.
+    assert body["registered_results_status"] == "NOT_AVAILABLE_DUE_TO_ABORT"
+    # No COMPLETE/INVALID result roster leaks onto the abort path (spec §2.2).
+    assert "registered_summary" not in body
+    assert "final_result_checksum" not in body
+    # v2 schema + self-excluding checksum are present.
+    assert body["schema"] == "compose_phase2b_terminal_v2"
+    assert "terminal_payload_checksum" in body
+
+    # The ABORTED body checksum is canonicalizer-consistent (writer == verifier).
+    recomputed = sha256_json(
+        canonicalize_terminal_checksum_input(
+            {k: v for k, v in body.items() if k != "terminal_payload_checksum"}
+        )
+    )
+    assert recomputed == body["terminal_payload_checksum"]
+    assert term.ledger.verify_file(
+        Phase2bTerminal.ABORTED_ARTIFACT, term.run_dir / Phase2bTerminal.ABORTED_ARTIFACT
+    )
+
+
+def test_pre_audit_failure_writes_no_aborted_terminal(tmp_path: Path) -> None:
+    manifest = _split_manifest()
+    audit_path = tmp_path / "compose_audit.jsonl"
+    store = _build_split_store(audit_path, manifest)
+    term = _terminal_over_audit(tmp_path, audit_path)
+
+    term.acquire()
+    term.attempt_access()
+
+    # A PRE-audit validation failure: the request is NOT the exact sealed union, so
+    # claim_sealed_access raises BEFORE writing the durable audit record. The seal is
+    # never consumed — this is the count-0 side of the boundary, NOT an abort.
+    not_exact_union = _exact_sealed_union(manifest)[:-1]  # drop one -> not exact
+    with pytest.raises(ComposeSealingError):
+        store.claim_sealed_access(_SPLIT_STORE_RUN_ID, not_exact_union)
+
+    assert store.sealed_access_count == 0
+    # No ABORTED_AFTER_SEAL file (and no terminal artifact at all): the terminal
+    # never reached ACCESS_CLAIMED, so no terminal record is owed.
+    assert not (term.run_dir / Phase2bTerminal.ABORTED_ARTIFACT).exists()
+    assert _existing_terminal_artifacts(term.run_dir) == []
+    assert term.state is TerminalState.ACCESS_ATTEMPTED

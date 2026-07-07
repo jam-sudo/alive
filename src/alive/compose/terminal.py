@@ -443,7 +443,14 @@ _STATE_TERMINAL_FIELDS: dict[TerminalState, frozenset[str] | None] = {
     TerminalState.COMPLETE: _COMPLETE_INVALID_STATE_FIELDS,
     TerminalState.INVALID: _COMPLETE_INVALID_STATE_FIELDS,
     TerminalState.ABORTED_AFTER_SEAL: frozenset(
-        {"exception_class", "message", "stage", "preflight_checksums", "audit_reference"}
+        {
+            "exception_class",
+            "message",
+            "stage",
+            "preflight_checksums",
+            "audit_reference",
+            "registered_results_status",
+        }
     ),
 }
 
@@ -851,6 +858,10 @@ class Phase2bTerminal:
             "stage": stage,
             "preflight_checksums": checksums,
             "audit_reference": self._audit_reference,
+            # An abort re-raises with NO trustworthy result (spec §2.2): the seal is
+            # consumed but there is no registered evaluation to embed. This marker
+            # makes that explicit so a reader never mistakes an abort for a result.
+            "registered_results_status": "NOT_AVAILABLE_DUE_TO_ABORT",
         }
         # The body's checksum field is now guaranteed safe, so guard the (possibly
         # reduced) value rather than the original unsafe input.
