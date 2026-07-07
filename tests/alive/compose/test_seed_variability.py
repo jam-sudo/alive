@@ -34,13 +34,21 @@ from alive.compose.phase2a import (
 )
 from alive.compose.response import fit_response_space, verify_response_artifact
 from alive.compose.seed_variability import (
+    CoverageReport,
     FoldExecutionError,
+    FoldExecutionRecord,
     FoldExecutionResult,
     FoldJob,
     FoldJobError,
     SeedAssemblyError,
+    SeedComparatorSummary,
+    SeedVariabilityContractError,
+    SeedVariabilityReport,
+    SeedVariabilityReportError,
+    SeedVariabilityStatus,
     assemble_seed_scalar,
     build_fold_job,
+    development_seed_variability,
     restrict_development_store,
     run_fold_job,
 )
@@ -756,3 +764,292 @@ def test_valid_results_assemble_cleanly_before_corruption(tmp_path):
     )
     assert tuple(pred_by_pair) == fx["manifest"].covered_pair_ids
     assert scalar == pytest.approx(0.0)
+
+
+# =========================================================================== #
+# Task 5 — report containers + development_seed_variability orchestration entry
+# =========================================================================== #
+#
+# The seed loop refits ONLY {gears, cpa}; the deterministic single-shot roster is
+# RECORDED but never entered. Deterministic seam-compatible stub adapters are used
+# throughout (no gears/cpa import). Opens NO seal (development delta only).
+
+import dataclasses  # noqa: E402
+
+from alive.compose.config2 import load_compose_phase2_config  # noqa: E402
+from alive.compose.outcome_store import ComposeOutcomeStore  # noqa: E402
+from alive.compose.provenance2 import PROTOCOL  # noqa: E402
+
+_DETERMINISTIC = {
+    "l1_bilinear_identifiable",
+    "l2_saturation",
+    "l3_hypernetwork",
+    "id_only",
+    "additive",
+    "no_change",
+    "perturbation_mean",
+}
+
+
+def _config(**overrides):
+    """Real preregistered config, relaxed to match the synthetic fixture.
+
+    The fixture's ``inputs.uncovered_tolerance`` is ``1.0`` (its 3-fold/6-gene
+    layout leaves an 0.8 uncovered fraction), so the config's tolerance is relaxed
+    to ``1.0`` for the config↔inputs equality gate. Everything else (split_seed=11,
+    oof_folds=3, registered_seeds=(11, 23, 37)) already matches the fixture.
+    """
+    cfg = load_compose_phase2_config("configs/compose_k562_v1_phase2.yaml")
+    cfg = dataclasses.replace(cfg, uncovered_tolerance=1.0)
+    if overrides:
+        cfg = dataclasses.replace(cfg, **overrides)
+    return cfg
+
+
+def _seed_from_payload(payload) -> int:
+    return int(payload["seed"])
+
+
+def _adapters(pred_fn, *, cpa_pred_fn=None):
+    """A ``{gears, cpa}`` adapter roster wrapping spawnable stub backends."""
+    gears, _rg, _bg = _adapter(pred_fn, name="gears")
+    cpa, _rc, _bc = _adapter(cpa_pred_fn or pred_fn, name="cpa")
+    return {"gears": gears, "cpa": cpa}
+
+
+def _entry(fx, adapters, config, **overrides):
+    kwargs = dict(
+        inputs=fx["inputs"],
+        development_outcome_store=fx["store"],
+        oof_manifest=fx["manifest"],
+        baseline_adapters=adapters,
+        config=config,
+        response_artifact=fx["response_artifact"],
+        fit_role_spec=fx["base_spec"],
+        gene_order=fx["gene_order"],
+        raw_data_sha256=_RAW,
+    )
+    kwargs.update(overrides)
+    return development_seed_variability(**kwargs)
+
+
+# --------------------------------------------------------------------------- #
+# store-type gate: a ComposeOutcomeStore / object / dict / path raises BEFORE work
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize(
+    "bad_store",
+    [
+        ComposeOutcomeStore.__new__(ComposeOutcomeStore),  # the SEAL store, rejected
+        {"combo_calibration_eps": [], "combo_calibration_pair_ids": []},  # arbitrary dict
+        np.zeros((3, _P)),  # arbitrary array
+        "artifacts/dev_outcome_store.h5ad",  # a path
+        object(),  # arbitrary object
+    ],
+)
+def test_store_type_gate_rejects_non_development_store(tmp_path, bad_store):
+    fx = _fixture(tmp_path)
+    truth = _delta_truth_by_pair(fx)
+    adapters = _adapters(_exact_truth_pred_fn(truth))
+    with pytest.raises(SeedVariabilityContractError):
+        _entry(fx, adapters, _config(), development_outcome_store=bad_store)
+
+
+# --------------------------------------------------------------------------- #
+# all-seeds-success -> COMPLETE; roster / seed order recorded exactly
+# --------------------------------------------------------------------------- #
+def test_all_seeds_success_is_complete(tmp_path):
+    fx = _fixture(tmp_path)
+    truth = _delta_truth_by_pair(fx)
+    adapters = _adapters(_exact_truth_pred_fn(truth))
+    report = _entry(fx, adapters, _config())
+
+    assert isinstance(report, SeedVariabilityReport)
+    assert report.status is SeedVariabilityStatus.COMPLETE
+    assert report.protocol == PROTOCOL == "COMPOSE-K562-v1"
+    assert report.run_id == fx["inputs"].run_id
+    assert report.registered_seeds == (11, 23, 37)
+    by_method = {s.method: s for s in report.summaries}
+    assert set(by_method) == {"gears", "cpa"}
+    for summary in by_method.values():
+        # each stochastic method lists all three seeds, in registered order.
+        assert tuple(summary.oof_mse_by_seed) == (11, 23, 37)
+        for value in summary.oof_mse_by_seed.values():
+            assert value == pytest.approx(0.0)
+        assert summary.failed_seeds == ()
+
+
+# --------------------------------------------------------------------------- #
+# deterministic roster is RECORDED but never entered into the seed loop
+# --------------------------------------------------------------------------- #
+def test_deterministic_roster_recorded_but_not_in_seed_loop(tmp_path):
+    fx = _fixture(tmp_path)
+    truth = _delta_truth_by_pair(fx)
+    report = _entry(fx, _adapters(_exact_truth_pred_fn(truth)), _config())
+    assert set(report.deterministic_roster) == _DETERMINISTIC
+    summarized = {s.method for s in report.summaries}
+    assert summarized == {"gears", "cpa"}
+    assert summarized.isdisjoint(_DETERMINISTIC)
+
+
+# --------------------------------------------------------------------------- #
+# one stub raising for seed 23 -> INCOMPLETE; seed 23 scrubbed + NOT dropped
+# --------------------------------------------------------------------------- #
+def test_one_failed_seed_is_incomplete_and_scrubbed(tmp_path):
+    fx = _fixture(tmp_path)
+    truth = _delta_truth_by_pair(fx)
+
+    def _fail_seed_23(payload, pair_ids, response_dim):
+        if _seed_from_payload(payload) == 23:
+            raise RuntimeError("stub backend crash carrying secret=hunter2")
+        return {p: np.asarray(truth[p], dtype=float) for p in pair_ids}
+
+    report = _entry(fx, _adapters(_fail_seed_23), _config())
+    assert report.status is SeedVariabilityStatus.INCOMPLETE
+    # the seed is NOT dropped from the roster.
+    assert report.registered_seeds == (11, 23, 37)
+    for summary in report.summaries:
+        assert 23 in summary.failed_seeds
+        # scrubbed: only the class name, never the message/data.
+        assert summary.failure_class_by_seed[23] == "RuntimeError"
+        assert "hunter2" not in repr(summary.failure_class_by_seed)
+        # successful seeds are still summarized; the failed seed is absent from them.
+        assert 11 in summary.oof_mse_by_seed
+        assert 37 in summary.oof_mse_by_seed
+        assert 23 not in summary.oof_mse_by_seed
+
+
+# --------------------------------------------------------------------------- #
+# sample_std uses ddof=1 (hand-checked on three known per-seed scalars)
+# --------------------------------------------------------------------------- #
+def test_sample_std_is_ddof_one(tmp_path):
+    fx = _fixture(tmp_path)
+    truth = _delta_truth_by_pair(fx)
+    offset_by_seed = {11: 1.0, 23: 2.0, 37: 3.0}  # -> scalars 1.0, 4.0, 9.0
+
+    def _offset(payload, pair_ids, response_dim):
+        off = offset_by_seed[_seed_from_payload(payload)]
+        return {p: np.asarray(truth[p], dtype=float) + off for p in pair_ids}
+
+    report = _entry(fx, _adapters(_offset), _config())
+    assert report.status is SeedVariabilityStatus.COMPLETE
+    scalars = [1.0, 4.0, 9.0]
+    for summary in report.summaries:
+        assert list(summary.oof_mse_by_seed.values()) == pytest.approx(scalars)
+        assert summary.mean == pytest.approx(float(np.mean(scalars)))
+        assert summary.sample_std == pytest.approx(float(np.std(scalars, ddof=1)))
+        # ddof=1 differs from the population std -> guards against ddof=0.
+        assert summary.sample_std != pytest.approx(float(np.std(scalars, ddof=0)))
+        assert summary.minimum == pytest.approx(1.0)
+        assert summary.maximum == pytest.approx(9.0)
+        assert summary.value_range == pytest.approx(8.0)
+
+
+def test_sample_std_zero_with_single_successful_seed(tmp_path):
+    fx = _fixture(tmp_path)
+    truth = _delta_truth_by_pair(fx)
+
+    def _only_seed_11(payload, pair_ids, response_dim):
+        if _seed_from_payload(payload) != 11:
+            raise RuntimeError("crash")
+        return {p: np.asarray(truth[p], dtype=float) for p in pair_ids}
+
+    report = _entry(fx, _adapters(_only_seed_11), _config())
+    assert report.status is SeedVariabilityStatus.INCOMPLETE
+    for summary in report.summaries:
+        assert tuple(summary.oof_mse_by_seed) == (11,)
+        assert summary.sample_std == 0.0  # ddof=1 with <2 successful seeds
+
+
+# --------------------------------------------------------------------------- #
+# whole-call failures: manifest/config mismatch RAISES (not INCOMPLETE)
+# --------------------------------------------------------------------------- #
+def test_config_manifest_mismatch_raises_whole_call(tmp_path):
+    fx = _fixture(tmp_path)
+    truth = _delta_truth_by_pair(fx)
+    adapters = _adapters(_exact_truth_pred_fn(truth))
+    # config.split_seed disagrees with the manifest/inputs split seed -> whole-call.
+    with pytest.raises(SeedVariabilityContractError):
+        _entry(fx, adapters, _config(split_seed=99))
+
+
+def test_adapter_roster_must_be_exactly_gears_cpa(tmp_path):
+    fx = _fixture(tmp_path)
+    truth = _delta_truth_by_pair(fx)
+    only_gears = {"gears": _adapter(_exact_truth_pred_fn(truth), name="gears")[0]}
+    with pytest.raises(SeedVariabilityContractError):
+        _entry(fx, only_gears, _config())
+
+
+def test_coverage_above_tolerance_is_incomplete(tmp_path):
+    fx = _fixture(tmp_path)
+    truth = _delta_truth_by_pair(fx)
+    # tighten BOTH inputs and config tolerance below the fixture's 0.8 uncovered
+    # fraction so coverage falls outside tolerance -> INCOMPLETE (not a raise).
+    tight_inputs = dataclasses.replace(fx["inputs"], uncovered_tolerance=0.5)
+    fx["inputs"] = tight_inputs
+    report = _entry(fx, _adapters(_exact_truth_pred_fn(truth)), _config(uncovered_tolerance=0.5))
+    assert report.status is SeedVariabilityStatus.INCOMPLETE
+    assert report.coverage.uncovered_fraction > report.coverage.uncovered_tolerance
+
+
+# --------------------------------------------------------------------------- #
+# report provenance + self-excluding checksum round-trip
+# --------------------------------------------------------------------------- #
+def test_report_binds_provenance_and_records(tmp_path):
+    fx = _fixture(tmp_path)
+    truth = _delta_truth_by_pair(fx)
+    report = _entry(fx, _adapters(_exact_truth_pred_fn(truth)), _config())
+    assert report.oof_manifest_checksum == fx["manifest"].manifest_checksum
+    assert report.response_space_checksum == fx["inputs"].response_space_checksum
+    assert report.base_fit_role_artifact_sha256 == fx["base_spec"].sha256
+    assert report.dev_store_content_checksum == fx["store"].content_checksum
+    assert isinstance(report.coverage, CoverageReport)
+    assert all(isinstance(s, SeedComparatorSummary) for s in report.summaries)
+    # every (method, seed, fold) job contributes a fold-scoped artifact checksum:
+    # 2 methods * 3 seeds * 3 folds = 18.
+    assert len(report.fold_fit_role_artifact_sha256s) == 2 * 3 * _N_FOLDS
+    assert all(s.startswith("sha256:") for s in report.fold_fit_role_artifact_sha256s)
+    # one FoldExecutionRecord per successfully executed fold (all succeed here).
+    assert len(report.fold_execution_records) == 2 * 3 * _N_FOLDS
+    rec = report.fold_execution_records[0]
+    assert isinstance(rec, FoldExecutionRecord)
+    assert rec.worker_identity_sha256 in report.worker_locks
+    assert len(rec.predictions_sha256) == 64
+
+
+def test_report_checksum_round_trips(tmp_path):
+    fx = _fixture(tmp_path)
+    truth = _delta_truth_by_pair(fx)
+    report = _entry(fx, _adapters(_exact_truth_pred_fn(truth)), _config())
+    assert len(report.report_checksum) == 64
+    path = tmp_path / "seed_variability_report.json"
+    report.write_once(path)
+    loaded = SeedVariabilityReport.load(path)
+    assert loaded.report_checksum == report.report_checksum
+    assert loaded.to_dict() == report.to_dict()
+    # write-once: a second write to the same path fails closed.
+    with pytest.raises(SeedVariabilityReportError):
+        report.write_once(path)
+
+
+def test_tampered_report_fails_closed_on_load(tmp_path):
+    fx = _fixture(tmp_path)
+    truth = _delta_truth_by_pair(fx)
+    report = _entry(fx, _adapters(_exact_truth_pred_fn(truth)), _config())
+    path = tmp_path / "report.json"
+    report.write_once(path)
+    data = json.loads(path.read_text())
+    data["status"] = "COMPLETE" if data["status"] == "INCOMPLETE" else "INCOMPLETE"
+    tampered = tmp_path / "tampered.json"
+    tampered.write_text(json.dumps(data))
+    with pytest.raises(SeedVariabilityReportError):
+        SeedVariabilityReport.load(tampered)
+
+
+def test_non_finite_statistic_is_rejected(tmp_path):
+    fx = _fixture(tmp_path)
+    truth = _delta_truth_by_pair(fx)
+    report = _entry(fx, _adapters(_exact_truth_pred_fn(truth)), _config())
+    bad_summary = dataclasses.replace(report.summaries[0], mean=float("nan"))
+    with pytest.raises(SeedVariabilityReportError):
+        dataclasses.replace(report, summaries=(bad_summary, *report.summaries[1:]))

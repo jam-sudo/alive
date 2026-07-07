@@ -1,4 +1,4 @@
-"""Controller-side fold jobs for COMPOSE development seed-variability (D2 Task 3).
+"""COMPOSE development seed-variability: fold jobs + top-level entry (D2 Tasks 3-5).
 
 SYNTHETIC-SAFE: pure ``numpy`` + a re-derived fit-role artifact. This module builds,
 for ONE gene-disjoint OOF calibration fold, a fold-scoped fit job whose worker payload
@@ -6,6 +6,12 @@ trains ONLY on that fold's TRAIN combo pairs. The fold's held-out TEST pairs and
 cross-group EXCLUDED pairs are fully absent from both the fold-scoped fit-role artifact
 and the payload — this is the leakage-critical heart of D2's per-seed OOF error
 measurement.
+
+Task 5 adds the strict report containers (:class:`SeedVariabilityStatus`,
+:class:`CoverageReport`, :class:`FoldExecutionRecord`, :class:`SeedComparatorSummary`,
+:class:`SeedVariabilityReport`) and the production entry
+:func:`development_seed_variability`, which ties Tasks 1-4 together into one
+self-checksummed report over the two refittable comparators ({gears, cpa}).
 
 It opens NO seal, reads NO sealed outcome, and imports NO ``gears`` / ``cpa`` (the
 subprocess seam runs the real workers pod-only). Development calibration outcomes only.
@@ -27,14 +33,19 @@ held-out/excluded combo token before it is bound into the job.
 from __future__ import annotations
 
 import dataclasses
+import json
+import math
 import os
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from enum import Enum
+from pathlib import Path
 
 import numpy as np
 
 from alive.compose.baseline_subprocess import _REQUIRED_KEYS
-from alive.compose.baselines_combo import BaselineTrainingContext
+from alive.compose.baselines_combo import BaselineAdapter, BaselineTrainingContext
+from alive.compose.config2 import ComposePhase2Config
 from alive.compose.fit_role import (
     ComposeFitRoleExtractor,
     FitRoleArtifactSpec,
@@ -46,9 +57,13 @@ from alive.compose.fit_role import (
 from alive.compose.phase2a import (
     DevelopmentOutcomeStore,
     Phase2aInputs,
+    _outcome_store_checksum,
     build_subprocess_fit_payload,
 )
+from alive.compose.provenance2 import PROTOCOL
 from alive.compose.select import OOFFoldManifest
+from alive.io import atomic_write_once
+from alive.provenance import sha256_json
 
 _CONTROL_TOKEN = "control"
 _COMBO_SEP = "_"
@@ -766,3 +781,901 @@ def assemble_seed_scalar(
         per_pair_mse.append(float(np.mean((pred - truth) ** 2)))
 
     return ordered, float(np.mean(per_pair_mse))
+
+
+# =========================================================================== #
+# D2 Task 5 — strict report containers + the production orchestration entry
+# =========================================================================== #
+#
+# ``development_seed_variability`` is the TOP-LEVEL D2 entry: it ties Tasks 1-4
+# together (OOF fold manifest -> per-(method, seed, fold) fold jobs -> isolated
+# fold execution -> covered-order per-seed OOF scalar) into a strict, self-checked
+# :class:`SeedVariabilityReport`. It opens NO seal and reads NO sealed outcome;
+# it measures ONLY development-calibration seed-to-seed dispersion of the two
+# refittable comparators ({gears, cpa}).
+
+#: Immutable schema tag for the persisted seed-variability report.
+_SEED_VARIABILITY_REPORT_SCHEMA = "compose_seed_variability_report_v1"
+
+#: The two comparators refit once per registered seed inside the D2 seed loop.
+#: Everything else in the config method roster is the DETERMINISTIC single-shot
+#: roster: recorded in the report for provenance but never entered into the loop.
+_SEED_LOOP_ROSTER: frozenset[str] = frozenset({"gears", "cpa"})
+
+#: Subdirectory (beside the base fit-role artifact) the write-once fold-scoped
+#: fit-role artifacts are written into. Derived rather than passed so the entry
+#: keeps its declared signature; the fold artifacts are development derivatives of
+#: the base fit-role artifact and belong next to it (CLAUDE.md §12 ``artifacts/``).
+_FOLD_ARTIFACT_SUBDIR = "d2_seed_variability_folds"
+
+#: Top-level keys of a serialised :class:`SeedVariabilityReport` (exact set).
+_REPORT_KEYS: frozenset[str] = frozenset(
+    {
+        "schema",
+        "protocol",
+        "run_id",
+        "config_sha256",
+        "registered_seeds",
+        "deterministic_roster",
+        "oof_manifest_checksum",
+        "coverage",
+        "response_space_checksum",
+        "base_fit_role_artifact_sha256",
+        "fold_fit_role_artifact_sha256s",
+        "dev_store_content_checksum",
+        "worker_locks",
+        "summaries",
+        "fold_execution_records",
+        "status",
+        "report_checksum",
+    }
+)
+
+
+class SeedVariabilityContractError(ValueError):
+    """Raised on a whole-call D2 contract/provenance violation.
+
+    Covers the store-type gate (a non-:class:`DevelopmentOutcomeStore` such as a
+    sealed :class:`~alive.compose.outcome_store.ComposeOutcomeStore`, an array, a
+    dict, a path or an arbitrary object), an adapter roster that is not exactly
+    ``{"gears", "cpa"}``, a config↔manifest↔inputs inequality (split seed, fold
+    count, registered seeds, tolerance), a pair-ID misalignment, and a development
+    outcome store whose ``content_checksum`` no longer verifies. Every such
+    violation FAILS THE WHOLE CALL — it is never laundered into a failed-seed
+    result.
+    """
+
+
+class SeedVariabilityReportError(ValueError):
+    """Raised on an invalid, non-finite or tampered :class:`SeedVariabilityReport`.
+
+    Covers a wrong schema tag, a non-:class:`SeedVariabilityStatus` status, a
+    non-finite float anywhere in the report, a write-once collision, and a
+    self-excluding-checksum mismatch on load (tampering).
+    """
+
+
+class SeedVariabilityStatus(str, Enum):
+    """Terminal status of a seed-variability run.
+
+    ``COMPLETE`` requires every seed of every stochastic method to succeed AND the
+    uncovered fraction to stay within tolerance. Any failed seed, an out-of-tolerance
+    uncovered fraction, or a non-finite per-seed statistic yields ``INCOMPLETE``.
+    """
+
+    COMPLETE = "COMPLETE"
+    INCOMPLETE = "INCOMPLETE"
+
+
+def _finite(value: object, *, field_name: str) -> float:
+    """Return ``value`` as a finite float or raise :class:`SeedVariabilityReportError`."""
+    if isinstance(value, bool) or not isinstance(value, (int, float, np.floating, np.integer)):
+        raise SeedVariabilityReportError(f"{field_name} must be a finite float, got {value!r}")
+    number = float(value)
+    if not math.isfinite(number):
+        raise SeedVariabilityReportError(f"{field_name} must be finite, got {number!r}")
+    return number
+
+
+def _predictions_checksum(predictions: Mapping[tuple[str, str], np.ndarray]) -> str:
+    """Canonical SHA-256 digest of a fold's covered (held-out TEST) predictions.
+
+    Parameters
+    ----------
+    predictions : Mapping of (str, str) to numpy.ndarray
+        The fold's held-out TEST-pair prediction vectors keyed by canonical pair ID.
+
+    Returns
+    -------
+    str
+        A canonical, order-independent 64-hex digest of the predictions.
+    """
+    payload = {
+        f"{a}|{b}": np.asarray(vec, dtype=float).tolist()
+        for (a, b), vec in sorted(predictions.items())
+    }
+    return sha256_json(payload)
+
+
+@dataclass(frozen=True)
+class CoverageReport:
+    """OOF coverage of the development calibration pairs (strict, finite).
+
+    Attributes
+    ----------
+    total_pairs : int
+        Number of development calibration pairs.
+    covered_count, uncovered_count : int
+        Counts of pairs that are (respectively are not) some fold's OOF TEST pair.
+    covered_fraction, uncovered_fraction : float
+        The corresponding fractions of ``total_pairs``.
+    covered_pair_ids_checksum, uncovered_pair_ids_checksum : str
+        Canonical digests of the ordered covered / uncovered pair-ID lists (in the
+        manifest's fixed order), so coverage identity is bound without inlining IDs.
+    uncovered_tolerance : float
+        The pre-registered maximum uncovered fraction (config value).
+    """
+
+    total_pairs: int
+    covered_count: int
+    uncovered_count: int
+    covered_fraction: float
+    uncovered_fraction: float
+    covered_pair_ids_checksum: str
+    uncovered_pair_ids_checksum: str
+    uncovered_tolerance: float
+
+    def to_dict(self) -> dict:
+        """Return a canonical JSON-serialisable representation."""
+        return {
+            "total_pairs": int(self.total_pairs),
+            "covered_count": int(self.covered_count),
+            "uncovered_count": int(self.uncovered_count),
+            "covered_fraction": _finite(self.covered_fraction, field_name="covered_fraction"),
+            "uncovered_fraction": _finite(self.uncovered_fraction, field_name="uncovered_fraction"),
+            "covered_pair_ids_checksum": str(self.covered_pair_ids_checksum),
+            "uncovered_pair_ids_checksum": str(self.uncovered_pair_ids_checksum),
+            "uncovered_tolerance": _finite(
+                self.uncovered_tolerance, field_name="uncovered_tolerance"
+            ),
+        }
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, object]) -> CoverageReport:
+        """Reconstruct a :class:`CoverageReport` from :meth:`to_dict` output."""
+        return cls(
+            total_pairs=int(data["total_pairs"]),
+            covered_count=int(data["covered_count"]),
+            uncovered_count=int(data["uncovered_count"]),
+            covered_fraction=float(data["covered_fraction"]),
+            uncovered_fraction=float(data["uncovered_fraction"]),
+            covered_pair_ids_checksum=str(data["covered_pair_ids_checksum"]),
+            uncovered_pair_ids_checksum=str(data["uncovered_pair_ids_checksum"]),
+            uncovered_tolerance=float(data["uncovered_tolerance"]),
+        )
+
+
+@dataclass(frozen=True)
+class FoldExecutionRecord:
+    """Real provenance digests captured from ONE executed ``(method, seed, fold)`` job.
+
+    Every digest is the value the backend's post-predict ``provenance_manifest``
+    (or the fold job) actually reported — never a value synthesized from
+    ``{method, seed}``.
+
+    Attributes
+    ----------
+    method : str
+        The refittable comparator name (``"gears"`` / ``"cpa"``).
+    seed : int
+        The registered seed the backend was spawned with.
+    fold : int
+        Zero-based OOF fold index.
+    fold_fit_role_artifact_sha256 : str
+        The fold-scoped fit-role artifact digest (from the fold job).
+    payload_sha256 : str
+        The configured fit-role payload digest reported by the backend.
+    request_sha256 : str
+        The order-sensitive combined-request digest reported by the backend.
+    checkpoint_sha256 : str
+        The verified checkpoint-file digest reported by the backend.
+    predictions_sha256 : str
+        Canonical digest of the fold's covered (held-out TEST) predictions.
+    worker_identity_sha256 : str
+        The worker-script / identity-lock digest reported by the backend.
+    """
+
+    method: str
+    seed: int
+    fold: int
+    fold_fit_role_artifact_sha256: str
+    payload_sha256: str
+    request_sha256: str
+    checkpoint_sha256: str
+    predictions_sha256: str
+    worker_identity_sha256: str
+
+    def to_dict(self) -> dict:
+        """Return a canonical JSON-serialisable representation."""
+        return {
+            "method": str(self.method),
+            "seed": int(self.seed),
+            "fold": int(self.fold),
+            "fold_fit_role_artifact_sha256": str(self.fold_fit_role_artifact_sha256),
+            "payload_sha256": str(self.payload_sha256),
+            "request_sha256": str(self.request_sha256),
+            "checkpoint_sha256": str(self.checkpoint_sha256),
+            "predictions_sha256": str(self.predictions_sha256),
+            "worker_identity_sha256": str(self.worker_identity_sha256),
+        }
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, object]) -> FoldExecutionRecord:
+        """Reconstruct a :class:`FoldExecutionRecord` from :meth:`to_dict` output."""
+        return cls(
+            method=str(data["method"]),
+            seed=int(data["seed"]),
+            fold=int(data["fold"]),
+            fold_fit_role_artifact_sha256=str(data["fold_fit_role_artifact_sha256"]),
+            payload_sha256=str(data["payload_sha256"]),
+            request_sha256=str(data["request_sha256"]),
+            checkpoint_sha256=str(data["checkpoint_sha256"]),
+            predictions_sha256=str(data["predictions_sha256"]),
+            worker_identity_sha256=str(data["worker_identity_sha256"]),
+        )
+
+
+@dataclass(frozen=True)
+class SeedComparatorSummary:
+    """Per-method seed-dispersion summary of the per-seed OOF-MSE scalars.
+
+    Attributes
+    ----------
+    method : str
+        The refittable comparator name (``"gears"`` / ``"cpa"``).
+    oof_mse_by_seed : Mapping of int to float
+        Per-seed covered-order OOF-MSE, SUCCESSFUL seeds only, in registered-seed
+        order. A failed seed is absent here (but retained in ``failed_seeds``).
+    mean, sample_std, minimum, maximum, value_range : float
+        Dispersion statistics over the successful seeds. ``sample_std`` uses
+        ``ddof=1`` and is ``0.0`` when fewer than two seeds succeeded; all five are
+        ``0.0`` when no seed succeeded (the run is then ``INCOMPLETE``).
+    failed_seeds : tuple of int
+        Registered seeds whose execution failed, in registered-seed order (never
+        dropped from the roster).
+    failure_class_by_seed : Mapping of int to str
+        Scrubbed exception CLASS name (no message/data) per failed seed.
+    fold_execution_records : tuple of FoldExecutionRecord
+        The real per-fold provenance records this method produced (across seeds).
+    """
+
+    method: str
+    oof_mse_by_seed: Mapping[int, float]
+    mean: float
+    sample_std: float
+    minimum: float
+    maximum: float
+    value_range: float
+    failed_seeds: tuple[int, ...]
+    failure_class_by_seed: Mapping[int, str]
+    fold_execution_records: tuple[FoldExecutionRecord, ...]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "oof_mse_by_seed",
+            {int(s): float(v) for s, v in dict(self.oof_mse_by_seed).items()},
+        )
+        object.__setattr__(self, "failed_seeds", tuple(int(s) for s in self.failed_seeds))
+        object.__setattr__(
+            self,
+            "failure_class_by_seed",
+            {int(s): str(c) for s, c in dict(self.failure_class_by_seed).items()},
+        )
+        object.__setattr__(self, "fold_execution_records", tuple(self.fold_execution_records))
+
+    def to_dict(self) -> dict:
+        """Return a canonical JSON-serialisable representation (finite floats only)."""
+        return {
+            "method": str(self.method),
+            "oof_mse_by_seed": [
+                [int(s), _finite(v, field_name=f"{self.method} oof_mse[{s}]")]
+                for s, v in self.oof_mse_by_seed.items()
+            ],
+            "mean": _finite(self.mean, field_name=f"{self.method} mean"),
+            "sample_std": _finite(self.sample_std, field_name=f"{self.method} sample_std"),
+            "minimum": _finite(self.minimum, field_name=f"{self.method} minimum"),
+            "maximum": _finite(self.maximum, field_name=f"{self.method} maximum"),
+            "value_range": _finite(self.value_range, field_name=f"{self.method} value_range"),
+            "failed_seeds": [int(s) for s in self.failed_seeds],
+            "failure_class_by_seed": [
+                [int(s), str(c)] for s, c in self.failure_class_by_seed.items()
+            ],
+            "fold_execution_records": [r.to_dict() for r in self.fold_execution_records],
+        }
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, object]) -> SeedComparatorSummary:
+        """Reconstruct a :class:`SeedComparatorSummary` from :meth:`to_dict` output."""
+        return cls(
+            method=str(data["method"]),
+            oof_mse_by_seed={int(s): float(v) for s, v in data["oof_mse_by_seed"]},
+            mean=float(data["mean"]),
+            sample_std=float(data["sample_std"]),
+            minimum=float(data["minimum"]),
+            maximum=float(data["maximum"]),
+            value_range=float(data["value_range"]),
+            failed_seeds=tuple(int(s) for s in data["failed_seeds"]),
+            failure_class_by_seed={int(s): str(c) for s, c in data["failure_class_by_seed"]},
+            fold_execution_records=tuple(
+                FoldExecutionRecord.from_dict(r) for r in data["fold_execution_records"]
+            ),
+        )
+
+
+@dataclass(frozen=True)
+class SeedVariabilityReport:
+    """Strict, self-checksummed record of one D2 seed-variability run.
+
+    Binds the protocol, run ID, config digest, registered seed order, the
+    deterministic (single-shot) roster, the OOF fold-manifest checksum, the
+    coverage report, the response-space checksum, the base fit-role artifact
+    digest, EVERY fold-scoped fit-role artifact digest, the development outcome
+    store's content checksum, the distinct worker-identity locks, every real
+    :class:`FoldExecutionRecord` and the terminal status. Schema is validated,
+    all floats must be finite, and :attr:`report_checksum` is a self-excluding
+    SHA-256 over :meth:`_payload` so any content change moves it and :meth:`load`
+    fails closed on tampering.
+    """
+
+    schema: str
+    protocol: str
+    run_id: str
+    config_sha256: str
+    registered_seeds: tuple[int, ...]
+    deterministic_roster: tuple[str, ...]
+    oof_manifest_checksum: str
+    coverage: CoverageReport
+    response_space_checksum: str
+    base_fit_role_artifact_sha256: str
+    fold_fit_role_artifact_sha256s: tuple[str, ...]
+    dev_store_content_checksum: str
+    worker_locks: tuple[str, ...]
+    summaries: tuple[SeedComparatorSummary, ...]
+    fold_execution_records: tuple[FoldExecutionRecord, ...]
+    status: SeedVariabilityStatus
+    report_checksum: str = field(default="")
+
+    def __post_init__(self) -> None:
+        if self.schema != _SEED_VARIABILITY_REPORT_SCHEMA:
+            raise SeedVariabilityReportError(f"unexpected report schema {self.schema!r}")
+        if not isinstance(self.status, SeedVariabilityStatus):
+            raise SeedVariabilityReportError(
+                f"status must be a SeedVariabilityStatus, got {self.status!r}"
+            )
+        object.__setattr__(self, "registered_seeds", tuple(int(s) for s in self.registered_seeds))
+        object.__setattr__(
+            self, "deterministic_roster", tuple(str(m) for m in self.deterministic_roster)
+        )
+        object.__setattr__(
+            self,
+            "fold_fit_role_artifact_sha256s",
+            tuple(str(s) for s in self.fold_fit_role_artifact_sha256s),
+        )
+        object.__setattr__(self, "worker_locks", tuple(str(w) for w in self.worker_locks))
+        object.__setattr__(self, "summaries", tuple(self.summaries))
+        object.__setattr__(self, "fold_execution_records", tuple(self.fold_execution_records))
+        # Finiteness is validated as part of building the canonical payload
+        # (``to_dict`` on coverage / summaries raises on any NaN/Inf), and the
+        # self-excluding checksum is computed over that payload.
+        object.__setattr__(self, "report_checksum", sha256_json(self._payload()))
+
+    # -- canonical payload + serialisation -------------------------------- #
+    def _payload(self) -> dict:
+        """Canonical checksum input (every field EXCEPT ``report_checksum``)."""
+        return {
+            "schema": self.schema,
+            "protocol": self.protocol,
+            "run_id": self.run_id,
+            "config_sha256": self.config_sha256,
+            "registered_seeds": [int(s) for s in self.registered_seeds],
+            "deterministic_roster": [str(m) for m in self.deterministic_roster],
+            "oof_manifest_checksum": self.oof_manifest_checksum,
+            "coverage": self.coverage.to_dict(),
+            "response_space_checksum": self.response_space_checksum,
+            "base_fit_role_artifact_sha256": self.base_fit_role_artifact_sha256,
+            "fold_fit_role_artifact_sha256s": [str(s) for s in self.fold_fit_role_artifact_sha256s],
+            "dev_store_content_checksum": self.dev_store_content_checksum,
+            "worker_locks": [str(w) for w in self.worker_locks],
+            "summaries": [s.to_dict() for s in self.summaries],
+            "fold_execution_records": [r.to_dict() for r in self.fold_execution_records],
+            "status": self.status.value,
+        }
+
+    def to_dict(self) -> dict:
+        """Return the canonical payload augmented with the self-excluding checksum."""
+        payload = self._payload()
+        payload["report_checksum"] = self.report_checksum
+        return payload
+
+    def write_once(self, path: str | Path) -> None:
+        """Serialise the report to ``path`` as canonical JSON (write-once).
+
+        Parameters
+        ----------
+        path : str or Path
+            Destination file; must not already exist (write-once, CLAUDE.md §11).
+
+        Raises
+        ------
+        SeedVariabilityReportError
+            If ``path`` already exists.
+        """
+        try:
+            atomic_write_once(
+                path, json.dumps(self.to_dict(), sort_keys=True, separators=(",", ":"))
+            )
+        except FileExistsError as exc:
+            raise SeedVariabilityReportError(
+                f"refusing to overwrite existing seed-variability report at {path}: write-once"
+            ) from exc
+
+    @classmethod
+    def load(cls, path: str | Path) -> SeedVariabilityReport:
+        """Load and fully VERIFY a report written by :meth:`write_once`.
+
+        Fails closed (:class:`SeedVariabilityReportError`) on unknown/missing keys,
+        a wrong schema tag, an unknown status, a non-finite float, or a
+        self-excluding-checksum mismatch (tampering).
+
+        Parameters
+        ----------
+        path : str or Path
+            Path to a report JSON file.
+
+        Returns
+        -------
+        SeedVariabilityReport
+            The verified report (its recorded checksum matches the recomputation).
+        """
+        try:
+            data = json.loads(Path(path).read_text())
+        except (OSError, json.JSONDecodeError) as exc:
+            raise SeedVariabilityReportError(f"failed to read report: {exc}") from exc
+        if not isinstance(data, dict):
+            raise SeedVariabilityReportError("report root must be a JSON object")
+        keys = set(data)
+        if keys != set(_REPORT_KEYS):
+            raise SeedVariabilityReportError(
+                f"report key set mismatch (missing={sorted(_REPORT_KEYS - keys)}, "
+                f"unknown={sorted(keys - _REPORT_KEYS)})"
+            )
+        try:
+            status = SeedVariabilityStatus(data["status"])
+        except ValueError as exc:
+            raise SeedVariabilityReportError(f"unknown status {data['status']!r}") from exc
+
+        report = cls(
+            schema=str(data["schema"]),
+            protocol=str(data["protocol"]),
+            run_id=str(data["run_id"]),
+            config_sha256=str(data["config_sha256"]),
+            registered_seeds=tuple(int(s) for s in data["registered_seeds"]),
+            deterministic_roster=tuple(str(m) for m in data["deterministic_roster"]),
+            oof_manifest_checksum=str(data["oof_manifest_checksum"]),
+            coverage=CoverageReport.from_dict(data["coverage"]),
+            response_space_checksum=str(data["response_space_checksum"]),
+            base_fit_role_artifact_sha256=str(data["base_fit_role_artifact_sha256"]),
+            fold_fit_role_artifact_sha256s=tuple(
+                str(s) for s in data["fold_fit_role_artifact_sha256s"]
+            ),
+            dev_store_content_checksum=str(data["dev_store_content_checksum"]),
+            worker_locks=tuple(str(w) for w in data["worker_locks"]),
+            summaries=tuple(SeedComparatorSummary.from_dict(s) for s in data["summaries"]),
+            fold_execution_records=tuple(
+                FoldExecutionRecord.from_dict(r) for r in data["fold_execution_records"]
+            ),
+            status=status,
+        )
+        stored = data["report_checksum"]
+        if not isinstance(stored, str) or stored != report.report_checksum:
+            raise SeedVariabilityReportError(
+                "report checksum mismatch: content was tampered after sealing"
+            )
+        return report
+
+
+# --------------------------------------------------------------------------- #
+# orchestration helpers
+# --------------------------------------------------------------------------- #
+
+
+def _fold_artifact_dir(fit_role_spec: FitRoleArtifactSpec) -> str:
+    """Return the write-once fold-artifact directory beside the base artifact."""
+    base_dir = os.path.dirname(os.path.realpath(os.path.abspath(fit_role_spec.path)))
+    return os.path.join(base_dir, _FOLD_ARTIFACT_SUBDIR)
+
+
+def _verify_orchestration_contract(
+    *,
+    config: ComposePhase2Config,
+    oof_manifest: OOFFoldManifest,
+    inputs: Phase2aInputs,
+    development_outcome_store: DevelopmentOutcomeStore,
+) -> None:
+    """Fail the WHOLE CALL unless config, manifest, inputs and store agree.
+
+    Runs before any fold job so a misaligned request never spawns a backend or
+    writes a fold artifact. Every disagreement raises
+    :class:`SeedVariabilityContractError`; none is laundered into a failed seed.
+
+    Raises
+    ------
+    SeedVariabilityContractError
+        On a pair-ID misalignment, a config↔manifest↔inputs inequality (split
+        seed / fold count / registered seeds / tolerance / gene count), or a
+        development outcome store whose ``content_checksum`` no longer verifies.
+    """
+    cal_ids = tuple(tuple(p) for p in inputs.cal_pair_ids)
+    if oof_manifest.calibration_pair_ids != cal_ids:
+        raise SeedVariabilityContractError(
+            "OOF manifest calibration pair IDs are not aligned with inputs.cal_pair_ids"
+        )
+    if development_outcome_store.combo_calibration_pair_ids != cal_ids:
+        raise SeedVariabilityContractError(
+            "development outcome pair IDs are not aligned with inputs.cal_pair_ids"
+        )
+
+    def _eq(name: str, config_value: int, manifest_value: int, inputs_value: int) -> None:
+        if not (int(config_value) == int(manifest_value) == int(inputs_value)):
+            raise SeedVariabilityContractError(
+                f"{name} disagree: config={config_value}, manifest={manifest_value}, "
+                f"inputs={inputs_value}"
+            )
+
+    _eq("split seeds", config.split_seed, oof_manifest.split_seed, inputs.seed)
+    _eq("fold counts", config.oof_folds, oof_manifest.n_folds, inputs.n_folds)
+    _eq("gene counts", int(inputs.n_genes), oof_manifest.n_genes, int(inputs.n_genes))
+
+    if tuple(int(s) for s in config.registered_seeds) != tuple(
+        int(s) for s in inputs.registered_seeds
+    ):
+        raise SeedVariabilityContractError(
+            "config.registered_seeds disagree with inputs.registered_seeds"
+        )
+    if float(config.uncovered_tolerance) != float(inputs.uncovered_tolerance):
+        raise SeedVariabilityContractError(
+            "config.uncovered_tolerance disagrees with inputs.uncovered_tolerance"
+        )
+    if _outcome_store_checksum(development_outcome_store) != (
+        development_outcome_store.content_checksum
+    ):
+        raise SeedVariabilityContractError(
+            "development outcome store content changed after its checksum was bound"
+        )
+
+
+def _build_delta_truth(
+    inputs: Phase2aInputs,
+    development_outcome_store: DevelopmentOutcomeStore,
+) -> dict[tuple[str, str], np.ndarray]:
+    """Reconstruct the development delta ``additive_cal + eps`` once, pair-aligned."""
+    cal_ids = tuple(tuple(p) for p in inputs.cal_pair_ids)
+    additive = np.asarray(inputs.additive_cal, dtype=float)
+    eps = np.asarray(development_outcome_store.combo_calibration_eps, dtype=float)
+    if additive.shape[0] != len(cal_ids) or eps.shape[0] != len(cal_ids):
+        raise SeedVariabilityContractError(
+            "additive_cal / combo_calibration_eps are not aligned with cal_pair_ids"
+        )
+    delta = additive + eps
+    return {cal_ids[i]: delta[i] for i in range(len(cal_ids))}
+
+
+def _build_coverage(oof_manifest: OOFFoldManifest, *, uncovered_tolerance: float) -> CoverageReport:
+    """Build the strict OOF :class:`CoverageReport` from the verified manifest."""
+    total = len(oof_manifest.calibration_pair_ids)
+    covered = tuple(oof_manifest.covered_pair_ids)
+    uncovered = tuple(oof_manifest.uncovered_pair_ids)
+    denom = float(total) if total else 1.0
+    return CoverageReport(
+        total_pairs=int(total),
+        covered_count=len(covered),
+        uncovered_count=len(uncovered),
+        covered_fraction=len(covered) / denom,
+        uncovered_fraction=len(uncovered) / denom,
+        covered_pair_ids_checksum=sha256_json([list(p) for p in covered]),
+        uncovered_pair_ids_checksum=sha256_json([list(p) for p in uncovered]),
+        uncovered_tolerance=float(uncovered_tolerance),
+    )
+
+
+def _fold_record(
+    method: str, seed: int, job: FoldJob, result: FoldExecutionResult
+) -> FoldExecutionRecord:
+    """Build a :class:`FoldExecutionRecord` from a job + its real execution result."""
+    return FoldExecutionRecord(
+        method=str(method),
+        seed=int(seed),
+        fold=int(job.fold_index),
+        fold_fit_role_artifact_sha256=str(job.fit_role_artifact_sha256),
+        payload_sha256=str(result.payload_sha256),
+        request_sha256=str(result.request_sha256),
+        checkpoint_sha256=str(result.checkpoint_sha256),
+        predictions_sha256=_predictions_checksum(result.predictions),
+        worker_identity_sha256=str(result.worker_sha256),
+    )
+
+
+def _summarize_seed_scalars(
+    method: str,
+    registered_seeds: Sequence[int],
+    *,
+    oof_by_seed: Mapping[int, float],
+    failed_seeds: Sequence[int],
+    failure_class_by_seed: Mapping[int, str],
+    fold_records: Sequence[FoldExecutionRecord],
+) -> SeedComparatorSummary:
+    """Reduce a method's per-seed OOF scalars to a strict dispersion summary.
+
+    ``sample_std`` uses ``ddof=1`` (``0.0`` with fewer than two successful seeds);
+    all statistics are ``0.0`` when no seed succeeded (the run is then INCOMPLETE).
+    Successful seeds are ordered by the registered-seed order.
+    """
+    ordered = {
+        int(s): float(oof_by_seed[int(s)]) for s in registered_seeds if int(s) in oof_by_seed
+    }
+    values = list(ordered.values())
+    if values:
+        mean = float(np.mean(values))
+        minimum = float(min(values))
+        maximum = float(max(values))
+        value_range = maximum - minimum
+        sample_std = float(np.std(values, ddof=1)) if len(values) >= 2 else 0.0
+    else:
+        mean = minimum = maximum = value_range = sample_std = 0.0
+    failed_in_order = tuple(int(s) for s in registered_seeds if int(s) in set(failed_seeds))
+    return SeedComparatorSummary(
+        method=str(method),
+        oof_mse_by_seed=ordered,
+        mean=mean,
+        sample_std=sample_std,
+        minimum=minimum,
+        maximum=maximum,
+        value_range=value_range,
+        failed_seeds=failed_in_order,
+        failure_class_by_seed={int(s): str(failure_class_by_seed[int(s)]) for s in failed_in_order},
+        fold_execution_records=tuple(fold_records),
+    )
+
+
+# --------------------------------------------------------------------------- #
+# production entry
+# --------------------------------------------------------------------------- #
+
+
+def development_seed_variability(
+    *,
+    inputs: Phase2aInputs,
+    development_outcome_store: DevelopmentOutcomeStore,
+    oof_manifest: OOFFoldManifest,
+    baseline_adapters: Mapping[str, BaselineAdapter],
+    config: ComposePhase2Config,
+    response_artifact: Mapping[str, object],
+    fit_role_spec: FitRoleArtifactSpec,
+    gene_order: Sequence[str],
+    raw_data_sha256: str,
+) -> SeedVariabilityReport:
+    """Measure development seed-to-seed OOF dispersion of ``{gears, cpa}`` (D2 Task 5).
+
+    For each refittable comparator and each registered seed (in ``config``'s exact
+    order), this refits the comparator once per gene-disjoint OOF fold on that
+    fold's TRAIN-only pairs, predicts the fold's held-out TEST pairs, and reduces
+    the folds to one covered-order per-seed OOF-MSE scalar. It ties together the
+    committed Tasks 1-4: :class:`OOFFoldManifest`, :func:`build_fold_job`,
+    :func:`run_fold_job` and :func:`assemble_seed_scalar`. The deterministic
+    single-shot roster (every other config method) is RECORDED but never entered
+    into the seed loop.
+
+    It opens NO seal and reads NO sealed outcome — only the development delta
+    ``inputs.additive_cal + development_outcome_store.combo_calibration_eps``.
+
+    The run identity is bound via ``inputs.run_id`` (the composite COMPOSE run ID
+    already computed for these inputs) together with the config / manifest /
+    response / dev-store checksums; no fake run ID is invented and no explicit
+    ``run_id`` kwarg is required (the pre-access ledger identity is a Task-6
+    concern).
+
+    Failure policy. An EXPECTED per-job execution failure (a
+    :func:`run_fold_job` / :func:`assemble_seed_scalar` raise for one seed) records
+    only a SCRUBBED exception class name, keeps the seed in the roster, and marks
+    the whole report ``INCOMPLETE``. ``BaseException`` is never caught. Internal
+    contract/provenance violations (the store-type gate, an adapter roster that is
+    not ``{gears, cpa}``, a config↔manifest↔inputs inequality, a coverage/pair
+    misalignment, or a fold-job leakage/contract failure) FAIL THE WHOLE CALL and
+    are never laundered into a failed-seed result.
+
+    Parameters
+    ----------
+    inputs : Phase2aInputs
+        The bound development inputs (identities/features only).
+    development_outcome_store : DevelopmentOutcomeStore
+        The typed calibration-only outcome store. A sealed
+        :class:`~alive.compose.outcome_store.ComposeOutcomeStore`, an array, a
+        dict, a path or any other object is rejected by the store-type gate.
+    oof_manifest : OOFFoldManifest
+        The verified single-call OOF fold manifest.
+    baseline_adapters : Mapping of str to BaselineAdapter
+        Exactly ``{"gears", "cpa"}`` spawnable guarded adapters.
+    config : ComposePhase2Config
+        The active Phase-2 config; supplies ``registered_seeds``, ``split_seed``,
+        ``oof_folds``, ``uncovered_tolerance``, ``method_roster`` and
+        ``config_sha256``.
+    response_artifact : Mapping
+        ``{"response_space", "control_mean"}`` for the payload projection.
+    fit_role_spec : FitRoleArtifactSpec
+        The validated base fit-role artifact each fold subset is carved from.
+    gene_order : sequence of str
+        Canonical full transcriptome gene order.
+    raw_data_sha256 : str
+        Shared raw-data digest bound across artifact, projection and source.
+
+    Returns
+    -------
+    SeedVariabilityReport
+        The strict, self-checksummed development seed-variability report.
+
+    Raises
+    ------
+    SeedVariabilityContractError
+        On any whole-call contract/provenance violation (see the failure policy).
+    FoldJobError
+        On a fold-job leakage/contract violation (whole-call; not laundered).
+    """
+    # 1. store-type gate — reject anything but a typed DevelopmentOutcomeStore
+    #    BEFORE any work (the sealed ComposeOutcomeStore, arrays, dicts, paths,
+    #    arbitrary objects and injected payloads all fail here).
+    if not isinstance(development_outcome_store, DevelopmentOutcomeStore):
+        raise SeedVariabilityContractError(
+            "development_outcome_store must be a DevelopmentOutcomeStore; got "
+            f"{type(development_outcome_store).__name__}"
+        )
+
+    # 2. adapter roster gate — exactly {gears, cpa}, each a name-matched adapter.
+    if set(baseline_adapters) != set(_SEED_LOOP_ROSTER):
+        raise SeedVariabilityContractError(
+            f"baseline_adapters must be exactly {sorted(_SEED_LOOP_ROSTER)}; "
+            f"got {sorted(baseline_adapters)}"
+        )
+    for name, adapter in baseline_adapters.items():
+        if not isinstance(adapter, BaselineAdapter) or adapter.name != name:
+            raise SeedVariabilityContractError(f"invalid baseline adapter for {name!r}")
+
+    # 3. config <-> manifest <-> inputs <-> store contract (whole-call on mismatch).
+    _verify_orchestration_contract(
+        config=config,
+        oof_manifest=oof_manifest,
+        inputs=inputs,
+        development_outcome_store=development_outcome_store,
+    )
+
+    # 4. reconstruct the development delta truth ONCE (pair-aligned).
+    delta_truth_by_pair = _build_delta_truth(inputs, development_outcome_store)
+
+    fold_dir = _fold_artifact_dir(fit_role_spec)
+    response_dim = int(inputs.response_dim)
+    registered_seeds = tuple(int(s) for s in config.registered_seeds)
+    n_folds = len(oof_manifest.folds)
+
+    # the deterministic single-shot roster: config method roster minus the seed loop.
+    deterministic_roster = tuple(m for m in config.method_roster if m not in _SEED_LOOP_ROSTER)
+
+    status = SeedVariabilityStatus.COMPLETE
+    summaries: list[SeedComparatorSummary] = []
+    all_records: list[FoldExecutionRecord] = []
+    all_fold_artifact_shas: list[str] = []
+    worker_locks: set[str] = set()
+
+    for method in sorted(baseline_adapters):
+        adapter = baseline_adapters[method]
+        oof_by_seed: dict[int, float] = {}
+        failed_seeds: list[int] = []
+        failure_class_by_seed: dict[int, str] = {}
+        method_records: list[FoldExecutionRecord] = []
+
+        for seed in registered_seeds:
+            # Fold jobs are built OUTSIDE the per-seed try: a build_fold_job
+            # leakage/contract failure (FoldJobError) is a whole-call failure, not
+            # a stochastic per-seed execution failure, so it must not be laundered.
+            fold_jobs: list[FoldJob] = []
+            for fold_index in range(n_folds):
+                job = build_fold_job(
+                    method=method,
+                    seed=seed,
+                    fold_index=fold_index,
+                    oof_manifest=oof_manifest,
+                    inputs=inputs,
+                    outcome_store=development_outcome_store,
+                    response_artifact=response_artifact,
+                    base_fit_role_spec=fit_role_spec,
+                    fold_artifact_dir=fold_dir,
+                    gene_order=gene_order,
+                    raw_data_sha256=raw_data_sha256,
+                )
+                fold_jobs.append(job)
+                all_fold_artifact_shas.append(job.fit_role_artifact_sha256)
+
+            # Only the stochastic execution + reassembly is caught per-seed. We do
+            # NOT catch BaseException; contract violations were validated up front
+            # and cannot reach here, so any Exception here is a genuine execution
+            # failure OF THIS SEED (record a scrubbed class, keep the seed).
+            fold_results: list[FoldExecutionResult] = []
+            try:
+                for job in fold_jobs:
+                    fold_results.append(
+                        run_fold_job(
+                            adapter,
+                            job,
+                            response_dim,
+                            pair_manifest_checksum=inputs.manifest_checksum,
+                            response_space_checksum=inputs.response_space_checksum,
+                        )
+                    )
+                _predictions, scalar = assemble_seed_scalar(
+                    fold_results,
+                    manifest=oof_manifest,
+                    delta_truth_by_pair=delta_truth_by_pair,
+                    response_dim=response_dim,
+                )
+            except Exception as exc:  # noqa: BLE001 — see comment above (not BaseException)
+                failed_seeds.append(int(seed))
+                failure_class_by_seed[int(seed)] = type(exc).__name__  # scrubbed: class only
+                status = SeedVariabilityStatus.INCOMPLETE
+            else:
+                if not math.isfinite(float(scalar)):
+                    # a non-finite per-seed statistic marks the seed failed + INCOMPLETE.
+                    failed_seeds.append(int(seed))
+                    failure_class_by_seed[int(seed)] = "NonFiniteSeedScalar"
+                    status = SeedVariabilityStatus.INCOMPLETE
+                else:
+                    oof_by_seed[int(seed)] = float(scalar)
+
+            # Record every fold that executed (partial for a failed seed), binding
+            # its real provenance digests + worker identity locks.
+            for job, result in zip(fold_jobs, fold_results):
+                record = _fold_record(method, seed, job, result)
+                method_records.append(record)
+                worker_locks.add(record.worker_identity_sha256)
+
+        summary = _summarize_seed_scalars(
+            method,
+            registered_seeds,
+            oof_by_seed=oof_by_seed,
+            failed_seeds=failed_seeds,
+            failure_class_by_seed=failure_class_by_seed,
+            fold_records=method_records,
+        )
+        summaries.append(summary)
+        all_records.extend(method_records)
+
+    coverage = _build_coverage(oof_manifest, uncovered_tolerance=config.uncovered_tolerance)
+    if coverage.uncovered_fraction > float(config.uncovered_tolerance):
+        status = SeedVariabilityStatus.INCOMPLETE
+
+    return SeedVariabilityReport(
+        schema=_SEED_VARIABILITY_REPORT_SCHEMA,
+        protocol=PROTOCOL,
+        run_id=inputs.run_id,
+        config_sha256=config.config_sha256,
+        registered_seeds=registered_seeds,
+        deterministic_roster=deterministic_roster,
+        oof_manifest_checksum=oof_manifest.manifest_checksum,
+        coverage=coverage,
+        response_space_checksum=inputs.response_space_checksum,
+        base_fit_role_artifact_sha256=fit_role_spec.sha256,
+        fold_fit_role_artifact_sha256s=tuple(all_fold_artifact_shas),
+        dev_store_content_checksum=development_outcome_store.content_checksum,
+        worker_locks=tuple(sorted(worker_locks)),
+        summaries=tuple(summaries),
+        fold_execution_records=tuple(all_records),
+        status=status,
+    )
