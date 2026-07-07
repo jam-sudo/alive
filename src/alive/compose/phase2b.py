@@ -1066,7 +1066,13 @@ def _run_phase2b_core(
     # lock file (keeping the run dir pristine for a corrected re-run); the lock
     # still precedes the seal opening and refuses a prior terminal / burned audit.
     audit_path = getattr(outcome_store, "_audit_path", None)
-    terminal = Phase2bTerminal(run_dir, ledger=ledger, audit_path=audit_path)
+    terminal = Phase2bTerminal(
+        run_dir,
+        ledger=ledger,
+        audit_path=audit_path,
+        protocol=config.protocol,
+        run_id=lock.run_id,
+    )
     terminal.acquire()
 
     # --- Step 3: the sealed access count MUST still be zero. -------------------
@@ -1112,6 +1118,16 @@ def _run_phase2b_core(
     )
     record_pre_access_provenance(ledger=ledger, provenance=pre_access_provenance)
     persist_pre_access_ledger(run_dir=run_dir, ledger=ledger)
+
+    # Bind the pre-access provenance identity onto the terminal now that the
+    # pre-access ledger is persisted (its file SHA and the provenance self-checksum
+    # are the only two common-roster fields not known at construction). Binding
+    # BEFORE the seal-open block guarantees an ABORT written from the protection
+    # boundary still emits the full common identity roster (CLAUDE.md §11).
+    terminal.bind_pre_access(
+        pre_access_ledger_sha256=sha256_file(run_dir / PRE_ACCESS_LEDGER_FILENAME),
+        pre_access_provenance_checksum=pre_access_provenance.self_checksum,
+    )
 
     # --- Step 5: attempt access, claim the DURABLE seal, then confirm. --------
     # The consumption boundary is the durable audit write inside

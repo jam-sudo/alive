@@ -83,6 +83,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import re
 from collections.abc import Mapping, Sequence
@@ -96,6 +97,7 @@ from alive.provenance import (
     DuplicateArtifactError,
     RunLedger,
     sha256_file,
+    sha256_json,
 )
 
 #: Maximum length of a flat numeric list before it is treated as a raw outcome
@@ -324,6 +326,111 @@ def scrub_exception_message(message: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# v2 terminal payload schema + canonical checksum input
+# ---------------------------------------------------------------------------
+
+#: The versioned terminal payload schema string carried by every v2 terminal body.
+TERMINAL_SCHEMA_V2 = "compose_phase2b_terminal_v2"
+
+#: The self-excluding checksum field name (excluded from its own checksum input).
+TERMINAL_PAYLOAD_CHECKSUM_FIELD = "terminal_payload_checksum"
+
+#: The common exact identity fields injected into EVERY terminal body BEFORE the
+#: self-excluding :data:`TERMINAL_PAYLOAD_CHECKSUM_FIELD`. Writer, recovery reader
+#: and durable finalizer all agree on this one roster (CLAUDE.md §11).
+_COMMON_TERMINAL_FIELDS = frozenset(
+    {
+        "schema",
+        "protocol",
+        "run_id",
+        "terminal_state",
+        "sealed_access_count",
+        "seal_audit_reference",
+        "pre_access_ledger_sha256",
+        "pre_access_provenance_checksum",
+    }
+)
+
+
+def canonicalize_terminal_checksum_input(value: object) -> object:
+    """Canonicalise a terminal payload value for ``terminal_payload_checksum``.
+
+    The SINGLE source of truth shared by the terminal writer, the recovery reader,
+    the durable finalizer and the tests: the writer and every verifier hash the
+    body through THIS function, never by applying :func:`sha256_json` to the raw
+    decoded body. Recursively it
+
+    * sorts mappings by (stringified) key and recurses into their values;
+    * preserves ``int``, ``str``, ``bool`` and ``None`` verbatim;
+    * converts every FINITE ``float`` to its exact ``float.hex()`` string so the
+      hash does not depend on a platform-specific decimal ``repr``;
+    * recurses into ``list`` / ``tuple`` (both emitted as lists so a tuple in the
+      in-memory body and the list it round-trips to through JSON hash equally);
+    * REJECTS a non-finite float (``NaN`` / ``Infinity``) or any unsupported type
+      with :class:`TerminalError`.
+
+    The PERSISTED terminal JSON keeps ordinary finite JSON numbers; only this
+    checksum input substitutes ``float.hex()`` strings. Because a finite float
+    round-trips through JSON to the identical value, the writer's hash of the
+    in-memory body and a verifier's hash of the reloaded body agree.
+
+    Parameters
+    ----------
+    value : object
+        A terminal body (or any nested value) to canonicalise.
+
+    Returns
+    -------
+    object
+        A structure of mappings, lists, ints, strings, booleans, ``None`` and
+        ``float.hex()`` strings, safe to pass to :func:`sha256_json`.
+
+    Raises
+    ------
+    TerminalError
+        If ``value`` contains a non-finite float or an unsupported type.
+    """
+    # ``bool`` is a subclass of ``int``; both are preserved verbatim here.
+    if value is None or isinstance(value, (bool, int, str)):
+        return value
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise TerminalError(
+                "terminal checksum input rejects a non-finite float "
+                f"({value!r}); every terminal float must be finite (no NaN/Infinity)."
+            )
+        return value.hex()
+    if isinstance(value, Mapping):
+        return {
+            str(key): canonicalize_terminal_checksum_input(val)
+            for key, val in sorted(value.items(), key=lambda item: str(item[0]))
+        }
+    if isinstance(value, (list, tuple)):
+        return [canonicalize_terminal_checksum_input(item) for item in value]
+    raise TerminalError(
+        "terminal checksum input rejects an unsupported value of type "
+        f"{type(value).__name__!r}; terminal payloads must contain only mappings, "
+        "lists, tuples, strings, integers, booleans, finite floats and null."
+    )
+
+
+#: State-specific exact field rosters. ``INVALID`` and ``ABORTED_AFTER_SEAL`` carry
+#: a FIXED set of state fields validated exactly against ``common ∪ state`` (missing
+#: OR unknown key → :class:`TerminalError`). ``COMPLETE`` is OPEN at this milestone:
+#: its state-specific content is the caller's outcome-free report payload spread at
+#: top level and is not yet a fixed roster (the exact COMPLETE roster lands when that
+#: payload is restructured into a registered summary). Even for ``COMPLETE`` the
+#: common identity roster is still required present.
+_STATE_TERMINAL_FIELDS: dict[TerminalState, frozenset[str] | None] = {
+    TerminalState.COMPLETE: None,
+    TerminalState.INVALID: frozenset({"reason", "evidence"}),
+    TerminalState.ABORTED_AFTER_SEAL: frozenset(
+        {"exception_class", "message", "stage", "preflight_checksums", "audit_reference"}
+    ),
+}
+
+
+# ---------------------------------------------------------------------------
 # Terminal state machine
 # ---------------------------------------------------------------------------
 
@@ -382,6 +489,10 @@ class Phase2bTerminal:
         *,
         ledger: RunLedger,
         audit_path: str | Path | None = None,
+        protocol: str | None = None,
+        run_id: str | None = None,
+        pre_access_ledger_sha256: str | None = None,
+        pre_access_provenance_checksum: str | None = None,
     ) -> None:
         self._run_dir = Path(run_dir)
         self._ledger = ledger
@@ -389,9 +500,21 @@ class Phase2bTerminal:
         self._state: TerminalState | None = None
         self._lock_fd: int | None = None
         #: The durable audit reference confirmed by :meth:`confirm_durable_access`
-        #: (``None`` until confirmed / on the deprecated in-memory path). Recorded
-        #: into ``ABORTED_AFTER_SEAL`` artifacts as durable proof of consumption.
+        #: (``None`` until confirmed / on the deprecated in-memory path). Emitted as
+        #: the common ``seal_audit_reference`` field and, in ``ABORTED_AFTER_SEAL``
+        #: artifacts, also as the state ``audit_reference`` — durable proof of
+        #: consumption.
         self._audit_reference: str | None = None
+        #: v2 common identity fields (CLAUDE.md §11). ``protocol`` / ``run_id`` are
+        #: known at construction; the pre-access provenance identity is only known
+        #: after the pre-access ledger is persisted and is bound via
+        #: :meth:`bind_pre_access` BEFORE the seal-open block, so an ABORT written
+        #: from the protection boundary (no caller payload) still emits the full
+        #: common roster.
+        self._protocol = protocol
+        self._run_id = run_id
+        self._pre_access_ledger_sha256 = pre_access_ledger_sha256
+        self._pre_access_provenance_checksum = pre_access_provenance_checksum
 
     # ------------------------------------------------------------------
     # Read-only properties
@@ -411,6 +534,54 @@ class Phase2bTerminal:
     def state(self) -> TerminalState | None:
         """The current lifecycle state (``None`` before :meth:`acquire`)."""
         return self._state
+
+    # ------------------------------------------------------------------
+    # v2 identity binding
+    # ------------------------------------------------------------------
+
+    def bind_pre_access(
+        self,
+        *,
+        pre_access_ledger_sha256: str,
+        pre_access_provenance_checksum: str,
+    ) -> None:
+        """Bind the pre-access provenance identity onto the terminal instance.
+
+        These two common fields — the SHA-256 of the persisted pre-access ledger
+        file and the self-excluding checksum of the pre-access provenance payload —
+        are only available AFTER the pre-access ledger is persisted, which is after
+        construction but BEFORE the seal-open block. They are terminal-INSTANCE
+        state (not per-call) so that an ``ABORTED_AFTER_SEAL`` written from the
+        protection boundary (which has no caller payload) still emits the full
+        common identity roster. Must be called before the terminal reaches
+        ``ACCESS_CLAIMED``.
+
+        Parameters
+        ----------
+        pre_access_ledger_sha256 : str
+            SHA-256 of the persisted pre-access ledger file.
+        pre_access_provenance_checksum : str
+            Self-excluding checksum of the pre-access provenance payload.
+
+        Raises
+        ------
+        TerminalError
+            If called once the seal-open block has been entered (state is
+            ``ACCESS_CLAIMED`` or terminal).
+        """
+        if self._state in (
+            TerminalState.ACCESS_CLAIMED,
+            TerminalState.COMPLETE,
+            TerminalState.INVALID,
+            TerminalState.ABORTED_AFTER_SEAL,
+        ):
+            current = self._state.value if self._state is not None else None
+            raise TerminalError(
+                "bind_pre_access must be called before the seal-open block; "
+                f"current state is {current!r}."
+            )
+        self._pre_access_ledger_sha256 = pre_access_ledger_sha256
+        self._pre_access_provenance_checksum = pre_access_provenance_checksum
 
     # ------------------------------------------------------------------
     # Lifecycle: acquire -> claim_access
@@ -755,36 +926,73 @@ class Phase2bTerminal:
         *,
         payload_to_guard: object,
     ) -> None:
-        """Guard, install (atomic, non-overwriting), verify, then record in ledger.
+        """Inject the common roster, guard, install, verify, then record in ledger.
 
-        The strict order is: (1) reject raw outcomes BEFORE writing; (2) install
-        canonical JSON via :func:`atomic_write_once` (raises ``FileExistsError`` if
-        the destination exists — write-once); (3) verify the installed file by
-        recomputing its sha; (4) only then append the write-once ledger entry.
+        The strict order is: (1) reject raw outcomes BEFORE writing; (2) inject the
+        v2 common identity roster (instance / derived state) into the body; (3)
+        validate the assembled body against the exact ``common ∪ state`` roster and
+        verify the filename ↔ ``terminal_state`` agreement; (4) compute and insert
+        the self-excluding ``terminal_payload_checksum`` via
+        :func:`canonicalize_terminal_checksum_input`; (5) install canonical JSON via
+        :func:`atomic_write_once` (raises ``FileExistsError`` if the destination
+        exists — write-once); (6) verify the installed file by recomputing its sha;
+        (7) only then append the write-once ledger entry.
 
         Parameters
         ----------
         artifact_name : str
             Terminal artifact filename (also the ledger artifact name).
         body : Mapping
-            The full JSON body to install.
+            The state-specific JSON body (carrying at least ``terminal_state``); the
+            common identity roster is injected here, never supplied per-call.
         payload_to_guard : object
             The user-supplied portion to scan for raw outcomes.
 
         Raises
         ------
         TerminalError
-            On a raw-outcome violation, a write-once destination conflict, a
-            verification failure, or a duplicate ledger entry.
+            On a raw-outcome violation, a roster / filename-state violation, a
+            non-finite / unsupported checksum value, a write-once destination
+            conflict, a verification failure, or a duplicate ledger entry.
         """
         # 1. Guard BEFORE any byte is written. A rejected payload leaves the run
         #    directory and the ledger completely untouched.
         _assert_no_raw_outcomes(payload_to_guard)
 
-        destination = self._run_dir / artifact_name
-        text = json.dumps(body, sort_keys=True, separators=(",", ":"))
+        expected_state = self._artifact_state(artifact_name)
 
-        # 2. Atomic, non-overwriting install (FileExistsError if it already exists).
+        # 2. Inject the v2 common identity roster into a LOCAL copy of the body so
+        #    COMPLETE / INVALID / ABORTED share one identity contract. The five
+        #    identity fields are terminal-INSTANCE state, so an ABORT with no caller
+        #    payload still emits the full roster (CLAUDE.md §11).
+        caller_state = body.get("terminal_state")
+        if caller_state != expected_state.value:
+            raise TerminalError(
+                f"terminal artifact {artifact_name!r} maps to state "
+                f"{expected_state.value!r} but the body carries terminal_state "
+                f"{caller_state!r}; filename and state must agree."
+            )
+        assembled: dict = dict(body)
+        assembled["schema"] = TERMINAL_SCHEMA_V2
+        assembled["protocol"] = self._protocol
+        assembled["run_id"] = self._run_id
+        assembled["seal_audit_reference"] = self._audit_reference
+        assembled["pre_access_ledger_sha256"] = self._pre_access_ledger_sha256
+        assembled["pre_access_provenance_checksum"] = self._pre_access_provenance_checksum
+        assembled["sealed_access_count"] = self._sealed_access_count()
+
+        # 3. Validate the assembled body against the exact common ∪ state roster.
+        self._validate_terminal_roster(assembled, expected_state)
+
+        # 4. Compute + insert the self-excluding checksum via the ONE shared
+        #    canonicalizer (never a raw sha256_json over the decoded body).
+        checksum_input = canonicalize_terminal_checksum_input(assembled)
+        assembled[TERMINAL_PAYLOAD_CHECKSUM_FIELD] = sha256_json(checksum_input)
+
+        destination = self._run_dir / artifact_name
+        text = json.dumps(assembled, sort_keys=True, separators=(",", ":"))
+
+        # 5. Atomic, non-overwriting install (FileExistsError if it already exists).
         try:
             atomic_write_once(destination, text)
         except FileExistsError as exc:
@@ -794,7 +1002,7 @@ class Phase2bTerminal:
                 "never overwritten."
             ) from exc
 
-        # 3. Verify the installed file before touching the ledger.
+        # 6. Verify the installed file before touching the ledger.
         installed_sha = sha256_file(destination)
         if installed_sha != _sha256_text(text):
             raise TerminalError(
@@ -802,7 +1010,7 @@ class Phase2bTerminal:
                 "the installed bytes do not match the intended content."
             )
 
-        # 4. Only now record the write-once ledger entry (after file verified).
+        # 7. Only now record the write-once ledger entry (after file verified).
         try:
             self._ledger.record_artifact(artifact_name, installed_sha)
         except DuplicateArtifactError as exc:
@@ -820,6 +1028,80 @@ class Phase2bTerminal:
 
     def _artifact_names(self) -> tuple[str, ...]:
         return (self.COMPLETE_ARTIFACT, self.INVALID_ARTIFACT, self.ABORTED_ARTIFACT)
+
+    def _artifact_state(self, artifact_name: str) -> TerminalState:
+        """Return the terminal state that ``artifact_name`` must carry.
+
+        Raises
+        ------
+        TerminalError
+            If ``artifact_name`` is not one of the three terminal filenames.
+        """
+        mapping = {
+            self.COMPLETE_ARTIFACT: TerminalState.COMPLETE,
+            self.INVALID_ARTIFACT: TerminalState.INVALID,
+            self.ABORTED_ARTIFACT: TerminalState.ABORTED_AFTER_SEAL,
+        }
+        try:
+            return mapping[artifact_name]
+        except KeyError as exc:  # pragma: no cover - guards a wiring mistake
+            raise TerminalError(f"{artifact_name!r} is not a terminal artifact filename.") from exc
+
+    def _validate_terminal_roster(self, body: Mapping, state: TerminalState) -> None:
+        """Validate an assembled body against the exact ``common ∪ state`` roster.
+
+        Every common identity field must be present (a missing one means the
+        injection failed). For states with a FIXED state roster (``INVALID`` /
+        ``ABORTED_AFTER_SEAL``) the body must carry exactly ``common ∪ state`` — an
+        unknown OR missing state field raises. ``COMPLETE`` is OPEN at this
+        milestone (its report payload is spread and not yet a fixed roster), so only
+        the common-present check applies. The self-excluding
+        ``terminal_payload_checksum`` is inserted AFTER this check and is not part
+        of the validated roster.
+
+        Raises
+        ------
+        TerminalError
+            On a missing common field, or (fixed-roster states) an unknown or
+            missing state field.
+        """
+        present = set(body.keys())
+        missing_common = _COMMON_TERMINAL_FIELDS - present
+        if missing_common:
+            raise TerminalError(
+                f"terminal body for state {state.value!r} is missing required common "
+                f"field(s) {sorted(missing_common)!r}."
+            )
+        state_keys = _STATE_TERMINAL_FIELDS[state]
+        if state_keys is None:
+            return
+        allowed = _COMMON_TERMINAL_FIELDS | state_keys | {TERMINAL_PAYLOAD_CHECKSUM_FIELD}
+        unknown = present - allowed
+        if unknown:
+            raise TerminalError(
+                f"terminal body for state {state.value!r} carries unknown field(s) "
+                f"{sorted(unknown)!r}; allowed fields are {sorted(allowed)!r}."
+            )
+        missing_state = state_keys - present
+        if missing_state:
+            raise TerminalError(
+                f"terminal body for state {state.value!r} is missing state field(s) "
+                f"{sorted(missing_state)!r}."
+            )
+
+    def _sealed_access_count(self) -> int:
+        """Count the durable seal-audit records at this terminal's own audit path.
+
+        Returns 0 when no audit path was supplied or the file is absent / empty. A
+        blank line is ignored; every non-blank line is one durable record (mirrors
+        :meth:`_audit_has_records`). This is the terminal's OWN derived count — it
+        never reaches into the outcome store's counter.
+        """
+        if self._audit_path is None or not self._audit_path.exists():
+            return 0
+        return sum(
+            1 for line in self._audit_path.read_text(encoding="utf-8").splitlines() if line.strip()
+        )
 
     def _require_state(self, expected: TerminalState, action: str) -> None:
         if self._state is not expected:

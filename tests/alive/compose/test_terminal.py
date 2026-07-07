@@ -36,10 +36,12 @@ from alive.compose.terminal import (
     Phase2bTerminal,
     TerminalError,
     TerminalState,
+    canonicalize_terminal_checksum_input,
 )
 from alive.provenance import (
     EnvironmentInfo,
     RunLedger,
+    sha256_json,
 )
 
 # ---------------------------------------------------------------------------
@@ -86,6 +88,50 @@ def _terminal(tmp_path: Path, *, audit_path: Path | None = None) -> Phase2bTermi
     return Phase2bTerminal(run_dir, ledger=_ledger(), audit_path=audit_path)
 
 
+def _durably_claimed_terminal(
+    tmp_path: Path, *, run_id: str = "deadbeefdeadbeef"
+) -> Phase2bTerminal:
+    """A terminal advanced to ``ACCESS_CLAIMED`` via a VERIFIED durable audit.
+
+    Constructs the terminal with the full v2 identity roster (protocol / run_id /
+    pre-access provenance identity), writes one durable audit record so
+    :meth:`Phase2bTerminal.confirm_durable_access` accepts the claim, and confirms
+    the durable reference — the seal-consumed state from which every terminal body
+    must carry the common identity fields.
+    """
+    run_dir = tmp_path / "run"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    audit_path = tmp_path / "audit.jsonl"
+    term = Phase2bTerminal(
+        run_dir,
+        ledger=_ledger(),
+        audit_path=audit_path,
+        protocol="COMPOSE-K562-v1",
+        run_id=run_id,
+        pre_access_ledger_sha256="c" * 64,
+        pre_access_provenance_checksum="d" * 64,
+    )
+    term.acquire()  # audit empty -> OK
+    term.attempt_access()
+    # The durable seal claim writes the audit record (as the outcome store would),
+    # after which confirm_durable_access accepts the durable reference.
+    audit_path.write_text(json.dumps({"run_id": run_id, "pair_ids": []}) + "\n", encoding="utf-8")
+    term.confirm_durable_access("durable-audit-reference-xyz")
+    return term
+
+
+def _v2_complete_payload(**overrides: object) -> dict:
+    """A tiny outcome-free COMPLETE report payload (state-specific content only).
+
+    The identity roster is injected by the terminal writer from instance state;
+    this payload supplies only the state-specific summary. ``theta`` is a finite
+    float by default so a test can override it with a non-finite value.
+    """
+    payload: dict = {"verdict": "NO_DISTINCT_WIN", "theta": 0.42, "n_pairs": 12}
+    payload.update(overrides)
+    return payload
+
+
 def _terminal_artifact_paths(run_dir: Path) -> list[Path]:
     """Every candidate terminal artifact path in the run dir."""
     return [
@@ -120,19 +166,77 @@ def test_complete_happy_path_writes_canonical_json_and_ledger(tmp_path: Path) ->
     artifact = run_dir / Phase2bTerminal.COMPLETE_ARTIFACT
     assert artifact.exists()
 
-    # Canonical JSON: sort_keys + compact separators. The body carries the
-    # payload plus a terminal_state marker.
+    # Canonical JSON: sort_keys + compact separators.
     text = artifact.read_text(encoding="utf-8")
     body = json.loads(text)
-    expected = dict(payload)
-    expected["terminal_state"] = TerminalState.COMPLETE.value
-    assert body == expected
     assert text == json.dumps(body, sort_keys=True, separators=(",", ":"))
+
+    # v2 common roster is injected; the report payload's non-reserved keys survive.
+    assert body["schema"] == "compose_phase2b_terminal_v2"
+    assert body["terminal_state"] == TerminalState.COMPLETE.value
+    for k in (
+        "protocol",
+        "run_id",
+        "sealed_access_count",
+        "seal_audit_reference",
+        "pre_access_ledger_sha256",
+        "pre_access_provenance_checksum",
+        "terminal_payload_checksum",
+    ):
+        assert k in body
+    assert body["verdict"] == payload["verdict"]
+    assert body["method_roster"] == payload["method_roster"]
+
+    # Self-excluding checksum recomputes via the shared canonicalizer.
+    checksum_input = canonicalize_terminal_checksum_input(
+        {k: v for k, v in body.items() if k != "terminal_payload_checksum"}
+    )
+    assert sha256_json(checksum_input) == body["terminal_payload_checksum"]
 
     # Ledger entry appended AND verifies against the file on disk.
     sha = term.ledger.artifact_sha(Phase2bTerminal.COMPLETE_ARTIFACT)
     assert isinstance(sha, str) and len(sha) == 64
     assert term.ledger.verify_file(Phase2bTerminal.COMPLETE_ARTIFACT, artifact) is True
+
+
+def test_terminal_v2_has_common_fields_and_self_excluding_checksum(tmp_path: Path) -> None:
+    term = _durably_claimed_terminal(tmp_path)  # verified audit -> ACCESS_CLAIMED
+    term.complete(_v2_complete_payload())
+
+    body = json.loads((term.run_dir / Phase2bTerminal.COMPLETE_ARTIFACT).read_text())
+    for k in (
+        "schema",
+        "protocol",
+        "run_id",
+        "terminal_state",
+        "sealed_access_count",
+        "seal_audit_reference",
+        "pre_access_ledger_sha256",
+        "pre_access_provenance_checksum",
+        "terminal_payload_checksum",
+    ):
+        assert k in body
+    assert body["schema"] == "compose_phase2b_terminal_v2"
+    # A durable audit was written, so the derived sealed access count is 1.
+    assert body["sealed_access_count"] == 1
+    assert body["seal_audit_reference"] == "durable-audit-reference-xyz"
+
+    # self-excluding: writer and verifier share the same recursive canonicalizer.
+    checksum_input = canonicalize_terminal_checksum_input(
+        {k: v for k, v in body.items() if k != "terminal_payload_checksum"}
+    )
+    recomputed = sha256_json(checksum_input)
+    assert recomputed == body["terminal_payload_checksum"]
+
+
+def test_terminal_rejects_nonfinite_float(tmp_path: Path) -> None:
+    term = _durably_claimed_terminal(tmp_path)
+    with pytest.raises(TerminalError, match="finite"):
+        term.complete(_v2_complete_payload(theta=float("nan")))
+
+    # Rejected BEFORE any write: the state is unchanged and no artifact exists.
+    assert term.state is TerminalState.ACCESS_CLAIMED
+    assert _existing_terminal_artifacts(term.run_dir) == []
 
 
 def test_complete_is_write_once_second_complete_raises(tmp_path: Path) -> None:
