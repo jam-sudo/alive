@@ -186,11 +186,16 @@ def test_generate_is_write_once(tmp_path):
 
 _CALIB = [("CEBPE", "KLF1")]
 _SEALED = [("AAA", "BBB")]
+_SINGLES = ["KLF1", "CEBPE", "AAA", "BBB"]
 
 
 def _validate(spec, approved_root, **over):
     kw = dict(
-        spec=spec, approved_root=approved_root, calibration_pair_ids=_CALIB, sealed_pair_ids=_SEALED
+        spec=spec,
+        approved_root=approved_root,
+        calibration_pair_ids=_CALIB,
+        sealed_pair_ids=_SEALED,
+        single_gene_ids=_SINGLES,
     )
     kw.update(over)
     validate_fit_role_artifact(spec.path, **kw)
@@ -199,6 +204,64 @@ def _validate(spec, approved_root, **over):
 def test_validate_happy_path(tmp_path):
     spec = _gen(tmp_path)
     _validate(spec, str(tmp_path))  # no raise
+
+
+def _gen_with_hidden_sealed_combo(tmp_path, name: str = "leak.h5ad") -> FitRoleArtifactSpec:
+    # The sealed (AAA,BBB) combo cell is written "AAA+BBB" (a '+' separator) rather
+    # than the '_' the classifier expects. The '_'-based extractor files it as a
+    # `singles` cell and RETAINS it, so the generated artifact carries a sealed
+    # outcome cell disguised as a single.
+    obs_src = [f"r{i}" for i in range(7)]
+    obs_pert = ["control", "KLF1", "CEBPE", "CEBPE_KLF1", "AAA", "BBB", "AAA+BBB"]
+    full = sparse.csr_matrix(np.arange(1, 22, dtype=np.float64).reshape(7, 3))
+    ex = ComposeFitRoleExtractor(
+        obs_source_row_id=obs_src,
+        obs_perturbation=obs_pert,
+        var_names=["G1", "G2", "G3"],
+        calibration_pair_ids=_CALIB,
+        sealed_pair_ids=_SEALED,
+        control_token="control",
+        raw_data_sha256="raw",
+        pair_manifest_sha256="pm",
+        eligibility_hash="elig",
+        row_reader=lambda idx: full[idx],
+    )
+    extraction = extract_fit_roles(extractor=ex)
+    return generate_fit_role_artifact(
+        extraction=extraction,
+        out_path=str(tmp_path / name),
+        config_sha256="cfg",
+        data_card_sha256="dc",
+        calibration_gene_set_hash="cg",
+        generator_code_sha256="gen",
+        writer_environment_sha256="env",
+    )
+
+
+def test_validate_rejects_sealed_combo_hidden_as_single(tmp_path):
+    # LEAKAGE REGRESSION: an artifact smuggling the sealed (AAA,BBB) combo cell in
+    # as the `singles` token "AAA+BBB" must fail closed. "AAA+BBB" is not a
+    # registered single-gene id, so the universe membership check rejects it even
+    # though the '_'-based separator never recognizes it as a combo.
+    spec = _gen_with_hidden_sealed_combo(tmp_path)
+    with pytest.raises(FitRoleArtifactError, match="single-gene id"):
+        _validate(spec, str(tmp_path))
+
+
+def test_validate_rejects_singles_token_outside_universe(tmp_path):
+    # A legitimate singles token absent from the declared single-gene universe
+    # fails closed: the universe is the governed source of truth.
+    spec = _gen(tmp_path)
+    with pytest.raises(FitRoleArtifactError, match="single-gene id"):
+        _validate(spec, str(tmp_path), single_gene_ids=["KLF1", "CEBPE", "BBB"])  # drop AAA
+
+
+def test_validate_rejects_empty_or_duplicate_single_gene_universe(tmp_path):
+    spec = _gen(tmp_path)
+    with pytest.raises(FitRoleArtifactError, match="single_gene_ids"):
+        _validate(spec, str(tmp_path), single_gene_ids=[])
+    with pytest.raises(FitRoleArtifactError, match="single_gene_ids"):
+        _validate(spec, str(tmp_path), single_gene_ids=["KLF1", "KLF1", "CEBPE", "AAA", "BBB"])
 
 
 def test_validate_rejects_file_sha_mismatch(tmp_path):

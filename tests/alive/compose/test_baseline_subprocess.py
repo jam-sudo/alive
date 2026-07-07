@@ -10,6 +10,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from alive.compose import baseline_subprocess
 from alive.compose.baseline_subprocess import (
     ExecutionIdentityLock,
     PayloadError,
@@ -321,6 +322,31 @@ def test_payload_with_sealed_token_is_refused(tmp_path) -> None:
         be.configure_payload(bad)
 
 
+def test_configure_payload_detaches_nested_state(tmp_path) -> None:
+    be = _backend(tmp_path)
+    payload = _payload()
+    be.configure_payload(payload)
+    payload["response_projection"]["response_artifact_sha256"] = "4" * 64
+    payload["fit_role_artifact"]["path"] = "/tampered/after/configure.h5ad"
+    assert be._payload["response_projection"]["response_artifact_sha256"] == "3" * 64
+    assert be._payload["fit_role_artifact"]["path"] == "/approved/artifacts/fit_role.h5ad"
+
+
+def test_predict_rejects_relative_approved_root() -> None:
+    be = SubprocessBaselineBackend(
+        name="stub",
+        env_python=sys.executable,
+        worker_script=_STUB,
+        import_name="json",
+        approved_artifacts_root=".",
+        expected_response_artifact_sha256="3" * 64,
+        execution_identity_lock=_stub_lock(),
+    )
+    be.configure_payload(_payload())
+    with pytest.raises(PayloadError, match="absolute path"):
+        be.predict(None, [("A", "B")], 3)
+
+
 def test_v1_schema_version_rejected(tmp_path):
     p = _payload()
     p["schema_version"] = 1
@@ -380,3 +406,79 @@ def test_pair_ids_overlapping_calibration_rejected(tmp_path):
     p["pair_ids"] = [["A", "B"], ["B", "C"]]  # ("B","C") is a calibration pair
     with pytest.raises(PayloadError, match="disjoint"):
         write_payload(str(tmp_path), p)
+
+
+# --------------------------------------------------------------------------- #
+# D2 fresh-backend spawn contract
+# --------------------------------------------------------------------------- #
+
+
+def test_spawn_backends_do_not_share_payload_or_manifest_state(tmp_path):
+    # D2 runs each (method, seed, fold) job on a fresh backend so mutable payload
+    # / execution-manifest state cannot bleed across folds. Configuring fold A
+    # must leave a sibling spawned fold B (and the parent) untouched.
+    base = _backend(tmp_path)
+    fold_a = base.spawn(seed=11)
+    fold_b = base.spawn(seed=23)
+
+    fold_a.configure_payload(_payload())
+    # simulate a post-predict manifest on A to prove the field is not aliased.
+    fold_a._last_execution_manifest = {"marker": "fold-a"}
+
+    assert fold_a._payload is not None
+    assert fold_b._payload is None
+    assert fold_b._last_execution_manifest is None
+    # the parent is never mutated by spawn or by a child's configuration.
+    assert base._payload is None
+    assert base._last_execution_manifest is None
+    # a fresh spawn copies immutable execution identity but sets the new seed.
+    assert fold_a.seed == 11
+    assert fold_b.seed == 23
+    assert fold_b.name == base.name
+    assert fold_b.execution_identity_lock is base.execution_identity_lock
+
+
+def test_spawn_seed_reaches_serialized_payload_and_provenance(tmp_path, monkeypatch):
+    # seed=23 must reach BOTH the worker payload the controller serializes and the
+    # provenance manifest bound into the method lock.
+    base = _backend(tmp_path)
+    fold = base.spawn(seed=23)
+    fold.configure_payload(_payload())
+
+    # (a) provenance path records the spawned seed.
+    assert fold.provenance_manifest["seed"] == 23
+
+    # (b) the seed the worker actually receives is the serialized payload seed.
+    captured: dict[str, object] = {}
+
+    class _StopBeforeWorker(RuntimeError):
+        pass
+
+    def _spy_write_payload(work_dir: str, payload: dict) -> str:
+        captured["seed"] = payload["seed"]
+        raise _StopBeforeWorker
+
+    monkeypatch.setattr(baseline_subprocess, "write_payload", _spy_write_payload)
+    with pytest.raises(_StopBeforeWorker):
+        fold.predict(None, [("A", "B")], 3)
+    assert captured["seed"] == 23
+
+
+def test_configuring_fold_b_cannot_change_fold_a(tmp_path):
+    # A previously spawned & configured fold-A backend is immune to fold-B config.
+    base = _backend(tmp_path)
+    fold_a = base.spawn(seed=11)
+    fold_b = base.spawn(seed=23)
+
+    fold_a.configure_payload(_payload())
+    payload_a = fold_a._payload
+
+    fold_b.configure_payload(_payload())
+
+    # A's bound snapshot is the same object, byte-identical, and independent of B.
+    assert fold_a._payload is payload_a
+    assert fold_a._payload is not fold_b._payload
+    assert fold_a.seed == 11
+    assert write_payload(str(tmp_path / "a"), fold_a._payload) == write_payload(
+        str(tmp_path / "a2"), payload_a
+    )

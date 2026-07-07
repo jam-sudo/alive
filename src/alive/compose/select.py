@@ -34,13 +34,20 @@ uncovered calibration pairs and the per-fold exclusions (plan §2.4).
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import numpy as np
 from numpy.random import PCG64, Generator
 
 from alive.compose.metric2 import paired_relative_error_reduction
+from alive.io import atomic_write_once
+from alive.provenance import sha256_json
+
+#: Immutable schema tag for the persisted OOF fold manifest (D2 Task 1).
+OOF_FOLD_MANIFEST_SCHEMA = "compose_oof_fold_manifest_v1"
 
 #: A typed model factory: a zero-arg callable returning a fresh symmetric model
 #: exposing ``fit(Z, pairs, eps_obs, *, lam)`` and ``predict_eps(Z, g, h)``.
@@ -53,6 +60,17 @@ class SelectionError(ValueError):
     Covers empty/ill-typed grids, missing factor banks, dimension mismatches
     (including a factor-shaped additive added to a response-shaped prediction),
     empty folds and an uncovered-pair fraction above the registered tolerance.
+    """
+
+
+class OOFFoldManifestError(ValueError):
+    """Raised on an invalid, inconsistent or tampered :class:`OOFFoldManifest`.
+
+    Covers unknown / missing keys, a wrong schema tag, non-canonical or duplicate
+    pair IDs, a position↔ID disagreement, overlapping or incomplete
+    train/test/excluded partitions, coverage that is not the union of the folds'
+    test IDs, and a self-excluding-checksum mismatch (tampering). Loading a
+    manifest that fails ANY of these checks fails closed.
     """
 
 
@@ -105,6 +123,10 @@ class SelectionResult:
         Per-fold tuple of the canonical pair IDs excluded from that fold.
     n_folds : int
         Number of retained folds (every retained fold has non-empty train+test).
+    oof_manifest : OOFFoldManifest or None
+        The canonical, checksummed record of the EXACT folds built at this single
+        selection call (never a second, independently rebuilt fold set). Bound so
+        later development tasks LOAD and VERIFY it instead of re-deriving folds.
     """
 
     selected_k_total: int
@@ -115,6 +137,456 @@ class SelectionResult:
     uncovered_fraction: float
     fold_exclusions: tuple[tuple[tuple[str, str], ...], ...] = field(default=())
     n_folds: int = 0
+    oof_manifest: OOFFoldManifest | None = None
+
+
+# --------------------------------------------------------------------------- #
+# persisted OOF fold manifest (D2 Task 1)
+# --------------------------------------------------------------------------- #
+
+#: Top-level keys of a serialised :class:`OOFFoldManifest` (exact set; extra or
+#: missing keys fail closed on load).
+_MANIFEST_KEYS: frozenset[str] = frozenset(
+    {
+        "schema",
+        "calibration_pair_ids",
+        "n_genes",
+        "n_folds",
+        "split_seed",
+        "folds",
+        "covered_pair_ids",
+        "uncovered_pair_ids",
+        "manifest_checksum",
+    }
+)
+
+#: Keys of a serialised :class:`OOFFoldRecord` (exact set).
+_FOLD_KEYS: frozenset[str] = frozenset(
+    {
+        "fold_index",
+        "held_out_gene_indices",
+        "train_pair_positions",
+        "test_pair_positions",
+        "excluded_pair_positions",
+        "train_pair_ids",
+        "test_pair_ids",
+        "excluded_pair_ids",
+    }
+)
+
+
+def _as_pair(value: object) -> tuple[str, str]:
+    """Coerce a JSON pair (list/tuple of two strings) to a canonical 2-tuple."""
+    if not isinstance(value, (list, tuple)):
+        raise OOFFoldManifestError(f"pair ID must be a two-element list, got {value!r}")
+    pair = tuple(value)
+    if len(pair) != 2 or not all(isinstance(x, str) for x in pair):
+        raise OOFFoldManifestError(f"pair ID must be a (str, str) tuple, got {value!r}")
+    return (pair[0], pair[1])
+
+
+def _is_canonical_pair(pair: tuple[str, str]) -> bool:
+    """Return ``True`` if ``pair`` is canonical ``(min, max)`` by UTF-8 bytes."""
+    return pair[0].encode("utf-8") <= pair[1].encode("utf-8")
+
+
+@dataclass(frozen=True)
+class OOFFoldRecord:
+    """One fold of the gene-disjoint OOF layout — positions AND aligned IDs.
+
+    Attributes
+    ----------
+    fold_index : int
+        Zero-based position of this fold in the manifest's fold tuple.
+    held_out_gene_indices : tuple of int
+        Gene indices held out for this fold (the test gene group).
+    train_pair_positions, test_pair_positions, excluded_pair_positions : tuple of int
+        Positions (indices into ``calibration_pair_ids``) of the fold's TRAIN /
+        TEST / EXCLUDED (cross-group) pairs.
+    train_pair_ids, test_pair_ids, excluded_pair_ids : tuple of tuple of str
+        The canonical pair IDs at those positions, aligned one-for-one so a later
+        loader can VERIFY ``*_pair_ids == [calibration_pair_ids[i] for i in
+        *_pair_positions]`` without re-deriving folds.
+    """
+
+    fold_index: int
+    held_out_gene_indices: tuple[int, ...]
+    train_pair_positions: tuple[int, ...]
+    test_pair_positions: tuple[int, ...]
+    excluded_pair_positions: tuple[int, ...]
+    train_pair_ids: tuple[tuple[str, str], ...]
+    test_pair_ids: tuple[tuple[str, str], ...]
+    excluded_pair_ids: tuple[tuple[str, str], ...]
+
+    def to_dict(self) -> dict:
+        """Return a canonical JSON-serialisable representation of this fold."""
+        return {
+            "fold_index": int(self.fold_index),
+            "held_out_gene_indices": [int(g) for g in self.held_out_gene_indices],
+            "train_pair_positions": [int(i) for i in self.train_pair_positions],
+            "test_pair_positions": [int(i) for i in self.test_pair_positions],
+            "excluded_pair_positions": [int(i) for i in self.excluded_pair_positions],
+            "train_pair_ids": [list(p) for p in self.train_pair_ids],
+            "test_pair_ids": [list(p) for p in self.test_pair_ids],
+            "excluded_pair_ids": [list(p) for p in self.excluded_pair_ids],
+        }
+
+
+@dataclass(frozen=True)
+class OOFFoldManifest:
+    """Canonical, checksummed record of the EXACT single-call OOF fold layout.
+
+    Persisted at the single :func:`select_hyperparams` selection call and bound
+    into the run identity so later development tasks LOAD and VERIFY it instead of
+    re-deriving folds. The :attr:`manifest_checksum` is a self-excluding SHA-256
+    over :meth:`_payload` (every field except the checksum itself), so any content
+    change moves it and :meth:`load` fails closed on tampering.
+
+    Attributes
+    ----------
+    schema : str
+        Immutable schema tag (:data:`OOF_FOLD_MANIFEST_SCHEMA`).
+    calibration_pair_ids : tuple of tuple of str
+        The full development calibration pair-ID tuple, in the selection call's
+        row order (fold positions index into this tuple).
+    n_genes : int
+        Total number of genes passed to :func:`select_hyperparams`.
+    n_folds : int
+        Number of gene-disjoint folds passed to :func:`select_hyperparams`.
+    split_seed : int
+        The fold-construction seed passed to :func:`select_hyperparams`.
+    folds : tuple of OOFFoldRecord
+        The per-fold positions + aligned IDs.
+    covered_pair_ids : tuple of tuple of str
+        Sorted canonical union of the folds' TEST pair IDs (the covered pairs).
+    uncovered_pair_ids : tuple of tuple of str
+        Sorted canonical calibration pairs never used as an OOF test pair.
+    manifest_checksum : str
+        Self-excluding SHA-256 over :meth:`_payload` (set by :meth:`from_folds`).
+    """
+
+    schema: str
+    calibration_pair_ids: tuple[tuple[str, str], ...]
+    n_genes: int
+    n_folds: int
+    split_seed: int
+    folds: tuple[OOFFoldRecord, ...]
+    covered_pair_ids: tuple[tuple[str, str], ...]
+    uncovered_pair_ids: tuple[tuple[str, str], ...]
+    manifest_checksum: str = ""
+
+    # -- construction ----------------------------------------------------- #
+    @classmethod
+    def from_folds(
+        cls,
+        folds: Sequence[GeneDisjointFold],
+        *,
+        pair_ids: Sequence[tuple[str, str]],
+        n_genes: int,
+        n_folds: int,
+        split_seed: int,
+    ) -> OOFFoldManifest:
+        """Build the manifest from the EXACT ``folds`` of a single selection call.
+
+        Parameters
+        ----------
+        folds : sequence of GeneDisjointFold
+            The folds already built at the single selection call — reused, never
+            rebuilt.
+        pair_ids : sequence of (str, str)
+            The calibration pair IDs (row order), aligned with the pair indices
+            the folds reference.
+        n_genes, n_folds, split_seed : int
+            The selection call's gene count, fold count and fold-construction seed.
+
+        Returns
+        -------
+        OOFFoldManifest
+            The sealed, self-checksummed manifest.
+        """
+        ids = tuple(tuple(p) for p in pair_ids)
+        records = tuple(
+            OOFFoldRecord(
+                fold_index=i,
+                held_out_gene_indices=tuple(int(g) for g in fold.held_out_genes),
+                train_pair_positions=tuple(int(j) for j in fold.train_idx),
+                test_pair_positions=tuple(int(j) for j in fold.test_idx),
+                excluded_pair_positions=tuple(int(j) for j in fold.excluded_idx),
+                train_pair_ids=tuple(ids[j] for j in fold.train_idx),
+                test_pair_ids=tuple(ids[j] for j in fold.test_idx),
+                excluded_pair_ids=tuple(ids[j] for j in fold.excluded_idx),
+            )
+            for i, fold in enumerate(folds)
+        )
+        covered = tuple(sorted({pid for rec in records for pid in rec.test_pair_ids}))
+        uncovered = tuple(sorted(set(ids) - set(covered)))
+        manifest = cls(
+            schema=OOF_FOLD_MANIFEST_SCHEMA,
+            calibration_pair_ids=ids,
+            n_genes=int(n_genes),
+            n_folds=int(n_folds),
+            split_seed=int(split_seed),
+            folds=records,
+            covered_pair_ids=covered,
+            uncovered_pair_ids=uncovered,
+        )
+        object.__setattr__(manifest, "manifest_checksum", sha256_json(manifest._payload()))
+        return manifest
+
+    # -- canonical payload + serialisation -------------------------------- #
+    def _payload(self) -> dict:
+        """Canonical checksum input (every field EXCEPT ``manifest_checksum``)."""
+        return {
+            "schema": self.schema,
+            "calibration_pair_ids": [list(p) for p in self.calibration_pair_ids],
+            "n_genes": int(self.n_genes),
+            "n_folds": int(self.n_folds),
+            "split_seed": int(self.split_seed),
+            "folds": [rec.to_dict() for rec in self.folds],
+            "covered_pair_ids": [list(p) for p in self.covered_pair_ids],
+            "uncovered_pair_ids": [list(p) for p in self.uncovered_pair_ids],
+        }
+
+    def to_dict(self) -> dict:
+        """Return the canonical payload augmented with the sealed checksum."""
+        payload = self._payload()
+        payload["manifest_checksum"] = self.manifest_checksum
+        return payload
+
+    def write_once(self, path: str | Path) -> None:
+        """Serialise the manifest to ``path`` as canonical JSON (write-once).
+
+        Parameters
+        ----------
+        path : str or Path
+            Destination file; must not already exist (write-once, CLAUDE.md §11).
+
+        Raises
+        ------
+        OOFFoldManifestError
+            If ``path`` already exists.
+        """
+        try:
+            atomic_write_once(
+                path,
+                json.dumps(self.to_dict(), sort_keys=True, separators=(",", ":")),
+            )
+        except FileExistsError as exc:
+            raise OOFFoldManifestError(
+                f"refusing to overwrite existing OOF fold manifest at {path}: write-once"
+            ) from exc
+
+    # -- loading (fail closed) -------------------------------------------- #
+    @classmethod
+    def load(cls, path: str | Path) -> OOFFoldManifest:
+        """Load and fully VERIFY a manifest written by :meth:`write_once`.
+
+        Fails closed (:class:`OOFFoldManifestError`) on: unknown / missing keys, a
+        wrong schema tag, non-canonical or duplicate pair IDs, a position↔ID
+        disagreement, overlapping / incomplete train/test/excluded partitions,
+        coverage that is not the union of the folds' test IDs, and a
+        self-excluding-checksum mismatch.
+
+        Parameters
+        ----------
+        path : str or Path
+            Path to a manifest JSON file.
+
+        Returns
+        -------
+        OOFFoldManifest
+            The verified manifest (its recorded checksum matches the recomputation).
+        """
+        try:
+            data = json.loads(Path(path).read_text())
+        except (OSError, json.JSONDecodeError) as exc:
+            raise OOFFoldManifestError(f"failed to read OOF fold manifest: {exc}") from exc
+        if not isinstance(data, dict):
+            raise OOFFoldManifestError("manifest root must be a JSON object")
+
+        keys = set(data)
+        if keys != set(_MANIFEST_KEYS):
+            raise OOFFoldManifestError(
+                f"manifest key set mismatch (missing={sorted(_MANIFEST_KEYS - keys)}, "
+                f"unknown={sorted(keys - _MANIFEST_KEYS)})"
+            )
+        if data["schema"] != OOF_FOLD_MANIFEST_SCHEMA:
+            raise OOFFoldManifestError(f"unexpected schema tag {data['schema']!r}")
+
+        n_genes = _as_int(data["n_genes"], field="n_genes")
+        n_folds = _as_int(data["n_folds"], field="n_folds")
+        split_seed = _as_int(data["split_seed"], field="split_seed")
+        if n_genes <= 0 or n_folds < 1:
+            raise OOFFoldManifestError("n_genes must be > 0 and n_folds must be >= 1")
+
+        calibration = _load_pair_tuple(data["calibration_pair_ids"], field="calibration_pair_ids")
+        n_pairs = len(calibration)
+        positions_universe = set(range(n_pairs))
+
+        records = _load_fold_records(data["folds"], calibration, n_genes, positions_universe)
+        if len(records) != n_folds:
+            raise OOFFoldManifestError(
+                f"manifest has {len(records)} folds but declares n_folds={n_folds}"
+            )
+
+        covered = _load_pair_tuple(data["covered_pair_ids"], field="covered_pair_ids")
+        uncovered = _load_pair_tuple(data["uncovered_pair_ids"], field="uncovered_pair_ids")
+        expected_covered = tuple(sorted({pid for rec in records for pid in rec.test_pair_ids}))
+        if covered != expected_covered:
+            raise OOFFoldManifestError(
+                "covered_pair_ids is not the sorted union of the folds' test pair IDs"
+            )
+        expected_uncovered = tuple(sorted(set(calibration) - set(covered)))
+        if uncovered != expected_uncovered:
+            raise OOFFoldManifestError(
+                "uncovered_pair_ids is not the sorted calibration remainder of coverage"
+            )
+
+        manifest = cls(
+            schema=OOF_FOLD_MANIFEST_SCHEMA,
+            calibration_pair_ids=calibration,
+            n_genes=n_genes,
+            n_folds=n_folds,
+            split_seed=split_seed,
+            folds=records,
+            covered_pair_ids=covered,
+            uncovered_pair_ids=uncovered,
+        )
+        recomputed = sha256_json(manifest._payload())
+        stored_checksum = data["manifest_checksum"]
+        if not isinstance(stored_checksum, str) or stored_checksum != recomputed:
+            raise OOFFoldManifestError(
+                "manifest checksum mismatch: content was tampered after sealing"
+            )
+        object.__setattr__(manifest, "manifest_checksum", recomputed)
+        return manifest
+
+
+def _as_int(value: object, *, field: str) -> int:
+    """Coerce a JSON integer scalar (rejecting bools) or fail closed."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise OOFFoldManifestError(f"{field} must be an integer, got {value!r}")
+    return int(value)
+
+
+def _load_pair_tuple(
+    raw: object, *, field: str, require_canonical: bool = True, require_unique: bool = True
+) -> tuple[tuple[str, str], ...]:
+    """Coerce and validate a list of canonical, unique pair IDs."""
+    if not isinstance(raw, list):
+        raise OOFFoldManifestError(f"{field} must be a list of pair IDs")
+    pairs = tuple(_as_pair(item) for item in raw)
+    if require_canonical:
+        noncanonical = [p for p in pairs if not _is_canonical_pair(p)]
+        if noncanonical:
+            raise OOFFoldManifestError(f"{field} contains non-canonical pair IDs: {noncanonical}")
+    if require_unique and len(set(pairs)) != len(pairs):
+        raise OOFFoldManifestError(f"{field} contains duplicate pair IDs")
+    return pairs
+
+
+def _load_positions(raw: object, *, field: str, universe: set[int]) -> tuple[int, ...]:
+    """Coerce a list of unique in-range integer positions or fail closed."""
+    if not isinstance(raw, list):
+        raise OOFFoldManifestError(f"{field} must be a list of integer positions")
+    positions = tuple(_as_int(item, field=field) for item in raw)
+    if len(set(positions)) != len(positions):
+        raise OOFFoldManifestError(f"{field} contains duplicate positions")
+    out_of_range = [p for p in positions if p not in universe]
+    if out_of_range:
+        raise OOFFoldManifestError(f"{field} positions out of range: {out_of_range}")
+    return positions
+
+
+def _load_fold_records(
+    raw: object,
+    calibration: tuple[tuple[str, str], ...],
+    n_genes: int,
+    positions_universe: set[int],
+) -> tuple[OOFFoldRecord, ...]:
+    """Parse and fully validate every fold record (positions, IDs, partition)."""
+    if not isinstance(raw, list):
+        raise OOFFoldManifestError("folds must be a list")
+    records: list[OOFFoldRecord] = []
+    for expected_index, item in enumerate(raw):
+        if not isinstance(item, dict):
+            raise OOFFoldManifestError("each fold must be a JSON object")
+        if set(item) != set(_FOLD_KEYS):
+            raise OOFFoldManifestError(
+                f"fold {expected_index} key set mismatch "
+                f"(missing={sorted(_FOLD_KEYS - set(item))}, "
+                f"unknown={sorted(set(item) - _FOLD_KEYS)})"
+            )
+        if _as_int(item["fold_index"], field="fold_index") != expected_index:
+            raise OOFFoldManifestError(
+                f"fold_index {item['fold_index']!r} is not the sequential position {expected_index}"
+            )
+        held = _load_positions(
+            item["held_out_gene_indices"],
+            field=f"fold {expected_index} held_out_gene_indices",
+            universe=set(range(n_genes)),
+        )
+        train_pos = _load_positions(
+            item["train_pair_positions"],
+            field=f"fold {expected_index} train_pair_positions",
+            universe=positions_universe,
+        )
+        test_pos = _load_positions(
+            item["test_pair_positions"],
+            field=f"fold {expected_index} test_pair_positions",
+            universe=positions_universe,
+        )
+        excl_pos = _load_positions(
+            item["excluded_pair_positions"],
+            field=f"fold {expected_index} excluded_pair_positions",
+            universe=positions_universe,
+        )
+        # partitions must be disjoint AND cover every calibration position exactly.
+        train_s, test_s, excl_s = set(train_pos), set(test_pos), set(excl_pos)
+        if train_s & test_s or train_s & excl_s or test_s & excl_s:
+            raise OOFFoldManifestError(
+                f"fold {expected_index} train/test/excluded partitions overlap"
+            )
+        if train_s | test_s | excl_s != positions_universe:
+            raise OOFFoldManifestError(
+                f"fold {expected_index} partitions do not cover every calibration pair"
+            )
+        # position↔ID alignment: recorded IDs must equal the calibration IDs at
+        # the recorded positions (never a re-derived or drifted set).
+        train_ids = _load_pair_tuple(
+            item["train_pair_ids"], field=f"fold {expected_index} train_pair_ids"
+        )
+        test_ids = _load_pair_tuple(
+            item["test_pair_ids"], field=f"fold {expected_index} test_pair_ids"
+        )
+        excl_ids = _load_pair_tuple(
+            item["excluded_pair_ids"],
+            field=f"fold {expected_index} excluded_pair_ids",
+            require_unique=True,
+        )
+        for name, pos, got in (
+            ("train", train_pos, train_ids),
+            ("test", test_pos, test_ids),
+            ("excluded", excl_pos, excl_ids),
+        ):
+            expected = tuple(calibration[j] for j in pos)
+            if got != expected:
+                raise OOFFoldManifestError(
+                    f"fold {expected_index} {name}_pair_ids disagree with the positions"
+                )
+        records.append(
+            OOFFoldRecord(
+                fold_index=expected_index,
+                held_out_gene_indices=held,
+                train_pair_positions=train_pos,
+                test_pair_positions=test_pos,
+                excluded_pair_positions=excl_pos,
+                train_pair_ids=train_ids,
+                test_pair_ids=test_ids,
+                excluded_pair_ids=excl_ids,
+            )
+        )
+    return tuple(records)
 
 
 # --------------------------------------------------------------------------- #
@@ -497,6 +969,16 @@ def select_hyperparams(
 
     fold_exclusions = tuple(tuple(pair_ids[i] for i in fold.excluded_idx) for fold in folds)
 
+    # Persist the EXACT folds built above (reuse ``folds`` — do NOT rebuild) as a
+    # canonical, checksummed manifest bound into the selection result.
+    oof_manifest = OOFFoldManifest.from_folds(
+        folds,
+        pair_ids=pair_ids,
+        n_genes=int(n_genes),
+        n_folds=int(n_folds),
+        split_seed=int(seed),
+    )
+
     return SelectionResult(
         selected_k_total=best[0],
         selected_lambda=best[1],
@@ -506,4 +988,5 @@ def select_hyperparams(
         uncovered_fraction=float(uncovered_fraction),
         fold_exclusions=fold_exclusions,
         n_folds=len(folds),
+        oof_manifest=oof_manifest,
     )

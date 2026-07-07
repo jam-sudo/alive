@@ -64,6 +64,7 @@ from alive.compose.freeze import (
 )
 from alive.compose.models import fitted_model_checksum
 from alive.compose.response import ResponseSpace, bind_response_source, verify_response_artifact
+from alive.compose.select import OOFFoldManifest
 from alive.compose.zfactor import GeneFactorBank
 from alive.provenance import RunLedger, sha256_bytes, sha256_file, sha256_json
 
@@ -317,6 +318,11 @@ class Phase2aResult:
     method_lock : dict or None
         The frozen method lock (roster + selected hyperparameters + upstream
         checksums); ``None`` on a futility stop.
+    oof_manifest : OOFFoldManifest or None
+        The canonical, checksummed OOF fold manifest from the single selection
+        call. Returned in memory on BOTH CONTINUE and FUTILITY_STOPPED; on
+        CONTINUE its checksum is additionally bound into the bundle diagnostics,
+        the method lock and the ledger (and written to disk when a path is given).
     """
 
     futility_status: str
@@ -327,6 +333,7 @@ class Phase2aResult:
     selected_lambda: float
     ledger: RunLedger | None = None
     method_lock: dict | None = field(default=None)
+    oof_manifest: OOFFoldManifest | None = None
 
 
 def build_subprocess_fit_payload(
@@ -1143,18 +1150,61 @@ def _validate_baseline_adapters(
     return adapters
 
 
+def _validate_adapter_runtime_bindings(
+    inputs: Phase2aInputs,
+    config: ComposePhase2Config,
+    adapters: Mapping[str, BaselineAdapter],
+) -> None:
+    """Bind every subprocess backend to the active run and method preregistration.
+
+    Payload construction validates its own response artifact, but the Phase2a
+    orchestrator must also prove that the *configured backend* consumes the same
+    response space as ``inputs`` and uses the representation registered for that
+    method. Otherwise predictions can be frozen under an unrelated response-space
+    checksum or a worker can silently select a different nonlinear adapter.
+    """
+    expected_representations = {
+        name: representation
+        for name, representation, _bias_report in config.baseline_representations
+    }
+    mismatches: list[str] = []
+    for name, adapter in sorted(adapters.items()):
+        backend = adapter.backend
+        observed_response = getattr(backend, "expected_response_artifact_sha256", None)
+        if observed_response != inputs.response_space_checksum:
+            mismatches.append(
+                f"{name}.response_space({observed_response!r}!={inputs.response_space_checksum!r})"
+            )
+        lock = getattr(backend, "execution_identity_lock", None)
+        observed_representation = getattr(lock, "prediction_representation", None)
+        expected_representation = expected_representations.get(name)
+        if observed_representation != expected_representation:
+            mismatches.append(
+                f"{name}.prediction_representation("
+                f"{observed_representation!r}!={expected_representation!r})"
+            )
+    if mismatches:
+        raise ScientificModeError(
+            "subprocess backend identities differ from the bound run/config: "
+            + ", ".join(mismatches)
+        )
+
+
 def _build_method_lock(
     inputs: Phase2aInputs,
     roster: tuple[str, ...],
     result: FutilityResult,
     *,
     model_checksum: str,
+    oof_fold_manifest_checksum: str,
 ):
     """Build the frozen method lock (roster + selected hyperparameters + checksums).
 
     The method lock binds the exact roster and the selected ``(k_total, lambda)``
-    + seeds to the upstream artifact checksums, so Phase 2b cannot silently swap a
-    method or a hyperparameter. Returns ``(lock_dict, lock_checksum)``.
+    + seeds to the upstream artifact checksums — including the persisted OOF fold
+    manifest checksum — so Phase 2b cannot silently swap a method, a
+    hyperparameter or the development fold layout. Returns
+    ``(lock_dict, lock_checksum)``.
     """
     lock = {
         "run_id": inputs.run_id,
@@ -1167,6 +1217,7 @@ def _build_method_lock(
         "model_checksum": model_checksum,
         "manifest_checksum": inputs.manifest_checksum,
         "environment_checksum": inputs.environment_checksum,
+        "oof_fold_manifest_checksum": oof_fold_manifest_checksum,
     }
     return lock, sha256_json(lock)
 
@@ -1192,12 +1243,16 @@ def run_phase2a(
     raw_asset_path: str | Path | None = None,
     response_artifact: Mapping | None = None,
     baseline_adapters: Mapping[str, BaselineAdapter] | None = None,
+    oof_manifest_path: str | Path | None = None,
 ) -> Phase2aResult:
     """Run scientific Phase-2a after all activation conditions are satisfied.
 
     ``fixture_mode=True`` is intentionally rejected here.  Synthetic tests must
     use :func:`run_phase2a_fixture`, so a caller-controlled boolean cannot bypass
     owner activation, clean-Git, and evidence-hash checks.
+
+    When ``oof_manifest_path`` is given and the run CONTINUEs, the canonical OOF
+    fold manifest is written ONCE there; on a futility stop nothing is written.
     """
     if fixture_mode:
         raise ScientificModeError(
@@ -1219,6 +1274,7 @@ def run_phase2a(
         raw_asset_path=raw_asset_path,
         response_artifact=response_artifact,
         baseline_adapters=baseline_adapters,
+        oof_manifest_path=oof_manifest_path,
     )
 
 
@@ -1232,6 +1288,7 @@ def run_phase2a_fixture(
     bundle_path: str | Path | None = None,
     environment=None,
     baseline_adapters: Mapping[str, BaselineAdapter] | None = None,
+    oof_manifest_path: str | Path | None = None,
 ) -> Phase2aResult:
     """Run the bounded synthetic/tiny-fixture Phase-2a path."""
     _assert_fixture_payload(inputs, outcome_store)
@@ -1250,6 +1307,7 @@ def run_phase2a_fixture(
         raw_asset_path=None,
         response_artifact=None,
         baseline_adapters=baseline_adapters,
+        oof_manifest_path=oof_manifest_path,
     )
 
 
@@ -1269,6 +1327,7 @@ def _run_phase2a_core(
     raw_asset_path: str | Path | None,
     response_artifact: Mapping | None,
     baseline_adapters: Mapping[str, BaselineAdapter] | None,
+    oof_manifest_path: str | Path | None = None,
 ) -> Phase2aResult:
     """Shared implementation after the public execution boundary is resolved.
 
@@ -1341,6 +1400,7 @@ def _run_phase2a_core(
         baseline_adapters=baseline_adapters,
         required=not fixture_execution,
     )
+    _validate_adapter_runtime_bindings(inputs, cfg, adapters)
 
     # Step 2: bind runtime values, in-memory contents, role provenance and run ID.
     _validate_config_contract(inputs, cfg, tuple(adapters))
@@ -1378,6 +1438,9 @@ def _run_phase2a_core(
     selected_lambda = futility.selected_lambda
 
     # Step 4: futility -> STOP without any sealed predictions (seal stays closed).
+    # The OOF fold manifest is returned in memory but NOT written and NOT bound
+    # into a bundle/lock/ledger — there is no sealed-prediction bundle on futility
+    # (the driver may still persist the development diagnostic at its own path).
     if futility.status != "CONTINUE":
         return Phase2aResult(
             futility_status=futility.status,
@@ -1388,10 +1451,19 @@ def _run_phase2a_core(
             selected_lambda=selected_lambda,
             ledger=None,
             method_lock=None,
+            oof_manifest=futility.oof_manifest,
         )
 
-    # Step 5: CONTINUE -> fit learned models on calibration data only, then
-    # predict the REGISTERED sealed pairs using IDENTITIES / FEATURES only.
+    # Step 5: CONTINUE -> bind the persisted OOF fold manifest (from the SINGLE
+    # selection call inside the futility checkpoint) and fit learned models on
+    # calibration data only, then predict the REGISTERED sealed pairs using
+    # IDENTITIES / FEATURES only.
+    oof_manifest = futility.oof_manifest
+    if oof_manifest is None:
+        raise OutcomeLeakageError(
+            "invariant violated: CONTINUE without a persisted OOF fold manifest"
+        )
+    oof_fold_manifest_checksum = oof_manifest.manifest_checksum
     selected_Z = np.asarray(inputs.factors_by_k[selected_k], dtype=float)
     fitted: dict[str, object] = {}
     for name, factory in inputs.model_factories.items():
@@ -1459,6 +1531,7 @@ def _run_phase2a_core(
         response_space_checksum=inputs.response_space_checksum,
         factor_checksum=inputs.factor_checksum,
         model_checksum=effective_model_checksum,
+        model_artifact_checksums=model_artifact_checksums,
         manifest_checksum=inputs.manifest_checksum,
         selected_k_total=selected_k,
         selected_lambda=selected_lambda,
@@ -1473,6 +1546,8 @@ def _run_phase2a_core(
             "measurable": bool(futility.measurability.passed),
             "selected_k_total": int(selected_k),
             "selected_lambda": round(float(selected_lambda), 12),
+            # binds the exact development OOF fold layout into the frozen bundle.
+            "oof_fold_manifest_checksum": oof_fold_manifest_checksum,
             # audit field: this run opened no seal. Named without the "sealed"
             # token so the leakage scanner does not flag the benign audit value.
             "seal_open_count": 0,
@@ -1487,12 +1562,17 @@ def _run_phase2a_core(
     if bundle_path is not None:
         bundle.write(bundle_path)
 
+    # write the OOF fold manifest ONCE when a destination is given (write-once).
+    if oof_manifest_path is not None:
+        oof_manifest.write_once(oof_manifest_path)
+
     # Step 8: record the bundle + method-lock checksums in a write-once ledger.
     method_lock, lock_checksum = _build_method_lock(
         inputs,
         roster,
         futility,
         model_checksum=effective_model_checksum,
+        oof_fold_manifest_checksum=oof_fold_manifest_checksum,
     )
     env = environment if environment is not None else _placeholder_environment(inputs)
     ledger = RunLedger(run_id=inputs.run_id, config_sha256=cfg.config_sha256, environment=env)
@@ -1507,6 +1587,7 @@ def _run_phase2a_core(
     ledger.record_artifact("pair_manifest", inputs.manifest_checksum)
     ledger.record_artifact("environment", inputs.environment_checksum)
     ledger.record_artifact("method_lock", lock_checksum)
+    ledger.record_artifact("phase2a_oof_fold_manifest", oof_fold_manifest_checksum)
     ledger.record_artifact("frozen_prediction_bundle", bundle.bundle_checksum)
 
     # Step 9: confirm the sealed access count is ZERO (it never opened a seal).
@@ -1522,6 +1603,7 @@ def _run_phase2a_core(
         selected_lambda=selected_lambda,
         ledger=ledger,
         method_lock=method_lock,
+        oof_manifest=oof_manifest,
     )
 
 

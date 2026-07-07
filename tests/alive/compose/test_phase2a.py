@@ -208,9 +208,14 @@ def _response_and_fit_role(
     control_mean = space.project(X, control_idx).mean(axis=0)
     _, _, combined = verify_response_artifact(space, control_mean)
 
+    # singles-cell tokens are drawn from the combo-pair genes, which are exactly
+    # the payload's ``single_gene_ids`` universe (``inputs.delta_by_gene`` keys).
+    # The fit-role validator rejects any `singles` token outside that universe
+    # (the sealed-combo-as-single leak guard).
+    combo_genes = [g for pair in combo_pairs for g in pair]
     rows = (
         [(f"c{i}", "control", "control") for i in range(n_control)]
-        + [(f"s{i}", "singles", f"S{i}") for i in range(n_single)]
+        + [(f"s{i}", "singles", combo_genes[i % len(combo_genes)]) for i in range(n_single)]
         + [(f"m{i}", "combo_calibration", f"{a}_{b}") for i, (a, b) in enumerate(combo_pairs)]
     )
     extraction = FitRoleExtraction(
@@ -235,10 +240,12 @@ def _response_and_fit_role(
     return response_artifact, gene_order, spec, combined
 
 
-def _stub_execution_lock() -> ExecutionIdentityLock:
+def _stub_execution_lock(
+    prediction_representation: str = "cell_raw_counts",
+) -> ExecutionIdentityLock:
     """The lock whose identities match ``stub_worker.py``'s emitted manifest."""
     return ExecutionIdentityLock(
-        prediction_representation="cell_raw_counts",
+        prediction_representation=prediction_representation,
         adapter_version="stub-2",
         adapter_sha256=hashlib.sha256(b"stub-response-operator-v2").hexdigest(),
         config_sha256=hashlib.sha256(b"stub-config").hexdigest(),
@@ -254,9 +261,9 @@ def _subprocess_adapters(inputs: Phase2aInputs, store: DevelopmentOutcomeStore, 
         raw_data_sha256="subproc-shared-raw",
         cal_pair_ids=inputs.cal_pair_ids,
     )
-    # bind the independently verified response-artifact digest onto the payload
-    # inputs so the emitter's response_artifact_sha256 <-> response_space_checksum
-    # guard is satisfied (the run itself keeps its own inputs / expected_hashes).
+    # The run inputs and every backend consume the SAME independently verified
+    # response artifact. Returning the aligned inputs prevents fixture tests from
+    # masking the runtime response-space binding enforced by the orchestrator.
     payload_inputs = dataclasses.replace(inputs, response_space_checksum=combined)
     payload = build_subprocess_fit_payload(
         inputs=payload_inputs,
@@ -269,6 +276,10 @@ def _subprocess_adapters(inputs: Phase2aInputs, store: DevelopmentOutcomeStore, 
     )
     worker = Path(__file__).parents[3] / "scripts" / "baselines" / "stub_worker.py"
     adapters = {}
+    representations = {
+        "gears": "raw_pseudobulk_approximation",
+        "cpa": "cell_raw_counts",
+    }
     for name in ("gears", "cpa"):
         backend = SubprocessBaselineBackend(
             name=name,
@@ -278,11 +289,11 @@ def _subprocess_adapters(inputs: Phase2aInputs, store: DevelopmentOutcomeStore, 
             seed=inputs.seed,
             approved_artifacts_root=str(tmp_path),
             expected_response_artifact_sha256=combined,
-            execution_identity_lock=_stub_execution_lock(),
+            execution_identity_lock=_stub_execution_lock(representations[name]),
         )
         backend.configure_payload(payload)
         adapters[name] = BaselineAdapter(name=name, backend=backend)
-    return adapters
+    return adapters, payload_inputs
 
 
 def _inputs(inst, **overrides) -> Phase2aInputs:
@@ -414,11 +425,12 @@ def test_subprocess_baselines_are_wired_into_phase2a_freeze(tmp_path):
     }
     inputs = _inputs(inst, model_factories=local_factories)
     store = _store(inst)
-    adapters = _subprocess_adapters(inputs, store, tmp_path)
+    adapters, inputs = _subprocess_adapters(inputs, store, tmp_path)
+    expected_hashes = {**_HASHES, "response_space_checksum": inputs.response_space_checksum}
     res = run_phase2a_fixture(
         inputs,
         store,
-        expected_hashes=_HASHES,
+        expected_hashes=expected_hashes,
         baseline_adapters=adapters,
     )
     assert res.bundle is not None
@@ -427,6 +439,48 @@ def test_subprocess_baselines_are_wired_into_phase2a_freeze(tmp_path):
         assert set(res.bundle.predictions_single_unseen[method]) == set(inst["sealed_single_id"])
     assert res.method_lock is not None
     assert len(res.method_lock["method_roster"]) == 9
+
+
+def test_phase2a_rejects_adapter_response_space_divergence(tmp_path):
+    inst = _build_instance(np.random.default_rng(32))
+    local_factories = {
+        name: factory
+        for name, factory in _model_factories().items()
+        if name not in {"gears", "cpa"}
+    }
+    inputs = _inputs(inst, model_factories=local_factories)
+    store = _store(inst)
+    adapters, inputs = _subprocess_adapters(inputs, store, tmp_path)
+    adapters["gears"].backend.expected_response_artifact_sha256 = "f" * 64
+    expected_hashes = {**_HASHES, "response_space_checksum": inputs.response_space_checksum}
+    with pytest.raises(ScientificModeError, match="response_space"):
+        run_phase2a_fixture(
+            inputs,
+            store,
+            expected_hashes=expected_hashes,
+            baseline_adapters=adapters,
+        )
+
+
+def test_phase2a_rejects_adapter_representation_divergence(tmp_path):
+    inst = _build_instance(np.random.default_rng(33))
+    local_factories = {
+        name: factory
+        for name, factory in _model_factories().items()
+        if name not in {"gears", "cpa"}
+    }
+    inputs = _inputs(inst, model_factories=local_factories)
+    store = _store(inst)
+    adapters, inputs = _subprocess_adapters(inputs, store, tmp_path)
+    adapters["gears"].backend.execution_identity_lock = _stub_execution_lock("cell_raw_counts")
+    expected_hashes = {**_HASHES, "response_space_checksum": inputs.response_space_checksum}
+    with pytest.raises(ScientificModeError, match="prediction_representation"):
+        run_phase2a_fixture(
+            inputs,
+            store,
+            expected_hashes=expected_hashes,
+            baseline_adapters=adapters,
+        )
 
 
 def test_build_subprocess_payload_is_v2_with_consistent_blocks(tmp_path):
@@ -538,6 +592,53 @@ def test_perturbation_mean_uses_calibration_double_shifts_only():
             res.bundle.predictions_double_unseen["perturbation_mean"][pair],
             expected,
         )
+
+
+def test_oof_fold_manifest_shares_one_checksum_across_bundle_lock_ledger_disk(tmp_path):
+    # The persisted OOF fold manifest checksum is bound identically into the frozen
+    # bundle diagnostics, the method lock, the ledger artifact and the on-disk
+    # manifest — one checksum, four surfaces (D2 Task 1).
+    from alive.compose.select import OOFFoldManifest
+
+    rng = np.random.default_rng(41)
+    inst = _build_instance(rng)
+    out = tmp_path / "compose" / "oof_fold_manifest.json"
+    res = run_phase2a_fixture(
+        _inputs(inst), _store(inst), expected_hashes=_HASHES, oof_manifest_path=out
+    )
+    assert res.futility_status == "CONTINUE"
+    checksum = res.oof_manifest.manifest_checksum
+    assert len(checksum) == 64
+    assert res.futility.oof_manifest.manifest_checksum == checksum
+    # bundle diagnostics
+    assert res.bundle.dev_diagnostics["oof_fold_manifest_checksum"] == checksum
+    res.bundle.verify()
+    # method lock
+    assert res.method_lock["oof_fold_manifest_checksum"] == checksum
+    # ledger artifact
+    assert res.ledger.artifact_sha("phase2a_oof_fold_manifest") == checksum
+    # on-disk manifest loads, verifies and matches
+    assert out.exists()
+    loaded = OOFFoldManifest.load(out)
+    assert loaded.manifest_checksum == checksum
+    # the manifest describes the calibration design of this run
+    assert loaded.calibration_pair_ids == tuple(tuple(p) for p in inst["cal_pairs_id"])
+
+
+def test_oof_fold_manifest_returned_in_memory_on_futility(tmp_path):
+    # On a futility stop the manifest is still returned in memory, but NOT written
+    # and NOT bound into a bundle/lock/ledger (there is no bundle on futility).
+    rng = np.random.default_rng(42)
+    inst = _build_instance(rng)
+    store = _store(inst, combo_calibration_eps=inst["additive_cal"])  # forces theta<=0
+    out = tmp_path / "futility_manifest.json"
+    res = run_phase2a_fixture(_inputs(inst), store, expected_hashes=_HASHES, oof_manifest_path=out)
+    assert res.futility_status == "FUTILITY_STOPPED"
+    assert res.bundle is None
+    assert res.method_lock is None
+    assert res.oof_manifest is not None
+    assert len(res.oof_manifest.manifest_checksum) == 64
+    assert not out.exists()  # futility writes no manifest
 
 
 def test_bundle_written_once(tmp_path):

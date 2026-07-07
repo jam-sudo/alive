@@ -656,6 +656,7 @@ def validate_fit_role_artifact(
     approved_root: str,
     calibration_pair_ids: Sequence[tuple[str, str]],
     sealed_pair_ids: Sequence[tuple[str, str]],
+    single_gene_ids: Sequence[str],
     control_token: str = "control",
     combo_sep: str = "_",
 ) -> None:
@@ -681,6 +682,13 @@ def validate_fit_role_artifact(
     sealed_pair_ids : Sequence of tuple of str
         Sealed combo pairs; no cell of any role may carry a sealed pair (a sealed
         pair present in obs is a leak → reject).
+    single_gene_ids : Sequence of str
+        The governed single-gene universe. Every obs token that classifies as
+        ``singles`` must be a member. A sealed/calibration combo written under a
+        separator other than ``combo_sep`` (e.g. a real ``GENEA+GENEB`` when
+        ``combo_sep`` is ``"_"``) otherwise falls through to ``singles`` and
+        smuggles a sealed outcome cell into the fit set; the membership check
+        closes that leak independently of separator correctness.
     control_token : str, default ``"control"``
         Token denoting a control cell (A1-consistent default so existing callers
         that pass only the pair sets keep working).
@@ -703,6 +711,7 @@ def validate_fit_role_artifact(
             approved_root=approved_root,
             calibration_pair_ids=calibration_pair_ids,
             sealed_pair_ids=sealed_pair_ids,
+            single_gene_ids=single_gene_ids,
             control_token=control_token,
             combo_sep=combo_sep,
         )
@@ -719,6 +728,7 @@ def _validate_fit_role_artifact_checks(
     approved_root: str,
     calibration_pair_ids: Sequence[tuple[str, str]],
     sealed_pair_ids: Sequence[tuple[str, str]],
+    single_gene_ids: Sequence[str],
     control_token: str = "control",
     combo_sep: str = "_",
 ) -> None:
@@ -745,6 +755,11 @@ def _validate_fit_role_artifact_checks(
     perts = [str(p) for p in adata.obs["perturbation"]]
     srcs = [str(s) for s in adata.obs["source_row_id"]]
 
+    single_list = [str(g) for g in single_gene_ids]
+    single_set = set(single_list)
+    if not single_list or len(single_set) != len(single_list) or any(g == "" for g in single_list):
+        raise FitRoleArtifactError("single_gene_ids must be a non-empty unique list of gene ids")
+
     # role↔token: classify EVERY row independently of its declared role (spec
     # §7.1; mirrors ComposeFitRoleExtractor._role_of). A sealed combo mislabeled
     # `singles`/`control`, a non-canonical combo, or an unregistered combo all
@@ -756,6 +771,15 @@ def _validate_fit_role_artifact_checks(
         if role != expected:
             raise FitRoleArtifactError(
                 f"role/token mismatch: token {pert!r} requires role {expected!r}, got {role!r}"
+            )
+        # A token that classifies as `singles` MUST be a registered single-gene id.
+        # A sealed/calibration combo written under a separator other than
+        # `combo_sep` (e.g. a real `GENEA+GENEB` when `combo_sep` is `_`) falls
+        # through to `singles` and would smuggle a sealed outcome cell into the fit
+        # set; this membership check closes that leak regardless of `combo_sep`.
+        if expected == "singles" and pert not in single_set:
+            raise FitRoleArtifactError(
+                f"token {pert!r} classified 'singles' is not a registered single-gene id"
             )
 
     # non-empty, unique source_row_id before recomputing row/content digests

@@ -1257,3 +1257,9 @@ def assert_scientific_mode_allowed(
             "scientific mode blocked: activation evidence file hash mismatch for "
             f"{sorted(mismatched_files)}"
         )
+
+    if config.pseudobulk_representation_activation_blocked:
+        raise ScientificModeError(
+            "scientific mode blocked: a raw-pseudobulk baseline representation "
+            "has no registered approximation-bias report checksum"
+        )

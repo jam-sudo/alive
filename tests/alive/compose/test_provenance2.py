@@ -100,7 +100,6 @@ def _provenance(**overrides) -> Phase2bProvenance:
         seal_audit_reference="audit/compose_seal.jsonl",
         regime_result_double_sha256="regime-double-sha",
         regime_result_single_sha256="regime-single-sha",
-        terminal_report_sha256="terminal-report-sha",
     )
     base.update(overrides)
     return Phase2bProvenance(**base)
@@ -135,7 +134,6 @@ _REQUIRED_ARTIFACT_NAMES = (
     "seal_audit",
     "regime_result_double",
     "regime_result_single",
-    "terminal_report",
     "phase2b_provenance",
 )
 
@@ -255,6 +253,17 @@ def test_provenance_self_checksum_excludes_itself():
     # Recompute from to_dict (which must NOT include self_checksum) and compare.
     assert "self_checksum" not in p.to_dict()
     assert p.self_checksum == sha256_json(p.to_dict())
+
+
+def test_embedded_provenance_v2_excludes_terminal_report_sha():
+    prov = _provenance()  # existing fixture (no terminal_report_sha256 arg)
+    d = prov.to_dict()
+    assert d["schema"] == "compose_phase2b_provenance_v2"
+    assert "terminal_report_sha256" not in d
+    # regime-result checksums remain (they precede the terminal, no circularity)
+    assert "regime_result_double_sha256" in d and "regime_result_single_sha256" in d
+    # self_checksum is a hash of the content only, stable across identical inputs
+    assert prov.self_checksum == _provenance().self_checksum
 
 
 # ---------------------------------------------------------------------------
@@ -578,7 +587,6 @@ def test_provenance_error_and_ledger_error_are_distinct():
 _POST_ACCESS_KEYS = (
     "regime_result_double_sha256",
     "regime_result_single_sha256",
-    "terminal_report_sha256",
 )
 
 
@@ -595,7 +603,6 @@ def test_pre_access_checksum_ignores_post_access_fields():
     b = _provenance(
         regime_result_double_sha256="X",
         regime_result_single_sha256="Y",
-        terminal_report_sha256="Z",
     )
     # The subset checksum is stable across post-access-only changes ...
     assert a.pre_access_checksum == b.pre_access_checksum

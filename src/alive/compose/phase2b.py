@@ -47,8 +47,9 @@ only. Real execution remains blocked until the owner activation commit and every
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import numpy as np
@@ -59,8 +60,9 @@ from alive.compose.config2 import (
     ScientificModeError,
     assert_scientific_mode_allowed,
 )
+from alive.compose.durable import finalize_phase2b_durable_outputs
 from alive.compose.freeze import FrozenPredictionBundle
-from alive.compose.outcome_store import ComposeOutcomeStore, ObservedPair
+from alive.compose.outcome_store import ComposeOutcomeStore, ObservedPair, SealedAccessClaim
 from alive.compose.preflight import EvaluationLock, run_preflight
 from alive.compose.provenance2 import (
     PRE_ACCESS_LEDGER_FILENAME,
@@ -75,6 +77,18 @@ from alive.compose.provenance2 import (
 )
 from alive.compose.response import ResponseSpace, verify_response_artifact
 from alive.compose.scoring2 import RegimeScore, score_regime
+from alive.compose.seed_variability import (
+    DEVELOPMENT_SEED_VARIABILITY_FILENAME,
+    DEVELOPMENT_SEED_VARIABILITY_LEDGER_ARTIFACT,
+    SeedVariabilityPreflightError,
+    SeedVariabilityReport,
+    SeedVariabilityReportError,
+    bind_development_seed_variability,
+    build_bounded_fixture_seed_variability_report,
+    verify_seed_variability_binding_bounded,
+    verify_seed_variability_for_preflight,
+)
+from alive.compose.select import OOFFoldManifest, OOFFoldManifestError
 from alive.compose.split import verify_split_manifest
 from alive.compose.terminal import Phase2bTerminal, TerminalState
 from alive.compose.verdict2 import (
@@ -101,6 +115,50 @@ _FIXTURE_MAX_RESPONSE_DIM = 256
 
 #: The audit-claim stage label recorded if the protected block aborts.
 _PROTECT_STAGE = "sealed_evaluation"
+
+#: Terminal lifecycle state -> the on-disk terminal artifact filename the terminal
+#: writer produces for it. Used to hand the durable finalizer the exact terminal
+#: path on the normal / INVALID path (the finalizer re-scans and cross-checks it).
+_TERMINAL_STATE_ARTIFACT: dict[TerminalState, str] = {
+    TerminalState.COMPLETE: Phase2bTerminal.COMPLETE_ARTIFACT,
+    TerminalState.INVALID: Phase2bTerminal.INVALID_ARTIFACT,
+    TerminalState.ABORTED_AFTER_SEAL: Phase2bTerminal.ABORTED_ARTIFACT,
+}
+
+
+def _durable_inputs_present(run_dir: Path) -> bool:
+    """Return ``True`` iff both durable-finalize inputs are regular files in ``run_dir``.
+
+    The durable finalizer (:func:`~alive.compose.durable.finalize_phase2b_durable_outputs`)
+    consumes the persisted pre-access ledger snapshot and the D2 development
+    seed-variability report. Both are written on every path that reaches the seal
+    (``persist_pre_access_ledger`` + ``_preaccess_seed_variability``), so their
+    presence gates the finalize: a run that never got that far (a pure pre-access
+    failure) does not crash demanding a finalize.
+    """
+    return (run_dir / PRE_ACCESS_LEDGER_FILENAME).is_file() and (
+        run_dir / DEVELOPMENT_SEED_VARIABILITY_FILENAME
+    ).is_file()
+
+
+def _terminal_file_path(run_dir: Path) -> Path | None:
+    """Return the single terminal artifact path in ``run_dir``, or ``None``.
+
+    Independently scans the run directory for the three terminal filenames. Returns
+    the sole match, or ``None`` if zero or more than one exist. On the abort path
+    this gates the finalize on a post-seal terminal actually being present (a
+    pre-audit failure leaves none, so no finalize is owed).
+    """
+    present = [
+        run_dir / name
+        for name in (
+            Phase2bTerminal.COMPLETE_ARTIFACT,
+            Phase2bTerminal.INVALID_ARTIFACT,
+            Phase2bTerminal.ABORTED_ARTIFACT,
+        )
+        if (run_dir / name).is_file()
+    ]
+    return present[0] if len(present) == 1 else None
 
 
 class Phase2bError(RuntimeError):
@@ -141,9 +199,23 @@ class Phase2bResult:
     provenance_checksum : str
         The COMPLETE provenance record's self-checksum.
     result_checksum : str
-        The self-excluding checksum over the terminal report payload.
+        The layered ``final_result_checksum`` — ``sha256_json`` over exactly
+        ``{terminal_state, final_verdict_checksum, registered_summary_checksum,
+        evaluation_payload_checksum, provenance_checksum}`` (spec §2.1). An INVALID
+        result never reuses the normal verdict payload checksum.
     ledger : RunLedger
         The write-once ledger carrying the terminal artifact's hash.
+    durable_commit_checksum : str or None
+        The self-excluding ``commit_checksum`` of the durable commit marker
+        published by :func:`~alive.compose.durable.finalize_phase2b_durable_outputs`
+        AFTER the terminal was written and the protection context exited (spec
+        §3.3). ``None`` until finalize succeeds; a ``None`` value on a returned
+        result therefore signals no verified durable export. The abort path never
+        returns a :class:`Phase2bResult` (its marker, if published, lives only on
+        disk), so this field is populated only on the normal / INVALID path.
+    durable_commit_path : str or None
+        The filesystem path of the published durable commit marker (companion to
+        :attr:`durable_commit_checksum`); ``None`` until finalize succeeds.
     """
 
     run_id: str
@@ -155,6 +227,8 @@ class Phase2bResult:
     provenance_checksum: str
     result_checksum: str
     ledger: RunLedger
+    durable_commit_checksum: str | None = None
+    durable_commit_path: str | None = None
 
 
 # --------------------------------------------------------------------------- #
@@ -518,50 +592,145 @@ def _build_provenance(
         seal_audit_reference=audit_reference,
         regime_result_double_sha256=regime_double.checksum if regime_double is not None else "",
         regime_result_single_sha256=regime_single.checksum if regime_single is not None else "",
-        terminal_report_sha256="",
     )
 
 
-def _terminal_payload(
+#: Sentinel substituted for any non-finite embedded float. A ``NaN`` / ``Infinity``
+#: anywhere in the registered summary would make the shared terminal canonicalizer
+#: REFUSE the write (a latent forced abort on the seal path), so the summary carries
+#: only finite floats or this string sentinel (spec §2, CLAUDE.md §5 / §10.10 —
+#: report the degenerate value honestly, never a silent NaN).
+_NON_FINITE_SENTINEL = "NON_FINITE"
+
+#: The Phase-2 GI-structure recovery is deferred; the summary reports the fixed
+#: sentinel string, never a number (mirrors the secondary block's gi_structure).
+_GI_STRUCTURE_RECOVERY = "NOT_EVALUABLE"
+
+
+def _finite_or_sentinel(value: float) -> float | str:
+    """Return ``float(value)`` when finite, else :data:`_NON_FINITE_SENTINEL`.
+
+    Every float embedded in the registered summary must be finite or a string
+    sentinel; otherwise :meth:`~alive.compose.terminal.Phase2bTerminal._write_terminal`
+    (via ``canonicalize_terminal_checksum_input``) refuses a legitimate COMPLETE /
+    INVALID write. Thetas are already gated finite on the COMPLETE path; this guards
+    the remaining embedded aggregates (per-method MSE, GI point/interval) so a
+    degenerate value can never silently force an abort.
+    """
+    number = float(value)
+    return number if math.isfinite(number) else _NON_FINITE_SENTINEL
+
+
+def build_registered_evaluation_summary(
     *,
+    protocol: str,
     run_id: str,
-    verdict: ComposeSealedResult,
+    terminal_state: str,
+    sealed_access_count: int,
     regime_double: RegimeScore,
     regime_single: RegimeScore,
-    lock: EvaluationLock,
-    provenance: Phase2bProvenance,
-    sealed_access_count: int,
+    per_method_aggregate_mse: Mapping[str, Mapping[str, float | str]],
+    final_verdict: ComposeSealedResult,
+    integrity: ComposeIntegrityReport,
+    family_confidence: float,
+    bootstrap_replicates: int,
+    bundle_checksum: str,
+    manifest_checksum: str,
+    provenance_checksum: str,
+    seed_variability_report_checksum: str,
 ) -> dict:
-    """Build the outcome-free terminal report payload (summaries / hashes only).
+    """Build the outcome-free ``RegisteredEvaluationSummary`` ONCE (spec §2.1).
 
-    Carries NO raw observed cell matrix and NO per-cell vector — only scalar
-    summaries, verdict axes, pair counts and content checksums. The terminal
-    writer's raw-outcome backstop guards this before any byte is written; the
-    orchestrator OWNS the no-raw-outcome property by constructing only summaries.
+    Constructed inside the protected evaluation AFTER the final terminal state and
+    final verdict are decided (for ``INVALID`` the verdict is already swapped to
+    ``INVALID``). Carries ONLY scalar summaries, per-method / per-comparator
+    aggregates, verdict axes/clauses, the integrity disclaimer and content
+    checksums — NO per-pair error array, NO per-pair CI, NO raw cell/count matrix.
+    Aggregate values (``per_method_aggregate_mse``) are computed ONCE in the
+    protected evaluation and COPIED in here; this exporter never recomputes them.
+
+    Every embedded float is passed through :func:`_finite_or_sentinel` so the
+    shared terminal canonicalizer can never refuse the write on a non-finite value.
+
+    Parameters
+    ----------
+    protocol, run_id, terminal_state, sealed_access_count
+        Common run identity echoed into the summary.
+    regime_double, regime_single : RegimeScore
+        The two independently-scored regimes (double-unseen is the headline / sole
+        verdict input). Only sample counts, checksums and the double-regime
+        secondary GI block are read; per-pair arrays are never embedded.
+    per_method_aggregate_mse : Mapping
+        ``{"double": {method -> mean(pair_errors[method])}, "single": {...}}`` —
+        the per-method aggregate MSE for BOTH regimes, computed ONCE inside the
+        protected evaluation. ``double`` is the headline / verdict-linked regime;
+        ``single`` is the registered secondary (CLAUDE.md §10). Each regime is
+        scored INDEPENDENTLY over its own pairs and the two are NEVER pooled.
+    final_verdict : ComposeSealedResult
+        The FINAL sealed verdict (swapped to ``INVALID`` on a post-access
+        inconsistency). Its axes and clauses are reported verbatim.
+    integrity : ComposeIntegrityReport
+        The structural integrity self-check; its ``disclaimer`` is embedded.
+    family_confidence, bootstrap_replicates
+        The registered family confidence and bootstrap replicate count.
+    bundle_checksum, manifest_checksum, provenance_checksum,
+    seed_variability_report_checksum : str
+        The bundle / manifest / provenance / pre-seal seed-variability content
+        checksums (regime-result + bounds checksums are read from the regimes).
+
+    Returns
+    -------
+    dict
+        The canonical outcome-free registered summary payload.
     """
+    bounds = regime_double.bounds
+    secondary = regime_double.secondary
+    gi_lower, gi_upper = secondary.gi_explained_interval
     return {
-        "protocol": "COMPOSE-K562-v1",
+        "protocol": protocol,
         "run_id": run_id,
+        "terminal_state": terminal_state,
         "sealed_access_count": int(sealed_access_count),
-        "sealed_axis": verdict.sealed_axis.value,
-        "method_axis": verdict.method_axis.value,
-        "sealed_verdict_checksum": verdict.checksum,
-        "verdict_clauses": {k: bool(v) for k, v in verdict.clauses.items()},
-        "double_unseen": {
-            "regime": regime_double.regime,
-            "sample_count": int(regime_double.sample_count),
-            "result_checksum": regime_double.checksum,
-            "bounds_checksum": regime_double.bounds.checksum,
+        "sample_counts": {
+            "double": int(regime_double.sample_count),
+            "single": int(regime_single.sample_count),
         },
-        "single_unseen": {
-            "regime": regime_single.regime,
-            "sample_count": int(regime_single.sample_count),
-            "result_checksum": regime_single.checksum,
-            "bounds_checksum": regime_single.bounds.checksum,
+        "per_method_aggregate_mse": {
+            regime: {
+                method: (
+                    regime_mse[method]
+                    if isinstance(regime_mse[method], str)
+                    else _finite_or_sentinel(float(regime_mse[method]))
+                )
+                for method in sorted(regime_mse)
+            }
+            for regime, regime_mse in sorted(per_method_aggregate_mse.items())
         },
-        "bundle_checksum": lock.bundle_checksum,
-        "manifest_checksum": lock.manifest_checksum,
-        "provenance_checksum": provenance.self_checksum,
+        "theta": {c: _finite_or_sentinel(bounds.theta[c]) for c in bounds.comparators},
+        "simultaneous_lower_bounds": {
+            c: _finite_or_sentinel(bounds.lower[c]) for c in bounds.comparators
+        },
+        "family_confidence": _finite_or_sentinel(family_confidence),
+        "bootstrap_replicates": int(bootstrap_replicates),
+        "gi_explained_point": _finite_or_sentinel(secondary.gi_explained_point),
+        "gi_explained_interval": [
+            _finite_or_sentinel(gi_lower),
+            _finite_or_sentinel(gi_upper),
+        ],
+        "gi_structure_recovery": _GI_STRUCTURE_RECOVERY,
+        "sealed_axis": final_verdict.sealed_axis.value,
+        "method_axis": final_verdict.method_axis.value,
+        "verdict_clauses": {
+            k: bool(final_verdict.clauses[k]) for k in sorted(final_verdict.clauses)
+        },
+        "integrity_disclaimer": integrity.disclaimer,
+        "bundle_checksum": bundle_checksum,
+        "manifest_checksum": manifest_checksum,
+        "provenance_checksum": provenance_checksum,
+        "regime_result_double_checksum": regime_double.checksum,
+        "regime_result_single_checksum": regime_single.checksum,
+        "bounds_checksum": bounds.checksum,
+        "seed_variability_report_checksum": seed_variability_report_checksum,
     }
 
 
@@ -582,6 +751,10 @@ def run_phase2b(
     activation_record: ActivationRecord | None,
     git_is_clean: bool | None = None,
     provenance_inputs: ActivationProvenanceInputs | None = None,
+    oof_manifest_path: str | Path | None = None,
+    oof_manifest_checksum: str | None = None,
+    seed_variability_report_path: str | Path | None = None,
+    seed_variability_report_checksum: str | None = None,
 ) -> Phase2bResult:
     """Run the SCIENTIFIC Phase-2b sealed evaluation after activation.
 
@@ -616,6 +789,15 @@ def run_phase2b(
     provenance_inputs : ActivationProvenanceInputs or None, optional
         The activated run's evidence-sourced provenance digests; required to
         populate the scientific provenance on the sealed run.
+    oof_manifest_path, oof_manifest_checksum : str, Path or None, optional
+        The verified OOF fold manifest path and its self-excluding checksum.
+        Required together with the seed-variability report on the scientific
+        path (all four provided, or none).
+    seed_variability_report_path, seed_variability_report_checksum : str, Path \
+or None, optional
+        The development seed-variability report path and its verified byte SHA.
+        The outcome-free pre-access gate binds + verifies this before any seal
+        access; its absence fails closed on the scientific path.
 
     Returns
     -------
@@ -626,7 +808,28 @@ def run_phase2b(
     ------
     alive.compose.config2.ScientificModeError
         If scientific mode is requested but not permitted (the blocked config).
+    Phase2bError
+        If the seed-variability / OOF-manifest inputs are supplied incompletely.
     """
+    provided = (
+        oof_manifest_path,
+        oof_manifest_checksum,
+        seed_variability_report_path,
+        seed_variability_report_checksum,
+    )
+    seed_variability: SeedVariabilityPreflightInputs | None = None
+    if any(v is not None for v in provided):
+        if any(v is None for v in provided):
+            raise Phase2bError(
+                "run_phase2b requires oof_manifest_path/checksum AND "
+                "seed_variability_report_path/checksum together (all four), or none"
+            )
+        seed_variability = SeedVariabilityPreflightInputs(
+            oof_manifest_path=oof_manifest_path,
+            oof_manifest_checksum=oof_manifest_checksum,
+            report_source_path=seed_variability_report_path,
+            report_checksum=seed_variability_report_checksum,
+        )
     assert_scientific_mode_allowed(
         config,
         fixture_mode=False,
@@ -650,6 +853,7 @@ def run_phase2b(
         git_clean=bool(git_is_clean),
         provenance_tamper=None,
         provenance_inputs=provenance_inputs,
+        seed_variability=seed_variability,
     )
 
 
@@ -710,6 +914,7 @@ def run_phase2b_fixture(
         git_clean=True,
         provenance_tamper=_tamper_provenance_after_register,
         provenance_inputs=None,
+        seed_variability=None,
     )
 
 
@@ -736,6 +941,155 @@ def _assert_fixture_payload(bundle: FrozenPredictionBundle) -> None:
         raise Phase2bError("fixture payload exceeds the synthetic/tiny-fixture safety limits")
 
 
+@dataclass(frozen=True)
+class SeedVariabilityPreflightInputs:
+    """Verified OOF-manifest + development seed-variability report handles (D2 Task 6).
+
+    Threaded EXPLICITLY into the SCIENTIFIC :func:`run_phase2b` so the outcome-free
+    pre-access gate can BIND the report into the write-once ledger and VERIFY it
+    BEFORE any seal access. Carries paths + verified checksums only — never an
+    outcome. The bounded synthetic :func:`run_phase2b_fixture` builds its own
+    bounded report and never receives this.
+
+    Attributes
+    ----------
+    oof_manifest_path : str or Path
+        Path to the verified single-call OOF fold manifest JSON.
+    oof_manifest_checksum : str
+        The manifest's verified self-excluding checksum (cross-checked on load).
+    report_source_path : str or Path
+        Path to the development seed-variability report produced by
+        :func:`alive.compose.seed_variability.development_seed_variability`.
+    report_checksum : str
+        The verified byte SHA the bound canonical report must reproduce.
+    """
+
+    oof_manifest_path: str | Path
+    oof_manifest_checksum: str
+    report_source_path: str | Path
+    report_checksum: str
+
+
+def _preaccess_seed_variability(
+    *,
+    run_dir: str | Path,
+    ledger: RunLedger,
+    frozen_bundle: FrozenPredictionBundle,
+    config: ComposePhase2Config,
+    fixture_execution: bool,
+    seed_variability: SeedVariabilityPreflightInputs | None,
+) -> None:
+    """Bind + verify the development seed-variability report BEFORE any seal access.
+
+    Writes ``development_seed_variability.json`` into ``run_dir`` and records its
+    byte SHA into the write-once ``ledger`` (BEFORE any pre-access snapshot), then
+    verifies it. On the SCIENTIFIC path (``fixture_execution=False``) the report is
+    REQUIRED — its absence fails closed (seal CLOSED) — and the FULL scientific
+    verifier runs; there is no branch that silently bypasses it. The bounded
+    synthetic fixture path builds a bounded report and runs the bounded check, so
+    it never silently skips the step either. Opens NO seal.
+
+    The ``frozen_bundle`` is the TRUST ROOT for the OOF fold layout: its
+    ``dev_diagnostics["oof_fold_manifest_checksum"]`` (bound into the
+    self-verifying bundle checksum by D2 Task 1) is the authoritative digest that
+    BOTH the loaded :class:`OOFFoldManifest` and the report's bound OOF-manifest
+    checksum must equal. The caller-supplied
+    ``seed_variability.oof_manifest_checksum`` is retained only as an additional
+    defense-in-depth check; it is never the authority.
+
+    Raises
+    ------
+    Phase2bError
+        On a missing scientific input or a caller-side OOF-manifest load / checksum
+        mismatch.
+    SeedVariabilityReportError, SeedVariabilityPreflightError
+        On an absent authoritative bundle digest, an OOF layout that does not bind
+        to the frozen bundle, a write-once collision, a byte-SHA / ledger conflict,
+        or any verification failure (all PRE-ACCESS; the seal stays CLOSED).
+    """
+    run_id = frozen_bundle.run_id
+    response_space_checksum = frozen_bundle.response_space_checksum
+    if fixture_execution:
+        report = build_bounded_fixture_seed_variability_report(
+            run_id=run_id,
+            protocol=config.protocol,
+            config_sha256=config.config_sha256,
+            registered_seeds=tuple(config.registered_seeds),
+            response_space_checksum=response_space_checksum,
+        )
+        path, _sha = bind_development_seed_variability(
+            run_dir=run_dir, ledger=ledger, report=report
+        )
+        verify_seed_variability_binding_bounded(report_path=path, run_dir=run_dir, ledger=ledger)
+        return
+
+    if seed_variability is None:
+        raise Phase2bError(
+            "scientific Phase2b requires the verified development seed-variability report and "
+            "OOF fold manifest (path + checksum); refusing to open the seal without the "
+            "pre-access artifact"
+        )
+    # The frozen bundle is the authority for the development OOF fold layout: read
+    # its bound checksum FIRST and fail closed if it is absent (should not happen
+    # post D2 Task 1, which binds it into the self-verifying bundle checksum).
+    try:
+        expected_oof = str(frozen_bundle.dev_diagnostics["oof_fold_manifest_checksum"])
+    except KeyError as exc:
+        raise SeedVariabilityPreflightError(
+            "frozen bundle dev_diagnostics is missing the authoritative "
+            "'oof_fold_manifest_checksum'; refusing to open the seal"
+        ) from exc
+    try:
+        oof_manifest = OOFFoldManifest.load(seed_variability.oof_manifest_path)
+    except OOFFoldManifestError as exc:
+        raise Phase2bError(f"failed to load the OOF fold manifest: {exc}") from exc
+    # Defense-in-depth: the caller-supplied value must still match the on-disk
+    # manifest, but it is NOT the authority.
+    if oof_manifest.manifest_checksum != seed_variability.oof_manifest_checksum:
+        raise Phase2bError(
+            "OOF fold manifest checksum does not match the verified value: "
+            f"{oof_manifest.manifest_checksum!r} != {seed_variability.oof_manifest_checksum!r}"
+        )
+    # Authority: the loaded manifest MUST bind to the frozen bundle's OOF digest.
+    if oof_manifest.manifest_checksum != expected_oof:
+        raise SeedVariabilityPreflightError(
+            "loaded OOF fold manifest checksum "
+            f"{oof_manifest.manifest_checksum!r} != the frozen bundle's authoritative "
+            f"oof_fold_manifest_checksum {expected_oof!r}"
+        )
+    try:
+        report = SeedVariabilityReport.load(seed_variability.report_source_path)
+    except SeedVariabilityReportError as exc:
+        raise Phase2bError(
+            f"failed to load the development seed-variability report: {exc}"
+        ) from exc
+    # Authority: the report's bound OOF-manifest checksum MUST also equal the
+    # frozen bundle's digest BEFORE the report is bound into the ledger.
+    if report.oof_manifest_checksum != expected_oof:
+        raise SeedVariabilityPreflightError(
+            "development seed-variability report OOF-manifest checksum "
+            f"{report.oof_manifest_checksum!r} != the frozen bundle's authoritative "
+            f"oof_fold_manifest_checksum {expected_oof!r}"
+        )
+    path, _sha = bind_development_seed_variability(
+        run_dir=run_dir,
+        ledger=ledger,
+        report=report,
+        expected_report_checksum=seed_variability.report_checksum,
+    )
+    verify_seed_variability_for_preflight(
+        report_path=path,
+        run_dir=run_dir,
+        ledger=ledger,
+        expected_protocol=config.protocol,
+        expected_run_id=run_id,
+        expected_config_sha256=config.config_sha256,
+        expected_registered_seeds=tuple(config.registered_seeds),
+        oof_manifest=oof_manifest,
+        expected_response_space_checksum=response_space_checksum,
+    )
+
+
 # --------------------------------------------------------------------------- #
 # shared core — the 12-step sealed-evaluation flow
 # --------------------------------------------------------------------------- #
@@ -754,6 +1108,7 @@ def _run_phase2b_core(
     git_clean: bool,
     provenance_tamper: Phase2bProvenance | None,
     provenance_inputs: ActivationProvenanceInputs | None,
+    seed_variability: SeedVariabilityPreflightInputs | None,
 ) -> Phase2bResult:
     """The shared 12-step sealed-evaluation flow (after the public boundary).
 
@@ -787,6 +1142,22 @@ def _run_phase2b_core(
     response_space, control_mean, response_artifact_checksum = _resolve_response_artifact(
         response_artifact,
         require_checksum=not fixture_execution,
+    )
+
+    # --- Step 2 (pre-access, outcome-free): bind + verify the development ------
+    # seed-variability report BEFORE any seal access. On the scientific path the
+    # report is REQUIRED (a missing / tampered / INCOMPLETE / misbound report
+    # fails closed here); the fixture path binds + bounded-verifies its own
+    # bounded report. The byte SHA is recorded into the write-once ledger BEFORE
+    # persist_pre_access_ledger below. The seal is untouched; any failure keeps
+    # access_count==0 and leaves NO terminal artifact.
+    _preaccess_seed_variability(
+        run_dir=run_dir,
+        ledger=ledger,
+        frozen_bundle=frozen_bundle,
+        config=config,
+        fixture_execution=fixture_execution,
+        seed_variability=seed_variability,
     )
 
     # --- Step 2 (pre-access, outcome-free): preflight + composite gate. --------
@@ -855,7 +1226,13 @@ def _run_phase2b_core(
     # lock file (keeping the run dir pristine for a corrected re-run); the lock
     # still precedes the seal opening and refuses a prior terminal / burned audit.
     audit_path = getattr(outcome_store, "_audit_path", None)
-    terminal = Phase2bTerminal(run_dir, ledger=ledger, audit_path=audit_path)
+    terminal = Phase2bTerminal(
+        run_dir,
+        ledger=ledger,
+        audit_path=audit_path,
+        protocol=config.protocol,
+        run_id=lock.run_id,
+    )
     terminal.acquire()
 
     # --- Step 3: the sealed access count MUST still be zero. -------------------
@@ -902,35 +1279,118 @@ def _run_phase2b_core(
     record_pre_access_provenance(ledger=ledger, provenance=pre_access_provenance)
     persist_pre_access_ledger(run_dir=run_dir, ledger=ledger)
 
-    # --- Step 5: claim access, then enter the protection boundary. ------------
-    terminal.claim_access()
-    result_box: dict[str, object] = {}
-    with terminal.protect(stage=_PROTECT_STAGE, preflight_checksums=preflight_checksums):
-        _evaluate_inside_boundary(
-            terminal=terminal,
-            outcome_store=outcome_store,
-            lock=lock,
-            frozen_bundle=frozen_bundle,
-            pair_manifest=pair_manifest,
-            config=config,
-            response_space=response_space,
-            control_mean=control_mean,
-            recomputed_run_id=recomputed_run_id,
-            audit_reference=audit_reference,
-            git_clean=git_clean,
-            provenance_tamper=provenance_tamper,
-            provenance_inputs=provenance_inputs,
-            fixture_execution=fixture_execution,
-            result_box=result_box,
-        )
+    # Bind the pre-access provenance identity onto the terminal now that the
+    # pre-access ledger is persisted (its file SHA and the provenance self-checksum
+    # are the only two common-roster fields not known at construction). Binding
+    # BEFORE the seal-open block guarantees an ABORT written from the protection
+    # boundary still emits the full common identity roster (CLAUDE.md §11).
+    # Bind the pre-access provenance SUBSET checksum (the value persisted into the
+    # write-once pre-access ledger under PRE_ACCESS_PROVENANCE_ARTIFACT by
+    # record_pre_access_provenance, i.e. provenance.pre_access_checksum), NOT the
+    # full self_checksum. The durable finalizer's ABORTED branch — which has no
+    # embedded provenance to recompute a subset from — cross-checks the terminal's
+    # pre_access_provenance_checksum DIRECTLY against that persisted subset checksum
+    # (the non-circular binding); the COMPLETE/INVALID branch recomputes the subset
+    # from the embedded provenance instead, so the discrepancy only surfaced on the
+    # abort path. This matches the terminal writer's documented use (see
+    # tests/alive/compose/test_durable.py _write_aborted_terminal).
+    terminal.bind_pre_access(
+        pre_access_ledger_sha256=sha256_file(run_dir / PRE_ACCESS_LEDGER_FILENAME),
+        pre_access_provenance_checksum=pre_access_provenance.pre_access_checksum,
+    )
 
-    return result_box["result"]  # type: ignore[return-value]
+    # --- Step 5: attempt access, claim the DURABLE seal, then confirm. --------
+    # The consumption boundary is the durable audit write inside
+    # claim_sealed_access. attempt_access() enters ACCESS_ATTEMPTED (no terminal
+    # owed yet); a failure BEFORE the durable claim leaves NO terminal and
+    # sealed_access_count == 0. Only the VERIFIED durable audit reference advances
+    # the terminal to ACCESS_CLAIMED, after which every exit writes one terminal.
+    #
+    # D1 §3.3 durable finalize wiring: the seal-open sequence + the protection
+    # boundary run inside a single top-level try/except BaseException. On ANY
+    # exception the except owner locates the terminal that ``protect`` left and
+    # calls the SAME finalizer ONCE — but ONLY if a post-seal terminal file
+    # actually exists (a pre-audit failure leaves none → SKIP, seal never opened).
+    # It then re-raises with a BARE ``raise`` preserving the original traceback; a
+    # finalize failure here is attached as an exception note (it does NOT replace
+    # the original evaluation exception) and leaves no marker (incomplete export).
+    # The NORMAL / INVALID finalize is OUTSIDE the except so its own failure never
+    # re-enters the abort finalize; it runs exactly ONCE after ``protect`` exits
+    # (no outcome-bearing evaluation frame is active) and is attached to the frozen
+    # result via ``dataclasses.replace``.
+    result_box: dict[str, object] = {}
+    try:
+        terminal.attempt_access()
+        union = list(lock.pair_ids_double_unseen) + list(lock.pair_ids_single_unseen)
+        claim = outcome_store.claim_sealed_access(lock.run_id, union)
+        terminal.confirm_durable_access(claim.audit_reference)
+
+        with terminal.protect(stage=_PROTECT_STAGE, preflight_checksums=preflight_checksums):
+            _evaluate_inside_boundary(
+                terminal=terminal,
+                outcome_store=outcome_store,
+                claim=claim,
+                lock=lock,
+                frozen_bundle=frozen_bundle,
+                pair_manifest=pair_manifest,
+                config=config,
+                response_space=response_space,
+                control_mean=control_mean,
+                recomputed_run_id=recomputed_run_id,
+                audit_reference=audit_reference,
+                git_clean=git_clean,
+                provenance_tamper=provenance_tamper,
+                provenance_inputs=provenance_inputs,
+                fixture_execution=fixture_execution,
+                result_box=result_box,
+            )
+        result: Phase2bResult = result_box["result"]  # type: ignore[assignment]
+    except BaseException as exc:
+        # Abort path: protect wrote ABORTED (or a pre-audit failure wrote no
+        # terminal). Finalize ONLY when a post-seal terminal file exists AND the
+        # durable inputs are present; a finalize failure is noted, never masking.
+        aborted_terminal = _terminal_file_path(run_dir)
+        if _durable_inputs_present(run_dir) and aborted_terminal is not None:
+            try:
+                finalize_phase2b_durable_outputs(
+                    run_dir=run_dir,
+                    terminal_path=aborted_terminal,
+                    pre_access_ledger_path=run_dir / PRE_ACCESS_LEDGER_FILENAME,
+                    seed_variability_path=run_dir / DEVELOPMENT_SEED_VARIABILITY_FILENAME,
+                )
+            except BaseException as fin_exc:  # noqa: BLE001 - noted, never masking
+                exc.add_note(
+                    "durable finalize failed on abort (incomplete durable export; "
+                    f"commit marker absent): {fin_exc!r}"
+                )
+        raise
+
+    # --- Normal / INVALID path: exactly one terminal was written inside protect. -
+    # Finalize ONCE after the boundary exited, then bind the verified commit marker
+    # onto the frozen result. A finalize failure here PROPAGATES as a clear
+    # DurableLedgerError (the seal is consumed + terminal on disk → recoverable),
+    # so the operator learns the export is incomplete rather than it passing silently.
+    if _durable_inputs_present(run_dir):
+        terminal_path = run_dir / _TERMINAL_STATE_ARTIFACT[result.terminal_state]
+        commit = finalize_phase2b_durable_outputs(
+            run_dir=run_dir,
+            terminal_path=terminal_path,
+            pre_access_ledger_path=run_dir / PRE_ACCESS_LEDGER_FILENAME,
+            seed_variability_path=run_dir / DEVELOPMENT_SEED_VARIABILITY_FILENAME,
+        )
+        result = replace(
+            result,
+            durable_commit_checksum=commit.commit_checksum,
+            durable_commit_path=str(commit.commit_marker_path),
+        )
+    return result
 
 
 def _evaluate_inside_boundary(
     *,
     terminal: Phase2bTerminal,
     outcome_store: ComposeOutcomeStore,
+    claim: SealedAccessClaim,
     lock: EvaluationLock,
     frozen_bundle: FrozenPredictionBundle,
     pair_manifest: Mapping,
@@ -956,8 +1416,12 @@ def _evaluate_inside_boundary(
     single_ids = lock.pair_ids_single_unseen
     union = list(double_ids) + list(single_ids)
 
-    # --- Step 6: open the seal EXACTLY ONCE for the UNION of both roles. -------
-    release = outcome_store.evaluate_sealed_once(lock.run_id, union)
+    # --- Step 6: materialise the DURABLY-claimed union (seal already burned). --
+    # The seal was consumed once by claim_sealed_access (durable audit write) in
+    # _run_phase2b_core; this only materialises the claim's observed pairs. A
+    # failure HERE is post-audit → the protection boundary writes ABORTED (count
+    # 1). materialize_claimed re-verifies the claim against the persisted audit.
+    release = outcome_store.materialize_claimed(claim)
 
     # --- Step 7 + 8: derive truth in the response space; score each regime. ---
     # score_regime projects each ObservedPair through the frozen response space
@@ -1057,35 +1521,49 @@ def _evaluate_inside_boundary(
         },
     )
 
-    # --- Step 12: write the terminal result + ledger entries ONCE. -------------
-    payload = _terminal_payload(
-        run_id=lock.run_id,
-        verdict=verdict,
-        regime_double=regime_double,
-        regime_single=regime_single,
-        lock=lock,
-        provenance=provenance,
-        sealed_access_count=outcome_store.sealed_access_count,
+    # --- Step 12: build the outcome-free summary + layered checksums ONCE. ------
+    # Aggregates are computed ONCE HERE inside the protected evaluation (spec §2.1);
+    # the summary exporter only COPIES them and never recomputes. per-pair error
+    # arrays and per-pair CIs are NEVER embedded — only the per-method mean MSE.
+    # Reported for BOTH regimes, regime-labeled and scored INDEPENDENTLY (never
+    # pooled): double = headline / verdict-linked, single = registered secondary
+    # (CLAUDE.md §10). Each embedded float passes _finite_or_sentinel so a
+    # degenerate mean becomes the sentinel string, never a summary-write abort.
+    per_method_aggregate_mse: dict[str, dict[str, float | str]] = {
+        "double": {
+            method: _finite_or_sentinel(float(np.mean(regime_double.pair_errors[method])))
+            for method in sorted(regime_double.pair_errors)
+        },
+        "single": {
+            method: _finite_or_sentinel(float(np.mean(regime_single.pair_errors[method])))
+            for method in sorted(regime_single.pair_errors)
+        },
+    }
+    # evaluation_payload_checksum binds the regime/bounds scoring results directly
+    # after scoring (distinct from final_result_checksum, which binds identity).
+    evaluation_payload_checksum = sha256_json(
+        {
+            "double_regime_checksum": regime_double.checksum,
+            "single_regime_checksum": regime_single.checksum,
+            "double_bounds_checksum": regime_double.bounds.checksum,
+            "single_bounds_checksum": regime_single.bounds.checksum,
+        }
     )
-    result_checksum = sha256_json(payload)
-    payload["result_checksum"] = result_checksum
+    # Source the ALREADY-VERIFIED pre-seal seed-variability report checksum from the
+    # write-once ledger (bound + verified pre-access); never recomputed here.
+    seed_variability_report_checksum = terminal.ledger.artifact_sha(
+        DEVELOPMENT_SEED_VARIABILITY_LEDGER_ARTIFACT
+    )
 
+    # Decide the FINAL terminal state + FINAL verdict BEFORE building the summary.
+    # For INVALID the verdict is swapped to INVALID first (spec §2.1), so the
+    # summary and every checksum bind the swapped verdict — never the normal one.
     if post_status is PostAccessStatus.OK:
-        terminal.complete(payload)
         final_verdict = verdict
         terminal_state = TerminalState.COMPLETE
     else:
-        terminal.invalid(
-            "post-access provenance / audit consistency check failed",
-            evidence={
-                "run_id": lock.run_id,
-                "provenance_checksum": expected_provenance_checksum,
-                "result_checksum": result_checksum,
-                "post_access_status": post_status.value,
-            },
-        )
-        # A post-access inconsistency dominates: the sealed axis is INVALID and
-        # the result is not trustworthy (CLAUDE.md §6 / §11).
+        # A post-access inconsistency dominates: the sealed axis is INVALID and the
+        # result is not trustworthy (CLAUDE.md §6 / §11).
         final_verdict = ComposeSealedResult(
             sealed_axis=SealedAxis.INVALID,
             method_axis=verdict.method_axis,
@@ -1093,6 +1571,54 @@ def _evaluate_inside_boundary(
             evidence={**verdict.evidence, "post_access_status": post_status.value},
         )
         terminal_state = TerminalState.INVALID
+
+    summary = build_registered_evaluation_summary(
+        protocol=provenance.protocol,
+        run_id=lock.run_id,
+        terminal_state=terminal_state.value,
+        sealed_access_count=outcome_store.sealed_access_count,
+        regime_double=regime_double,
+        regime_single=regime_single,
+        per_method_aggregate_mse=per_method_aggregate_mse,
+        final_verdict=final_verdict,
+        integrity=integrity,
+        family_confidence=config.family_confidence,
+        bootstrap_replicates=config.bootstrap_replicates,
+        bundle_checksum=lock.bundle_checksum,
+        manifest_checksum=lock.manifest_checksum,
+        provenance_checksum=expected_provenance_checksum,
+        seed_variability_report_checksum=seed_variability_report_checksum,
+    )
+    registered_summary_checksum = sha256_json(summary)
+    final_verdict_checksum = final_verdict.checksum
+    # final_result_checksum binds EXACTLY these five identity fields (spec §2.1).
+    final_result_checksum = sha256_json(
+        {
+            "terminal_state": terminal_state.value,
+            "final_verdict_checksum": final_verdict_checksum,
+            "registered_summary_checksum": registered_summary_checksum,
+            "evaluation_payload_checksum": evaluation_payload_checksum,
+            "provenance_checksum": expected_provenance_checksum,
+        }
+    )
+
+    # The v2 COMPLETE / INVALID body: exactly the state-specific roster (spec §2.1).
+    # The whole-body terminal_payload_checksum is computed by the terminal writer;
+    # these are the inner content checksums over specific in-process dicts.
+    body = {
+        "registered_summary": summary,
+        "registered_summary_checksum": registered_summary_checksum,
+        "final_verdict_checksum": final_verdict_checksum,
+        "terminal_embedded_provenance": provenance.to_dict(),
+        "provenance_checksum": expected_provenance_checksum,
+        "evaluation_payload_checksum": evaluation_payload_checksum,
+        "final_result_checksum": final_result_checksum,
+    }
+
+    if terminal_state is TerminalState.COMPLETE:
+        terminal.complete(body)
+    else:
+        terminal.invalid(body)
 
     result_box["result"] = Phase2bResult(
         run_id=lock.run_id,
@@ -1102,7 +1628,7 @@ def _evaluate_inside_boundary(
         terminal_state=terminal_state,
         sealed_access_count=outcome_store.sealed_access_count,
         provenance_checksum=expected_provenance_checksum,
-        result_checksum=result_checksum,
+        result_checksum=final_result_checksum,
         ledger=terminal.ledger,
     )
 

@@ -35,7 +35,6 @@ _ADAPTER_SHA256 = hashlib.sha256(b"stub-response-operator-v2").hexdigest()
 _CONFIG_SHA256 = hashlib.sha256(b"stub-config").hexdigest()
 _RESOURCE_SHA256 = hashlib.sha256(b"stub-resource").hexdigest()
 _ENVIRONMENT_LOCK_SHA256 = hashlib.sha256(b"stub-environment").hexdigest()
-_PREDICTION_REPRESENTATION = "cell_raw_counts"
 
 
 def main() -> None:
@@ -44,6 +43,11 @@ def main() -> None:
     ap.add_argument("--in", dest="work_dir", required=True)
     ap.add_argument("--out", dest="out", required=True)
     ap.add_argument("--approved-root", required=True)
+    ap.add_argument(
+        "--prediction-representation",
+        required=True,
+        choices=("cell_raw_counts", "raw_pseudobulk_approximation"),
+    )
     a = ap.parse_args()
     payload = read_payload(a.work_dir)
     fit_role = payload["fit_role_artifact"]
@@ -72,6 +76,7 @@ def main() -> None:
         approved_root=a.approved_root,
         calibration_pair_ids=[tuple(pr) for pr in payload["calibration_pair_ids"]],
         sealed_pair_ids=[tuple(pr) for pr in payload["pair_ids"]],
+        single_gene_ids=[str(g) for g in payload["single_gene_ids"]],
     )
 
     # 2. load the artifact; group native full-gene combo_calibration cells only.
@@ -114,19 +119,25 @@ def main() -> None:
     control_mean = np.asarray(proj["control_mean"], dtype=np.float64)
     group_keys = sorted(calibration_groups)
     preds: dict[tuple[str, str], np.ndarray] = {}
+    representation = a.prediction_representation
     for g, h in payload["pair_ids"]:
         request_digest = hashlib.sha256(f"{g}\0{h}".encode()).digest()
         token = group_keys[int.from_bytes(request_digest[:8], "big") % len(group_keys)]
         native = calibration_groups[token]
+        operator_input = (
+            native.mean(axis=0, keepdims=True)
+            if representation == "raw_pseudobulk_approximation"
+            else native
+        )
         z = apply_response_projection(
-            proj, native, gene_order, representation=_PREDICTION_REPRESENTATION
+            proj, operator_input, gene_order, representation=representation
         )
         preds[(g, h)] = (z.mean(axis=0) - control_mean)[:dim]
 
     with open(__file__, "rb") as fh:
         worker_sha256 = hashlib.sha256(fh.read()).hexdigest()
     manifest = {
-        "prediction_representation": _PREDICTION_REPRESENTATION,
+        "prediction_representation": representation,
         "adapter_version": _ADAPTER_VERSION,
         "adapter_sha256": _ADAPTER_SHA256,
         "expected_gene_order_sha256": proj["gene_order_sha256"],

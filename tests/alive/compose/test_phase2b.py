@@ -44,6 +44,12 @@ from alive.compose.config2 import (
     load_compose_phase2_config,
 )
 from alive.compose.datacard import compute_compose_run_id
+from alive.compose.durable import (
+    COMMIT_CHECKSUM_FIELD,
+    DURABLE_COMMIT_FILENAME,
+    DurableLedgerError,
+    recover_phase2b_durable_outputs,
+)
 from alive.compose.freeze import FrozenPredictionBundle
 from alive.compose.outcome_store import ComposeOutcomeStore, ComposeSealingError
 from alive.compose.preflight import PreflightError
@@ -54,16 +60,22 @@ from alive.compose.provenance2 import (
 )
 from alive.compose.response import fit_response_space
 from alive.compose.scoring2 import RegimeScore
+from alive.compose.seed_variability import (
+    DEVELOPMENT_SEED_VARIABILITY_FILENAME,
+    DEVELOPMENT_SEED_VARIABILITY_LEDGER_ARTIFACT,
+)
 from alive.compose.split import build_split_manifest
 from alive.compose.terminal import Phase2bTerminal, TerminalState
 from alive.compose.verdict2 import MethodAxis, SealedAxis
-from alive.provenance import EnvironmentInfo, RunLedger
+from alive.provenance import EnvironmentInfo, RunLedger, sha256_file, sha256_json
 
 from alive.compose.phase2b import (  # isort: skip
     ActivationProvenanceInputs,
     Phase2bError,
     Phase2bResult,
     _build_provenance,
+    _preaccess_seed_variability,
+    _run_phase2b_core,
     build_activation_provenance_inputs,
     run_phase2b,
     run_phase2b_fixture,
@@ -254,6 +266,19 @@ def _build_bundle(manifest: dict, cfg, *, response_dim=2, futility_status="CONTI
     """A FrozenPredictionBundle whose sealed pairs == the manifest roles exactly."""
     double_ids = tuple(_role_pairs(manifest, "sealed_double_unseen"))
     single_ids = tuple(_role_pairs(manifest, "sealed_single_unseen"))
+    model_artifact_checksums = {
+        name: sha256_json({"fixture_model": name})
+        for name in cfg.method_roster
+        if name not in {"additive", "no_change", "perturbation_mean"}
+    }
+    model_checksum = sha256_json(
+        {
+            "schema": "compose_model_set_v1",
+            "methods": model_artifact_checksums,
+            "selected_k_total": 4,
+            "selected_lambda": float(0.01).hex(),
+        }
+    )
     return FrozenPredictionBundle.create(
         run_id=_run_id(cfg),
         method_roster=cfg.method_roster,
@@ -267,7 +292,8 @@ def _build_bundle(manifest: dict, cfg, *, response_dim=2, futility_status="CONTI
         ),
         response_space_checksum="rs-checksum",
         factor_checksum="zf-checksum",
-        model_checksum="model-checksum",
+        model_checksum=model_checksum,
+        model_artifact_checksums=model_artifact_checksums,
         manifest_checksum=manifest["checksum"],
         selected_k_total=4,
         selected_lambda=0.01,
@@ -327,7 +353,6 @@ def _provenance(manifest: dict, bundle: FrozenPredictionBundle, cfg) -> Phase2bP
         seal_audit_reference="audit.jsonl",
         regime_result_double_sha256="placeholder-double",
         regime_result_single_sha256="placeholder-single",
-        terminal_report_sha256="placeholder-terminal",
     )
 
 
@@ -376,6 +401,28 @@ def _terminal_artifacts(run_dir: Path) -> list[Path]:
         )
         if p.exists()
     ]
+
+
+def _read_terminal(run_dir: Path, which: str) -> dict:
+    """Load a written terminal artifact body (``"complete"`` or ``"invalid"``)."""
+    name = {
+        "complete": Phase2bTerminal.COMPLETE_ARTIFACT,
+        "invalid": Phase2bTerminal.INVALID_ARTIFACT,
+    }[which]
+    return json.loads((run_dir / name).read_text(encoding="utf-8"))
+
+
+def _flatten_keys(obj) -> list[str]:
+    """Every mapping key at any nesting depth (for per-pair / *_ci leakage checks)."""
+    keys: list[str] = []
+    if isinstance(obj, dict):
+        for key, value in obj.items():
+            keys.append(key)
+            keys.extend(_flatten_keys(value))
+    elif isinstance(obj, (list, tuple)):
+        for value in obj:
+            keys.extend(_flatten_keys(value))
+    return keys
 
 
 # ===========================================================================
@@ -520,9 +567,13 @@ class _SpyStore:
         self.events: list[str] = []
         self._compose_fixture_marker = True
 
-    def evaluate_sealed_once(self, run_id, pair_ids):
-        self.events.append("evaluate_sealed_once")
-        return self._inner.evaluate_sealed_once(run_id, pair_ids)
+    def claim_sealed_access(self, run_id, pair_ids):
+        self.events.append("claim_sealed_access")
+        return self._inner.claim_sealed_access(run_id, pair_ids)
+
+    def materialize_claimed(self, claim):
+        self.events.append("materialize_claimed")
+        return self._inner.materialize_claimed(claim)
 
     def read_unsealed(self, pair_ids):  # pragma: no cover - defensive
         self.events.append("read_unsealed")
@@ -545,8 +596,9 @@ def test_predictions_consumed_readonly_no_access_until_step_six(tmp_path):
     kwargs["outcome_store"] = spy
     res = run_phase2b_fixture(**kwargs)
 
-    # exactly one access event, and the bundle was not mutated (consumed read-only).
-    assert spy.events == ["evaluate_sealed_once"]
+    # the durable claim then materialisation are the only sealed events, and the
+    # bundle was not mutated (consumed read-only).
+    assert spy.events == ["claim_sealed_access", "materialize_claimed"]
     assert kit["bundle"].bundle_checksum == pre_checksum
     kit["bundle"].verify()
     assert res.sealed_access_count == 1
@@ -711,10 +763,13 @@ class _EmptyCellsStore:
         self._audit_path = inner._audit_path
         self._compose_fixture_marker = True
 
-    def evaluate_sealed_once(self, run_id, pair_ids):
+    def claim_sealed_access(self, run_id, pair_ids):
+        return self._inner.claim_sealed_access(run_id, pair_ids)
+
+    def materialize_claimed(self, claim):
         from alive.compose.outcome_store import ObservedPair
 
-        release = self._inner.evaluate_sealed_once(run_id, pair_ids)
+        release = self._inner.materialize_claimed(claim)
         return {pid: ObservedPair(pair_id=pid, cells=op.cells[:0]) for pid, op in release.items()}
 
     def read_unsealed(self, pair_ids):  # pragma: no cover - defensive
@@ -753,16 +808,19 @@ def test_post_access_scoring_failure_writes_failure_terminal(tmp_path):
 
 
 class _RaisingAfterClaimStore:
-    """Store whose evaluate_sealed_once burns the audit, then raises."""
+    """Store whose durable claim burns the audit, then materialisation raises."""
 
     def __init__(self, inner: ComposeOutcomeStore) -> None:
         self._inner = inner
+        self._audit_path = inner._audit_path
         self._compose_fixture_marker = True
 
-    def evaluate_sealed_once(self, run_id, pair_ids):
-        # Burn the audit exactly as the real store would (write FIRST), then fail
-        # during materialisation — the worst-case the terminal must survive.
-        self._inner._write_audit_record(run_id, [self._inner._canonical(p) for p in pair_ids])
+    def claim_sealed_access(self, run_id, pair_ids):
+        # Burn the audit exactly as the real store would (durable write FIRST).
+        return self._inner.claim_sealed_access(run_id, pair_ids)
+
+    def materialize_claimed(self, claim):
+        # Fail AFTER the audit is on disk — the worst-case the terminal survives.
         raise RuntimeError("synthetic materialisation failure")
 
     def read_unsealed(self, pair_ids):  # pragma: no cover - defensive
@@ -879,9 +937,156 @@ def test_terminal_and_ledger_hashes_round_trip(tmp_path):
     # the ledger recorded the terminal artifact under its canonical name.
     assert res.ledger.artifact_sha(Phase2bTerminal.COMPLETE_ARTIFACT) == file_sha
     assert res.ledger.verify_file(Phase2bTerminal.COMPLETE_ARTIFACT, complete)
-    # the result's recorded checksums are present in the persisted body.
-    assert body["sealed_verdict_checksum"] == res.sealed_verdict.checksum
+    # the result's recorded checksums are present in the persisted body. The
+    # sealed verdict checksum is now the top-level state field final_verdict_checksum
+    # (COMPLETE: the final verdict IS the sealed verdict).
+    assert body["final_verdict_checksum"] == res.sealed_verdict.checksum
     assert res.result_checksum  # non-empty
+
+
+# ===========================================================================
+# 13b. COMPLETE terminal embeds the outcome-free registered summary + the
+#      layered final_result_checksum; INVALID differs from COMPLETE (D1 Task 3)
+# ===========================================================================
+
+
+def test_complete_terminal_embeds_summary_and_final_result_checksum(tmp_path):
+    kit = _make_run(tmp_path)
+    result = run_phase2b_fixture(**_fixture_kwargs(kit))
+    assert result.terminal_state == TerminalState.COMPLETE
+
+    body = _read_terminal(kit["run_dir"], "complete")
+    summ = body["registered_summary"]
+    assert set(summ) >= {
+        "per_method_aggregate_mse",
+        "theta",
+        "simultaneous_lower_bounds",
+        "family_confidence",
+        "bootstrap_replicates",
+        "gi_explained_interval",
+        "gi_structure_recovery",
+        "sample_counts",
+        "seed_variability_report_checksum",
+    }
+    assert summ["gi_structure_recovery"] == "NOT_EVALUABLE"
+    # per_method_aggregate_mse is a regime-labeled mapping (mirrors sample_counts):
+    # both the double (headline / verdict-linked) AND single (registered secondary,
+    # §10) regimes are present, regime-labeled, scored INDEPENDENTLY and NEVER
+    # pooled into one flat method->mse map.
+    pmm = summ["per_method_aggregate_mse"]
+    assert set(pmm) == {"double", "single"}
+    assert set(pmm["double"]) == set(pmm["single"])
+    assert pmm["single"] != pmm["double"]
+    # no per-pair error array or per-pair CI leaks into the terminal payload.
+    assert not any("per_pair" in k or k.endswith("_ci") for k in _flatten_keys(body))
+
+    # the inner content checksums bind their in-process dicts.
+    assert body["registered_summary_checksum"] == sha256_json(summ)
+    assert body["final_result_checksum"] == sha256_json(
+        {
+            "terminal_state": body["terminal_state"],
+            "final_verdict_checksum": body["final_verdict_checksum"],
+            "registered_summary_checksum": body["registered_summary_checksum"],
+            "evaluation_payload_checksum": body["evaluation_payload_checksum"],
+            "provenance_checksum": body["provenance_checksum"],
+        }
+    )
+    # Phase2bResult.result_checksum IS the layered final_result_checksum.
+    assert result.result_checksum == body["final_result_checksum"]
+
+
+def test_per_method_aggregate_mse_reports_both_regimes_unpooled(tmp_path):
+    # §10 registered-secondary completeness: the summary must report the per-method
+    # aggregate MSE for BOTH the double-unseen (headline / verdict-linked) AND the
+    # single-unseen (registered secondary) regimes — regime-labeled, scored
+    # INDEPENDENTLY, and NEVER pooled. Under-reporting only the double regime would
+    # silently drop the §10 registered secondary.
+    kit = _make_run(tmp_path)
+    res = run_phase2b_fixture(**_fixture_kwargs(kit))
+    assert res.terminal_state == TerminalState.COMPLETE
+
+    body = _read_terminal(kit["run_dir"], "complete")
+    per_method = body["registered_summary"]["per_method_aggregate_mse"]
+
+    # regime-labeled mapping mirroring sample_counts: {"double": {...}, "single": {...}}.
+    assert set(per_method) == {"double", "single"}
+    assert isinstance(per_method["double"], dict)
+    assert isinstance(per_method["single"], dict)
+
+    # both regimes carry the SAME (full) method roster; per-method, never per-pair.
+    assert set(per_method["double"]) == set(per_method["single"])
+    assert set(per_method["single"]) == set(res.regime_single.pair_errors)
+
+    # each embedded value is the INDEPENDENT per-regime mean over THAT regime's own
+    # pair_errors — proving it is regime-labeled, aggregate-scalar and NOT pooled.
+    for method in sorted(res.regime_single.pair_errors):
+        expected_double = float(np.mean(res.regime_double.pair_errors[method]))
+        expected_single = float(np.mean(res.regime_single.pair_errors[method]))
+        assert per_method["double"][method] == pytest.approx(expected_double)
+        assert per_method["single"][method] == pytest.approx(expected_single)
+        # a finite aggregate scalar, never a per-pair array.
+        assert isinstance(per_method["single"][method], float)
+        assert np.isfinite(per_method["single"][method])
+        # NOT pooled: a mean over the union of both regimes would differ from the
+        # single-regime mean (the regimes score disjoint pairs).
+        pooled = float(
+            np.mean(
+                np.concatenate(
+                    [
+                        res.regime_double.pair_errors[method],
+                        res.regime_single.pair_errors[method],
+                    ]
+                )
+            )
+        )
+        assert per_method["single"][method] != pytest.approx(pooled)
+
+    # single is a DISTINCT dict from double (independent regimes).
+    assert per_method["single"] != per_method["double"]
+
+
+def test_invalid_final_result_checksum_differs_from_complete(tmp_path):
+    # A clean COMPLETE run and a post-access-tampered INVALID run from the SAME
+    # inputs must not share a final_result_checksum (terminal_state + final
+    # verdict differ), and INVALID must not reuse the normal verdict checksum.
+    kit_c = _make_run(tmp_path / "complete")
+    complete = run_phase2b_fixture(**_fixture_kwargs(kit_c))
+    assert complete.terminal_state == TerminalState.COMPLETE
+
+    kit_i = _make_run(tmp_path / "invalid")
+    tampered = dataclasses.replace(kit_i["provenance"], processed_sha256="TAMPERED-AFTER-REGISTER")
+    invalid = run_phase2b_fixture(
+        **_fixture_kwargs(kit_i),
+        _tamper_provenance_after_register=tampered,
+    )
+    assert invalid.terminal_state == TerminalState.INVALID
+
+    assert invalid.result_checksum != complete.result_checksum
+    inv_body = _read_terminal(kit_i["run_dir"], "invalid")
+    assert inv_body["terminal_state"] == TerminalState.INVALID.value
+    assert inv_body["final_result_checksum"] == invalid.result_checksum
+
+    # WHY the checksums differ: the `!=` above would ALSO hold merely because the
+    # two runs live in different run dirs (different seal_audit_reference ->
+    # different provenance_checksum), even if terminal_state / verdict were NOT
+    # bound into final_result_checksum. Reconstruct the INVALID checksum from its
+    # OWN five composition keys (mirroring the COMPLETE composition test) to prove
+    # terminal_state="INVALID" + the swapped final_verdict_checksum are the bound
+    # inputs, not an incidental run-dir difference.
+    assert inv_body["final_result_checksum"] == sha256_json(
+        {
+            "terminal_state": inv_body["terminal_state"],
+            "final_verdict_checksum": inv_body["final_verdict_checksum"],
+            "registered_summary_checksum": inv_body["registered_summary_checksum"],
+            "evaluation_payload_checksum": inv_body["evaluation_payload_checksum"],
+            "provenance_checksum": inv_body["provenance_checksum"],
+        }
+    )
+    # The verdict->INVALID swap is bound: this INVALID body's final_verdict_checksum
+    # differs from the COMPLETE run's, so the difference is attributable to the
+    # terminal_state + swapped verdict, not just the run dir / provenance.
+    complete_body = _read_terminal(kit_c["run_dir"], "complete")
+    assert inv_body["final_verdict_checksum"] != complete_body["final_verdict_checksum"]
 
 
 # ===========================================================================
@@ -1137,3 +1342,222 @@ def test_build_activation_provenance_inputs_hashes_real_files(tmp_path):
     assert inputs.cpa_revision == "0.7.2"
     assert len(inputs.dependency_lock_sha256) == 64
     assert inputs.git_commit == _environment().git_commit
+
+
+# ===========================================================================
+# D2 Task 6 — pre-access seed-variability binding wired into Phase-2b preflight
+# ===========================================================================
+
+
+def _scientific_response_artifact():
+    """A response artifact carrying the combined checksum the scientific path needs."""
+    from alive.compose.response import verify_response_artifact
+
+    space, control_mean = _response_space()
+    _, _, checksum = verify_response_artifact(space, control_mean)
+    return {"response_space": space, "control_mean": control_mean, "checksum": checksum}
+
+
+def test_fixture_path_binds_seed_variability_before_persist(tmp_path):
+    # The bounded fixture path is NOT a silent bypass: it writes the report ONCE
+    # and records its byte SHA into the write-once ledger BEFORE the pre-access
+    # snapshot, so the persisted snapshot carries the artifact.
+    kit = _make_run(tmp_path)
+    res = run_phase2b_fixture(**_fixture_kwargs(kit))
+
+    report_path = kit["run_dir"] / DEVELOPMENT_SEED_VARIABILITY_FILENAME
+    assert report_path.is_file()
+    recorded = res.ledger.artifact_sha(DEVELOPMENT_SEED_VARIABILITY_LEDGER_ARTIFACT)
+    assert recorded == sha256_file(report_path)
+    # recorded BEFORE persist_pre_access_ledger -> present in the durable snapshot.
+    snapshot = RunLedger.read(kit["run_dir"] / PRE_ACCESS_LEDGER_FILENAME)
+    assert snapshot.artifact_sha(DEVELOPMENT_SEED_VARIABILITY_LEDGER_ARTIFACT) == recorded
+    # the run still completes normally (one sealed access, COMPLETE terminal).
+    assert res.sealed_access_count == 1
+    assert res.terminal_state == TerminalState.COMPLETE
+
+
+def test_preaccess_fixture_binds_bounded_report(tmp_path):
+    kit = _make_run(tmp_path)
+    _preaccess_seed_variability(
+        run_dir=kit["run_dir"],
+        ledger=kit["ledger"],
+        frozen_bundle=kit["bundle"],
+        config=kit["cfg"],
+        fixture_execution=True,
+        seed_variability=None,
+    )
+    assert (kit["run_dir"] / DEVELOPMENT_SEED_VARIABILITY_FILENAME).is_file()
+    assert kit["ledger"].artifact_sha(DEVELOPMENT_SEED_VARIABILITY_LEDGER_ARTIFACT)
+
+
+def test_preaccess_scientific_requires_seed_variability_inputs(tmp_path):
+    # The scientific branch cannot be silently bypassed: with no seed-variability
+    # inputs it FAILS CLOSED (before any seal access).
+    kit = _make_run(tmp_path)
+    with pytest.raises(Phase2bError, match="seed-variability"):
+        _preaccess_seed_variability(
+            run_dir=kit["run_dir"],
+            ledger=kit["ledger"],
+            frozen_bundle=kit["bundle"],
+            config=kit["cfg"],
+            fixture_execution=False,
+            seed_variability=None,
+        )
+
+
+def test_scientific_core_missing_seed_report_leaves_seal_closed(tmp_path):
+    # Drive _run_phase2b_core on the SCIENTIFIC path with no seed-variability
+    # inputs: the pre-access seed-variability gate raises BEFORE any seal access,
+    # so the seal stays CLOSED and NO terminal artifact is written.
+    kit = _make_run(tmp_path, fixture_store=True)
+    with pytest.raises(Phase2bError, match="seed-variability"):
+        _run_phase2b_core(
+            run_dir=kit["run_dir"],
+            outcome_store=kit["store"],
+            frozen_bundle=kit["bundle"],
+            pair_manifest=kit["manifest"],
+            response_artifact=_scientific_response_artifact(),
+            config=kit["cfg"],
+            ledger=kit["ledger"],
+            fixture_execution=False,
+            git_clean=True,
+            provenance_tamper=None,
+            provenance_inputs=None,
+            seed_variability=None,
+        )
+    assert kit["store"].sealed_access_count == 0
+    assert _terminal_artifacts(kit["run_dir"]) == []
+
+
+def test_run_phase2b_partial_seed_inputs_rejected(tmp_path):
+    # The scientific entry refuses a partial seed-variability input set (all four
+    # of oof_manifest_path/checksum + report_path/checksum, or none).
+    kit = _make_run(tmp_path, fixture_store=False)
+    with pytest.raises(Phase2bError, match="together"):
+        run_phase2b(
+            run_dir=kit["run_dir"],
+            outcome_store=kit["store"],
+            frozen_bundle=kit["bundle"],
+            pair_manifest=kit["manifest"],
+            response_artifact=kit["response_artifact"],
+            config=kit["cfg"],
+            ledger=kit["ledger"],
+            activation_record=_activation_record(kit["cfg"]),
+            git_is_clean=True,
+            oof_manifest_path=tmp_path / "oof.json",  # only one of four supplied
+        )
+    assert kit["store"].sealed_access_count == 0
+
+
+# ===========================================================================
+# D1 Task 7: durable finalize wired into run_phase2b (normal / abort)
+# ===========================================================================
+
+
+def test_complete_run_publishes_verified_durable_commit_marker(tmp_path):
+    # NORMAL path: after the terminal is written and the protection context has
+    # exited, the durable finalizer publishes a commit marker and the frozen
+    # Phase2bResult carries its checksum + path.
+    kit = _make_run(tmp_path)
+    res = run_phase2b_fixture(**_fixture_kwargs(kit))
+    run_dir = kit["run_dir"]
+
+    assert res.terminal_state == TerminalState.COMPLETE
+    # exactly one terminal (COMPLETE) — the marker is NOT a terminal artifact.
+    assert _terminal_artifacts(run_dir) == [run_dir / Phase2bTerminal.COMPLETE_ARTIFACT]
+
+    marker_path = run_dir / DURABLE_COMMIT_FILENAME
+    assert marker_path.is_file()
+    assert res.durable_commit_checksum is not None
+    assert res.durable_commit_path == str(marker_path)
+
+    # the marker's self-excluding checksum recomputes (verified marker).
+    marker = json.loads(marker_path.read_text(encoding="utf-8"))
+    core = {k: v for k, v in marker.items() if k != COMMIT_CHECKSUM_FIELD}
+    assert marker[COMMIT_CHECKSUM_FIELD] == res.durable_commit_checksum
+    assert sha256_json(core) == res.durable_commit_checksum
+
+    # a marker-present recovery re-verifies every published file (verify-only).
+    recovered = recover_phase2b_durable_outputs(run_dir=run_dir)
+    assert recovered.commit_checksum == res.durable_commit_checksum
+
+
+def test_abort_publishes_durable_marker_and_reraises_original(tmp_path):
+    # ABORT path: an exception inside the protection boundary → protect writes the
+    # ABORTED terminal and re-raises; the SAME finalizer then publishes the reduced
+    # abort marker. The ORIGINAL evaluation exception propagates unchanged.
+    kit = _make_run(tmp_path)
+    burner = _RaisingAfterClaimStore(kit["store"])
+    kwargs = _fixture_kwargs(kit)
+    kwargs["outcome_store"] = burner
+    with pytest.raises(RuntimeError, match="synthetic materialisation failure"):
+        run_phase2b_fixture(**kwargs)
+
+    run_dir = kit["run_dir"]
+    # the seal was consumed once; exactly one terminal (ABORTED).
+    assert kit["store"].sealed_access_count == 1
+    assert _terminal_artifacts(run_dir) == [run_dir / Phase2bTerminal.ABORTED_ARTIFACT]
+
+    # the abort marker was published and re-verifies.
+    marker_path = run_dir / DURABLE_COMMIT_FILENAME
+    assert marker_path.is_file()
+    recover_phase2b_durable_outputs(run_dir=run_dir)
+
+
+def test_abort_finalize_failure_does_not_mask_original_exception(tmp_path, monkeypatch):
+    # A finalizer that ITSELF raises on the abort path must NOT replace the original
+    # evaluation exception (it is attached as a note) and must leave NO commit
+    # marker (a missing marker signals an incomplete durable export).
+    kit = _make_run(tmp_path)
+    burner = _RaisingAfterClaimStore(kit["store"])
+    kwargs = _fixture_kwargs(kit)
+    kwargs["outcome_store"] = burner
+
+    def _boom(**_kwargs):
+        raise DurableLedgerError("synthetic durable finalize failure")
+
+    monkeypatch.setattr("alive.compose.phase2b.finalize_phase2b_durable_outputs", _boom)
+
+    with pytest.raises(RuntimeError, match="synthetic materialisation failure") as excinfo:
+        run_phase2b_fixture(**kwargs)
+
+    # the original evaluation exception is preserved; the finalize failure is a note.
+    notes = getattr(excinfo.value, "__notes__", [])
+    assert any("finalize" in note for note in notes)
+
+    run_dir = kit["run_dir"]
+    # no commit marker (incomplete export) but the abort terminal is untouched.
+    assert not (run_dir / DURABLE_COMMIT_FILENAME).exists()
+    assert _terminal_artifacts(run_dir) == [run_dir / Phase2bTerminal.ABORTED_ARTIFACT]
+
+
+def test_pre_audit_failure_does_not_finalize(tmp_path, monkeypatch):
+    # A pre-audit failure (here a preflight checksum mismatch) happens BEFORE the
+    # seal is claimed: no terminal exists, so the durable finalizer is NEVER called
+    # and no marker is published.
+    kit = _make_run(tmp_path)
+    bad_ledger = RunLedger(
+        run_id=kit["bundle"].run_id,
+        config_sha256=kit["cfg"].config_sha256,
+        environment=_environment(),
+    )
+    bad_ledger.record_artifact("pair_manifest", kit["manifest"]["checksum"])
+    bad_ledger.record_artifact("response_space", kit["bundle"].response_space_checksum)
+    bad_ledger.record_artifact("factor_bank", kit["bundle"].factor_checksum)
+    bad_ledger.record_artifact("model", kit["bundle"].model_checksum)
+    bad_ledger.record_artifact("frozen_prediction_bundle", "WRONG-SHA")
+
+    def _must_not_run(**_kwargs):
+        raise AssertionError("finalize must NOT run on a pre-audit failure")
+
+    monkeypatch.setattr("alive.compose.phase2b.finalize_phase2b_durable_outputs", _must_not_run)
+
+    kwargs = _fixture_kwargs(kit)
+    kwargs["ledger"] = bad_ledger
+    with pytest.raises(PreflightError):
+        run_phase2b_fixture(**kwargs)
+
+    assert kit["store"].sealed_access_count == 0
+    assert _terminal_artifacts(kit["run_dir"]) == []
+    assert not (kit["run_dir"] / DURABLE_COMMIT_FILENAME).exists()

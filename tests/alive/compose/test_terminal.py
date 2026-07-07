@@ -3,18 +3,19 @@
 TDD order: tests written first; the implementation must pass all of them.
 
 This module is Task 7 of 8 for COMPOSE-K562-v1 Phase 2b. It is the SAFETY NET
-around the one-time COMPOSE seal opening: once ``claim_access()`` is called (the
-point the seal is about to be opened), EVERY exit path MUST leave exactly one
-write-once terminal artifact — ``COMPLETE``, ``INVALID`` or ``ABORTED_AFTER_SEAL``.
-A consumed seal with no durable terminal record is the worst-case failure; the
-``try/except/finally`` boundary makes it impossible.
+around the one-time COMPOSE seal opening: once the terminal reaches
+``ACCESS_CLAIMED`` (the point the seal is durably consumed, via
+``attempt_access`` then ``confirm_durable_access``), EVERY exit path MUST leave
+exactly one write-once terminal artifact — ``COMPLETE``, ``INVALID`` or
+``ABORTED_AFTER_SEAL``. A consumed seal with no durable terminal record is the
+worst-case failure; the ``try/except/finally`` boundary makes it impossible.
 
 The crash-injection suite covers every stage BEFORE and AFTER access:
 
-  * BEFORE access (no ``claim_access``) → a crash leaves NO terminal artifact
+  * BEFORE the durable claim → a crash leaves NO terminal artifact
     (the seal was never opened);
-  * AFTER access (``claim_access`` done) → any crash, or even a silent return,
-    leaves exactly one ``ABORTED_AFTER_SEAL`` artifact.
+  * AFTER the durable claim (state ``ACCESS_CLAIMED``) → any crash, or even a
+    silent return, leaves exactly one ``ABORTED_AFTER_SEAL`` artifact.
 
 Raw outcome matrices may NEVER appear in a report, in provenance, or in scrubbed
 exception text. The guard rejects arrays / nested raw matrices BEFORE any write
@@ -32,15 +33,20 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from alive.compose.outcome_store import ComposeOutcomeStore, ComposeSealingError
+from alive.compose.split import build_split_manifest
 from alive.compose.terminal import (
     Phase2bTerminal,
     TerminalError,
     TerminalState,
+    canonicalize_terminal_checksum_input,
 )
 from alive.provenance import (
     EnvironmentInfo,
     RunLedger,
+    sha256_json,
 )
+from tests.alive.compose._terminal_bodies import minimal_v2_terminal_body
 
 # ---------------------------------------------------------------------------
 # Synthetic fixtures — tiny, deterministic, no real data.
@@ -68,15 +74,12 @@ def _ledger() -> RunLedger:
 
 
 def _payload() -> dict:
-    """A small, outcome-free report payload (verdict-style summary only)."""
-    return {
-        "protocol": "COMPOSE-K562-v1",
-        "verdict": "NO_DISTINCT_WIN",
-        "regime_double_metric": 0.42,
-        "regime_single_metric": 0.31,
-        "method_roster": ["operator", "additive", "gears"],
-        "preflight_checksums": {"pair_manifest": "a" * 64},
-    }
+    """A minimal VALID v2 COMPLETE state-roster body (spec §2.1).
+
+    D1 Task 3 closed the COMPLETE / INVALID roster, so the outcome-free report is
+    now exactly the registered summary + embedded provenance + layered checksums.
+    """
+    return minimal_v2_terminal_body()
 
 
 def _terminal(tmp_path: Path, *, audit_path: Path | None = None) -> Phase2bTerminal:
@@ -84,6 +87,79 @@ def _terminal(tmp_path: Path, *, audit_path: Path | None = None) -> Phase2bTermi
     run_dir = tmp_path / "run"
     run_dir.mkdir(parents=True, exist_ok=True)
     return Phase2bTerminal(run_dir, ledger=_ledger(), audit_path=audit_path)
+
+
+def _durably_claimed_terminal(
+    tmp_path: Path, *, run_id: str = "deadbeefdeadbeef"
+) -> Phase2bTerminal:
+    """A terminal advanced to ``ACCESS_CLAIMED`` via a VERIFIED durable audit.
+
+    Constructs the terminal with the full v2 identity roster (protocol / run_id /
+    pre-access provenance identity), writes one durable audit record so
+    :meth:`Phase2bTerminal.confirm_durable_access` accepts the claim, and confirms
+    the durable reference — the seal-consumed state from which every terminal body
+    must carry the common identity fields.
+    """
+    run_dir = tmp_path / "run"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    audit_path = tmp_path / "audit.jsonl"
+    term = Phase2bTerminal(
+        run_dir,
+        ledger=_ledger(),
+        audit_path=audit_path,
+        protocol="COMPOSE-K562-v1",
+        run_id=run_id,
+        pre_access_ledger_sha256="c" * 64,
+        pre_access_provenance_checksum="d" * 64,
+    )
+    term.acquire()  # audit empty -> OK
+    term.attempt_access()
+    # The durable seal claim writes the audit record (as the outcome store would),
+    # after which confirm_durable_access accepts the durable reference.
+    audit_path.write_text(json.dumps({"run_id": run_id, "pair_ids": []}) + "\n", encoding="utf-8")
+    term.confirm_durable_access("durable-audit-reference-xyz")
+    return term
+
+
+def _durably_claimed_terminal_missing_pre_access(
+    tmp_path: Path, *, run_id: str = "deadbeefdeadbeef"
+) -> Phase2bTerminal:
+    """A durably-claimed terminal that NEVER bound its pre-access identity.
+
+    Identical to :func:`_durably_claimed_terminal` EXCEPT the two pre-access
+    provenance identity fields are left ``None`` (constructed without them and
+    ``bind_pre_access`` never called) — the exact state a future refactor that
+    drops / reorders ``bind_pre_access`` would leave. Reaching a terminal write
+    from here MUST fail closed (Part 1 canary).
+    """
+    run_dir = tmp_path / "run"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    audit_path = tmp_path / "audit.jsonl"
+    term = Phase2bTerminal(
+        run_dir,
+        ledger=_ledger(),
+        audit_path=audit_path,
+        protocol="COMPOSE-K562-v1",
+        run_id=run_id,
+        # pre_access_ledger_sha256 / pre_access_provenance_checksum deliberately
+        # left at their None defaults: bind_pre_access is never called.
+    )
+    term.acquire()
+    term.attempt_access()
+    audit_path.write_text(json.dumps({"run_id": run_id, "pair_ids": []}) + "\n", encoding="utf-8")
+    term.confirm_durable_access("durable-audit-reference-xyz")
+    return term
+
+
+def _v2_complete_payload(**overrides: object) -> dict:
+    """A minimal VALID v2 COMPLETE state-roster body (state-specific content only).
+
+    The identity roster is injected by the terminal writer from instance state;
+    this body supplies only the state-specific summary + checksums. ``overrides``
+    are applied to the embedded summary, so ``theta`` is a finite float by default
+    and a test can override it with a non-finite value.
+    """
+    return minimal_v2_terminal_body(**overrides)
 
 
 def _terminal_artifact_paths(run_dir: Path) -> list[Path]:
@@ -105,12 +181,9 @@ def _existing_terminal_artifacts(run_dir: Path) -> list[Path]:
 
 
 def test_complete_happy_path_writes_canonical_json_and_ledger(tmp_path: Path) -> None:
-    term = _terminal(tmp_path)
+    term = _durably_claimed_terminal(tmp_path)
     run_dir = term.run_dir
 
-    term.acquire()
-    assert term.state is TerminalState.PREPARED
-    term.claim_access()
     assert term.state is TerminalState.ACCESS_CLAIMED
 
     payload = _payload()
@@ -120,14 +193,33 @@ def test_complete_happy_path_writes_canonical_json_and_ledger(tmp_path: Path) ->
     artifact = run_dir / Phase2bTerminal.COMPLETE_ARTIFACT
     assert artifact.exists()
 
-    # Canonical JSON: sort_keys + compact separators. The body carries the
-    # payload plus a terminal_state marker.
+    # Canonical JSON: sort_keys + compact separators.
     text = artifact.read_text(encoding="utf-8")
     body = json.loads(text)
-    expected = dict(payload)
-    expected["terminal_state"] = TerminalState.COMPLETE.value
-    assert body == expected
     assert text == json.dumps(body, sort_keys=True, separators=(",", ":"))
+
+    # v2 common roster is injected; the report payload's non-reserved keys survive.
+    assert body["schema"] == "compose_phase2b_terminal_v2"
+    assert body["terminal_state"] == TerminalState.COMPLETE.value
+    for k in (
+        "protocol",
+        "run_id",
+        "sealed_access_count",
+        "seal_audit_reference",
+        "pre_access_ledger_sha256",
+        "pre_access_provenance_checksum",
+        "terminal_payload_checksum",
+    ):
+        assert k in body
+    # the state-specific v2 roster survives verbatim (spec §2.1).
+    assert body["registered_summary"] == payload["registered_summary"]
+    assert body["final_result_checksum"] == payload["final_result_checksum"]
+
+    # Self-excluding checksum recomputes via the shared canonicalizer.
+    checksum_input = canonicalize_terminal_checksum_input(
+        {k: v for k, v in body.items() if k != "terminal_payload_checksum"}
+    )
+    assert sha256_json(checksum_input) == body["terminal_payload_checksum"]
 
     # Ledger entry appended AND verifies against the file on disk.
     sha = term.ledger.artifact_sha(Phase2bTerminal.COMPLETE_ARTIFACT)
@@ -135,10 +227,48 @@ def test_complete_happy_path_writes_canonical_json_and_ledger(tmp_path: Path) ->
     assert term.ledger.verify_file(Phase2bTerminal.COMPLETE_ARTIFACT, artifact) is True
 
 
+def test_terminal_v2_has_common_fields_and_self_excluding_checksum(tmp_path: Path) -> None:
+    term = _durably_claimed_terminal(tmp_path)  # verified audit -> ACCESS_CLAIMED
+    term.complete(_v2_complete_payload())
+
+    body = json.loads((term.run_dir / Phase2bTerminal.COMPLETE_ARTIFACT).read_text())
+    for k in (
+        "schema",
+        "protocol",
+        "run_id",
+        "terminal_state",
+        "sealed_access_count",
+        "seal_audit_reference",
+        "pre_access_ledger_sha256",
+        "pre_access_provenance_checksum",
+        "terminal_payload_checksum",
+    ):
+        assert k in body
+    assert body["schema"] == "compose_phase2b_terminal_v2"
+    # A durable audit was written, so the derived sealed access count is 1.
+    assert body["sealed_access_count"] == 1
+    assert body["seal_audit_reference"] == "durable-audit-reference-xyz"
+
+    # self-excluding: writer and verifier share the same recursive canonicalizer.
+    checksum_input = canonicalize_terminal_checksum_input(
+        {k: v for k, v in body.items() if k != "terminal_payload_checksum"}
+    )
+    recomputed = sha256_json(checksum_input)
+    assert recomputed == body["terminal_payload_checksum"]
+
+
+def test_terminal_rejects_nonfinite_float(tmp_path: Path) -> None:
+    term = _durably_claimed_terminal(tmp_path)
+    with pytest.raises(TerminalError, match="finite"):
+        term.complete(_v2_complete_payload(theta=float("nan")))
+
+    # Rejected BEFORE any write: the state is unchanged and no artifact exists.
+    assert term.state is TerminalState.ACCESS_CLAIMED
+    assert _existing_terminal_artifacts(term.run_dir) == []
+
+
 def test_complete_is_write_once_second_complete_raises(tmp_path: Path) -> None:
-    term = _terminal(tmp_path)
-    term.acquire()
-    term.claim_access()
+    term = _durably_claimed_terminal(tmp_path)
     term.complete(_payload())
 
     # A second terminal write must fail (state guard fires first).
@@ -152,7 +282,7 @@ def test_complete_is_write_once_second_complete_raises(tmp_path: Path) -> None:
 def test_complete_only_valid_from_access_claimed(tmp_path: Path) -> None:
     term = _terminal(tmp_path)
     term.acquire()
-    # complete() before claim_access() is illegal — seal not yet opened.
+    # complete() before the durable claim (ACCESS_CLAIMED) is illegal — seal not yet opened.
     with pytest.raises(TerminalError):
         term.complete(_payload())
     assert _existing_terminal_artifacts(term.run_dir) == []
@@ -164,20 +294,20 @@ def test_complete_only_valid_from_access_claimed(tmp_path: Path) -> None:
 
 
 def test_invalid_path_writes_artifact_and_ledger(tmp_path: Path) -> None:
-    term = _terminal(tmp_path)
+    term = _durably_claimed_terminal(tmp_path)
     run_dir = term.run_dir
-    term.acquire()
-    term.claim_access()
 
-    term.invalid("post-access checksum mismatch", evidence={"observed": "x", "expected": "y"})
+    invalid_body = minimal_v2_terminal_body(terminal_state="INVALID")
+    term.invalid(invalid_body)
     assert term.state is TerminalState.INVALID
 
     artifact = run_dir / Phase2bTerminal.INVALID_ARTIFACT
     assert artifact.exists()
     body = json.loads(artifact.read_text(encoding="utf-8"))
     assert body["terminal_state"] == TerminalState.INVALID.value
-    assert body["reason"] == "post-access checksum mismatch"
-    assert body["evidence"] == {"observed": "x", "expected": "y"}
+    # INVALID carries the SAME state roster as COMPLETE (spec §2.1), not reason/evidence.
+    assert body["registered_summary"] == invalid_body["registered_summary"]
+    assert body["final_result_checksum"] == invalid_body["final_result_checksum"]
 
     assert term.ledger.verify_file(Phase2bTerminal.INVALID_ARTIFACT, artifact) is True
 
@@ -186,7 +316,7 @@ def test_invalid_only_valid_from_access_claimed(tmp_path: Path) -> None:
     term = _terminal(tmp_path)
     term.acquire()
     with pytest.raises(TerminalError):
-        term.invalid("too early")
+        term.invalid(minimal_v2_terminal_body(terminal_state="INVALID"))
     assert _existing_terminal_artifacts(term.run_dir) == []
 
 
@@ -196,10 +326,8 @@ def test_invalid_only_valid_from_access_claimed(tmp_path: Path) -> None:
 
 
 def test_aborted_via_protect_records_class_and_stage_and_reraises(tmp_path: Path) -> None:
-    term = _terminal(tmp_path)
+    term = _durably_claimed_terminal(tmp_path)
     run_dir = term.run_dir
-    term.acquire()
-    term.claim_access()
 
     class ScoringBoom(RuntimeError):
         pass
@@ -221,9 +349,7 @@ def test_aborted_via_protect_records_class_and_stage_and_reraises(tmp_path: Path
 
 
 def test_aborted_records_preflight_checksums_not_raw_outcomes(tmp_path: Path) -> None:
-    term = _terminal(tmp_path)
-    term.acquire()
-    term.claim_access()
+    term = _durably_claimed_terminal(tmp_path)
     checksums = {"pair_manifest": "a" * 64, "data_card": "b" * 64}
 
     with pytest.raises(ValueError):
@@ -242,9 +368,7 @@ def test_aborted_records_preflight_checksums_not_raw_outcomes(tmp_path: Path) ->
 
 
 def test_finally_guarantee_silent_return_writes_aborted(tmp_path: Path) -> None:
-    term = _terminal(tmp_path)
-    term.acquire()
-    term.claim_access()
+    term = _durably_claimed_terminal(tmp_path)
 
     # Exit the protected block WITHOUT writing a terminal (simulate a silent
     # early return where no complete/invalid was reached).
@@ -260,9 +384,7 @@ def test_finally_guarantee_silent_return_writes_aborted(tmp_path: Path) -> None:
 
 
 def test_protect_complete_inside_block_does_not_double_write(tmp_path: Path) -> None:
-    term = _terminal(tmp_path)
-    term.acquire()
-    term.claim_access()
+    term = _durably_claimed_terminal(tmp_path)
 
     with term.protect(stage="scoring"):
         term.complete(_payload())
@@ -274,9 +396,7 @@ def test_protect_complete_inside_block_does_not_double_write(tmp_path: Path) -> 
 
 
 def test_run_protected_helper_aborts_on_exception(tmp_path: Path) -> None:
-    term = _terminal(tmp_path)
-    term.acquire()
-    term.claim_access()
+    term = _durably_claimed_terminal(tmp_path)
 
     def _boom() -> None:
         raise KeyError("nested boom")
@@ -300,7 +420,7 @@ def test_crash_before_access_writes_no_terminal_artifact(tmp_path: Path) -> None
     term.acquire()
     assert term.state is TerminalState.PREPARED
 
-    # A crash before claim_access: the seal was never opened. The protect
+    # A crash before the durable claim: the seal was never opened. The protect
     # boundary must refuse to run pre-claim, and no terminal artifact appears.
     with pytest.raises(TerminalError):
         with term.protect(stage="preflight"):
@@ -382,11 +502,20 @@ def test_double_acquire_same_owner_raises(tmp_path: Path) -> None:
         term.acquire()
 
 
-def test_claim_access_only_from_prepared(tmp_path: Path) -> None:
+def test_confirm_durable_access_only_from_access_attempted(tmp_path: Path) -> None:
+    # Durable-path equivalent of the retired one-step in-memory claim state guard:
+    # the ONLY route into ACCESS_CLAIMED is confirm_durable_access from ACCESS_ATTEMPTED.
+    # Neither the initial pre-acquire state nor PREPARED (before attempt_access)
+    # may jump straight to ACCESS_CLAIMED — the state guard still holds.
     term = _terminal(tmp_path)
     # Not yet acquired (state is the initial pre-PREPARED state).
     with pytest.raises(TerminalError):
-        term.claim_access()
+        term.confirm_durable_access("durable-audit-reference-xyz")
+
+    term.acquire()  # -> PREPARED, still not ACCESS_ATTEMPTED
+    with pytest.raises(TerminalError):
+        term.confirm_durable_access("durable-audit-reference-xyz")
+    assert term.state is TerminalState.PREPARED
 
 
 # ---------------------------------------------------------------------------
@@ -395,9 +524,7 @@ def test_claim_access_only_from_prepared(tmp_path: Path) -> None:
 
 
 def test_complete_rejects_numpy_array_payload(tmp_path: Path) -> None:
-    term = _terminal(tmp_path)
-    term.acquire()
-    term.claim_access()
+    term = _durably_claimed_terminal(tmp_path)
 
     payload = {"verdict": "x", "leaked": np.arange(10)}
     with pytest.raises(TerminalError):
@@ -409,9 +536,7 @@ def test_complete_rejects_numpy_array_payload(tmp_path: Path) -> None:
 
 
 def test_complete_rejects_nested_raw_cell_matrix(tmp_path: Path) -> None:
-    term = _terminal(tmp_path)
-    term.acquire()
-    term.claim_access()
+    term = _durably_claimed_terminal(tmp_path)
 
     # A nested raw cell/observation matrix (list of equal-length numeric rows).
     raw_matrix = [[float(i + j) for j in range(8)] for i in range(8)]
@@ -423,9 +548,7 @@ def test_complete_rejects_nested_raw_cell_matrix(tmp_path: Path) -> None:
 
 
 def test_complete_rejects_oversized_numeric_list(tmp_path: Path) -> None:
-    term = _terminal(tmp_path)
-    term.acquire()
-    term.claim_access()
+    term = _durably_claimed_terminal(tmp_path)
 
     payload = {"verdict": "x", "flat": list(range(10_000))}
     with pytest.raises(TerminalError):
@@ -435,29 +558,27 @@ def test_complete_rejects_oversized_numeric_list(tmp_path: Path) -> None:
 
 
 def test_invalid_rejects_array_evidence(tmp_path: Path) -> None:
-    term = _terminal(tmp_path)
-    term.acquire()
-    term.claim_access()
+    term = _durably_claimed_terminal(tmp_path)
 
+    # A raw array anywhere in the INVALID body is rejected by the guard (step 1),
+    # BEFORE the roster check, so no artifact is written.
+    body = minimal_v2_terminal_body(terminal_state="INVALID")
+    body["registered_summary"]["leaked_array"] = np.zeros(5)
     with pytest.raises(TerminalError):
-        term.invalid("reason", evidence={"leaked": np.zeros(5)})
+        term.invalid(body)
 
     assert _existing_terminal_artifacts(term.run_dir) == []
 
 
 def test_small_numeric_metrics_are_allowed(tmp_path: Path) -> None:
     # A handful of scalar metrics must NOT trip the raw-outcome guard.
-    term = _terminal(tmp_path)
-    term.acquire()
-    term.claim_access()
-    term.complete({"a": 1.0, "b": 2.0, "c": [0.1, 0.2, 0.3]})
+    term = _durably_claimed_terminal(tmp_path)
+    term.complete(minimal_v2_terminal_body(small_metric_list=[0.1, 0.2, 0.3]))
     assert term.state is TerminalState.COMPLETE
 
 
 def test_aborted_scrubs_array_in_exception_message(tmp_path: Path) -> None:
-    term = _terminal(tmp_path)
-    term.acquire()
-    term.claim_access()
+    term = _durably_claimed_terminal(tmp_path)
 
     big = np.arange(64).tolist()
     msg = f"failure with embedded outcomes {big}"
@@ -478,14 +599,117 @@ def test_aborted_scrubs_array_in_exception_message(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# CLOSED COMPLETE / INVALID roster — the headline Task-3 deliverable (spec §2.1).
+#
+# These lock the roster check in `_write_terminal` -> `_validate_terminal_roster`
+# DIRECTLY. The existing raw-outcome tests (oversized list / nested matrix) are
+# caught by the raw-outcome guard (step 1) BEFORE the roster check, so they do
+# NOT exercise the roster. Each body below is OTHERWISE-VALID (built from the
+# shared `minimal_v2_terminal_body()`), so it passes the guard and the ROSTER
+# check is forced to be the rejecter. The extra key is a guard-SAFE short scalar
+# and the dropped field is a state field, so these can ONLY pass while the roster
+# is closed: re-opening it (`_STATE_TERMINAL_FIELDS[COMPLETE] = None`) would let
+# both writes through and fail these tests.
+# ---------------------------------------------------------------------------
+
+
+def test_complete_rejects_unknown_top_level_key_via_roster(tmp_path: Path) -> None:
+    # Otherwise-valid v2 COMPLETE body + one EXTRA top-level key whose value is a
+    # raw-outcome-SAFE short string. It passes the raw-outcome guard and reaches
+    # the closed roster, which rejects it by NAME as an unknown field.
+    term = _durably_claimed_terminal(tmp_path)
+    body = minimal_v2_terminal_body()
+    body["surprise"] = "x"  # guard-safe scalar -> reaches the roster check
+
+    with pytest.raises(TerminalError, match="unknown field") as excinfo:
+        term.complete(body)
+    # The roster/unknown-key error fired, NOT the raw-outcome guard.
+    assert "surprise" in str(excinfo.value)
+    assert "raw-outcome guard" not in str(excinfo.value)
+
+    # Rejected BEFORE any write: state unchanged, no terminal artifact.
+    assert term.state is TerminalState.ACCESS_CLAIMED
+    assert _existing_terminal_artifacts(term.run_dir) == []
+
+
+def test_complete_rejects_missing_state_field_via_roster(tmp_path: Path) -> None:
+    # Drop one of the seven state fields (spec §2.1). The body still passes the
+    # raw-outcome guard, so the closed roster is the rejecter and names the
+    # missing state field. A re-opened roster would skip this check entirely.
+    term = _durably_claimed_terminal(tmp_path)
+    body = minimal_v2_terminal_body()
+    del body["evaluation_payload_checksum"]  # a required COMPLETE state field
+
+    with pytest.raises(TerminalError, match="missing state field") as excinfo:
+        term.complete(body)
+    assert "evaluation_payload_checksum" in str(excinfo.value)
+    assert "raw-outcome guard" not in str(excinfo.value)
+
+    assert term.state is TerminalState.ACCESS_CLAIMED
+    assert _existing_terminal_artifacts(term.run_dir) == []
+
+
+def test_invalid_rejects_unknown_top_level_key_via_roster(tmp_path: Path) -> None:
+    # INVALID shares the same closed roster as COMPLETE (spec §2.1): a guard-safe
+    # extra top-level key is rejected by the roster, not the raw-outcome guard.
+    term = _durably_claimed_terminal(tmp_path)
+    body = minimal_v2_terminal_body(terminal_state="INVALID")
+    body["surprise"] = "x"  # guard-safe scalar -> reaches the roster check
+
+    with pytest.raises(TerminalError, match="unknown field") as excinfo:
+        term.invalid(body)
+    assert "surprise" in str(excinfo.value)
+    assert "raw-outcome guard" not in str(excinfo.value)
+
+    assert term.state is TerminalState.ACCESS_CLAIMED
+    assert _existing_terminal_artifacts(term.run_dir) == []
+
+
+# ---------------------------------------------------------------------------
+# FAIL-CLOSED null-identity canary (Task 4H Part 1) — a terminal write reached
+# WITHOUT bind_pre_access (so the pre-access provenance identity is None) must
+# raise TerminalError naming the null field, NOT advance to the terminal state,
+# and write NO artifact. This is the seal-critical backstop that stops a future
+# refactor dropping / reordering bind_pre_access from silently emitting a
+# null-identity seal artifact.
+# ---------------------------------------------------------------------------
+
+
+def test_complete_fails_closed_on_null_pre_access_identity(tmp_path: Path) -> None:
+    term = _durably_claimed_terminal_missing_pre_access(tmp_path)
+    assert term.state is TerminalState.ACCESS_CLAIMED
+
+    with pytest.raises(TerminalError, match="empty identity") as excinfo:
+        term.complete(_v2_complete_payload())
+    # The error names the null pre-access identity field.
+    assert "pre_access" in str(excinfo.value)
+    assert "raw-outcome guard" not in str(excinfo.value)
+
+    # Fail CLOSED: state did NOT advance to the terminal state and NO artifact
+    # file was written — a null-identity seal artifact can never exist.
+    assert term.state is TerminalState.ACCESS_CLAIMED
+    assert _existing_terminal_artifacts(term.run_dir) == []
+
+
+def test_aborted_fails_closed_on_null_pre_access_identity(tmp_path: Path) -> None:
+    # The ABORTED path shares the same injected common identity, so a missing
+    # pre-access binding must fail closed there too (no un-attributable abort seal).
+    term = _durably_claimed_terminal_missing_pre_access(tmp_path)
+
+    with pytest.raises(TerminalError, match="empty identity"):
+        term.aborted(exception=RuntimeError("boom"), stage="scoring")
+
+    assert term.state is TerminalState.ACCESS_CLAIMED
+    assert _existing_terminal_artifacts(term.run_dir) == []
+
+
+# ---------------------------------------------------------------------------
 # Atomicity hygiene — no leftover temp files, destination never overwritten
 # ---------------------------------------------------------------------------
 
 
 def test_no_leftover_temp_files_after_complete(tmp_path: Path) -> None:
-    term = _terminal(tmp_path)
-    term.acquire()
-    term.claim_access()
+    term = _durably_claimed_terminal(tmp_path)
     term.complete(_payload())
 
     leftovers = list(term.run_dir.glob("*.tmp")) + list(term.run_dir.glob(".*.tmp"))
@@ -494,9 +718,7 @@ def test_no_leftover_temp_files_after_complete(tmp_path: Path) -> None:
 
 def test_terminal_artifact_destination_never_overwritten(tmp_path: Path) -> None:
     # Pre-create the COMPLETE destination, then a complete() must refuse to clobber.
-    term = _terminal(tmp_path)
-    term.acquire()
-    term.claim_access()
+    term = _durably_claimed_terminal(tmp_path)
 
     # Simulate a stale COMPLETE artifact appearing between claim and complete.
     sentinel = term.run_dir / Phase2bTerminal.COMPLETE_ARTIFACT
@@ -515,9 +737,7 @@ def test_terminal_artifact_destination_never_overwritten(tmp_path: Path) -> None
 
 
 def test_no_ledger_entry_when_payload_rejected_before_write(tmp_path: Path) -> None:
-    term = _terminal(tmp_path)
-    term.acquire()
-    term.claim_access()
+    term = _durably_claimed_terminal(tmp_path)
 
     with pytest.raises(TerminalError):
         term.complete({"leaked": np.arange(5)})
@@ -530,9 +750,7 @@ def test_no_ledger_entry_when_payload_rejected_before_write(tmp_path: Path) -> N
 
 
 def test_ledger_entry_only_after_file_exists_and_verifies(tmp_path: Path) -> None:
-    term = _terminal(tmp_path)
-    term.acquire()
-    term.claim_access()
+    term = _durably_claimed_terminal(tmp_path)
     term.complete(_payload())
 
     artifact = term.run_dir / Phase2bTerminal.COMPLETE_ARTIFACT
@@ -548,10 +766,8 @@ def test_ledger_entry_only_after_file_exists_and_verifies(tmp_path: Path) -> Non
 
 
 def test_invalid_then_complete_is_blocked(tmp_path: Path) -> None:
-    term = _terminal(tmp_path)
-    term.acquire()
-    term.claim_access()
-    term.invalid("first terminal")
+    term = _durably_claimed_terminal(tmp_path)
+    term.invalid(minimal_v2_terminal_body(terminal_state="INVALID"))
 
     with pytest.raises(TerminalError):
         term.complete(_payload())
@@ -559,9 +775,7 @@ def test_invalid_then_complete_is_blocked(tmp_path: Path) -> None:
 
 
 def test_aborted_then_no_further_terminal(tmp_path: Path) -> None:
-    term = _terminal(tmp_path)
-    term.acquire()
-    term.claim_access()
+    term = _durably_claimed_terminal(tmp_path)
     with pytest.raises(RuntimeError):
         with term.protect(stage="scoring"):
             raise RuntimeError("boom")
@@ -592,10 +806,8 @@ def test_protect_preserves_original_exception_when_abort_write_fails(tmp_path: P
     # raises FileExistsError -> TerminalError inside __exit__. The original exception
     # must STILL be what propagates (not the TerminalError/FileExistsError), and a
     # durable last-resort marker must exist (never zero terminal markers).
-    term = _terminal(tmp_path)
+    term = _durably_claimed_terminal(tmp_path)
     run_dir = term.run_dir
-    term.acquire()
-    term.claim_access()
 
     # Pre-create the canonical abort artifact so aborted() cannot install its own.
     (run_dir / Phase2bTerminal.ABORTED_ARTIFACT).write_text("STALE-ABORT", encoding="utf-8")
@@ -625,10 +837,8 @@ def test_protect_preserves_original_exception_when_checksums_are_raw(tmp_path: P
     # but because aborted() drops unsafe checksums, the abort still writes. Force a
     # genuine double-fault by ALSO pre-creating the abort destination, and confirm
     # the original exception propagates with a durable marker present.
-    term = _terminal(tmp_path)
+    term = _durably_claimed_terminal(tmp_path)
     run_dir = term.run_dir
-    term.acquire()
-    term.claim_access()
     (run_dir / Phase2bTerminal.ABORTED_ARTIFACT).write_text("STALE", encoding="utf-8")
 
     class OriginalBoom(ValueError):
@@ -646,10 +856,8 @@ def test_aborted_direct_with_raw_checksums_omits_unsafe_and_does_not_raise(tmp_p
     # aborted() called directly with preflight_checksums containing a raw ndarray
     # must STILL write a valid ABORTED_AFTER_SEAL artifact (checksums omitted-unsafe)
     # and must NOT raise — the core abort record cannot be blocked by a bad field.
-    term = _terminal(tmp_path)
+    term = _durably_claimed_terminal(tmp_path)
     run_dir = term.run_dir
-    term.acquire()
-    term.claim_access()
 
     term.aborted(
         exception=RuntimeError("core abort message"),
@@ -675,10 +883,8 @@ def test_clean_silent_return_raises_terminal_error_when_abort_write_fails(tmp_pa
     # abort write is forced to fail (abort destination pre-exists). There is NO
     # original exception to preserve → a TerminalError must be raised, and a
     # last-resort marker must exist.
-    term = _terminal(tmp_path)
+    term = _durably_claimed_terminal(tmp_path)
     run_dir = term.run_dir
-    term.acquire()
-    term.claim_access()
     (run_dir / Phase2bTerminal.ABORTED_ARTIFACT).write_text("STALE", encoding="utf-8")
 
     with pytest.raises(TerminalError):
@@ -686,3 +892,159 @@ def test_clean_silent_return_raises_terminal_error_when_abort_write_fails(tmp_pa
             pass  # silent return, no terminal written
 
     assert _last_resort_markers(run_dir), "best-effort last-resort marker not written"
+
+
+# ---------------------------------------------------------------------------
+# ABORTED_AFTER_SEAL over the durable SPLIT-STORE boundary (D1 Task 4).
+#
+# These exercise the real seal-open path — the Task-0 durable split store
+# (`claim_sealed_access` then `confirm_durable_access`), which is the ONLY route
+# to ACCESS_CLAIMED (the deprecated in-memory one-step claim was retired in Task
+# 4H). They pin the two sides of the count boundary:
+#   * a post-claim abort writes an ABORTED_AFTER_SEAL terminal carrying
+#     `registered_results_status="NOT_AVAILABLE_DUE_TO_ABORT"`, the v2 common
+#     roster, `sealed_access_count == 1` and the exact durable audit reference;
+#   * a PRE-audit failure (before the durable claim writes) leaves count 0 and
+#     writes NO ABORTED terminal — a pre-access failure is not an abort.
+# ---------------------------------------------------------------------------
+
+#: Eligible pairs whose seed/fraction populate BOTH sealed roles (mirrors the
+#: Phase-2b fixture universe).
+_SPLIT_ELIGIBLE_PAIRS: list[tuple[str, str]] = [
+    ("GENEA", "GENEB"),
+    ("GENEA", "GENEC"),
+    ("GENEB", "GENEC"),
+    ("GENEC", "GENED"),
+    ("GENED", "GENEE"),
+    ("GENEE", "GENEF"),
+    ("GENEA", "GENED"),
+    ("GENEB", "GENEF"),
+]
+_SPLIT_SEED = 7
+_SPLIT_CAL_FRACTION = 0.5
+_SPLIT_STORE_RUN_ID = "compose-terminal-run"
+_ROWS_PER_PAIR = 4
+
+
+class _XSource:
+    """Tiny AnnData-like source exposing only an ``.X`` matrix (row-sliceable)."""
+
+    def __init__(self, X: np.ndarray) -> None:
+        self.X = X
+
+
+def _split_manifest() -> dict:
+    """A deterministic split manifest with both sealed roles populated."""
+    return build_split_manifest(
+        _SPLIT_ELIGIBLE_PAIRS, seed=_SPLIT_SEED, calibration_fraction=_SPLIT_CAL_FRACTION
+    )
+
+
+def _exact_sealed_union(manifest: dict) -> list[tuple[str, str]]:
+    """The exact sealed union (double ∪ single) as canonical pair tuples."""
+    union: list[tuple[str, str]] = []
+    for role in ("sealed_double_unseen", "sealed_single_unseen"):
+        union.extend(tuple(p) for p in manifest["roles"][role])
+    return union
+
+
+def _build_split_store(audit_path: Path, manifest: dict) -> ComposeOutcomeStore:
+    """A durable ComposeOutcomeStore over a synthetic source (Task-0 split API)."""
+    all_pairs: list[tuple[str, str]] = []
+    for role in ("combo_calibration", "sealed_double_unseen", "sealed_single_unseen"):
+        all_pairs.extend(tuple(p) for p in manifest["roles"][role])
+    pair_index: dict[tuple[str, str], np.ndarray] = {}
+    cursor = 0
+    for pair in all_pairs:
+        pair_index[pair] = np.arange(cursor, cursor + _ROWS_PER_PAIR, dtype=np.int64)
+        cursor += _ROWS_PER_PAIR
+    source = _XSource(np.ones((cursor, 3), dtype=np.float64))
+    return ComposeOutcomeStore(
+        pair_index=pair_index, source=source, manifest=manifest, audit_path=audit_path
+    )
+
+
+def _terminal_over_audit(
+    tmp_path: Path, audit_path: Path, *, run_id: str = "deadbeefdeadbeef"
+) -> Phase2bTerminal:
+    """A terminal wired to the store's durable audit path with the v2 identity roster."""
+    run_dir = tmp_path / "run"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    return Phase2bTerminal(
+        run_dir,
+        ledger=_ledger(),
+        audit_path=audit_path,
+        protocol="COMPOSE-K562-v1",
+        run_id=run_id,
+        pre_access_ledger_sha256="c" * 64,
+        pre_access_provenance_checksum="d" * 64,
+    )
+
+
+def test_aborted_terminal_has_status_and_no_result(tmp_path: Path) -> None:
+    manifest = _split_manifest()
+    audit_path = tmp_path / "compose_audit.jsonl"
+    store = _build_split_store(audit_path, manifest)
+    term = _terminal_over_audit(tmp_path, audit_path)
+
+    # Real seal-open path: acquire -> attempt -> durable claim -> confirm.
+    term.acquire()
+    term.attempt_access()
+    claim = store.claim_sealed_access(_SPLIT_STORE_RUN_ID, _exact_sealed_union(manifest))
+    term.confirm_durable_access(claim.audit_reference)
+    assert term.state is TerminalState.ACCESS_CLAIMED
+
+    with pytest.raises(RuntimeError):
+        with term.protect(stage="scoring"):
+            raise RuntimeError("boom in scoring")
+
+    assert term.state is TerminalState.ABORTED_AFTER_SEAL
+    body = json.loads((term.run_dir / Phase2bTerminal.ABORTED_ARTIFACT).read_text())
+    assert body["terminal_state"] == "ABORTED_AFTER_SEAL"
+    assert body["sealed_access_count"] == 1
+    assert body["seal_audit_reference"] == claim.audit_reference
+    # The state audit_reference double-ref derives from the same durable reference.
+    assert body["audit_reference"] == claim.audit_reference
+    # The abort carries NO trustworthy registered result — only the status marker.
+    assert body["registered_results_status"] == "NOT_AVAILABLE_DUE_TO_ABORT"
+    # No COMPLETE/INVALID result roster leaks onto the abort path (spec §2.2).
+    assert "registered_summary" not in body
+    assert "final_result_checksum" not in body
+    # v2 schema + self-excluding checksum are present.
+    assert body["schema"] == "compose_phase2b_terminal_v2"
+    assert "terminal_payload_checksum" in body
+
+    # The ABORTED body checksum is canonicalizer-consistent (writer == verifier).
+    recomputed = sha256_json(
+        canonicalize_terminal_checksum_input(
+            {k: v for k, v in body.items() if k != "terminal_payload_checksum"}
+        )
+    )
+    assert recomputed == body["terminal_payload_checksum"]
+    assert term.ledger.verify_file(
+        Phase2bTerminal.ABORTED_ARTIFACT, term.run_dir / Phase2bTerminal.ABORTED_ARTIFACT
+    )
+
+
+def test_pre_audit_failure_writes_no_aborted_terminal(tmp_path: Path) -> None:
+    manifest = _split_manifest()
+    audit_path = tmp_path / "compose_audit.jsonl"
+    store = _build_split_store(audit_path, manifest)
+    term = _terminal_over_audit(tmp_path, audit_path)
+
+    term.acquire()
+    term.attempt_access()
+
+    # A PRE-audit validation failure: the request is NOT the exact sealed union, so
+    # claim_sealed_access raises BEFORE writing the durable audit record. The seal is
+    # never consumed — this is the count-0 side of the boundary, NOT an abort.
+    not_exact_union = _exact_sealed_union(manifest)[:-1]  # drop one -> not exact
+    with pytest.raises(ComposeSealingError):
+        store.claim_sealed_access(_SPLIT_STORE_RUN_ID, not_exact_union)
+
+    assert store.sealed_access_count == 0
+    # No ABORTED_AFTER_SEAL file (and no terminal artifact at all): the terminal
+    # never reached ACCESS_CLAIMED, so no terminal record is owed.
+    assert not (term.run_dir / Phase2bTerminal.ABORTED_ARTIFACT).exists()
+    assert _existing_terminal_artifacts(term.run_dir) == []
+    assert term.state is TerminalState.ACCESS_ATTEMPTED

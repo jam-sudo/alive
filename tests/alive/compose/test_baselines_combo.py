@@ -338,3 +338,49 @@ def test_adapter_accepts_pairs_in_any_request_order():
     adapter = BaselineAdapter(name="cpa", backend=_StubBackend(expected))
     out = adapter.predict(_allowed_context(), list(reversed(PAIRS)), RESPONSE_DIM)
     assert set(out.keys()) == set(PAIRS)
+
+
+# --------------------------------------------------------------------------- #
+# D2 fresh-backend spawn contract
+# --------------------------------------------------------------------------- #
+
+
+class _SpawnableStub:
+    """A backend stub that exposes the ``spawn(*, seed)`` fresh-instance contract."""
+
+    def __init__(self, seed: int):
+        self.seed = seed
+
+    def spawn(self, *, seed: int) -> "_SpawnableStub":
+        return _SpawnableStub(seed)
+
+
+def test_adapter_spawn_delegates_to_backend_and_wraps_fresh_instance():
+    backend = _SpawnableStub(seed=11)
+    adapter = BaselineAdapter(name="gears", backend=backend)
+
+    child = adapter.spawn(seed=23)
+
+    assert isinstance(child, BaselineAdapter)
+    assert child.name == "gears"
+    assert child is not adapter
+    # a genuinely fresh backend, seeded as requested, not the original instance.
+    assert child.backend is not backend
+    assert child.backend.seed == 23
+    # spawning must not mutate the parent adapter or its backend.
+    assert adapter.backend is backend
+    assert backend.seed == 11
+
+
+def test_adapter_spawn_rejects_backend_without_spawn():
+    # _StubBackend exposes is_available + predict but NOT spawn: scientific D2
+    # rejects it here, before any fit, so it can never enter a seed-variability run.
+    adapter = BaselineAdapter(name="gears", backend=_StubBackend(_good_predictions()))
+    with pytest.raises(TypeError, match="spawn"):
+        adapter.spawn(seed=23)
+
+
+def test_adapter_spawn_rejects_missing_backend():
+    adapter = BaselineAdapter(name="cpa", backend=None)
+    with pytest.raises(TypeError, match="spawn"):
+        adapter.spawn(seed=23)

@@ -160,7 +160,6 @@ def recompute_run_id(
 _POST_ACCESS_FIELDS: tuple[str, ...] = (
     "regime_result_double_sha256",
     "regime_result_single_sha256",
-    "terminal_report_sha256",
 )
 
 
@@ -175,7 +174,12 @@ class Phase2bProvenance:
     model-lock and frozen-prediction-bundle hashes; the Git SHA and clean-state
     flag; the dependency-lock hash, GEARS/CPA revisions, Python/platform, device
     and precision; the registered seeds; the seal-audit reference; and the
-    regime-result and terminal-report checksums.
+    regime-result checksums.
+
+    The embedded provenance is non-circular (schema
+    ``"compose_phase2b_provenance_v2"``): it carries NO checksum OF the terminal
+    report. The terminal↔provenance link runs the other way — the terminal report
+    carries this provenance, verified by re-hashing the embedded payload.
 
     :attr:`self_checksum` is the canonical-JSON SHA-256 of :meth:`to_dict` (which
     excludes the checksum itself), so two records built from identical inputs
@@ -217,9 +221,8 @@ class Phase2bProvenance:
     seal_audit_reference : str
         Reference (path / identifier) to the independent COMPOSE seal audit.
     regime_result_double_sha256, regime_result_single_sha256 : str
-        Checksums of the double-unseen and single-unseen regime results.
-    terminal_report_sha256 : str
-        Checksum of the terminal report artifact.
+        Checksums of the double-unseen and single-unseen regime results. These
+        precede the terminal report, so embedding them introduces no circularity.
     """
 
     protocol: str
@@ -249,7 +252,6 @@ class Phase2bProvenance:
     seal_audit_reference: str
     regime_result_double_sha256: str
     regime_result_single_sha256: str
-    terminal_report_sha256: str
 
     def to_dict(self) -> dict:
         """Serialise the content (EXCLUDING the self-checksum) to a JSON dict.
@@ -264,6 +266,7 @@ class Phase2bProvenance:
             JSON-serialisable content dict.
         """
         return {
+            "schema": "compose_phase2b_provenance_v2",
             "protocol": self.protocol,
             "config_digest": self.config_digest,
             "pair_manifest_sha256": self.pair_manifest_sha256,
@@ -291,7 +294,6 @@ class Phase2bProvenance:
             "seal_audit_reference": self.seal_audit_reference,
             "regime_result_double_sha256": self.regime_result_double_sha256,
             "regime_result_single_sha256": self.regime_result_single_sha256,
-            "terminal_report_sha256": self.terminal_report_sha256,
         }
 
     @cached_property
@@ -309,8 +311,8 @@ class Phase2bProvenance:
         """Return the pre-access digest subset (``to_dict`` minus post-access fields).
 
         The subset is everything computable BEFORE the seal opens: it drops the
-        regime-result and terminal-report checksums (:data:`_POST_ACCESS_FIELDS`),
-        which are known only after the single sealed access. Recording this
+        regime-result checksums (:data:`_POST_ACCESS_FIELDS`), which are known
+        only after the single sealed access. Recording this
         subset's checksum before access (Change C) turns the post-access
         provenance consistency check into a real tamper detector rather than a
         self-reference (CLAUDE.md §11).
@@ -365,7 +367,6 @@ _DIGEST_ARTIFACTS: tuple[tuple[str, str], ...] = (
     ("dependency_lock", "dependency_lock_sha256"),
     ("regime_result_double", "regime_result_double_sha256"),
     ("regime_result_single", "regime_result_single_sha256"),
-    ("terminal_report", "terminal_report_sha256"),
 )
 
 #: Canonical write-once artifact names → the :class:`Phase2bProvenance` field
@@ -393,7 +394,7 @@ def record_phase2b_provenance(
 
     Records the COMPLETE provenance set under canonical, write-once artifact
     names (CLAUDE.md §11). Hash-valued fields (manifest / data-card / model /
-    bundle / regime-result / terminal-report digests) are recorded directly;
+    bundle / regime-result digests) are recorded directly;
     string/scalar evidence (GEARS/CPA revisions, device, precision, the
     seal-audit reference, the clean-state flag) is recorded as ``sha256_json`` of
     the value so a tamper is detectable. The record's own self-checksum is

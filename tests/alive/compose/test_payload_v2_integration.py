@@ -118,9 +118,16 @@ def _make_fixture(out_path: str, *, seed: int = 0) -> dict:
         space, gene_order=gene_order, control_mean=control_mean, raw_data_sha256=_RAW_DATA_SHA256
     )
 
+    # singles-cell tokens are drawn from the governed single-gene universe
+    # (``_SINGLE_GENE_IDS``): a `singles` perturbation targets a gene in the
+    # universe, and the fit-role validator now rejects any `singles` token outside
+    # it (the sealed-combo-as-single leak guard).
     rows = (
         [(f"c{i}", "control", "control") for i in range(n_control)]
-        + [(f"s{i}", "singles", f"S{i}") for i in range(n_single)]
+        + [
+            (f"s{i}", "singles", _SINGLE_GENE_IDS[i % len(_SINGLE_GENE_IDS)])
+            for i in range(n_single)
+        ]
         + [(f"da{i}", "combo_calibration", "DDD_EEE") for i in range(n_calib_a)]
         + [(f"db{i}", "combo_calibration", "FFF_GGG") for i in range(n_calib_b)]
     )
