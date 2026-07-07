@@ -34,6 +34,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from alive.compose.baseline_subprocess import _REQUIRED_KEYS
+from alive.compose.baselines_combo import BaselineTrainingContext
 from alive.compose.fit_role import (
     ComposeFitRoleExtractor,
     FitRoleArtifactSpec,
@@ -61,6 +62,24 @@ class FoldJobError(ValueError):
     disagreement, an ``oof_folds`` label that disagrees with the verified manifest,
     and — the load-bearing guard — any held-out or cross-group combo token surviving
     into the fold-scoped fit-role artifact. Every path fails closed.
+    """
+
+
+class FoldExecutionError(ValueError):
+    """Raised when a single fold job cannot be executed to a verified result.
+
+    Covers a backend whose ``provenance_manifest`` never reaches its post-predict
+    form (no verified ``execution_manifest``), so no real worker/checkpoint/request
+    digest can be captured. Fails closed rather than synthesizing a checksum.
+    """
+
+
+class SeedAssemblyError(ValueError):
+    """Raised when a seed's covered-order OOF reassembly is not exactly-once.
+
+    A missing, duplicate, extra, non-finite or dimension-mismatched covered-pair
+    prediction — or a covered pair with no development delta truth — makes the
+    whole seed fail rather than yielding a partial or silently-imputed scalar.
     """
 
 
@@ -108,6 +127,50 @@ class FoldJob:
     fit_role_artifact_sha256: str
     train_source_checksum: str
     fold_manifest_checksum: str
+
+
+@dataclass(frozen=True)
+class FoldExecutionResult:
+    """The verified outcome of executing ONE ``(method, seed, fold)`` job.
+
+    Holds the fold's held-out TEST-pair predictions together with the *real*
+    provenance digests captured from the backend's post-predict
+    ``provenance_manifest`` — never a value synthesized from ``{method, seed}``.
+    These digests bind the executed worker, its configured payload, its verified
+    checkpoint and the exact ordered request into the per-seed OOF measurement.
+
+    Attributes
+    ----------
+    method : str
+        The seed-refittable comparator name this job ran (``"gears"`` / ``"cpa"``).
+    seed : int
+        The registered random seed the backend was spawned with.
+    fold_index : int
+        Zero-based index of the executed OOF fold in the manifest.
+    test_pair_ids : tuple of tuple of str
+        The fold's held-out TEST pair IDs (the OOF measurement targets).
+    predictions : Mapping of (str, str) to numpy.ndarray
+        The response-space prediction vector for each held-out TEST pair, keyed by
+        canonical pair ID; every vector has length ``response_dim``.
+    worker_sha256 : str
+        The worker-script digest reported by the post-predict manifest.
+    payload_sha256 : str
+        The configured fit-role payload digest reported by the post-predict manifest.
+    checkpoint_sha256 : str
+        The verified checkpoint-file digest from the execution manifest.
+    request_sha256 : str
+        The order-sensitive combined-request digest from the execution manifest.
+    """
+
+    method: str
+    seed: int
+    fold_index: int
+    test_pair_ids: tuple[tuple[str, str], ...]
+    predictions: Mapping[tuple[str, str], np.ndarray]
+    worker_sha256: str
+    payload_sha256: str
+    checkpoint_sha256: str
+    request_sha256: str
 
 
 def restrict_development_store(
@@ -501,3 +564,205 @@ def build_fold_job(
         train_source_checksum=train_store.content_checksum,
         fold_manifest_checksum=oof_manifest.manifest_checksum,
     )
+
+
+def _fold_training_context(
+    job: FoldJob,
+    *,
+    pair_manifest_checksum: str,
+    response_space_checksum: str,
+) -> BaselineTrainingContext:
+    """Build the fold's frozen development-role context from the job's TRAIN pairs.
+
+    The context carries identities and checksums only (no outcome handle, no
+    sealed path): the allowed adapter roles, the caller-bound manifest/response
+    checksums, this fold's TRAIN pair IDs (``payload["calibration_pair_ids"]``) and
+    the fitting single-gene universe (``payload["single_gene_ids"]``).
+
+    Parameters
+    ----------
+    job : FoldJob
+        The fold-scoped job whose payload supplies the fold's TRAIN identities.
+    pair_manifest_checksum : str
+        The bound pair-split manifest checksum (``inputs.manifest_checksum``).
+    response_space_checksum : str
+        The bound response-space checksum (``inputs.response_space_checksum``).
+
+    Returns
+    -------
+    BaselineTrainingContext
+        The frozen context handed to the guarded adapter for this fold.
+    """
+    return BaselineTrainingContext(
+        allowed_roles=frozenset({"singles", "combo_calibration"}),
+        pair_manifest_checksum=str(pair_manifest_checksum),
+        response_space_checksum=str(response_space_checksum),
+        training_pair_ids=tuple(tuple(p) for p in job.payload["calibration_pair_ids"]),
+        single_gene_ids=tuple(str(g) for g in job.payload["single_gene_ids"]),
+    )
+
+
+def run_fold_job(
+    adapter: object,
+    job: FoldJob,
+    response_dim: int,
+    *,
+    pair_manifest_checksum: str,
+    response_space_checksum: str,
+) -> FoldExecutionResult:
+    """Execute ONE isolated ``(method, seed, fold)`` job on a fresh backend.
+
+    Runs the full per-fold seam exactly once, without ever pre-building a
+    cross-fold context map (which would leave one shared backend configured to the
+    last fold): spawn a fresh seed-bound backend, configure it with the fold's
+    TRAIN-only payload, build the fold's development-role context, predict ONLY the
+    fold's held-out TEST pairs a single time, then read the backend's post-predict
+    ``provenance_manifest`` and capture the *real* worker / payload / checkpoint /
+    request digests it reports. It opens NO seal and reads NO sealed outcome.
+
+    Parameters
+    ----------
+    adapter : object
+        A spawnable guarded baseline adapter (``adapter.spawn(seed=...)`` returns a
+        fresh adapter wrapping a fresh, unconfigured backend). A subprocess GEARS /
+        CPA adapter in production; a deterministic seam-compatible stub in tests.
+    job : FoldJob
+        The fold-scoped job to execute (payload restricted to the fold's TRAIN
+        pairs; TEST/EXCLUDED pairs absent).
+    response_dim : int
+        The required response dimension for every prediction vector.
+    pair_manifest_checksum : str
+        The bound pair-split manifest checksum for the fold context
+        (``inputs.manifest_checksum``).
+    response_space_checksum : str
+        The bound response-space checksum for the fold context
+        (``inputs.response_space_checksum``).
+
+    Returns
+    -------
+    FoldExecutionResult
+        The fold's held-out TEST-pair predictions plus the real provenance digests.
+
+    Raises
+    ------
+    FoldExecutionError
+        If the backend's ``provenance_manifest`` is not in its post-predict form
+        (no verified ``execution_manifest``), so no real checkpoint/request digest
+        can be captured.
+    """
+    fold_adapter = adapter.spawn(seed=job.seed)
+    backend = fold_adapter.backend
+    backend.configure_payload(job.payload)
+    context = _fold_training_context(
+        job,
+        pair_manifest_checksum=pair_manifest_checksum,
+        response_space_checksum=response_space_checksum,
+    )
+    predictions = fold_adapter.predict(context, list(job.test_pair_ids), int(response_dim))
+
+    manifest = backend.provenance_manifest
+    if "execution_manifest" not in manifest:
+        raise FoldExecutionError(
+            f"{job.method} backend provenance manifest is not in its post-predict form; "
+            "no verified checkpoint/request digest is available"
+        )
+    execution_manifest = manifest["execution_manifest"]
+    return FoldExecutionResult(
+        method=str(job.method),
+        seed=int(job.seed),
+        fold_index=int(job.fold_index),
+        test_pair_ids=tuple(tuple(p) for p in job.test_pair_ids),
+        predictions={tuple(k): np.asarray(v, dtype=float) for k, v in predictions.items()},
+        worker_sha256=str(manifest["worker_sha256"]),
+        payload_sha256=str(manifest["payload_sha256"]),
+        checkpoint_sha256=str(execution_manifest["checkpoint_sha256"]),
+        request_sha256=str(execution_manifest["combined_request_sha256"]),
+    )
+
+
+def assemble_seed_scalar(
+    fold_results: Sequence[FoldExecutionResult],
+    *,
+    manifest: OOFFoldManifest,
+    delta_truth_by_pair: Mapping[tuple[str, str], np.ndarray],
+    response_dim: int,
+) -> tuple[dict[tuple[str, str], np.ndarray], float]:
+    """Reassemble one seed's fold predictions into a covered-order OOF scalar.
+
+    Concatenates every fold's held-out TEST predictions and requires the covered
+    set — ``manifest.covered_pair_ids`` — to be predicted EXACTLY once: a missing,
+    duplicate, extra, non-finite or dimension-mismatched prediction makes the whole
+    seed fail (raises), never a partial or imputed result. The surviving
+    predictions are reordered to the manifest's fixed covered order and scored
+    against the development delta with per-pair MSE
+    ``mean((pred - delta_truth) ** 2)`` over response dims; the returned scalar is
+    the mean over the fixed covered set.
+
+    Parameters
+    ----------
+    fold_results : sequence of FoldExecutionResult
+        The per-fold execution results for a single seed (any order).
+    manifest : OOFFoldManifest
+        The verified OOF fold manifest; its ``covered_pair_ids`` fix both the
+        required coverage and the canonical output order.
+    delta_truth_by_pair : Mapping of (str, str) to numpy.ndarray
+        The development delta (``inputs.additive_cal + combo_calibration_eps``)
+        pair-aligned, reconstructed once by the caller. Must cover every covered pair.
+    response_dim : int
+        The required length of every prediction and delta-truth vector.
+
+    Returns
+    -------
+    tuple of (dict of (str, str) to numpy.ndarray, float)
+        ``(pred_by_pair, mean_pair_mse)`` where ``pred_by_pair`` is in the
+        manifest's covered order and ``mean_pair_mse`` is the per-seed scalar.
+
+    Raises
+    ------
+    SeedAssemblyError
+        On empty coverage, or any missing / duplicate / extra / non-finite /
+        dimension-mismatched prediction, or a covered pair lacking a delta truth.
+    """
+    covered = tuple(tuple(p) for p in manifest.covered_pair_ids)
+    if not covered:
+        raise SeedAssemblyError("manifest has no covered pairs to reassemble")
+    dim = int(response_dim)
+    covered_set = set(covered)
+
+    pred_by_pair: dict[tuple[str, str], np.ndarray] = {}
+    for result in fold_results:
+        for raw_pair, raw_vec in result.predictions.items():
+            pair = tuple(raw_pair)
+            if pair in pred_by_pair:
+                raise SeedAssemblyError(f"duplicate prediction for covered pair {pair!r}")
+            arr = np.asarray(raw_vec, dtype=float)
+            if arr.shape != (dim,):
+                raise SeedAssemblyError(
+                    f"prediction for {pair!r} has shape {arr.shape}, expected ({dim},)"
+                )
+            if not np.all(np.isfinite(arr)):
+                raise SeedAssemblyError(f"prediction for {pair!r} contains non-finite values")
+            pred_by_pair[pair] = arr
+
+    missing = covered_set - set(pred_by_pair)
+    if missing:
+        raise SeedAssemblyError(f"missing predictions for covered pairs: {sorted(missing)}")
+    extra = set(pred_by_pair) - covered_set
+    if extra:
+        raise SeedAssemblyError(f"predictions for non-covered pairs: {sorted(extra)}")
+
+    ordered: dict[tuple[str, str], np.ndarray] = {}
+    per_pair_mse: list[float] = []
+    for pair in covered:
+        if pair not in delta_truth_by_pair:
+            raise SeedAssemblyError(f"no development delta truth for covered pair {pair!r}")
+        truth = np.asarray(delta_truth_by_pair[pair], dtype=float)
+        if truth.shape != (dim,):
+            raise SeedAssemblyError(
+                f"delta truth for {pair!r} has shape {truth.shape}, expected ({dim},)"
+            )
+        pred = pred_by_pair[pair]
+        ordered[pair] = pred
+        per_pair_mse.append(float(np.mean((pred - truth) ** 2)))
+
+    return ordered, float(np.mean(per_pair_mse))

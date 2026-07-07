@@ -12,6 +12,9 @@ outcome, imports NO gears/cpa. Development calibration outcomes only.
 
 from __future__ import annotations
 
+import hashlib
+import json
+import random
 from pathlib import Path
 
 import numpy as np
@@ -19,6 +22,7 @@ import pytest
 from scipy import sparse
 
 from alive.compose.baseline_subprocess import _REQUIRED_KEYS
+from alive.compose.baselines_combo import BaselineAdapter
 from alive.compose.fit_role import (
     FitRoleExtraction,
     generate_fit_role_artifact,
@@ -30,10 +34,15 @@ from alive.compose.phase2a import (
 )
 from alive.compose.response import fit_response_space, verify_response_artifact
 from alive.compose.seed_variability import (
+    FoldExecutionError,
+    FoldExecutionResult,
     FoldJob,
     FoldJobError,
+    SeedAssemblyError,
+    assemble_seed_scalar,
     build_fold_job,
     restrict_development_store,
+    run_fold_job,
 )
 from alive.compose.select import (
     OOFFoldManifest,
@@ -417,3 +426,333 @@ def test_distinct_jobs_get_distinct_fold_artifacts(tmp_path):
     assert a.fit_role_artifact_path != b.fit_role_artifact_path
     assert Path(a.fit_role_artifact_path).is_file()
     assert Path(b.fit_role_artifact_path).is_file()
+
+
+# =========================================================================== #
+# Task 4 — execute one (method, seed, fold) job + per-seed covered reassembly
+# =========================================================================== #
+#
+# A deterministic stub backend modelled on the Task-2/Task-3 seam
+# (``spawn`` / ``configure_payload`` / ``predict`` / ``provenance_manifest``);
+# it imports NO gears/cpa. Its ``provenance_manifest`` mirrors the real
+# ``SubprocessBaselineBackend`` post-predict shape: real digests bound to the
+# configured payload / worker bytes / requested pair IDs — never a
+# ``{method, seed}`` synthesis — so a fabricated checkpoint hash cannot match.
+
+
+class _StubFoldBackend:
+    """Deterministic, seam-compatible stand-in for a GEARS/CPA subprocess backend.
+
+    Every mutable-state method mirrors ``SubprocessBaselineBackend``: ``spawn``
+    returns a fresh, unconfigured child (registered so a test can inspect it),
+    ``configure_payload`` takes a detached JSON snapshot, ``predict`` runs a
+    caller-supplied ``pred_fn`` exactly once and records the requested pairs, and
+    ``provenance_manifest`` exposes real payload/worker/checkpoint/request digests
+    (only in its post-predict form once ``predict`` has run).
+    """
+
+    def __init__(self, *, seed, pred_fn, registry, worker_bytes=b"stub-worker-v1"):
+        self.seed = int(seed)
+        self._pred_fn = pred_fn
+        self._registry = registry
+        self._worker_bytes = worker_bytes
+        self._payload = None
+        self._predicted_pairs = None
+        self.predict_calls = 0
+
+    def spawn(self, *, seed):
+        child = type(self)(
+            seed=seed,
+            pred_fn=self._pred_fn,
+            registry=self._registry,
+            worker_bytes=self._worker_bytes,
+        )
+        self._registry.setdefault("spawned", []).append(child)
+        return child
+
+    @property
+    def is_available(self):
+        return True
+
+    def configure_payload(self, payload):
+        self._payload = json.loads(json.dumps(dict(payload), sort_keys=True))
+        self._predicted_pairs = None
+
+    def predict(self, context, pair_ids, response_dim):
+        if self._payload is None:
+            raise RuntimeError("stub predict called before configure_payload")
+        self.predict_calls += 1
+        self._predicted_pairs = [tuple(p) for p in pair_ids]
+        return self._pred_fn(self._payload, self._predicted_pairs, int(response_dim))
+
+    @staticmethod
+    def _digest(text):
+        return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+    @property
+    def provenance_manifest(self):
+        if self._payload is None:
+            raise RuntimeError("stub provenance requested before configure_payload")
+        payload_sha = self._digest(json.dumps(self._payload, sort_keys=True))
+        worker_sha = hashlib.sha256(self._worker_bytes).hexdigest()
+        manifest = {
+            "worker_sha256": worker_sha,
+            "payload_sha256": payload_sha,
+            "seed": self.seed,
+        }
+        if self._predicted_pairs is not None:
+            request_sha = self._digest(
+                json.dumps([list(p) for p in self._predicted_pairs], sort_keys=True)
+            )
+            manifest["execution_manifest"] = {
+                "checkpoint_sha256": self._digest("checkpoint:" + payload_sha),
+                "combined_request_sha256": request_sha,
+                "worker_sha256": worker_sha,
+            }
+        return manifest
+
+
+def _delta_truth_by_pair(fx) -> dict[tuple[str, str], np.ndarray]:
+    """Development delta ``additive_cal + combo_calibration_eps``, pair-aligned."""
+    cal = fx["cal_pairs_id"]
+    add = np.asarray(fx["additive_cal"], dtype=float)
+    eps = np.asarray(fx["eps_cal"], dtype=float)
+    return {tuple(cal[i]): add[i] + eps[i] for i in range(len(cal))}
+
+
+def _exact_truth_pred_fn(truth):
+    def _fn(payload, pair_ids, response_dim):
+        return {p: np.asarray(truth[p], dtype=float) for p in pair_ids}
+
+    return _fn
+
+
+def _adapter(pred_fn, *, name="gears"):
+    registry: dict[str, list] = {}
+    backend = _StubFoldBackend(seed=0, pred_fn=pred_fn, registry=registry)
+    return BaselineAdapter(name=name, backend=backend), registry, backend
+
+
+def _run(fx, adapter, *, method, seed, fold_index):
+    job = _build(fx, method=method, seed=seed, fold_index=fold_index)
+    result = run_fold_job(
+        adapter,
+        job,
+        _P,
+        pair_manifest_checksum=fx["inputs"].manifest_checksum,
+        response_space_checksum=fx["inputs"].response_space_checksum,
+    )
+    return job, result
+
+
+def _run_all_folds(fx, adapter, *, method="gears", seed=23):
+    return [_run(fx, adapter, method=method, seed=seed, fold_index=fi)[1] for fi in range(_N_FOLDS)]
+
+
+# --------------------------------------------------------------------------- #
+# run_fold_job: fresh backend, predicts the test pairs exactly once
+# --------------------------------------------------------------------------- #
+def test_run_fold_job_spawns_fresh_backend_and_predicts_once(tmp_path):
+    fx = _fixture(tmp_path)
+    truth = _delta_truth_by_pair(fx)
+    adapter, registry, parent = _adapter(_exact_truth_pred_fn(truth))
+    job, result = _run(fx, adapter, method="gears", seed=23, fold_index=0)
+
+    assert isinstance(result, FoldExecutionResult)
+    # exactly one fresh child backend, seeded to the job seed, is NOT the parent.
+    assert len(registry["spawned"]) == 1
+    child = registry["spawned"][0]
+    assert child is not parent
+    assert child.seed == job.seed == 23
+    # the fold's held-out test pairs were predicted exactly once.
+    assert child.predict_calls == 1
+    assert child._predicted_pairs == list(job.test_pair_ids)
+    # predictions are keyed by the fold's test pair IDs.
+    assert set(result.predictions) == set(job.test_pair_ids)
+    for vec in result.predictions.values():
+        assert np.asarray(vec).shape == (_P,)
+
+
+def test_run_fold_job_result_carries_job_identity(tmp_path):
+    fx = _fixture(tmp_path)
+    truth = _delta_truth_by_pair(fx)
+    adapter, _registry, _parent = _adapter(_exact_truth_pred_fn(truth), name="cpa")
+    job, result = _run(fx, adapter, method="cpa", seed=37, fold_index=1)
+    assert result.method == "cpa"
+    assert result.seed == 37
+    assert result.fold_index == 1
+    assert result.test_pair_ids == job.test_pair_ids
+
+
+# --------------------------------------------------------------------------- #
+# checksums are the REAL post-predict provenance digests, not a {method,seed} hash
+# --------------------------------------------------------------------------- #
+def test_run_fold_job_captures_real_provenance_checksums(tmp_path):
+    fx = _fixture(tmp_path)
+    truth = _delta_truth_by_pair(fx)
+    adapter, registry, _parent = _adapter(_exact_truth_pred_fn(truth), name="cpa")
+    job, result = _run(fx, adapter, method="cpa", seed=37, fold_index=1)
+
+    child = registry["spawned"][0]
+    manifest = child.provenance_manifest
+    exec_manifest = manifest["execution_manifest"]
+    # every captured digest equals exactly what the backend manifest reports.
+    assert result.worker_sha256 == manifest["worker_sha256"]
+    assert result.payload_sha256 == manifest["payload_sha256"]
+    assert result.checkpoint_sha256 == exec_manifest["checkpoint_sha256"]
+    assert result.request_sha256 == exec_manifest["combined_request_sha256"]
+    # a fabricated {method, seed} checkpoint hash would NOT match the real one.
+    fabricated = hashlib.sha256(f"{job.method}:{job.seed}".encode("utf-8")).hexdigest()
+    assert result.checkpoint_sha256 != fabricated
+    assert len(result.checkpoint_sha256) == 64
+
+
+def test_run_fold_job_requires_post_predict_manifest(tmp_path):
+    # a backend whose provenance never reaches the post-predict form (no
+    # execution_manifest) must fail closed rather than fabricate checksums.
+    fx = _fixture(tmp_path)
+    truth = _delta_truth_by_pair(fx)
+
+    class _NoManifestBackend(_StubFoldBackend):
+        @property
+        def provenance_manifest(self):
+            m = dict(super().provenance_manifest)
+            m.pop("execution_manifest", None)  # simulate a pre-predict manifest
+            return m
+
+    registry: dict[str, list] = {}
+    backend = _NoManifestBackend(seed=0, pred_fn=_exact_truth_pred_fn(truth), registry=registry)
+    adapter = BaselineAdapter(name="gears", backend=backend)
+    job = _build(fx, method="gears", seed=23, fold_index=0)
+    with pytest.raises(FoldExecutionError):
+        run_fold_job(
+            adapter,
+            job,
+            _P,
+            pair_manifest_checksum=fx["inputs"].manifest_checksum,
+            response_space_checksum=fx["inputs"].response_space_checksum,
+        )
+
+
+# --------------------------------------------------------------------------- #
+# per-seed reassembly: covered order, independent of fold execution order
+# --------------------------------------------------------------------------- #
+def test_reassembly_is_covered_order_independent_of_fold_order(tmp_path):
+    fx = _fixture(tmp_path)
+    truth = _delta_truth_by_pair(fx)
+    adapter, _registry, _parent = _adapter(_exact_truth_pred_fn(truth))
+    results = _run_all_folds(fx, adapter)
+
+    shuffled = list(results)
+    random.Random(5).shuffle(shuffled)
+    pred_by_pair, scalar = assemble_seed_scalar(
+        shuffled,
+        manifest=fx["manifest"],
+        delta_truth_by_pair=truth,
+        response_dim=_P,
+    )
+    # covered pairs appear EXACTLY once, in the manifest's covered order.
+    assert tuple(pred_by_pair) == fx["manifest"].covered_pair_ids
+    assert set(pred_by_pair) == set(fx["manifest"].covered_pair_ids)
+    # WIRING known-answer (not stochastic-stability evidence): a stub predicting
+    # exactly the development delta yields a per-seed scalar of 0.
+    assert scalar == pytest.approx(0.0)
+
+
+def test_seed_scalar_equals_hand_computed_mean_pair_mse(tmp_path):
+    fx = _fixture(tmp_path)
+    truth = _delta_truth_by_pair(fx)
+    offset = 0.5
+
+    def _offset_pred_fn(payload, pair_ids, response_dim):
+        return {p: np.asarray(truth[p], dtype=float) + offset for p in pair_ids}
+
+    adapter, _registry, _parent = _adapter(_offset_pred_fn)
+    results = _run_all_folds(fx, adapter)
+    _pred_by_pair, scalar = assemble_seed_scalar(
+        results,
+        manifest=fx["manifest"],
+        delta_truth_by_pair=truth,
+        response_dim=_P,
+    )
+    # every covered pair has per-pair MSE mean(offset**2) == offset**2, so the
+    # mean over the fixed covered set is offset**2.
+    assert scalar == pytest.approx(offset**2)
+
+
+# --------------------------------------------------------------------------- #
+# a covered-set defect makes the whole seed FAIL (raises)
+# --------------------------------------------------------------------------- #
+def _valid_results(fx, truth):
+    """One FoldExecutionResult per manifest fold, predicting that fold's tests."""
+    results = []
+    for rec in fx["manifest"].folds:
+        preds = {tuple(p): np.asarray(truth[tuple(p)], dtype=float) for p in rec.test_pair_ids}
+        results.append(
+            FoldExecutionResult(
+                method="gears",
+                seed=23,
+                fold_index=int(rec.fold_index),
+                test_pair_ids=rec.test_pair_ids,
+                predictions=preds,
+                worker_sha256="w" * 64,
+                payload_sha256="p" * 64,
+                checkpoint_sha256="c" * 64,
+                request_sha256="r" * 64,
+            )
+        )
+    return results
+
+
+@pytest.mark.parametrize("defect", ["missing", "duplicate", "extra", "nonfinite", "dim"])
+def test_covered_set_defect_fails_the_seed(tmp_path, defect):
+    fx = _fixture(tmp_path)
+    truth = _delta_truth_by_pair(fx)
+    results = _valid_results(fx, truth)
+    covered = fx["manifest"].covered_pair_ids
+    target = covered[0]
+
+    if defect == "missing":
+        for r in results:
+            if target in r.predictions:
+                del r.predictions[target]
+                break
+    elif defect == "duplicate":
+        for r in results:
+            if target not in r.predictions:
+                r.predictions[target] = np.asarray(truth[target], dtype=float)
+                break
+    elif defect == "extra":
+        results[0].predictions[("ZZnot", "ZZcovered")] = np.zeros(_P)
+    elif defect == "nonfinite":
+        for r in results:
+            if target in r.predictions:
+                r.predictions[target] = np.full(_P, np.inf)
+                break
+    elif defect == "dim":
+        for r in results:
+            if target in r.predictions:
+                r.predictions[target] = np.zeros(_P + 1)
+                break
+
+    with pytest.raises(SeedAssemblyError):
+        assemble_seed_scalar(
+            results,
+            manifest=fx["manifest"],
+            delta_truth_by_pair=truth,
+            response_dim=_P,
+        )
+
+
+def test_valid_results_assemble_cleanly_before_corruption(tmp_path):
+    # guards the defect suite: the uncorrupted baseline assembles without error.
+    fx = _fixture(tmp_path)
+    truth = _delta_truth_by_pair(fx)
+    pred_by_pair, scalar = assemble_seed_scalar(
+        _valid_results(fx, truth),
+        manifest=fx["manifest"],
+        delta_truth_by_pair=truth,
+        response_dim=_P,
+    )
+    assert tuple(pred_by_pair) == fx["manifest"].covered_pair_ids
+    assert scalar == pytest.approx(0.0)
