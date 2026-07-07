@@ -223,7 +223,9 @@ production driver가 내부적으로 다음 순서를 강제해야 한다.
 2. `run_phase2b` preflight와 composite upstream gate.
 3. pre-access provenance payload+checksum과 seed-variability artifact의 실제 file SHA를
    `phase2b_pre_access_ledger.json`에 원자적 write-once 저장하고 재독출.
-4. `claim_access()` 후 double/single union을 한 번에 materialize.
+4. double/single exact union에 대해 outcome store의 durable audit claim을 먼저 원자적으로 설치·검증하고,
+   그 audit reference로 terminal의 access를 확정한 뒤 claim-bound materialization을 한 번 수행한다.
+   audit 설치 전 실패는 pre-access failure(count 0)이며 `ABORTED_AFTER_SEAL`로 기록하지 않는다.
 5. 두 regime을 분리 채점하고 double-unseen만 verdict에 사용.
 6. on-disk pre-access checksum, seal audit run/request checksum, result checksums 교차검증.
 7. complete provenance payload를 내장하고 terminal SHA를 내부 provenance에서 제외한 비순환 구조로

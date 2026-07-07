@@ -8,7 +8,7 @@
 
 **Tech Stack:** Python 3.11–3.12, `uv`, `pytest`, `ruff` (line-length 100), stdlib `hashlib`/`json`/`os`, `dataclasses`, `alive.io.atomic_write_once`, `alive.provenance.sha256_json`.
 
-**Design source:** `docs/superpowers/specs/2026-07-05-compose-durable-ledger-design.md` §1–§3, §5, §6.1 (spec-review gate PASS iter2). This plan is **D1 only**; D2 (seed-variability) is a separate plan.
+**Design source:** `docs/superpowers/specs/2026-07-05-compose-durable-ledger-design.md` §1–§3, §5, §6.1. This plan is **D1 only**, but D2 is an explicit prerequisite for Tasks 3, 5 and 7: the verified `development_seed_variability.json` and its pre-access-ledger SHA must already exist. There is no placeholder or post-seal backfill.
 
 ## Global Constraints
 
@@ -21,12 +21,41 @@
 - **Durable completion is declared ONLY by a fully-verified `phase2b_durable_commit.json`.** A terminal without a marker is evidence of seal consumption, not of export completeness.
 - **Seal-critical migration (spec F3):** Task 8 re-runs the full CLAUDE.md §13 suite (leakage/provenance/tamper/resume) + `ruff`. Every task runs the compose suite.
 
+## Prerequisite Task 0: durable audit defines the consumed-seal boundary
+
+The current `phase2b.py` calls `terminal.claim_access()` before
+`ComposeOutcomeStore.evaluate_sealed_once()` writes its durable audit. That in-memory transition is
+not proof of seal consumption and must be removed before terminal-v2 work.
+
+Split the outcome-store operation into an atomic durable claim and a claim-bound materialization:
+
+```python
+claim = outcome_store.claim_sealed_access(run_id, exact_union)  # audit write + fsync/verify
+terminal.confirm_durable_access(claim.audit_reference)
+release = outcome_store.materialize_claimed(claim)
+```
+
+The terminal may enter an internal `ACCESS_ATTEMPTED` state before the claim, but only a verified
+audit record may transition it to `ACCESS_CLAIMED`. An exception before the durable audit leaves no
+`ABORTED_AFTER_SEAL` artifact and is reported as a pre-access failure. An exception after audit write
+(including materialization failure) writes exactly one `ABORTED_AFTER_SEAL` terminal with
+`sealed_access_count=1` and the matching audit reference. Recovery derives consumption from the
+audit record, never from an in-memory method call.
+
+Required tests: pre-audit validation/I/O failure → count 0 and no post-seal terminal; audit-written
+materialization failure → count 1 and ABORTED; process restart observes the same claim; run/request
+digest mismatch fails closed; concurrent claims produce one audit record and one winner.
+
 ---
 
 ## File Structure
 
+- Modify `src/alive/compose/outcome_store.py` — split durable audit claim from claim-bound
+  materialization and expose an immutable claim identity.
 - Modify `src/alive/compose/provenance2.py` — split `Phase2bProvenance` into a pre-access field set + a v2 embedded-provenance schema that drops `terminal_report_sha256`; update `check_post_access_consistency`.
-- Modify `src/alive/compose/terminal.py` — v2 terminal bodies (common fields + `terminal_payload_checksum`), state-field rosters, finite/`float.hex()` canonicalization, filename↔state check; `aborted()` gains `registered_results_status`.
+- Modify `src/alive/compose/terminal.py` — attempted/durably-claimed state boundary, v2 terminal bodies
+  (common fields + `terminal_payload_checksum`), state-field rosters, canonicalization,
+  filename↔state check; `aborted()` gains `registered_results_status`.
 - Modify `src/alive/compose/phase2b.py` — build `RegisteredEvaluationSummary` once inside the protected boundary; embedded-provenance + the three checksums; `result_checksum = final_result_checksum`; wire the finalizer into the normal/INVALID/abort paths.
 - Create `src/alive/compose/durable.py` — `finalize_phase2b_durable_outputs`, `install_or_verify_exact`, `DurableFinalizeResult`, `DurableLedgerError`, commit-marker build/verify, recovery.
 - Create `tests/alive/compose/test_durable.py` — publish/recovery/crash-injection/path-safety.
@@ -82,7 +111,7 @@ def test_embedded_provenance_v2_excludes_terminal_report_sha():
 
 ```python
 def test_terminal_v2_has_common_fields_and_self_excluding_checksum(tmp_path):
-    term = _claimed_terminal(tmp_path)  # PREPARED->ACCESS_CLAIMED fixture
+    term = _durably_claimed_terminal(tmp_path)  # verified audit -> ACCESS_CLAIMED
     term.complete(_v2_complete_payload(run_id="deadbeef...", ...))
     body = json.loads((tmp_path / Phase2bTerminal.COMPLETE_ARTIFACT).read_text())
     for k in ("schema","protocol","run_id","terminal_state","sealed_access_count",
@@ -90,19 +119,22 @@ def test_terminal_v2_has_common_fields_and_self_excluding_checksum(tmp_path):
               "pre_access_provenance_checksum","terminal_payload_checksum"):
         assert k in body
     assert body["schema"] == "compose_phase2b_terminal_v2"
-    # self-excluding: recompute over body minus its own checksum
-    recomputed = sha256_json({k: v for k, v in body.items() if k != "terminal_payload_checksum"})
+    # self-excluding: writer and verifier share the same recursive canonicalizer
+    checksum_input = canonicalize_terminal_checksum_input(
+        {k: v for k, v in body.items() if k != "terminal_payload_checksum"}
+    )
+    recomputed = sha256_json(checksum_input)
     assert recomputed == body["terminal_payload_checksum"]
 
 def test_terminal_rejects_nonfinite_float(tmp_path):
-    term = _claimed_terminal(tmp_path)
+    term = _durably_claimed_terminal(tmp_path)
     with pytest.raises(TerminalError, match="finite"):
         term.complete(_v2_complete_payload(..., theta=float("nan")))
 ```
 
 - [ ] **Step 2: Run, expect FAIL.**
 
-- [ ] **Step 3: Implement** — in `_write_terminal`, before install: (a) validate the body against the common+state roster (unknown/missing key → `TerminalError`); (b) recurse the payload rejecting any non-finite float and canonicalising floats to `float.hex()` strings for the checksum input; (c) compute `terminal_payload_checksum = sha256_json(body_without_that_field)` and insert it; (d) verify the filename matches `body["terminal_state"]`. Keep the existing guard→`atomic_write_once`→verify→ledger order. Have `complete`/`invalid`/`aborted` assemble the common fields (`schema`, `protocol`, `run_id`, `sealed_access_count`, `seal_audit_reference`, `pre_access_ledger_sha256`, `pre_access_provenance_checksum`) — passed in by the phase2b orchestrator (Task 3/4), not invented here.
+- [ ] **Step 3: Implement** — add one public-to-module `canonicalize_terminal_checksum_input` used by writer, reader, finalizer and tests. It recursively sorts mappings, preserves int/str/bool, converts finite floats to `float.hex()` strings, and rejects non-finite/unsupported values. Persisted JSON retains finite JSON numbers; only the checksum input uses hex strings. In `_write_terminal`, before install: (a) validate the body against the common+state roster (unknown/missing key → `TerminalError`); (b) canonicalize the self-excluding checksum input with that function; (c) compute and insert `terminal_payload_checksum`; (d) verify filename↔state. Never verify by applying raw `sha256_json` directly to the decoded body.
 
 - [ ] **Step 4: Run tests** — new tests + existing terminal suite pass.
 
@@ -168,19 +200,27 @@ def test_invalid_final_result_checksum_differs_from_complete(...):
 - Consumes: the exception + stage + preflight checksums (already) + the common fields.
 - Produces: an abort terminal with the §2.2 state-specific fields (`exception_class`, `message`, `stage`, `preflight_checksums`, `registered_results_status="NOT_AVAILABLE_DUE_TO_ABORT"`) + the common fields + `terminal_payload_checksum`. No `Phase2bResult`.
 
-- [ ] **Step 1: Write the failing test** — an abort inside `protect` writes an abort terminal (no result object) carrying `registered_results_status` and the common v2 fields; `sealed_access_count` reflects the durable audit (a pre-audit-claim exception is a separate pre-access failure, NOT `ABORTED_AFTER_SEAL`).
+- [ ] **Step 1: Write the failing tests** — use the Task-0 split store API, not a fixture that manually calls the old in-memory `claim_access()`. Prove both sides of the boundary: (a) an exception before `claim_sealed_access` durably installs an audit writes no post-seal terminal; (b) an exception after a verified claim writes an abort terminal carrying `registered_results_status`, the common v2 fields, `sealed_access_count=1`, and the exact audit reference.
 
 ```python
-def test_aborted_terminal_has_status_and_no_result(tmp_path):
-    term = _claimed_terminal(tmp_path)
+def test_aborted_terminal_has_status_and_no_result(tmp_path, claimed_store):
+    term = _terminal(tmp_path)
+    term.acquire()
+    claim = claimed_store.claim_sealed_access(RUN_ID, EXACT_UNION)
+    term.confirm_durable_access(claim.audit_reference)
     with pytest.raises(RuntimeError):
         with term.protect(stage="scoring"):
             raise RuntimeError("boom in scoring")
     body = json.loads((tmp_path / Phase2bTerminal.ABORTED_ARTIFACT).read_text())
     assert body["terminal_state"] == "ABORTED_AFTER_SEAL"
+    assert body["sealed_access_count"] == 1
+    assert body["seal_audit_reference"] == claim.audit_reference
     assert body["registered_results_status"] == "NOT_AVAILABLE_DUE_TO_ABORT"
     assert body["schema"] == "compose_phase2b_terminal_v2" and "terminal_payload_checksum" in body
 ```
+
+Add a companion `test_pre_audit_failure_writes_no_aborted_terminal` that injects failure before the
+audit write and asserts access count 0 plus no `ABORTED_AFTER_SEAL` file.
 
 - [ ] **Step 2: Run, expect FAIL.**
 - [ ] **Step 3: Implement** — add `registered_results_status="NOT_AVAILABLE_DUE_TO_ABORT"` + the common fields to the `aborted()` body; route through the same v2 `_write_terminal` (Task 2). Keep the `OMITTED_UNSAFE` fallback for an unsafe `preflight_checksums`.
@@ -256,12 +296,22 @@ def recover_phase2b_durable_outputs(*, run_dir) -> DurableFinalizeResult
 - Test: `tests/alive/compose/test_phase2b.py`
 
 **Interfaces (spec §3.3):**
-- Normal/INVALID: after the terminal write completes (inside the boundary), call `finalize_phase2b_durable_outputs(...)`; `Phase2bResult` carries the resulting commit-marker path/checksum (extend the dataclass with `durable_commit_checksum`/`commit_marker_path`).
+- Prerequisite: Task 0 and D2 are complete. The scientific entry receives explicit verified
+  `oof_manifest_path/checksum` and `seed_variability_path/checksum`; both must match the persisted
+  pre-access ledger before any access attempt.
+- Normal/INVALID: write the terminal inside the protection boundary, exit the context, then call
+  `finalize_phase2b_durable_outputs(...)`. `Phase2bResult` carries the resulting commit-marker
+  path/checksum. The finalizer never runs while outcome-bearing evaluation frames are active.
 - Abort: a single top-level `except BaseException` in `run_phase2b` locates the terminal `protect` left, calls the SAME finalizer, then re-raises preserving the original traceback (`raise` bare inside the handler after finalize). The context manager and the caller must not double-call. A finalizer failure is attached as an exception note / logged and does NOT replace the original evaluation exception; a missing commit marker signals an incomplete durable export.
 
 - [ ] **Step 1: Write the failing tests** — a COMPLETE fixture run leaves a verified commit marker + `Phase2bResult.durable_commit_checksum`; an abort fixture (raise inside the boundary) re-raises the ORIGINAL exception AND leaves an abort terminal that the finalizer published (marker present); a finalizer that itself raises does not mask the evaluation exception and leaves no marker.
 - [ ] **Step 2: Run, expect FAIL.**
-- [ ] **Step 3: Implement** — wrap the `with terminal.protect(...)` block in `run_phase2b` with a top-level `try/except BaseException`; on success call finalize after the boundary; on exception call finalize on the protect-left terminal then `raise`. Extend `Phase2bResult`. Ensure exactly one finalize call per path (no double-call from the boundary).
+- [ ] **Step 3: Implement** — replace the old pre-audit `terminal.claim_access()` path with Task 0's
+  attempted→durably-confirmed transition. Wrap the protected evaluation in a top-level
+  `try/except BaseException`; on success call finalize after the protection context has exited; on
+  exception call finalize only when a durable post-seal terminal exists, then use bare `raise`.
+  A pre-audit failure has no post-seal terminal and therefore does not call the D1 finalizer. Ensure
+  exactly one finalize call per terminal path.
 - [ ] **Step 4: Run tests** — pass.
 - [ ] **Step 5: Commit** — `git commit -m "feat(compose): wire durable finalize into run_phase2b normal/INVALID/abort (D1)"`
 

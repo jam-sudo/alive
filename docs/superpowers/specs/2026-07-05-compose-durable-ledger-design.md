@@ -230,11 +230,9 @@ gene-disjoint OOF assignment에서 계산한다.
 
 각 `(method, registered_seed, fold)`에 대해:
 
-1. D2가 fold manifest(train/test/cross-group indices)를 **구성**한다 — 현재 코드에 이 이름의 persisted
-   아티팩트는 없다. Phase2a가 고정한 per-pair OOF fold 배정(`oof_folds`, calibration pair와 1:1)과
-   `select.py`의 group/cross-group 정의로부터 **결정론적으로 유도**하며, D2에서 fold를 새로 난수
-   생성하지 않는다. 구성된 manifest는 self-checksummed 아티팩트로 persist되어 report와 pre-access
-   ledger에 결속된다.
+1. Phase2a selection이 실제 사용한 train/test/cross-group position과 pair ID를 **그 selection 호출에서
+   직접** canonical `OOFFoldManifest`로 만들고 self-checksummed write-once artifact로 persist한다.
+   D2는 이 manifest를 검증·소비하며 fold를 재생성하거나 caller-supplied per-pair 배정을 받지 않는다.
 2. controller가 **fold-scoped fit-role artifact와 payload를 새로 생성**한다. singles는 등록 계약대로
    사용할 수 있지만 combo rows/targets는 train pair만 포함한다.
 3. held-out test와 cross-group pair의 row ID, target, aggregate, validation/early-stopping signal을 worker
@@ -245,9 +243,9 @@ gene-disjoint OOF assignment에서 계산한다.
 6. 모든 fold의 held-out prediction을 canonical **covered OOF pair order**로 재조립한다.
 7. seed별 scalar는 동일 covered OOF pair 집합의 mean MSE로 고정한다.
 
-OOF fold assignment, calibration pair order, response checksum, fit-role artifact checksum, worker/config/
-resource/environment lock과 seed는 report에 결속한다. sealed pair identity나 outcome store를 입력으로
-받지 않는다.
+OOF manifest, calibration pair order, response checksum, base 및 fold-scoped fit-role artifact checksum,
+worker/config/resource/environment lock과 seed는 report에 결속한다. sealed pair identity나 sealed
+outcome store를 입력으로 받지 않는다.
 
 현재 gene-disjoint fold는 cross-group pair를 OOF test에서 제외할 수 있다. Report는 전체 calibration
 pair count, covered/uncovered count와 fraction, ordered covered/uncovered pair-ID checksum,
@@ -270,29 +268,33 @@ Phase2b preflight를 차단한다. 모든 seed가 성공해야 `COMPLETE`다.
 ```python
 development_seed_variability(
     *,
-    inputs,
-    development_outcome_store,
-    oof_fold_assignment,
-    baseline_adapters,
-    config,
+    inputs: Phase2aInputs,
+    development_outcome_store: DevelopmentOutcomeStore,
+    oof_manifest: OOFFoldManifest,
+    baseline_adapters: Mapping[str, BaselineAdapter],
+    config: ComposePhase2Config,
+    response_artifact,
+    fit_role_spec,
+    gene_order,
+    raw_data_sha256,
 ) -> SeedVariabilityReport
 ```
 
 `inputs`는 frozen `Phase2aInputs`, `development_outcome_store`는 audited-unsealed 또는 bounded synthetic
-`DevelopmentOutcomeStore`, `oof_fold_assignment`는 Phase2a가 고정한 per-pair OOF fold 배정
-(`oof_folds`, calibration pair와 1:1)여야 한다. D2는 이 배정과 `select.py` group 정의에서 §4.2의 fold
-manifest를 내부 구성한다. 임의 outcome 배열/dict/path와 `ComposeOutcomeStore`는 받지 않는다.
+`DevelopmentOutcomeStore`, `oof_manifest`는 Phase2a selection·bundle·method lock·ledger가 동일 checksum으로
+결속한 exact manifest여야 한다. D2는 이를 재구성하지 않는다. 임의 outcome 배열/dict/path와
+`ComposeOutcomeStore`는 받지 않는다.
 Calibration truth는 `inputs.additive_cal + development_outcome_store.combo_calibration_eps`로 한 번
 재구성하며 pair ID alignment와 outcome-store content checksum을 검증한다. Seed/pair/response checksum은
 `inputs`와 activated config의 exact equality로 가져온다.
 
-production entry는 caller-supplied payload/factory를 받지 않고 내부
-`build_fold_scoped_fit_payload(...)`만 호출한다. fixture 전용 private injection seam은 scientific entry에서
-구조적으로 도달할 수 없어야 한다. 각 payload는 train/test/cross-group pair 및 source-row checksum,
-train-only fit artifact checksum을 기록한다. worker hyperparameter 선택, checkpoint selection, early
+production entry는 caller-supplied payload/factory를 받지 않고 내부 fold-job builder만 호출한다. fixture
+전용 private injection seam은 scientific entry에서 구조적으로 도달할 수 없어야 한다. Worker payload는
+기존 payload-v2 exact key roster를 유지하고 train pair/target만 포함한다. test/cross-group ID와 fold/source
+checksum은 controller-side `FoldJob` 및 report에 기록한다. worker hyperparameter 선택, checkpoint selection, early
 stopping에는 train payload 밖 outcome을 사용할 수 없다. seed는 Python/NumPy/framework/CUDA RNG 설정과
-worker identity에 전달하며 동일 seed 재실행의 determinism 또는 알려진 nondeterministic backend 상태를
-report한다.
+fresh backend instance identity에 전달하며, fold 간 mutable payload state를 공유하지 않는다. 동일 seed
+재실행의 determinism 또는 알려진 nondeterministic backend 상태를 report한다.
 
 실제 GEARS/CPA 숫자는 locked pod environments에서 산출한다. 로컬 stub은 seed 전달·fold exclusion·
 alignment/checksum wiring known-answer만 검증하며, spread 0을 실제 stochastic stability 근거로 사용하지
