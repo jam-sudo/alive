@@ -1002,6 +1002,28 @@ def test_invalid_final_result_checksum_differs_from_complete(tmp_path):
     assert inv_body["terminal_state"] == TerminalState.INVALID.value
     assert inv_body["final_result_checksum"] == invalid.result_checksum
 
+    # WHY the checksums differ: the `!=` above would ALSO hold merely because the
+    # two runs live in different run dirs (different seal_audit_reference ->
+    # different provenance_checksum), even if terminal_state / verdict were NOT
+    # bound into final_result_checksum. Reconstruct the INVALID checksum from its
+    # OWN five composition keys (mirroring the COMPLETE composition test) to prove
+    # terminal_state="INVALID" + the swapped final_verdict_checksum are the bound
+    # inputs, not an incidental run-dir difference.
+    assert inv_body["final_result_checksum"] == sha256_json(
+        {
+            "terminal_state": inv_body["terminal_state"],
+            "final_verdict_checksum": inv_body["final_verdict_checksum"],
+            "registered_summary_checksum": inv_body["registered_summary_checksum"],
+            "evaluation_payload_checksum": inv_body["evaluation_payload_checksum"],
+            "provenance_checksum": inv_body["provenance_checksum"],
+        }
+    )
+    # The verdict->INVALID swap is bound: this INVALID body's final_verdict_checksum
+    # differs from the COMPLETE run's, so the difference is attributable to the
+    # terminal_state + swapped verdict, not just the run dir / provenance.
+    complete_body = _read_terminal(kit_c["run_dir"], "complete")
+    assert inv_body["final_verdict_checksum"] != complete_body["final_verdict_checksum"]
+
 
 # ===========================================================================
 # 14. a futility-stopped bundle cannot invoke Phase 2b (refused before access)

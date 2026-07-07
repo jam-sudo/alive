@@ -586,6 +586,73 @@ def test_aborted_scrubs_array_in_exception_message(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# CLOSED COMPLETE / INVALID roster — the headline Task-3 deliverable (spec §2.1).
+#
+# These lock the roster check in `_write_terminal` -> `_validate_terminal_roster`
+# DIRECTLY. The existing raw-outcome tests (oversized list / nested matrix) are
+# caught by the raw-outcome guard (step 1) BEFORE the roster check, so they do
+# NOT exercise the roster. Each body below is OTHERWISE-VALID (built from the
+# shared `minimal_v2_terminal_body()`), so it passes the guard and the ROSTER
+# check is forced to be the rejecter. The extra key is a guard-SAFE short scalar
+# and the dropped field is a state field, so these can ONLY pass while the roster
+# is closed: re-opening it (`_STATE_TERMINAL_FIELDS[COMPLETE] = None`) would let
+# both writes through and fail these tests.
+# ---------------------------------------------------------------------------
+
+
+def test_complete_rejects_unknown_top_level_key_via_roster(tmp_path: Path) -> None:
+    # Otherwise-valid v2 COMPLETE body + one EXTRA top-level key whose value is a
+    # raw-outcome-SAFE short string. It passes the raw-outcome guard and reaches
+    # the closed roster, which rejects it by NAME as an unknown field.
+    term = _durably_claimed_terminal(tmp_path)
+    body = minimal_v2_terminal_body()
+    body["surprise"] = "x"  # guard-safe scalar -> reaches the roster check
+
+    with pytest.raises(TerminalError, match="unknown field") as excinfo:
+        term.complete(body)
+    # The roster/unknown-key error fired, NOT the raw-outcome guard.
+    assert "surprise" in str(excinfo.value)
+    assert "raw-outcome guard" not in str(excinfo.value)
+
+    # Rejected BEFORE any write: state unchanged, no terminal artifact.
+    assert term.state is TerminalState.ACCESS_CLAIMED
+    assert _existing_terminal_artifacts(term.run_dir) == []
+
+
+def test_complete_rejects_missing_state_field_via_roster(tmp_path: Path) -> None:
+    # Drop one of the seven state fields (spec §2.1). The body still passes the
+    # raw-outcome guard, so the closed roster is the rejecter and names the
+    # missing state field. A re-opened roster would skip this check entirely.
+    term = _durably_claimed_terminal(tmp_path)
+    body = minimal_v2_terminal_body()
+    del body["evaluation_payload_checksum"]  # a required COMPLETE state field
+
+    with pytest.raises(TerminalError, match="missing state field") as excinfo:
+        term.complete(body)
+    assert "evaluation_payload_checksum" in str(excinfo.value)
+    assert "raw-outcome guard" not in str(excinfo.value)
+
+    assert term.state is TerminalState.ACCESS_CLAIMED
+    assert _existing_terminal_artifacts(term.run_dir) == []
+
+
+def test_invalid_rejects_unknown_top_level_key_via_roster(tmp_path: Path) -> None:
+    # INVALID shares the same closed roster as COMPLETE (spec §2.1): a guard-safe
+    # extra top-level key is rejected by the roster, not the raw-outcome guard.
+    term = _durably_claimed_terminal(tmp_path)
+    body = minimal_v2_terminal_body(terminal_state="INVALID")
+    body["surprise"] = "x"  # guard-safe scalar -> reaches the roster check
+
+    with pytest.raises(TerminalError, match="unknown field") as excinfo:
+        term.invalid(body)
+    assert "surprise" in str(excinfo.value)
+    assert "raw-outcome guard" not in str(excinfo.value)
+
+    assert term.state is TerminalState.ACCESS_CLAIMED
+    assert _existing_terminal_artifacts(term.run_dir) == []
+
+
+# ---------------------------------------------------------------------------
 # Atomicity hygiene — no leftover temp files, destination never overwritten
 # ---------------------------------------------------------------------------
 
