@@ -12,9 +12,11 @@ outcome, imports NO gears/cpa. Development calibration outcomes only.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import random
+import warnings
 from pathlib import Path
 
 import numpy as np
@@ -75,6 +77,28 @@ _P = 4  # response dim
 
 def _canon(a: str, b: str) -> tuple[str, str]:
     return (a, b) if a.encode("utf-8") <= b.encode("utf-8") else (b, a)
+
+
+@contextlib.contextmanager
+def _ignore_anndata_str_index_warning():
+    """Silence anndata's implicit-str-index warning at fit-role artifact creation.
+
+    ``generate_fit_role_artifact`` (``alive.compose.fit_role``, production code out
+    of scope for this test module) builds its ``obs`` DataFrame without an explicit
+    string index, so ``anndata.AnnData.__init__`` always auto-transforms the
+    default integer ``RangeIndex`` to str, emitting an
+    ``ImplicitModificationWarning`` on every call. This fixture module calls that
+    path (directly, and transitively via ``build_fold_job`` /
+    ``development_seed_variability``) far more often than other test modules do,
+    so the identical pre-existing warning becomes disproportionate noise here.
+    Narrowly scoped to this one warning category, at exactly the call sites that
+    reach it — no test assertion or semantics are affected.
+    """
+    import anndata as ad
+
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", category=ad.ImplicitModificationWarning)
+        yield
 
 
 def _fixture(tmp_path: Path):
@@ -139,15 +163,16 @@ def _fixture(tmp_path: Path):
         pair_manifest_sha256="pm",
         eligibility_hash="elig",
     )
-    base_spec = generate_fit_role_artifact(
-        extraction=extraction,
-        out_path=str(tmp_path / "base_fit_role.h5ad"),
-        config_sha256="cfg",
-        data_card_sha256="dc",
-        calibration_gene_set_hash="cg",
-        generator_code_sha256="gen",
-        writer_environment_sha256="env",
-    )
+    with _ignore_anndata_str_index_warning():
+        base_spec = generate_fit_role_artifact(
+            extraction=extraction,
+            out_path=str(tmp_path / "base_fit_role.h5ad"),
+            config_sha256="cfg",
+            data_card_sha256="dc",
+            calibration_gene_set_hash="cg",
+            generator_code_sha256="gen",
+            writer_environment_sha256="env",
+        )
     response_artifact = {"response_space": space, "control_mean": control_mean}
 
     # --- OOF fold manifest (the exact single-call folds) -------------------------
@@ -212,19 +237,20 @@ def _fixture(tmp_path: Path):
 
 
 def _build(fx, *, method="gears", seed=23, fold_index=0) -> FoldJob:
-    return build_fold_job(
-        method=method,
-        seed=seed,
-        fold_index=fold_index,
-        oof_manifest=fx["manifest"],
-        inputs=fx["inputs"],
-        outcome_store=fx["store"],
-        response_artifact=fx["response_artifact"],
-        base_fit_role_spec=fx["base_spec"],
-        fold_artifact_dir=fx["fold_dir"],
-        gene_order=fx["gene_order"],
-        raw_data_sha256=_RAW,
-    )
+    with _ignore_anndata_str_index_warning():
+        return build_fold_job(
+            method=method,
+            seed=seed,
+            fold_index=fold_index,
+            oof_manifest=fx["manifest"],
+            inputs=fx["inputs"],
+            outcome_store=fx["store"],
+            response_artifact=fx["response_artifact"],
+            base_fit_role_spec=fx["base_spec"],
+            fold_artifact_dir=fx["fold_dir"],
+            gene_order=fx["gene_order"],
+            raw_data_sha256=_RAW,
+        )
 
 
 # --------------------------------------------------------------------------- #
@@ -844,7 +870,8 @@ def _entry(fx, adapters, config, **overrides):
         raw_data_sha256=_RAW,
     )
     kwargs.update(overrides)
-    return development_seed_variability(**kwargs)
+    with _ignore_anndata_str_index_warning():
+        return development_seed_variability(**kwargs)
 
 
 # --------------------------------------------------------------------------- #
