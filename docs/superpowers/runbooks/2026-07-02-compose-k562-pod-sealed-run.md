@@ -90,6 +90,14 @@ driver는 `Phase2aInputs`, development/sealed stores, manifest, response artifac
 `preflight`와 `phase2a`는 seal handle을 생성하거나 열 수 없어야 한다. `phase2b`는 Phase-2a CONTINUE,
 frozen bundle checksum, clean tree와 confirmation token을 재검증해야 한다.
 
+> **Note (2026-07-07, sub-project C 설계 조정).** (1) 실행 순서: `run_preflight`은 phase2a가 만든 frozen
+> bundle(`futility_status=='CONTINUE'`)을 검증하므로 `preflight` subcommand는 **phase2a 뒤에** 실행된다
+> (canonical **phase2a → preflight → phase2b**). 위 나열 순서는 subcommand 목록일 뿐 실행 순서가 아니다.
+> (2) 위 stage-1 입력(`Phase2aInputs`/fit-role/response/manifest)은 driver 상위의 **PREPARE**(별도
+> sub-project)가 만들며 §3 step 8처럼 pre-built로 sync된다. `scripts/compose/build_fit_role_artifact.py`의
+> "source/split assembly = sub-project C" 문구는 stale이다. 설계 계약:
+> `docs/superpowers/specs/2026-07-07-compose-production-driver-design.md`.
+
 ### 2.4 내구 artifact와 보고
 
 - pre-access snapshot 외에 terminal 전이가 반영된 **최종 ledger**를 write-once 파일로 내보내고
