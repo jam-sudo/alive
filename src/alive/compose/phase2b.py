@@ -62,7 +62,13 @@ from alive.compose.config2 import (
 )
 from alive.compose.durable import finalize_phase2b_durable_outputs
 from alive.compose.freeze import FrozenPredictionBundle
-from alive.compose.outcome_store import ComposeOutcomeStore, ObservedPair, SealedAccessClaim
+from alive.compose.outcome_store import (
+    _FIXTURE_CORPUS_ALLOWLIST,
+    ComposeOutcomeStore,
+    FixtureOutcomeStore,
+    ObservedPair,
+    SealedAccessClaim,
+)
 from alive.compose.preflight import EvaluationLock, run_preflight
 from alive.compose.provenance2 import (
     PRE_ACCESS_LEDGER_FILENAME,
@@ -930,8 +936,19 @@ def _canonical_pair(pair) -> tuple[str, str]:
 
 
 def _is_fixture_store(outcome_store: object) -> bool:
-    """Return ``True`` if the store carries the synthetic-fixture marker."""
-    return getattr(outcome_store, "_compose_fixture_marker", False) is True
+    """Return ``True`` only for a sanctioned synthetic-fixture store.
+
+    A store is a fixture store IFF it is a :class:`FixtureOutcomeStore` AND its
+    carried corpus attestation is in the committed allowlist. BOTH conditions are
+    required: a raw ``FixtureOutcomeStore`` built with a non-allowlisted
+    attestation does NOT pass, and setting any attribute on a real
+    :class:`ComposeOutcomeStore` can never make it read as a fixture store (the
+    old spoofable ``_compose_fixture_marker`` boolean is retired).
+    """
+    return (
+        isinstance(outcome_store, FixtureOutcomeStore)
+        and getattr(outcome_store, "fixture_corpus_attestation", None) in _FIXTURE_CORPUS_ALLOWLIST
+    )
 
 
 def _assert_fixture_payload(bundle: FrozenPredictionBundle) -> None:

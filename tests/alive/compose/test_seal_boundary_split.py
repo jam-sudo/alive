@@ -192,12 +192,16 @@ def _open_seal(
 
 
 class _MaterializeBoom:
-    """Wraps a real store; ``claim_sealed_access`` burns the audit, materialise fails."""
+    """Wraps a real store; ``claim_sealed_access`` burns the audit, materialise fails.
+
+    Driven DIRECTLY against the terminal (not via ``run_phase2b_fixture``), so it is
+    never routed through ``_is_fixture_store`` and needs no fixture attestation — a
+    plain duck-typed wrapper is sufficient here.
+    """
 
     def __init__(self, inner: ComposeOutcomeStore) -> None:
         self._inner = inner
         self._audit_path = inner._audit_path
-        self._compose_fixture_marker = True
 
     def claim_sealed_access(self, run_id, pair_ids) -> SealedAccessClaim:
         return self._inner.claim_sealed_access(run_id, pair_ids)

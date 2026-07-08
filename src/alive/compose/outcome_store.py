@@ -50,6 +50,7 @@ ComposeOutcomeStore
 
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -151,6 +152,63 @@ class SealedAccessClaim:
     request_checksum: str
     manifest_checksum: str
     pair_ids: tuple[PairID, ...]
+
+
+# ---------------------------------------------------------------------------
+# Synthetic-fixture corpus attestation + committed allowlist
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class FixtureCorpusAttestation:
+    """Immutable identity of a sanctioned synthetic-fixture corpus.
+
+    Carried by a :class:`FixtureOutcomeStore` and validated against the committed
+    :data:`_FIXTURE_CORPUS_ALLOWLIST` by :func:`build_fixture_outcome_store` — the
+    only sanctioned fixture-store constructor. It replaces the old mutable
+    ``_compose_fixture_marker`` boolean (which any caller could set on a REAL
+    store), so fixture-vs-scientific routing is a type + allowlist decision, not a
+    spoofable attribute.
+
+    Parameters
+    ----------
+    corpus_id : str
+        Stable identifier of the synthetic fixture corpus.
+    source_sha256 : str
+        Committed digest identifying the synthetic-source bytes of the corpus.
+    builder_code_sha256 : str
+        Committed digest identifying the fixture-builder code that produced it.
+    """
+
+    corpus_id: str
+    source_sha256: str
+    builder_code_sha256: str
+
+
+# C0-forward-declared synthetic-fixture corpus identity. Sub-project C (§6) will
+# replace these with the real synthetic-source / builder digests and wire
+# build_fixture_outcome_store to compute source_sha256 from the passed source and
+# compare (fixture-vs-real-source binding). At C0 the factory only checks that the
+# passed triple is one of these committed allowlisted triples; it does NOT yet
+# digest the actual source bytes.
+_FIXTURE_CORPUS_V1_SOURCE_SHA = hashlib.sha256(
+    b"compose_c_fixture_v1::synthetic-source::c0-forward-declared"
+).hexdigest()
+_FIXTURE_CORPUS_V1_BUILDER_SHA = hashlib.sha256(
+    b"compose_c_fixture_v1::builder-code::c0-forward-declared"
+).hexdigest()
+
+#: The single forward-declared allowlisted fixture corpus (see note above).
+FIXTURE_CORPUS_V1 = FixtureCorpusAttestation(
+    corpus_id="compose_c_fixture_v1",
+    source_sha256=_FIXTURE_CORPUS_V1_SOURCE_SHA,
+    builder_code_sha256=_FIXTURE_CORPUS_V1_BUILDER_SHA,
+)
+
+#: Committed allowlist of sanctioned synthetic fixture corpora (extend as new
+#: fixture corpora are added). :func:`build_fixture_outcome_store` fails closed
+#: for any attestation triple not in this set.
+_FIXTURE_CORPUS_ALLOWLIST: frozenset[FixtureCorpusAttestation] = frozenset({FIXTURE_CORPUS_V1})
 
 
 # ---------------------------------------------------------------------------
@@ -874,6 +932,110 @@ class ComposeOutcomeStore:
                 "the seal may be opened exactly once"
             ) from exc
         return record
+
+
+# ---------------------------------------------------------------------------
+# Synthetic-fixture store subtype + sanctioned constructor
+# ---------------------------------------------------------------------------
+
+
+class FixtureOutcomeStore(ComposeOutcomeStore):
+    """A synthetic-fixture sealed store — the ONLY store type the bounded fixture
+    Phase-2b path (:func:`alive.compose.phase2b.run_phase2b_fixture`) accepts.
+
+    Built solely by :func:`build_fixture_outcome_store`, which validates the
+    carried :class:`FixtureCorpusAttestation` against the committed
+    :data:`_FIXTURE_CORPUS_ALLOWLIST`. There is no mutable marker: fixture-vs-
+    scientific routing is decided by ``isinstance`` + an allowlisted attestation,
+    so setting an attribute on a REAL :class:`ComposeOutcomeStore` can never make
+    it read as a fixture store. The subtype ADDS only the attestation; the seal
+    boundary (:class:`ComposeOutcomeStore`) is inherited unchanged.
+
+    Parameters
+    ----------
+    *args
+        Positional arguments forwarded to :class:`ComposeOutcomeStore`
+        (``pair_index``, ``source``, ``manifest``).
+    fixture_corpus_attestation : FixtureCorpusAttestation
+        The corpus identity this fixture store attests to.
+    **kwargs
+        Keyword arguments forwarded to :class:`ComposeOutcomeStore` (e.g.
+        ``audit_path``).
+    """
+
+    def __init__(
+        self,
+        *args,
+        fixture_corpus_attestation: FixtureCorpusAttestation,
+        **kwargs,
+    ) -> None:
+        super().__init__(*args, **kwargs)
+        object.__setattr__(self, "_fixture_corpus_attestation", fixture_corpus_attestation)
+
+    @property
+    def fixture_corpus_attestation(self) -> FixtureCorpusAttestation:
+        """The validated synthetic-fixture corpus attestation this store carries."""
+        return self._fixture_corpus_attestation
+
+
+def build_fixture_outcome_store(
+    pair_index: Mapping[PairID, np.ndarray],
+    source: _anndata.AnnData | str | Path | object,
+    manifest: Mapping,
+    *,
+    audit_path: str | Path,
+    corpus_id: str,
+    source_sha256: str,
+    builder_code_sha256: str,
+) -> FixtureOutcomeStore:
+    """Build the ONLY sanctioned :class:`FixtureOutcomeStore`.
+
+    Validates the ``(corpus_id, source_sha256, builder_code_sha256)`` triple
+    against the committed :data:`_FIXTURE_CORPUS_ALLOWLIST` and FAILS CLOSED
+    (:class:`ComposeSealingError`) if it is not allowlisted. This is the single
+    place a fixture store may be minted, so the bounded fixture Phase-2b path can
+    trust the type without a spoofable marker.
+
+    Parameters
+    ----------
+    pair_index, source, manifest, audit_path
+        Forwarded verbatim to :class:`ComposeOutcomeStore` (see its docstring).
+    corpus_id : str
+        Identifier of the synthetic fixture corpus; must be allowlisted.
+    source_sha256 : str
+        Committed synthetic-source digest; the full triple must match an
+        allowlisted entry.
+    builder_code_sha256 : str
+        Committed fixture-builder-code digest; the full triple must match an
+        allowlisted entry.
+
+    Returns
+    -------
+    FixtureOutcomeStore
+        A fixture store carrying the validated attestation.
+
+    Raises
+    ------
+    ComposeSealingError
+        If the attestation triple is not in the committed allowlist.
+    """
+    attestation = FixtureCorpusAttestation(
+        corpus_id=corpus_id,
+        source_sha256=source_sha256,
+        builder_code_sha256=builder_code_sha256,
+    )
+    if attestation not in _FIXTURE_CORPUS_ALLOWLIST:
+        raise ComposeSealingError(
+            f"fixture corpus {attestation!r} is not in the committed allowlist; "
+            "build_fixture_outcome_store refuses to mint an unattested fixture store"
+        )
+    return FixtureOutcomeStore(
+        pair_index,
+        source,
+        manifest,
+        audit_path=audit_path,
+        fixture_corpus_attestation=attestation,
+    )
 
 
 # ---------------------------------------------------------------------------
