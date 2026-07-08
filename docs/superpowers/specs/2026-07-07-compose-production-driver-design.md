@@ -209,7 +209,10 @@ ResolvedRunSpec **안에 저장하지 않아** file-SHA 순환참조를 피하�
   `{response_space_checksum, factor_checksum, manifest_checksum, environment_checksum,
   data_card_checksum, raw_data_checksum, sequence_mapping_checksum}`
 - method별 worker block: `env_python`, `worker_script` path+SHA, `import_name`, `worker_config` path+SHA,
-  `resource_manifest` path+SHA, `requirements_lock` path+SHA, 그리고 §5의 6-field identity lock
+  `resource_manifest` path+SHA, `requirements_lock` path+SHA, `adapter_artifact` path+SHA, 그리고 §5의 6-field
+  identity lock. `adapter_artifact`는 launch되는 `worker_script`와 **구분되는** adapter/model 콘텐츠이며
+  §5의 `adapter_sha256` 출처다(worker self-report의 adapter identity와 대조; runtime은 launched
+  `worker_script` 파일을 별도 `worker_sha256`으로 검증한다, `baseline_subprocess.py`)
 - scientific 전용: activation requirement→evidence path+`sha256:` digest exact roster, dependency manifest,
   device, precision, `sealed_input={source_path, expected_file_sha256, snapshot_id, audit_path}`. Fixture
   mode에서는 이 block이 없어야 한다
@@ -397,14 +400,18 @@ value일 뿐 ground truth 자체가 아니다. Worker self-report가 이 lock에
 | `prediction_representation` | config `baseline_representations[name]` | 로컬(committed config) |
 | `environment_lock_sha256` | 실제 requirements lock bytes를 driver가 stream-hash | 로컬/pod |
 | `adapter_version` | 별도 committed adapter manifest의 exact version | 로컬/pod |
-| `adapter_sha256` | 실제 worker/adapter code bytes를 driver가 stream-hash | 로컬/pod |
+| `adapter_sha256` | 실제 **`adapter_artifact`** bytes를 driver가 stream-hash(launched `worker_script`가 아님 — 그것은 runtime이 `worker_sha256`으로 별도 검증) | 로컬/pod |
 | `config_sha256` | 실제 worker-config bytes를 driver가 stream-hash | 로컬/pod |
 | `resource_sha256` | 실제 resource-manifest bytes를 driver가 stream-hash | 로컬/pod |
 
 현재 dependency manifest에는 `adapter_version`이 없으므로 sub-project B가 versioned adapter manifest를
-추가하기 전 scientific assembler는 fail-closed한다. Fixture ResolvedRunSpec도 stub 선언값만 믿지 않고
-`scripts/baselines/stub_worker.py`와 stub config/resource/lock bytes를 직접 해시한다. 선언값·실제 digest·worker
-self-report 세 값이 모두 같아야 한다.
+추가하기 전 scientific assembler는 fail-closed한다. `adapter_sha256`은 **launched `worker_script`가 아니라
+별도 `adapter_artifact` bytes를 해시**한다: committed runtime(`baseline_subprocess.py`)은 lock의
+`adapter_sha256`을 worker self-report의 adapter identity(`stub_worker.py`의 `_ADAPTER_SHA256`)와 대조하고,
+launched `worker_script` 파일은 **별개 field `worker_sha256`으로** 재해시·검증한다 — 둘은 서로 다른 identity다.
+Fixture ResolvedRunSpec도 stub 선언값만 믿지 않고 `adapter_artifact`(bytes가 stub의 self-reported
+`_ADAPTER_SHA256`와 일치하도록 fixture builder가 기록)·stub config/resource/requirements-lock bytes를 직접
+해시한다. 선언값·실제 digest·worker self-report 세 값이 모두 같아야 한다.
 
 ## 6. fixture builder + mini e2e
 
