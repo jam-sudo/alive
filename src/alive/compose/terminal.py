@@ -867,6 +867,125 @@ class Phase2bTerminal:
         self._state = TerminalState.ABORTED_AFTER_SEAL
 
     # ------------------------------------------------------------------
+    # Recovery-sanctioned entry — the audit=1 / terminal=0 post-crash state
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def recover_aborted_after_seal(
+        cls,
+        run_dir: str | Path,
+        *,
+        ledger: RunLedger,
+        audit_path: str | Path,
+        protocol: str,
+        run_id: str,
+        pre_access_ledger_sha256: str,
+        pre_access_provenance_checksum: str,
+        exception: BaseException,
+        stage: str,
+    ) -> None:
+        """Recovery-ONLY terminal write for the ``audit=1`` / ``terminal=0`` crash state.
+
+        A hard process death AFTER the durable seal claim
+        (:meth:`~alive.compose.outcome_store.ComposeOutcomeStore.claim_sealed_access`)
+        burns the durable audit (``sealed_access_count >= 1``) but, if it lands before
+        any terminal artifact is written, leaves the worst-case state: a consumed seal
+        with NO durable terminal record. The FORWARD lifecycle (:meth:`acquire` ->
+        :meth:`attempt_access` -> :meth:`confirm_durable_access`) is DESIGNED to refuse
+        this state — :meth:`acquire` rejects a burned audit and holds a never-unlinked
+        exclusive lock, and :meth:`aborted` is reachable only from ``ACCESS_CLAIMED``,
+        itself reachable only through :meth:`acquire`.
+
+        This classmethod is the SANCTIONED, encapsulated recovery entry: it writes
+        EXCLUSIVELY one ``ABORTED_AFTER_SEAL`` terminal recording the already-consumed
+        seal, opens / reopens NO seal, constructs NO outcome store, re-scores nothing,
+        and creates NO exclusive lock. The seal count is auto-derived from the on-disk
+        burned audit via :meth:`_sealed_access_count` (the TRUE consumed count, ``>= 1``,
+        never asserted ``0``); the durable ``seal_audit_reference`` is re-derived the SAME
+        way the outcome store did (``sha256_json`` over the FIRST parsed audit record), a
+        verifiable proof of consumption. The whole-body ``terminal_payload_checksum`` is
+        written by :meth:`_write_terminal` through the shared canonicalizer, never
+        hand-computed. There is NO ``COMPLETE`` / ``INVALID`` path.
+
+        Fails CLOSED (:class:`TerminalError`) when a terminal artifact already exists
+        (the run already has a durable record — nothing to recover) or when the burned
+        audit has NO records (the seal was never consumed, so this is a pre-access
+        failure, not an ``ABORTED_AFTER_SEAL`` state).
+
+        Parameters
+        ----------
+        run_dir : str or Path
+            The run directory holding the burned audit and receiving the terminal.
+        ledger : RunLedger
+            The pre-access run ledger (``RunLedger.read`` of the persisted pre-access
+            ledger); the terminal artifact's SHA is recorded into it AFTER the file
+            verifies (an in-memory record — the on-disk pre-access ledger is untouched).
+        audit_path : str or Path
+            The resolved burned-audit JSONL path (``<run_dir>/audit.jsonl``); the true
+            ``sealed_access_count`` and the durable ``seal_audit_reference`` are read
+            from it.
+        protocol : str
+            The run protocol (sourced upstream from the self-checksum-verified
+            seed-variability report — ``RunLedger`` carries no protocol).
+        run_id : str
+            The run identifier (sourced from the pre-access ledger).
+        pre_access_ledger_sha256 : str
+            SHA-256 of the persisted pre-access ledger file.
+        pre_access_provenance_checksum : str
+            The persisted pre-access provenance subset checksum
+            (``pre_access_ledger.artifact_sha(PRE_ACCESS_PROVENANCE_ARTIFACT)``); the
+            durable finalizer cross-checks the terminal against exactly this value.
+        exception : BaseException
+            The (fixed) exception recorded as the abort cause.
+        stage : str
+            The (fixed) stage label recorded on the abort artifact.
+
+        Raises
+        ------
+        TerminalError
+            If a terminal artifact already exists, or if the burned audit has no
+            durable records.
+        """
+        terminal = cls(
+            run_dir,
+            ledger=ledger,
+            audit_path=audit_path,
+            protocol=protocol,
+            run_id=run_id,
+            pre_access_ledger_sha256=pre_access_ledger_sha256,
+            pre_access_provenance_checksum=pre_access_provenance_checksum,
+        )
+        # Fail-closed recovery guard 1: a terminal already exists -> nothing to recover.
+        existing = [
+            name for name in terminal._artifact_names() if (terminal._run_dir / name).exists()
+        ]
+        if existing:
+            raise TerminalError(
+                f"recover_aborted_after_seal refused: terminal artifact(s) already "
+                f"present {existing!r}; the run already has a durable terminal record — "
+                "nothing to recover."
+            )
+        # Fail-closed recovery guard 2: no burned audit records -> the seal was never
+        # consumed, so this is a pre-access failure, not an ABORTED_AFTER_SEAL state.
+        if terminal._audit_path is None or not terminal._audit_has_records():
+            raise TerminalError(
+                "recover_aborted_after_seal refused: no durable seal-audit records at "
+                f"{str(terminal._audit_path)!r}; the seal was not consumed, so this is a "
+                "pre-access failure, not an ABORTED_AFTER_SEAL state (fail closed)."
+            )
+        # Derive the durable audit reference the SAME way ComposeOutcomeStore._audit_reference
+        # did — sha256_json over the FIRST parsed audit record — a verifiable proof of the
+        # consumed seal (even though _finalize_aborted_terminal does not re-derive it).
+        terminal._audit_reference = sha256_json(terminal._first_audit_record())
+        # Sanctioned bypass: the seal is ALREADY durably burned on disk, so enter
+        # ACCESS_CLAIMED directly (the forward guards would refuse this legitimate
+        # post-crash state). This is ENCAPSULATED in the state machine — durable.py never
+        # pokes terminal state. From ACCESS_CLAIMED, aborted() writes the sole terminal
+        # (its atomic write-once install is the anti-double-write guard).
+        terminal._state = TerminalState.ACCESS_CLAIMED
+        terminal.aborted(exception=exception, stage=stage)
+
+    # ------------------------------------------------------------------
     # Protection boundary — guarantees a terminal artifact on EVERY exit
     # ------------------------------------------------------------------
 
@@ -1152,6 +1271,39 @@ class Phase2bTerminal:
             raise TerminalError(
                 f"{action}() is only valid from {expected.value!r}; current state is {current!r}."
             )
+
+    def _first_audit_record(self) -> dict:
+        """Return the FIRST durable audit record parsed from ``self._audit_path``.
+
+        Reads the first non-blank JSONL line and parses it as JSON — the record the
+        :class:`~alive.compose.outcome_store.ComposeOutcomeStore` wrote at
+        ``claim_sealed_access``. Its ``sha256_json`` reproduces the store's
+        ``_audit_reference`` byte-for-byte (both hash the record under sorted keys).
+        Fails closed if the audit path is unset / absent / empty, or the first record
+        is not valid JSON.
+
+        Raises
+        ------
+        TerminalError
+            If there is no readable durable audit record to reference.
+        """
+        if self._audit_path is None or not self._audit_path.exists():
+            raise TerminalError(
+                "recover_aborted_after_seal: no durable seal audit to read a reference from."
+            )
+        for line in self._audit_path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            try:
+                return json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise TerminalError(
+                    f"first durable audit record at {str(self._audit_path)!r} is not valid "
+                    f"JSON: {exc} (fail closed)."
+                ) from exc
+        raise TerminalError(
+            f"durable seal audit {str(self._audit_path)!r} has no records to reference."
+        )
 
     def _audit_has_records(self) -> bool:
         """Return ``True`` if the seal audit file exists and has >= 1 JSON record.

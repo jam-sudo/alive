@@ -1049,3 +1049,142 @@ def test_recover_rejects_seed_self_checksum_mismatch(tmp_path: Path) -> None:
     scenario = _build_scenario(tmp_path, break_seed_self_checksum=True)
     with pytest.raises(DurableLedgerError):
         recover_phase2b_durable_outputs(run_dir=scenario["run_dir"])
+
+
+# ---------------------------------------------------------------------------
+# Task 7 (C0 #5): recover synthesizes the missing ABORTED_AFTER_SEAL terminal
+# for the audit=1 / terminal=0 post-crash state via the recovery-sanctioned
+# Phase2bTerminal.recover_aborted_after_seal, then finalizes the reduced abort
+# publish. A hard process death AFTER claim_sealed_access burns the durable
+# audit but may land before any terminal is written; recover must record the
+# already-consumed seal. Reuses the module's pre-access-ledger / seed-report
+# builders; the burned audit lives at the PRODUCTION location run_dir/audit.jsonl.
+# ---------------------------------------------------------------------------
+
+
+def _write_burned_audit(run_dir: Path, *, records: int = 1) -> Path:
+    """Write a burned seal audit at run_dir/audit.jsonl (the production location)."""
+    audit_path = run_dir / "audit.jsonl"
+    lines = "".join(
+        json.dumps(
+            {"run_id": _RUN_ID, "pair_ids": [], "seq": i}, sort_keys=True, separators=(",", ":")
+        )
+        + "\n"
+        for i in range(records)
+    )
+    audit_path.write_text(lines, encoding="utf-8")
+    return audit_path
+
+
+def _build_audit_only_scenario(tmp_path: Path, *, audit_records: int = 1) -> dict:
+    """A run_dir with a burned audit + pre-access ledger + seed report + ZERO terminals.
+
+    Exactly the audit=1 / terminal=0 post-crash state. When ``audit_records == 0`` no
+    audit file is written (the no-seal-consumed fail-closed case).
+    """
+    run_dir = tmp_path / "run"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    provenance = _provenance()
+    seed_path, seed_byte_sha, seed_report_checksum = _write_seed_variability(run_dir)
+    pre_access_path = _persist_pre_access_ledger(
+        run_dir, provenance=provenance, seed_byte_sha=seed_byte_sha
+    )
+    if audit_records > 0:
+        _write_burned_audit(run_dir, records=audit_records)
+    return {
+        "run_dir": run_dir,
+        "pre_access_path": pre_access_path,
+        "seed_path": seed_path,
+        "seed_report_checksum": seed_report_checksum,
+        "provenance": provenance,
+    }
+
+
+def test_recover_synthesizes_aborted_from_audit_only(tmp_path: Path) -> None:
+    """audit=1 / terminal=0: recover synthesizes the missing ABORTED_AFTER_SEAL terminal
+    (recording the consumed seal) and publishes the reduced durable set + commit marker,
+    opening NO seal."""
+    scenario = _build_audit_only_scenario(tmp_path, audit_records=1)
+    run_dir = scenario["run_dir"]
+    assert not (run_dir / Phase2bTerminal.ABORTED_ARTIFACT).exists()
+
+    result = recover_phase2b_durable_outputs(run_dir=run_dir)
+
+    assert result.terminal_state == "ABORTED_AFTER_SEAL"
+    assert result.registered_summary_path is None
+
+    aborted_path = run_dir / Phase2bTerminal.ABORTED_ARTIFACT
+    assert aborted_path.is_file()
+    assert not (run_dir / REGISTERED_SUMMARY_FILENAME).exists()
+    assert (run_dir / FINAL_LEDGER_FILENAME).is_file()
+    marker_path = run_dir / DURABLE_COMMIT_FILENAME
+    assert marker_path.is_file()
+
+    # The synthesized terminal records the already-consumed seal.
+    body = json.loads(aborted_path.read_text(encoding="utf-8"))
+    assert body["terminal_state"] == "ABORTED_AFTER_SEAL"
+    assert body["sealed_access_count"] >= 1
+    assert body["seal_audit_reference"]  # non-empty, derived from the burned audit
+    assert body["audit_reference"] == body["seal_audit_reference"]
+    assert body["registered_results_status"] == "NOT_AVAILABLE_DUE_TO_ABORT"
+    assert body["protocol"] == _PROTOCOL
+    assert body["run_id"] == _RUN_ID
+
+    # The reduced marker: ABORTED, NO registered_summary, self-checksum recomputes,
+    # binds the on-disk final ledger + pre-access + seed SHAs.
+    marker = json.loads(marker_path.read_text(encoding="utf-8"))
+    assert marker["terminal_state"] == "ABORTED_AFTER_SEAL"
+    assert "registered_summary" not in marker
+    assert marker["terminal"]["filename"] == Phase2bTerminal.ABORTED_ARTIFACT
+    assert marker["terminal"]["sha256"] == _file_sha(aborted_path)
+    assert marker["final_ledger"]["sha256"] == _file_sha(result.final_ledger_path)
+    assert marker["pre_access_ledger"]["sha256"] == _file_sha(scenario["pre_access_path"])
+    assert marker["seed_variability"]["sha256"] == _file_sha(scenario["seed_path"])
+    core = {k: v for k, v in marker.items() if k != "commit_checksum"}
+    assert sha256_json(core) == marker["commit_checksum"] == result.commit_checksum
+
+
+def test_recover_aborted_from_audit_only_is_byte_identical_idempotent(tmp_path: Path) -> None:
+    """A second recover sees the now-1-terminal + marker → verify-only: the synthesized
+    terminal, the final ledger and the marker are byte-identical and never rewritten."""
+    scenario = _build_audit_only_scenario(tmp_path, audit_records=1)
+    run_dir = scenario["run_dir"]
+
+    first = recover_phase2b_durable_outputs(run_dir=run_dir)
+    aborted_path = run_dir / Phase2bTerminal.ABORTED_ARTIFACT
+    aborted_bytes = aborted_path.read_bytes()
+    aborted_inode = aborted_path.stat().st_ino
+    ledger_bytes = first.final_ledger_path.read_bytes()
+    ledger_inode = first.final_ledger_path.stat().st_ino
+    marker_bytes = first.commit_marker_path.read_bytes()
+    marker_inode = first.commit_marker_path.stat().st_ino
+
+    second = recover_phase2b_durable_outputs(run_dir=run_dir)
+
+    assert second.terminal_state == "ABORTED_AFTER_SEAL"
+    assert second.registered_summary_path is None
+    assert second.commit_checksum == first.commit_checksum
+    # Nothing rewritten: identical bytes AND identical inodes across the board.
+    assert aborted_path.read_bytes() == aborted_bytes
+    assert aborted_path.stat().st_ino == aborted_inode
+    assert first.final_ledger_path.read_bytes() == ledger_bytes
+    assert first.final_ledger_path.stat().st_ino == ledger_inode
+    assert first.commit_marker_path.read_bytes() == marker_bytes
+    assert first.commit_marker_path.stat().st_ino == marker_inode
+
+
+def test_recover_still_fails_closed_with_no_audit_and_no_terminal(tmp_path: Path) -> None:
+    """Pre-access ledger + seed present, but the burned audit has 0 records AND there are
+    0 terminals: the seal was never consumed, so recover fails closed (no synthesized
+    terminal, no marker) rather than fabricating an ABORTED_AFTER_SEAL."""
+    scenario = _build_audit_only_scenario(tmp_path, audit_records=0)
+    run_dir = scenario["run_dir"]
+    assert not (run_dir / "audit.jsonl").exists()
+    assert not (run_dir / Phase2bTerminal.ABORTED_ARTIFACT).exists()
+
+    with pytest.raises(DurableLedgerError):
+        recover_phase2b_durable_outputs(run_dir=run_dir)
+
+    # Fail closed: nothing synthesized, no durable marker.
+    assert not (run_dir / Phase2bTerminal.ABORTED_ARTIFACT).exists()
+    assert not (run_dir / DURABLE_COMMIT_FILENAME).exists()

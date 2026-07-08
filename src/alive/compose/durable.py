@@ -70,6 +70,7 @@ from alive.compose.terminal import (
     _STATE_TERMINAL_FIELDS,
     TERMINAL_PAYLOAD_CHECKSUM_FIELD,
     Phase2bTerminal,
+    TerminalError,
     TerminalState,
     _assert_no_raw_outcomes,
     canonicalize_terminal_checksum_input,
@@ -79,8 +80,15 @@ from alive.provenance import (
     DuplicateArtifactError,
     LedgerError,
     RunLedger,
+    sha256_file,
     sha256_json,
 )
+
+#: The durable sealed-access audit filename (a direct child of the run dir), written
+#: by :class:`~alive.compose.outcome_store.ComposeOutcomeStore` at ``claim_sealed_access``
+#: (see :mod:`alive.cli`). Recovery reads it to synthesize the missing
+#: ``ABORTED_AFTER_SEAL`` terminal for the ``audit=1`` / ``terminal=0`` crash state.
+SEAL_AUDIT_FILENAME = "audit.jsonl"
 
 #: Published derived-file names (all direct children of the run dir).
 REGISTERED_SUMMARY_FILENAME = "phase2b_registered_summary.json"
@@ -318,17 +326,17 @@ def _resolve_run_dir(run_dir: str | Path) -> Path:
     return run_dir_path.resolve()
 
 
-def _scan_single_terminal(run_dir_resolved: Path) -> str:
-    """Independently scan ``run_dir`` for EXACTLY ONE terminal artifact (spec §3).
+def _scan_terminals(run_dir_resolved: Path) -> list[str]:
+    """Independently scan ``run_dir`` for terminal artifacts (0, 1 or more; spec §3).
 
     Iterates the fixed terminal-filename roster, refusing a symlink at any roster
-    name, and returns the sole terminal filename. 0 or ≥2 terminals fail closed —
-    the finalizer/recovery never trusts a caller-supplied path alone.
+    name, and returns the roster names present as regular files (in sorted-roster
+    order). The finalizer/recovery never trusts a caller-supplied path alone.
 
     Raises
     ------
     DurableLedgerError
-        On a terminal-named symlink, an un-stat-able candidate, or a count != 1.
+        On a terminal-named symlink or an un-stat-able candidate.
     """
     scanned: list[str] = []
     for name in sorted(_TERMINAL_FILENAMES):
@@ -347,6 +355,21 @@ def _scan_single_terminal(run_dir_resolved: Path) -> str:
             ) from exc
         if stat.S_ISREG(cst.st_mode):
             scanned.append(name)
+    return scanned
+
+
+def _scan_single_terminal(run_dir_resolved: Path) -> str:
+    """Independently scan ``run_dir`` for EXACTLY ONE terminal artifact (spec §3).
+
+    Thin wrapper over :func:`_scan_terminals` enforcing a count of exactly 1 and
+    returning the sole terminal filename. 0 or ≥2 terminals fail closed.
+
+    Raises
+    ------
+    DurableLedgerError
+        On a terminal-named symlink, an un-stat-able candidate, or a count != 1.
+    """
+    scanned = _scan_terminals(run_dir_resolved)
     if len(scanned) != 1:
         raise DurableLedgerError(
             f"expected EXACTLY ONE terminal artifact in {str(run_dir_resolved)!r}; "
@@ -1166,6 +1189,97 @@ def _verify_only_recover(
     )
 
 
+def _synthesize_aborted_after_seal_terminal(run_dir_resolved: Path) -> None:
+    """Synthesize the missing ``ABORTED_AFTER_SEAL`` terminal for the audit=1/terminal=0 state.
+
+    A hard process death AFTER the durable seal claim burns
+    ``<run_dir>/audit.jsonl`` but may land before any terminal is written, leaving a
+    consumed seal with no durable terminal record. This routes the on-disk recovery
+    inputs (the persisted pre-access ledger for the two provenance identity anchors +
+    run id, and the self-checksum-verified seed-variability report for the protocol —
+    :class:`~alive.provenance.RunLedger` carries no protocol) into the SANCTIONED
+    :meth:`~alive.compose.terminal.Phase2bTerminal.recover_aborted_after_seal`, which
+    writes the sole ``ABORTED_AFTER_SEAL`` terminal recording the already-consumed seal.
+    It opens NO seal, constructs NO outcome store and creates NO exclusive lock; the
+    seal count + durable audit reference are derived from the burned audit.
+
+    The two pre-access anchors are bound to EXACTLY the values
+    :func:`_finalize_aborted_terminal` cross-checks: ``pre_access_ledger_sha256`` is the
+    on-disk pre-access ledger file SHA and ``pre_access_provenance_checksum`` is the
+    persisted pre-access provenance subset checksum (``artifact_sha`` of
+    :data:`~alive.compose.provenance2.PRE_ACCESS_PROVENANCE_ARTIFACT`). Every read is
+    wrapped so a missing / invalid pre-access ledger, a missing provenance subset
+    checksum, a tampered / protocol-less seed report, or a burned audit with no records
+    fails CLOSED with :class:`DurableLedgerError` — no terminal is fabricated when the
+    seal was not consumed.
+
+    Raises
+    ------
+    DurableLedgerError
+        On any missing / invalid recovery input, or if the burned audit has no records.
+    """
+    pre_access_path = run_dir_resolved / PRE_ACCESS_LEDGER_FILENAME
+    try:
+        pre_access = RunLedger.read(pre_access_path)
+    except LedgerError as exc:
+        raise DurableLedgerError(
+            f"recover: pre-access ledger {str(pre_access_path)!r} is absent or invalid; "
+            "cannot synthesize an ABORTED_AFTER_SEAL terminal for the audit-only crash "
+            "state (fail closed)."
+        ) from exc
+    try:
+        pre_access_provenance_checksum = pre_access.artifact_sha(PRE_ACCESS_PROVENANCE_ARTIFACT)
+    except LedgerError as exc:
+        raise DurableLedgerError(
+            "recover: pre-access ledger is missing the pre-access provenance subset "
+            f"checksum {PRE_ACCESS_PROVENANCE_ARTIFACT!r}; cannot synthesize (fail closed)."
+        ) from exc
+    run_id = pre_access.to_dict().get("run_id")
+    if not isinstance(run_id, str) or not run_id.strip():
+        raise DurableLedgerError(
+            "recover: pre-access ledger carries an empty run_id; cannot synthesize an "
+            "attributable ABORTED_AFTER_SEAL terminal (fail closed)."
+        )
+
+    # Protocol comes from the SELF-CHECKSUM-VERIFIED seed report (RunLedger has no
+    # protocol). _read_seed_report_checksum fails closed on a missing / unreadable /
+    # bad-self-checksum report before we read the bound protocol value.
+    seed_path = run_dir_resolved / DEVELOPMENT_SEED_VARIABILITY_FILENAME
+    _read_seed_report_checksum(seed_path)
+    try:
+        seed_doc = json.loads(seed_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:  # pragma: no cover - just validated above
+        raise DurableLedgerError(
+            f"recover: seed-variability report {str(seed_path)!r} is not readable JSON: {exc}"
+        ) from exc
+    protocol = seed_doc.get("protocol") if isinstance(seed_doc, dict) else None
+    if not isinstance(protocol, str) or not protocol.strip():
+        raise DurableLedgerError(
+            f"recover: seed-variability report {str(seed_path)!r} has no usable 'protocol' "
+            "to attribute the synthesized terminal (fail closed)."
+        )
+
+    try:
+        Phase2bTerminal.recover_aborted_after_seal(
+            run_dir_resolved,
+            ledger=pre_access,
+            audit_path=run_dir_resolved / SEAL_AUDIT_FILENAME,
+            protocol=protocol,
+            run_id=run_id,
+            pre_access_ledger_sha256=sha256_file(pre_access_path),
+            pre_access_provenance_checksum=pre_access_provenance_checksum,
+            exception=RuntimeError(
+                "recovered: process death after seal claim, before terminal write"
+            ),
+            stage="recover_audit_only",
+        )
+    except TerminalError as exc:
+        raise DurableLedgerError(
+            "recover: cannot synthesize an ABORTED_AFTER_SEAL terminal for the audit-only "
+            f"crash state: {exc}"
+        ) from exc
+
+
 def recover_phase2b_durable_outputs(*, run_dir: str | Path) -> DurableFinalizeResult:
     """Idempotently recover / complete the durable publish for a run (spec §3.2).
 
@@ -1205,6 +1319,23 @@ def recover_phase2b_durable_outputs(*, run_dir: str | Path) -> DurableFinalizeRe
         cross-check failure.
     """
     run_dir_resolved = _resolve_run_dir(run_dir)
+
+    # --- Task 7 (C0 #5) terminal-count branch: the audit=1 / terminal=0 post-crash
+    # state has NO terminal yet — a process death after claim_sealed_access burned the
+    # durable audit but landed before any terminal was written. Synthesize the sole
+    # missing ABORTED_AFTER_SEAL terminal via the sanctioned recovery entry (opens NO
+    # seal), then fall through to the ordinary single-terminal recovery below (which now
+    # finds exactly 1 and takes the reduced §3.3 abort publish). 0 records / no
+    # pre-access inputs fail closed inside the synthesizer; ≥2 terminals fail closed here.
+    terminals = _scan_terminals(run_dir_resolved)
+    if len(terminals) >= 2:
+        raise DurableLedgerError(
+            f"expected 0 or 1 terminal artifact in {str(run_dir_resolved)!r}; found "
+            f"{sorted(terminals)!r} (fail closed)."
+        )
+    if not terminals:
+        _synthesize_aborted_after_seal_terminal(run_dir_resolved)
+
     terminal_name = _scan_single_terminal(run_dir_resolved)
     terminal_state = _TERMINAL_FILENAME_STATE[terminal_name]
     terminal_path = run_dir_resolved / terminal_name
