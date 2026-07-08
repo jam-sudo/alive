@@ -523,23 +523,34 @@ def _build_provenance(
     response-space / factor / model), the scientific provenance digests, the
     registered seeds and the regime-result checksums.
 
-    On the fixture path the scientific digests are synthetic-empty (they are not
-    real evidence). On the scientific path the run-identity digests
-    (``data_card`` / ``raw_data`` / ``sequence_mapping``) come from the upstream
-    ledger — the same values preflight and the run-id recomputation consume, so
-    there is ONE source of truth — and the remaining scientific digests come from
-    ``inputs``. A scientific run with ``inputs is None`` fails closed (an
-    activated run must supply real evidence, never empty digests).
+    The run-identity digests (``data_card`` / ``raw_data`` /
+    ``sequence_mapping``) come from the upstream ledger on BOTH paths — the same
+    values preflight and the run-id recomputation consume, so there is ONE source
+    of truth and the durable ledger<->provenance cross-check holds actively even
+    on the fixture path. The remaining scientific EVIDENCE digests
+    (processed / feature-bank / dependency-lock / gears / cpa / environment) are
+    synthetic-empty on the fixture path (a fixture is not real evidence); on the
+    scientific path they come from ``inputs``, and a scientific run with
+    ``inputs is None`` fails closed (an activated run must supply real evidence,
+    never empty digests).
 
     ``regime_double`` / ``regime_single`` may be ``None`` to build the pre-access
     record (Change C): the regime-result checksums are then empty, which is
     correct because the pre-access subset excludes them.
     """
     if fixture_execution:
-        data_card_sha256 = ""
-        raw_or_source_sha256 = ""
+        # The run-IDENTITY digests (data_card / raw_data / sequence_mapping) are the
+        # inputs to compute_compose_run_id, so they MUST match the upstream ledger the
+        # run_id was computed from — on BOTH paths (single source of truth = the
+        # ledger; this keeps the durable ledger<->provenance cross-check holding
+        # ACTIVELY, not trivially, on the fixture path). The remaining scientific
+        # EVIDENCE digests (processed / feature_bank / dependency_lock / gears / cpa /
+        # environment) stay empty: a fixture is not real evidence and must never
+        # masquerade as an activated run.
+        data_card_sha256 = _required_digest(ledger, "data_card")
+        raw_or_source_sha256 = _required_digest(ledger, "raw_data")
+        sequence_mapping_sha256 = _required_digest(ledger, "sequence_mapping")
         processed_sha256 = ""
-        sequence_mapping_sha256 = ""
         feature_bank_sha256 = ""
         dependency_lock_sha256 = ""
         gears_revision = ""
@@ -1192,15 +1203,9 @@ def _run_phase2b_core(
         bundle=frozen_bundle,
         pair_manifest=pair_manifest,
         config=config,
-        data_card_digest="data-card-checksum"
-        if fixture_execution
-        else _required_digest(ledger, "data_card"),
-        raw_or_source_digest="raw-data-checksum"
-        if fixture_execution
-        else _required_digest(ledger, "raw_data"),
-        sequence_mapping_digest="sequence-mapping-checksum"
-        if fixture_execution
-        else _required_digest(ledger, "sequence_mapping"),
+        data_card_digest=_required_digest(ledger, "data_card"),
+        raw_or_source_digest=_required_digest(ledger, "raw_data"),
+        sequence_mapping_digest=_required_digest(ledger, "sequence_mapping"),
         ledger=ledger,
         expected_response_dim=expected_response_dim,
     )
@@ -1214,15 +1219,9 @@ def _run_phase2b_core(
     # any mismatch/absence this RAISES, leaving the seal closed.
     recomputed_run_id = recompute_run_id(
         config_digest=config.config_sha256,
-        data_card_digest="data-card-checksum"
-        if fixture_execution
-        else _required_digest(ledger, "data_card"),
-        raw_or_source_sha256="raw-data-checksum"
-        if fixture_execution
-        else _required_digest(ledger, "raw_data"),
-        sequence_mapping_sha256="sequence-mapping-checksum"
-        if fixture_execution
-        else _required_digest(ledger, "sequence_mapping"),
+        data_card_digest=_required_digest(ledger, "data_card"),
+        raw_or_source_sha256=_required_digest(ledger, "raw_data"),
+        sequence_mapping_sha256=_required_digest(ledger, "sequence_mapping"),
     )
     verify_upstream_before_access(
         expected_run_id=lock.run_id,
@@ -1665,9 +1664,11 @@ def _evaluate_inside_boundary(
 def _required_digest(ledger: RunLedger, name: str) -> str:
     """Return a provenance digest from the ledger, raising if absent.
 
-    Used only on the SCIENTIFIC path where the run-identity provenance digests
-    are recorded in the upstream ledger. The fixture path uses the bound
-    synthetic digests directly (they are not real evidence).
+    Used on BOTH the scientific and fixture paths: the run-identity provenance
+    digests (``data_card`` / ``raw_data`` / ``sequence_mapping``) are recorded
+    in the upstream ledger by Phase2a in both modes, so the fixture path
+    recomputes the run id from the SAME ledger-recorded values as the run id was
+    built from (rather than from placeholder digests).
     """
     from alive.provenance import LedgerError
 

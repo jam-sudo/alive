@@ -328,6 +328,9 @@ def _build_ledger(manifest: dict, bundle: FrozenPredictionBundle, cfg) -> RunLed
     ledger = RunLedger(
         run_id=bundle.run_id, config_sha256=cfg.config_sha256, environment=_environment()
     )
+    ledger.record_artifact("data_card", _DATA_CARD)
+    ledger.record_artifact("raw_data", _RAW)
+    ledger.record_artifact("sequence_mapping", _SEQ)
     ledger.record_artifact("pair_manifest", manifest["checksum"])
     ledger.record_artifact("response_space", bundle.response_space_checksum)
     ledger.record_artifact("factor_bank", bundle.factor_checksum)
@@ -493,6 +496,9 @@ def test_preflight_failure_keeps_access_zero_and_no_terminal(tmp_path):
         config_sha256=kit["cfg"].config_sha256,
         environment=_environment(),
     )
+    bad_ledger.record_artifact("data_card", _DATA_CARD)
+    bad_ledger.record_artifact("raw_data", _RAW)
+    bad_ledger.record_artifact("sequence_mapping", _SEQ)
     bad_ledger.record_artifact("pair_manifest", kit["manifest"]["checksum"])
     bad_ledger.record_artifact("response_space", kit["bundle"].response_space_checksum)
     bad_ledger.record_artifact("factor_bank", kit["bundle"].factor_checksum)
@@ -1330,9 +1336,21 @@ def test_build_provenance_fixture_leaves_scientific_digests_empty(tmp_path):
         inputs=None,
         fixture_execution=True,
     )
-    assert prov.data_card_sha256 == ""
+    # run-IDENTITY digests come from the ledger on BOTH paths (single source of
+    # truth) so the durable ledger<->provenance cross-check holds on the fixture
+    # path; the scientific EVIDENCE digests stay empty (a fixture is not evidence).
+    assert prov.data_card_sha256 == _DATA_CARD
+    assert prov.raw_or_source_sha256 == _RAW
+    assert prov.sequence_mapping_sha256 == _SEQ
     assert prov.processed_sha256 == ""
+    assert prov.feature_bank_sha256 == ""
+    assert prov.dependency_lock_sha256 == ""
     assert prov.gears_revision == ""
+    assert prov.cpa_revision == ""
+    assert prov.python_version == ""
+    assert prov.platform == ""
+    assert prov.device == ""
+    assert prov.precision == ""
     assert prov.git_commit == "UNKNOWN"
     # upstream (bundle-derived) hashes are still populated on the fixture path.
     assert prov.frozen_prediction_bundle_sha256 == kit["bundle"].bundle_checksum
@@ -1358,10 +1376,8 @@ def test_build_provenance_scientific_requires_inputs(tmp_path):
 def test_build_provenance_scientific_populates_from_ledger_and_inputs(tmp_path):
     kit = _make_run(tmp_path)
     ledger = kit["ledger"]
-    # Single source of truth: run-identity digests come from the upstream ledger.
-    ledger.record_artifact("data_card", "dc-sha")
-    ledger.record_artifact("raw_data", "raw-sha")
-    ledger.record_artifact("sequence_mapping", "seq-sha")
+    # Single source of truth: run-identity digests come from the upstream ledger
+    # (recorded by the shared _build_ledger as _DATA_CARD / _RAW / _SEQ).
     prov = _build_provenance(
         bundle=kit["bundle"],
         pair_manifest=kit["manifest"],
@@ -1375,9 +1391,9 @@ def test_build_provenance_scientific_populates_from_ledger_and_inputs(tmp_path):
         fixture_execution=False,
     )
     # from the ledger (run-identity path):
-    assert prov.data_card_sha256 == "dc-sha"
-    assert prov.raw_or_source_sha256 == "raw-sha"
-    assert prov.sequence_mapping_sha256 == "seq-sha"
+    assert prov.data_card_sha256 == _DATA_CARD
+    assert prov.raw_or_source_sha256 == _RAW
+    assert prov.sequence_mapping_sha256 == _SEQ
     # from the inputs object (evidence-sourced digests):
     assert prov.processed_sha256 == "1" * 64
     assert prov.feature_bank_sha256 == "2" * 64
@@ -1425,9 +1441,7 @@ def test_activation_provenance_inputs_reject_malformed_values(field, value):
 def test_build_provenance_rejects_environment_mismatch(tmp_path):
     kit = _make_run(tmp_path)
     ledger = kit["ledger"]
-    ledger.record_artifact("data_card", "dc-sha")
-    ledger.record_artifact("raw_data", "raw-sha")
-    ledger.record_artifact("sequence_mapping", "seq-sha")
+    # run-identity digests are already recorded by the shared _build_ledger.
     values = dataclasses.asdict(_prov_inputs())
     values["git_commit"] = "f" * 40
     with pytest.raises(Phase2bError, match="ledger environment"):
@@ -1672,6 +1686,9 @@ def test_pre_audit_failure_does_not_finalize(tmp_path, monkeypatch):
         config_sha256=kit["cfg"].config_sha256,
         environment=_environment(),
     )
+    bad_ledger.record_artifact("data_card", _DATA_CARD)
+    bad_ledger.record_artifact("raw_data", _RAW)
+    bad_ledger.record_artifact("sequence_mapping", _SEQ)
     bad_ledger.record_artifact("pair_manifest", kit["manifest"]["checksum"])
     bad_ledger.record_artifact("response_space", kit["bundle"].response_space_checksum)
     bad_ledger.record_artifact("factor_bank", kit["bundle"].factor_checksum)
