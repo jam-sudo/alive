@@ -55,6 +55,7 @@ from __future__ import annotations
 import contextlib
 import fcntl
 import os
+import sys
 from pathlib import Path
 from typing import Iterator
 
@@ -147,10 +148,14 @@ def run_recover_subcommand(*, run_dir: str | Path) -> int:
         # wrapper never re-implements it and never touches the outcome store or seal.
         try:
             result = recover_phase2b_durable_outputs(run_dir=run_dir)
-        except DurableLedgerError:
+        except DurableLedgerError as exc:
             # POST-seal fail-closed (e.g. a burned audit with 0 records, an invalid
             # pre-access provenance, a divergent partial durable byte). recover opens
             # no seal, so this is the CLI's "durable export incomplete" -> exit 30.
+            print(
+                f"recover: durable export fail-closed: {type(exc).__name__}: {exc}",
+                file=sys.stderr,
+            )
             return RECOVER_NONCOMPLETE_EXIT
 
         # Step 2: map the verified terminal state to an exit code (result-driven).

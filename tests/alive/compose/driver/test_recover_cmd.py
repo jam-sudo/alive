@@ -132,7 +132,7 @@ def test_recover_synthesizes_aborted_terminal_returns_thirty(tmp_path: Path) -> 
 # --------------------------------------------------------------------------- #
 # Scenario (c): pre-access ledger + 0 audit records + 0 terminals → fail closed
 # --------------------------------------------------------------------------- #
-def test_recover_zero_audit_records_fails_closed_returns_thirty(tmp_path: Path) -> None:
+def test_recover_zero_audit_records_fails_closed_returns_thirty(tmp_path: Path, capsys) -> None:
     fx = _run_full_fixture(tmp_path)
     run_dir = fx.run_dir
     _reduce_to_audit_only(run_dir)
@@ -149,6 +149,12 @@ def test_recover_zero_audit_records_fails_closed_returns_thirty(tmp_path: Path) 
     assert not (run_dir / Phase2bTerminal.ABORTED_ARTIFACT).exists()
     assert not (run_dir / DURABLE_COMMIT_FILENAME).exists()
     assert not (run_dir / FINAL_LEDGER_FILENAME).exists()
+    # The fail-closed reason is diagnosed on stderr, not silently swallowed: it
+    # names the caught exception class so a tampered/corrupt durable export is
+    # distinguishable from a benign aborted-recovery.
+    stderr = capsys.readouterr().err
+    assert stderr
+    assert "DurableLedgerError" in stderr
 
 
 # --------------------------------------------------------------------------- #
