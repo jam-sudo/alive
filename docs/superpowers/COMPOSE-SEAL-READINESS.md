@@ -4,7 +4,7 @@
 > **이 문서는 아무것도 정의하지 않는다** — 세부(task)는 plan, claim은 spec, exact param은 config,
 > 시간순 audit는 git이 authoritative다(sources-of-truth: `CLAUDE.md` §1). 상태 행이 authoritative
 > 문서와 어긋나면 **authoritative 문서가 옳다**; 이 인덱스를 갱신한다.
-> **Updated:** 2026-07-07 @ `c261abb` (branch `compose-c0-library-fixes`, main +9 미병합)
+> **Updated:** 2026-07-08 @ `a8b3157` (branch `compose-c-driver`)
 > **갱신 트리거:** sub-project/gate **상태가 바뀔 때만**(커밋마다 아님).
 > **종결 상태:** COMPOSE seal이 정확히 한 번 열리면 이 인덱스는 **frozen/은퇴**한다. 이후 진행상황은
 > seal 결과와 post-hoc analysis가 대신한다.
@@ -29,13 +29,13 @@
 | G | driver-guards — scientific-boundary wiring | ✅ merged (PR #10) | `specs/2026-07-04-compose-driver-guards-design.md` |
 | D1 | durable-publish + non-circular provenance | ✅ merged | `specs/2026-07-05-compose-durable-ledger-design.md`; `plans/2026-07-06-compose-durable-ledger-d1.md` |
 | D2 | development seed-variability (Task 1–6) | ✅ merged | `plans/2026-07-06-compose-durable-ledger-d2.md` |
-| C0 | seal-critical library fixes (7) | 🟡 **6/7** — done: #1·#3·#4·#6·#7·#8 · 잔여: **#5 (T7, "largest")** + **T8 verification sweep** | `plans/2026-07-07-compose-c0-library-fixes.md` |
-| C | 단일 production driver | 🔴 **NEEDS-IMPLEMENTATION** (C0 완료가 선행 blocker) | `specs/2026-07-07-compose-production-driver-design.md` |
+| C0 | seal-critical library fixes (7) | 🟡 **7/7 done** — branch `compose-production-driver`, main 미병합 | `plans/2026-07-07-compose-c0-library-fixes.md` |
+| C | 단일 production driver | 🟡 **in-progress** — branch `compose-c-driver`, T1–T8 + fixture-digest fix 커밋(9/14); 잔여 T9(phase2b subcommand)–T14 | `specs/2026-07-07-compose-production-driver-design.md`; `plans/2026-07-08-compose-c-production-driver.md` |
 | — | **pod sealed confirmatory run (opens seal once)** | ⛔ not started (C 완료가 선행) | `runbooks/2026-07-02-compose-k562-pod-sealed-run.md` |
 
 ## Critical path to seal
 
-1. **C0 마무리** — #5 (T7, durable recovery `audit=1,terminal=0` → `ABORTED_AFTER_SEAL`) + T8 sweep → C0 green.
+1. ~~C0 마무리~~ ✅ **done** (7/7 fixes, branch `compose-production-driver`).
 2. **C production driver 구현** — 단일 committed driver(`phase2a`/`preflight`/`phase2b --confirm-seal`/`recover`),
    MacBook synthetic fixture로 orchestration·fail-closed 전량 검증(spec §0의 acceptance gate). *Gate PASS ≠ scientific verdict.*
 3. **branch → main 병합** — clean git tree 확보.
