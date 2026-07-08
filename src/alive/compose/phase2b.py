@@ -34,8 +34,10 @@ Two-entry activation pattern (mirrors :mod:`alive.compose.phase2a`)
   rejects any ``fixture_mode``-style bypass and refuses a synthetic-fixture
   store as scientific evidence.
 * :func:`run_phase2b_fixture` — the BOUNDED SYNTHETIC entry the integration
-  tests use (no activation required; the synthetic store carries a fixture
-  marker; the payload is bounded like Phase-2a's fixture guard).
+  tests use (no activation required; the synthetic store must be a dedicated
+  :class:`~alive.compose.outcome_store.FixtureOutcomeStore` carrying an
+  allowlisted corpus attestation; the payload is bounded like Phase-2a's fixture
+  guard).
 
 Both delegate to a shared :func:`_run_phase2b_core`. NEITHER entry accepts raw
 truth.
@@ -846,8 +848,9 @@ or None, optional
     )
     if _is_fixture_store(outcome_store):
         raise ScientificModeError(
-            "scientific Phase2b refuses a synthetic-fixture outcome store; a fixture marker "
-            "is not scientific evidence. Use run_phase2b_fixture for bounded synthetic runs."
+            "scientific Phase2b refuses a synthetic-fixture outcome store; a sanctioned "
+            "FixtureOutcomeStore (dedicated type + allowlisted corpus attestation) is not "
+            "scientific evidence. Use run_phase2b_fixture for bounded synthetic runs."
         )
     return _run_phase2b_core(
         run_dir=run_dir,
@@ -879,8 +882,9 @@ def run_phase2b_fixture(
     """Run the BOUNDED SYNTHETIC Phase-2b sealed evaluation (no activation).
 
     The integration-test path. No activation is required, but the outcome store
-    must carry a synthetic-fixture marker and the sealed payload must be bounded
-    (mirrors Phase-2a's fixture guard). NEVER accepts raw truth.
+    must be a dedicated :class:`~alive.compose.outcome_store.FixtureOutcomeStore`
+    carrying an allowlisted corpus attestation and the sealed payload must be
+    bounded (mirrors Phase-2a's fixture guard). NEVER accepts raw truth.
 
     Parameters
     ----------
@@ -906,8 +910,8 @@ def run_phase2b_fixture(
     """
     if not _is_fixture_store(outcome_store):
         raise Phase2bError(
-            "run_phase2b_fixture requires a synthetic-fixture outcome store (a store "
-            "carrying the fixture marker); the scientific store must use run_phase2b"
+            "run_phase2b_fixture requires a sanctioned FixtureOutcomeStore (dedicated type "
+            "+ allowlisted corpus attestation); the scientific store must use run_phase2b"
         )
     _assert_fixture_payload(frozen_bundle)
     return _run_phase2b_core(

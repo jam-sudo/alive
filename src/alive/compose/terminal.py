@@ -955,15 +955,22 @@ class Phase2bTerminal:
             pre_access_ledger_sha256=pre_access_ledger_sha256,
             pre_access_provenance_checksum=pre_access_provenance_checksum,
         )
-        # Fail-closed recovery guard 1: a terminal already exists -> nothing to recover.
+        # Fail-closed recovery guard 1: a terminal already present -> nothing to recover.
+        # This is a PUBLIC seal-critical entry a C driver can call directly, so mirror
+        # durable.py._scan_terminals' symlink-refusing posture: a terminal-named path that
+        # is a SYMLINK (broken or not) OR an existing regular file is refused. ``.exists()``
+        # follows symlinks and returns False for a BROKEN symlink, so test ``is_symlink()``
+        # first, else a broken symlink at a terminal name would slip past this guard.
         existing = [
-            name for name in terminal._artifact_names() if (terminal._run_dir / name).exists()
+            name
+            for name in terminal._artifact_names()
+            if (terminal._run_dir / name).is_symlink() or (terminal._run_dir / name).exists()
         ]
         if existing:
             raise TerminalError(
                 f"recover_aborted_after_seal refused: terminal artifact(s) already "
-                f"present {existing!r}; the run already has a durable terminal record — "
-                "nothing to recover."
+                f"present {existing!r} (regular file or symlink, broken or not); the run "
+                "already has a durable terminal record — nothing to recover."
             )
         # Fail-closed recovery guard 2: no burned audit records -> the seal was never
         # consumed, so this is a pre-access failure, not an ABORTED_AFTER_SEAL state.

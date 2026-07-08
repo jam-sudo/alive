@@ -1190,3 +1190,24 @@ def test_recover_aborted_after_seal_existing_terminal_fails_closed(tmp_path: Pat
     with pytest.raises(TerminalError):
         _recover(run_dir, audit_path)
     assert not (run_dir / Phase2bTerminal.ABORTED_ARTIFACT).exists()
+
+
+def test_recover_aborted_after_seal_broken_symlink_terminal_fails_closed(tmp_path: Path) -> None:
+    """A BROKEN symlink at a terminal artifact name must be refused by guard-1.
+
+    ``.exists()`` follows symlinks and returns False for a broken symlink, so guard-1 also
+    tests ``is_symlink()`` (mirrors durable.py._scan_terminals' symlink-refusing posture).
+    This is a PUBLIC seal-critical API a C driver can call directly, so a terminal-named
+    symlink must fail closed BEFORE any write — never terminal_aborted.json alongside it."""
+    run_dir = tmp_path / "run"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    audit_path = _burned_audit(run_dir, records=1)
+    # A BROKEN symlink at a terminal artifact name (points at a nonexistent target):
+    # is_symlink() is True but exists() is False, so it would slip past an exists()-only guard.
+    broken = run_dir / Phase2bTerminal.COMPLETE_ARTIFACT
+    broken.symlink_to(run_dir / "does-not-exist.json")
+    assert broken.is_symlink() and not broken.exists()
+
+    with pytest.raises(TerminalError):
+        _recover(run_dir, audit_path)
+    assert not (run_dir / Phase2bTerminal.ABORTED_ARTIFACT).exists()
