@@ -81,6 +81,9 @@ def _worker_block(root: Path, method: str) -> dict[str, object]:
         "worker_config": _mkfile(root, f"workers/{method}_config.json", b"{}\n"),
         "resource_manifest": _mkfile(root, f"workers/{method}_resource.json", b"{}\n"),
         "requirements_lock": _mkfile(root, f"workers/{method}_lock.txt", b"pkg==1\n"),
+        # ``adapter_artifact`` is the adapter/model content — DISTINCT from the
+        # launched ``worker_script`` — and is §5's sole source of adapter_sha256.
+        "adapter_artifact": _mkfile(root, f"workers/{method}_adapter.bin", b"# adapter\n"),
         "execution_identity_lock": {
             "prediction_representation": "delta_mean",
             "environment_lock_sha256": _HEX,
@@ -309,6 +312,21 @@ def test_fixture_block_in_scientific_spec_raises(tmp_path: Path) -> None:
     )
     with pytest.raises(RunSpecError, match="fixture"):
         load_resolved_run_spec(spec_path, approved_artifacts_root=root, mode_expected="scientific")
+
+
+# ---------------------------------------------------------------------------
+# (d2) worker block missing adapter_artifact (spec §2.2 / §5)
+# ---------------------------------------------------------------------------
+
+
+def test_worker_block_missing_adapter_artifact_raises(tmp_path: Path) -> None:
+    spec_path, root = _write_spec(tmp_path)
+    payload = json.loads(spec_path.read_text())
+    del payload["worker_blocks"]["gears"]["adapter_artifact"]
+    _reseal(payload)
+    spec_path.write_text(_canonical(payload), encoding="utf-8")
+    with pytest.raises(RunSpecError, match="adapter_artifact"):
+        load_resolved_run_spec(spec_path, approved_artifacts_root=root, mode_expected="fixture")
 
 
 # ---------------------------------------------------------------------------

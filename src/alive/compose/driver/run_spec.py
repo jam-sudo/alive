@@ -144,17 +144,23 @@ WORKER_BLOCK_KEYS: frozenset[str] = frozenset(
         "worker_config",
         "resource_manifest",
         "requirements_lock",
+        "adapter_artifact",
         "execution_identity_lock",
     }
 )
 
 #: Path+SHA sub-objects inside a worker block (schema-checked here; their byte
 #: digests are the ``ExecutionIdentityLock`` assembler's job in a later task).
+#: ``adapter_artifact`` is the adapter/model content file — DISTINCT from the
+#: launched ``worker_script`` — and is the sole source of ``adapter_sha256``
+#: (spec §2.2 / §5). The runtime re-hashes ``worker_script`` separately as
+#: ``worker_sha256``; the two are different identities.
 _WORKER_PATH_SHA_KEYS: tuple[str, ...] = (
     "worker_script",
     "worker_config",
     "resource_manifest",
     "requirements_lock",
+    "adapter_artifact",
 )
 
 #: The 6-field identity lock declared per method (spec §5).
@@ -233,9 +239,12 @@ class PathSha:
 class WorkerBlock:
     """A per-method subprocess worker block (spec §2.2 / §5).
 
-    ``execution_identity_lock`` holds the 6 declared identity fields; their
-    binding to the *actual* worker/adapter bytes is performed later by the
-    ``ExecutionIdentityLock`` assembler (a separate task), not by this loader.
+    ``adapter_artifact`` is the adapter/model content file — DISTINCT from the
+    launched ``worker_script`` — and is the sole source of the lock's
+    ``adapter_sha256`` (spec §5). ``execution_identity_lock`` holds the 6
+    declared identity fields; their binding to the *actual* worker/adapter bytes
+    is performed later by the ``ExecutionIdentityLock`` assembler (a separate
+    task), not by this loader.
     """
 
     env_python: str
@@ -244,6 +253,7 @@ class WorkerBlock:
     worker_config: PathSha
     resource_manifest: PathSha
     requirements_lock: PathSha
+    adapter_artifact: PathSha
     execution_identity_lock: Mapping[str, str]
 
 
@@ -617,6 +627,7 @@ def _parse_worker_blocks(obj: Any, root_real: str) -> dict[str, WorkerBlock]:
             worker_config=path_shas["worker_config"],
             resource_manifest=path_shas["resource_manifest"],
             requirements_lock=path_shas["requirements_lock"],
+            adapter_artifact=path_shas["adapter_artifact"],
             execution_identity_lock=MappingProxyType(dict(lock)),
         )
     return blocks

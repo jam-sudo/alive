@@ -10,19 +10,30 @@ is verified against this lock at predict time by
 :func:`alive.compose.baseline_subprocess._verify_execution_manifest` — never the
 reverse.
 
-Field sources (spec §5 table), mapped 1:1 onto the four ``{path, sha256}`` files
-a :class:`~alive.compose.driver.run_spec.WorkerBlock` carries:
+Field sources (spec §5 table), each a controller-side stream-hash of a real
+``{path, sha256}`` file a :class:`~alive.compose.driver.run_spec.WorkerBlock`
+carries:
 
 ======================== ===========================================
 lock field                source
 ======================== ===========================================
 prediction_representation committed config ``baseline_representations[name]``
-adapter_sha256            stream-hash of the worker/adapter code file
+adapter_sha256            stream-hash of the SEPARATE ``adapter_artifact`` file
 config_sha256             stream-hash of the worker-config file
 resource_sha256           stream-hash of the resource-manifest file
 environment_lock_sha256   stream-hash of the requirements-lock file
 adapter_version           a SEPARATE committed versioned adapter manifest
 ======================== ===========================================
+
+``adapter_sha256`` is the digest of the ``adapter_artifact`` (adapter/model
+content) — NOT the launched ``worker_script``. The committed runtime keeps these
+two identities distinct: ``baseline_subprocess._verify_execution_manifest``
+compares the lock's ``adapter_sha256`` against the worker's self-reported
+``_ADAPTER_SHA256`` (adapter content), and re-hashes the launched
+``worker_script`` file separately as ``worker_sha256`` (spec §2.2 / §5). Hashing
+``worker_script`` into ``adapter_sha256`` would make the runtime reject every
+real worker. ``worker_script`` is still re-hashed here for its node-kind policy
+and declared-digest cross-check, but it feeds no lock field.
 
 ``adapter_version`` has no committed versioned source yet (sub-project B ships
 it pod-side), so the **scientific** assembler fails closed. The **fixture**
@@ -276,8 +287,18 @@ def assemble_execution_identity_lock(
             f"config={config_representation!r})"
         )
 
-    # 2. re-hash the four worker files (node-kind enforced) ------------------
-    actual_adapter = _hash_regular_file(worker_block.worker_script.path, field="worker_script")
+    # 2. re-hash the worker files (node-kind enforced) -----------------------
+    # ``adapter_sha256`` is sourced from the SEPARATE ``adapter_artifact`` file,
+    # NOT the launched ``worker_script`` (spec §5). ``worker_script`` is still
+    # re-hashed for its node-kind policy + declared-digest cross-check, but it
+    # feeds no lock field — the runtime verifies it separately as
+    # ``worker_sha256``.
+    actual_worker_script = _hash_regular_file(
+        worker_block.worker_script.path, field="worker_script"
+    )
+    actual_adapter = _hash_regular_file(
+        worker_block.adapter_artifact.path, field="adapter_artifact"
+    )
     actual_config = _hash_regular_file(worker_block.worker_config.path, field="worker_config")
     actual_resource = _hash_regular_file(
         worker_block.resource_manifest.path, field="resource_manifest"
@@ -285,7 +306,12 @@ def assemble_execution_identity_lock(
     actual_env = _hash_regular_file(worker_block.requirements_lock.path, field="requirements_lock")
 
     # 3. cross-check the declared {path, sha256} digests (Task 1 skipped these)
-    _require_equal(worker_block.worker_script.sha256, actual_adapter, field="worker_script.sha256")
+    _require_equal(
+        worker_block.worker_script.sha256, actual_worker_script, field="worker_script.sha256"
+    )
+    _require_equal(
+        worker_block.adapter_artifact.sha256, actual_adapter, field="adapter_artifact.sha256"
+    )
     _require_equal(worker_block.worker_config.sha256, actual_config, field="worker_config.sha256")
     _require_equal(
         worker_block.resource_manifest.sha256, actual_resource, field="resource_manifest.sha256"
@@ -295,6 +321,8 @@ def assemble_execution_identity_lock(
     )
 
     # 4. cross-check the declared lock digests -------------------------------
+    # The declared ``adapter_sha256`` is compared to the re-hashed
+    # ``adapter_artifact`` (not the worker_script) — divergence fails closed.
     _require_equal(declared["adapter_sha256"], actual_adapter, field="adapter_sha256")
     _require_equal(declared["config_sha256"], actual_config, field="config_sha256")
     _require_equal(declared["resource_sha256"], actual_resource, field="resource_sha256")
