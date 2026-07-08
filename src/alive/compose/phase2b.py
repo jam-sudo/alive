@@ -667,9 +667,10 @@ def build_registered_evaluation_summary(
         verdict input). Only sample counts, checksums and the double-regime
         secondary GI block are read; per-pair arrays are never embedded.
     per_method_aggregate_mse : Mapping
-        ``{"double": {method -> mean(pair_errors[method])}, "single": {...}}`` —
-        the per-method aggregate MSE for BOTH regimes, computed ONCE inside the
-        protected evaluation. ``double`` is the headline / verdict-linked regime;
+        ``{"double": {method -> mean(descriptive_pair_errors[method])}, "single":
+        {...}}`` — the per-method aggregate MSE over the FULL nine-method descriptive
+        roster for BOTH regimes, computed ONCE inside the protected evaluation.
+        ``double`` is the headline / verdict-linked regime;
         ``single`` is the registered secondary (CLAUDE.md §10). Each regime is
         scored INDEPENDENTLY over its own pairs and the two are NEVER pooled.
     final_verdict : ComposeSealedResult
@@ -693,6 +694,7 @@ def build_registered_evaluation_summary(
     secondary = regime_double.secondary
     gi_lower, gi_upper = secondary.gi_explained_interval
     return {
+        "schema": "compose_registered_evaluation_summary_v1",
         "protocol": protocol,
         "run_id": run_id,
         "terminal_state": terminal_state,
@@ -1546,14 +1548,20 @@ def _evaluate_inside_boundary(
     # pooled): double = headline / verdict-linked, single = registered secondary
     # (CLAUDE.md §10). Each embedded float passes _finite_or_sentinel so a
     # degenerate mean becomes the sentinel string, never a summary-write abort.
+    # Aggregate over the FULL nine-method DESCRIPTIVE roster (descriptive_pair_errors),
+    # NOT the six verdict methods (pair_errors): freeze validates all nine per regime,
+    # so l2_saturation / no_change / perturbation_mean are reported descriptively. The
+    # verdict remains driven solely by the six-method pair_errors via the bounds.
+    double_desc = regime_double.descriptive_pair_errors
+    single_desc = regime_single.descriptive_pair_errors
     per_method_aggregate_mse: dict[str, dict[str, float | str]] = {
         "double": {
-            method: _finite_or_sentinel(float(np.mean(regime_double.pair_errors[method])))
-            for method in sorted(regime_double.pair_errors)
+            method: _finite_or_sentinel(float(np.mean(double_desc[method])))
+            for method in sorted(double_desc)
         },
         "single": {
-            method: _finite_or_sentinel(float(np.mean(regime_single.pair_errors[method])))
-            for method in sorted(regime_single.pair_errors)
+            method: _finite_or_sentinel(float(np.mean(single_desc[method])))
+            for method in sorted(single_desc)
         },
     }
     # evaluation_payload_checksum binds the regime/bounds scoring results directly

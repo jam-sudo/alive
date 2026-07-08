@@ -40,6 +40,7 @@ import numpy as np
 import pytest
 
 from alive.compose.config2 import (
+    _EXPECTED_METHOD_ROSTER,
     ScientificModeError,
     load_compose_phase2_config,
 )
@@ -1018,15 +1019,18 @@ def test_per_method_aggregate_mse_reports_both_regimes_unpooled(tmp_path):
     assert isinstance(per_method["double"], dict)
     assert isinstance(per_method["single"], dict)
 
-    # both regimes carry the SAME (full) method roster; per-method, never per-pair.
+    # both regimes carry the SAME (full 9-method) DESCRIPTIVE roster; per-method,
+    # never per-pair. The verdict pair_errors (6) are a subset; the aggregate MSE
+    # surfaces every roster method via descriptive_pair_errors.
     assert set(per_method["double"]) == set(per_method["single"])
-    assert set(per_method["single"]) == set(res.regime_single.pair_errors)
+    assert set(per_method["single"]) == set(res.regime_single.descriptive_pair_errors)
 
     # each embedded value is the INDEPENDENT per-regime mean over THAT regime's own
-    # pair_errors — proving it is regime-labeled, aggregate-scalar and NOT pooled.
-    for method in sorted(res.regime_single.pair_errors):
-        expected_double = float(np.mean(res.regime_double.pair_errors[method]))
-        expected_single = float(np.mean(res.regime_single.pair_errors[method]))
+    # descriptive_pair_errors — proving it is regime-labeled, aggregate-scalar and
+    # NOT pooled.
+    for method in sorted(res.regime_single.descriptive_pair_errors):
+        expected_double = float(np.mean(res.regime_double.descriptive_pair_errors[method]))
+        expected_single = float(np.mean(res.regime_single.descriptive_pair_errors[method]))
         assert per_method["double"][method] == pytest.approx(expected_double)
         assert per_method["single"][method] == pytest.approx(expected_single)
         # a finite aggregate scalar, never a per-pair array.
@@ -1038,8 +1042,8 @@ def test_per_method_aggregate_mse_reports_both_regimes_unpooled(tmp_path):
             np.mean(
                 np.concatenate(
                     [
-                        res.regime_double.pair_errors[method],
-                        res.regime_single.pair_errors[method],
+                        res.regime_double.descriptive_pair_errors[method],
+                        res.regime_single.descriptive_pair_errors[method],
                     ]
                 )
             )
@@ -1048,6 +1052,32 @@ def test_per_method_aggregate_mse_reports_both_regimes_unpooled(tmp_path):
 
     # single is a DISTINCT dict from double (independent regimes).
     assert per_method["single"] != per_method["double"]
+
+
+def test_per_method_aggregate_mse_covers_full_roster_both_regimes(tmp_path):
+    # The descriptive per-method aggregate MSE must span the FULL 9-method roster in
+    # BOTH regimes (not just the 6 verdict methods): freeze validates all nine per
+    # regime, so l2_saturation / no_change / perturbation_mean are reported
+    # descriptively even though the verdict consumes only headline + 5 comparators.
+    kit = _make_run(tmp_path)
+    res = run_phase2b_fixture(**_fixture_kwargs(kit))
+    assert res.terminal_state == TerminalState.COMPLETE
+
+    body = _read_terminal(kit["run_dir"], "complete")
+    pmm = body["registered_summary"]["per_method_aggregate_mse"]
+    assert set(pmm["double"]) == set(_EXPECTED_METHOD_ROSTER)
+    assert set(pmm["single"]) == set(_EXPECTED_METHOD_ROSTER)
+
+
+def test_registered_summary_has_schema_v1(tmp_path):
+    # The registered summary carries a versioned schema tag so downstream durable
+    # finalization (Task 6) can version-gate it. Task 5 only ADDS the tag.
+    kit = _make_run(tmp_path)
+    res = run_phase2b_fixture(**_fixture_kwargs(kit))
+    assert res.terminal_state == TerminalState.COMPLETE
+
+    body = _read_terminal(kit["run_dir"], "complete")
+    assert body["registered_summary"]["schema"] == "compose_registered_evaluation_summary_v1"
 
 
 def test_invalid_final_result_checksum_differs_from_complete(tmp_path):
