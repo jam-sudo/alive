@@ -53,6 +53,10 @@ import stat
 from dataclasses import dataclass
 from pathlib import Path
 
+from alive.compose.config2 import (
+    _EXPECTED_COMPARATOR_FAMILY,
+    _EXPECTED_METHOD_ROSTER,
+)
 from alive.compose.provenance2 import (
     _DIGEST_ARTIFACTS,
     _EVIDENCE_ARTIFACTS,
@@ -85,6 +89,12 @@ DURABLE_COMMIT_FILENAME = "phase2b_durable_commit.json"
 
 #: Versioned schema string carried by the durable commit marker.
 DURABLE_COMMIT_SCHEMA = "compose_phase2b_durable_commit_v1"
+
+#: The registered-summary schema the finalizer validates for a summary-bearing
+#: terminal (the Task-5 v1 shape written by
+#: :func:`alive.compose.phase2b.build_registered_evaluation_summary`). A summary
+#: carrying any other schema fails closed.
+_REGISTERED_SUMMARY_SCHEMA_V1 = "compose_registered_evaluation_summary_v1"
 
 #: The marker's self-excluding checksum field (excluded from its own checksum).
 COMMIT_CHECKSUM_FIELD = "commit_checksum"
@@ -774,6 +784,65 @@ def finalize_phase2b_durable_outputs(
         raise DurableLedgerError("terminal embedded provenance is not a JSON object.")
     if sha256_json(embedded) != terminal_body["provenance_checksum"]:
         raise DurableLedgerError("terminal provenance_checksum does not bind its embedded payload.")
+
+    # --- Recompute final_result_checksum from its 5 constituent identity fields —
+    # all top-level body keys, binding EXACTLY these five (phase2b.py:1620-1628). The
+    # whole-body terminal_payload_checksum above only catches POST-hoc tampering; a
+    # writer that emits a self-consistent-but-WRONG final_result_checksum at write time
+    # (its whole-body checksum happily binds the wrong value) is caught only here.
+    # sha256_json sorts keys, so this dict's insertion order is irrelevant.
+    recomputed_final_result_checksum = sha256_json(
+        {
+            "terminal_state": terminal_body["terminal_state"],
+            "final_verdict_checksum": terminal_body["final_verdict_checksum"],
+            "registered_summary_checksum": terminal_body["registered_summary_checksum"],
+            "evaluation_payload_checksum": terminal_body["evaluation_payload_checksum"],
+            "provenance_checksum": terminal_body["provenance_checksum"],
+        }
+    )
+    if recomputed_final_result_checksum != terminal_body["final_result_checksum"]:
+        raise DurableLedgerError(
+            "terminal final_result_checksum does not match its 5 constituent identity "
+            "fields (terminal_state, final_verdict_checksum, registered_summary_checksum, "
+            "evaluation_payload_checksum, provenance_checksum); fail closed."
+        )
+
+    # --- Validate the registered-summary schema + method/comparator rosters (Task 5
+    # v1 shape). A wrong schema, a per-method-MSE roster != the 9-method roster (in
+    # either regime), or a theta roster != the 5-comparator family fails closed.
+    if registered_summary.get("schema") != _REGISTERED_SUMMARY_SCHEMA_V1:
+        raise DurableLedgerError(
+            f"registered summary schema {registered_summary.get('schema')!r} is not the "
+            f"expected {_REGISTERED_SUMMARY_SCHEMA_V1!r} (fail closed)."
+        )
+    per_method_aggregate_mse = registered_summary.get("per_method_aggregate_mse")
+    if not isinstance(per_method_aggregate_mse, dict):
+        raise DurableLedgerError(
+            "registered summary per_method_aggregate_mse is not a JSON object (fail closed)."
+        )
+    for regime in ("double", "single"):
+        regime_mse = per_method_aggregate_mse.get(regime)
+        if not isinstance(regime_mse, dict):
+            raise DurableLedgerError(
+                f"registered summary per_method_aggregate_mse[{regime!r}] is missing or is "
+                "not a JSON object (fail closed)."
+            )
+        got_methods = set(regime_mse)
+        if got_methods != set(_EXPECTED_METHOD_ROSTER):
+            raise DurableLedgerError(
+                f"registered summary per_method_aggregate_mse[{regime!r}] method roster "
+                f"{sorted(got_methods)!r} != the expected 9-method roster "
+                f"{sorted(_EXPECTED_METHOD_ROSTER)!r} (fail closed)."
+            )
+    theta = registered_summary.get("theta")
+    if not isinstance(theta, dict):
+        raise DurableLedgerError("registered summary theta is not a JSON object (fail closed).")
+    theta_roster = set(theta)
+    if theta_roster != set(_EXPECTED_COMPARATOR_FAMILY):
+        raise DurableLedgerError(
+            f"registered summary theta roster {sorted(theta_roster)!r} != the expected "
+            f"5-comparator family {sorted(_EXPECTED_COMPARATOR_FAMILY)!r} (fail closed)."
+        )
 
     # --- Step 2: read + verify the pre-access ledger (run id, embedded pre-access
     # provenance subset checksum, and shared upstream digests vs the terminal's
