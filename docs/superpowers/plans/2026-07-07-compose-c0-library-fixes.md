@@ -595,6 +595,16 @@ git commit -m "fix(compose): finalizer recomputes final_result_checksum + valida
 
 ### Task 7: #5 — recover synthesizes `ABORTED_AFTER_SEAL` from `audit=1, terminal=0`
 
+> **SUPERSEDED (as-built, owner-approved 2026-07-07).** The approach below — driving the *forward* `Phase2bTerminal`
+> lifecycle (`acquire→attempt_access→confirm_durable_access→aborted`) from `durable.py` — is STRUCTURALLY IMPOSSIBLE:
+> `acquire()` refuses a burned seal audit (`terminal.py:671-675`) and holds a never-unlinked `O_EXCL` lock
+> (`650-659`); `aborted()` needs `ACCESS_CLAIMED`, reachable only via `acquire()`. As built, C0 added a NEW
+> recovery-sanctioned classmethod `Phase2bTerminal.recover_aborted_after_seal` in `terminal.py` (the encapsulated,
+> ABORTED-only bypass; seal never opened; count/reference derived from the burned audit;
+> `pre_access_provenance_checksum` bound to the pre-access ledger subset checksum; `protocol` from the seed report)
+> + a `durable.py` 0-terminal branch that calls it. Scope: `terminal.py` + `durable.py` (+ their tests). Behaviorally
+> identical to the intent below. Committed `f9b53f5`; reviewed clean (8/8 seal-safety risks refuted); spec §0.1 #5 + §3.4 reconciled.
+
 **Files:**
 - Modify: `src/alive/compose/durable.py` (`recover_phase2b_durable_outputs` lines 1100-1191; the terminal-count branch)
 - Test: `tests/alive/compose/test_durable.py`

@@ -28,6 +28,15 @@ run으로 승격하는 행위는 금지한다. Gate PASS는 scientific verdict�
 
 ### 0.1 선행 library blocker(C0, driver 구현 전 필수)
 
+> **상태(2026-07-08): C0 COMPLETE + MERGED.** 아래 7개 code-fix(#1 preflight leg·#3·#4·#5·#6·#7·#8)가
+> 모두 구현·독립 review·science-dev gate(13/13 PASS)를 거쳐 `compose-production-driver`(@ `66c2dfb`)에
+> 병합됐다. 따라서 driver의 library blocker는 해소됐고 scientific `phase2b` 구현이 인가된다. **#5는 forward
+> terminal lifecycle이 crash 상태(burned audit + 잔존 lock)를 설계상 거부하므로, owner 승인 아래 seal-critical
+> `terminal.py`에 recovery 전용 sanctioned API `Phase2bTerminal.recover_aborted_after_seal`를 추가해
+> 해소했다**(ABORTED-only, seal 미개봉, burned audit에서 count 유도). 이는 아래 #5의 행위 계약(audit
+> claim+pre-access ledger로 `ABORTED_AFTER_SEAL` 생성 후 finalize)과 일치하며, 구현 위치만 durable.py에서
+> terminal.py API로 확장된 것이다.
+
 Driver는 아래 결함을 우회하거나 wrapper에서 숨기지 않는다. 해당하는 library 결함은 driver 구현 전 library
 계층에서 먼저 수정되고 negative test가 green이어야 한다(어느 항목이 code-fix 대상이고 어느 것이
 설계규칙·기구현인지는 아래 'Code-fix 범위 정리' 참조).
@@ -328,8 +337,11 @@ seal 직전(runbook §6/§7) 순서로 재검증한다.
    `(device,inode,size,mtime_ns)`를 비교하고 attestation의 expected source digest와 실제 bytes의 일치를
    검증한다. Store는 같은 immutable snapshot만 소비해야 하며, 이를 보증할 수 없으면 생성 전에 abort한다.
    이어 pair-index manifest를 source obs에 대조하고 sealed store를 **이 함수에서만** 생성한다 —
-   ResolvedRunSpec/fixture가 제공한 source + verified pair-index + manifest + audit path를 사용한다. Fixture면
-   §4 전용 factory를, scientific이면 일반 store를 사용한다.
+   ResolvedRunSpec/fixture가 제공한 source + verified pair-index + manifest + audit path를 사용한다. **이때
+   store의 `audit_path`는 고정된 run-상대 경로 `<run_dir>/audit.jsonl`(`SEAL_AUDIT_FILENAME`)이어야 한다:
+   §3.4 `recover`가 live store 없이 동일 경로에서 burned audit을 독립 재구성하므로, 다른 경로로 생성하면 실제로
+   소비된 seal이 fail-closed로 복구 불능이 된다(안전하되 stuck). TG-K562 CLI(`cli.py:167,288`)와 같은 규약이다.**
+   Fixture면 §4 전용 factory를, scientific이면 일반 store를 사용한다.
    **`ComposeOutcomeStore`가 import·생성되는 유일한 함수이며 phase2b에서만 도달 가능하다(§4).** fixture
    builder는 store 객체가 아니라 sealed-outcome DATA만 만든다(§6).
 5. `run_phase2b[_fixture](run_dir=, outcome_store=, frozen_bundle=, pair_manifest=, response_artifact=,
@@ -349,7 +361,11 @@ phase2b는 어떤 audit이든 소비할 수 있는 유일한 subcommand다.
 1. exactly-one terminal이 있으면 pre-access ledger, canonical seed report와 partial durable outputs를 검증하고
    byte-identical finalize를 재개한다.
 2. terminal은 없지만 exact run-bound durable audit claim이 하나 있으면, audit claim과 pre-access provenance를
-   검증해 `ABORTED_AFTER_SEAL` terminal을 write-once 생성하고 finalize한다.
+   검증해 `ABORTED_AFTER_SEAL` terminal을 write-once 생성하고 finalize한다. Audit은 §3.3이 고정한
+   `<run_dir>/audit.jsonl`에서 재구성하며, 파일이 없거나 record가 0이면 pre-access failure로 fail-closed한다.
+   Terminal 생성은 sanctioned `Phase2bTerminal.recover_aborted_after_seal`(ABORTED-only·seal 미개봉·burned
+   audit에서 count/`seal_audit_reference` 유도·`pre_access_provenance_checksum`을 pre-access ledger의
+   subset checksum에 결속)만 사용하고, `_finalize_aborted_terminal` 경로로 durable 마무리한다.
 
 그 밖의 `terminal=0` 상태는 pre-access failure로 보고 아무 terminal도 만들지 않는다. 어느 경로도 outcome
 source, pair-index, bundle prediction 또는 `ComposeOutcomeStore`를 로드하지 않으며 seal 재실행·verdict 재계산을
@@ -536,7 +552,10 @@ phase2b). 이 해석을 조용히 남기지 않고 runbook에서 두 gate의 이
 2. RunSpecTemplate/ResolvedRunSpec/pair-index/confirmation manifest의 versioned exact schema와 loader가 구현됨.
 3. Scientific ResolvedRunSpec file SHA가 phase2a ledger→confirmation→pre-access provenance→terminal→durable
    marker에서 동일하게 확인됨.
-4. `phase2a → preflight → phase2b` 세 독립 process e2e가 green이고 preflight 생략은 fail-closed함.
+4. `phase2a → preflight → phase2b` 세 독립 process e2e가 green이고 preflight 생략은 fail-closed함. 또한
+   driver가 scientific store를 `audit_path=<run_dir>/audit.jsonl`로 생성하고, `audit=1/terminal=0` crash를
+   재현한 뒤 `recover`가 `ABORTED_AFTER_SEAL`를 합성하는 e2e가 green이며, 다른 audit 경로로 생성하면 recover가
+   복구 불능(fail-closed)임을 negative test로 고정한다.
 5. Fixture e2e와 별도로 scientific no-seal assembly test가 activation/provenance/D2 report wiring을 검증함.
 6. C의 로컬 gate에서는 **stub worker/config/resource/lock bytes**가 assembled lock과 일치하고, adapter
    manifest 부재 시 scientific assembler가 fail-closed함을 검증한다. 실제 GEARS/CPA
