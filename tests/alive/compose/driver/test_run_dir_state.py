@@ -24,6 +24,7 @@ from alive.compose.durable import (
     SEAL_AUDIT_FILENAME,
 )
 from alive.compose.provenance2 import PRE_ACCESS_LEDGER_FILENAME
+from alive.compose.seed_variability import DEVELOPMENT_SEED_VARIABILITY_FILENAME
 from alive.compose.terminal import Phase2bTerminal
 
 _FROZEN_BUNDLE = RUN_PRODUCED_BASENAMES["frozen_bundle"]
@@ -254,11 +255,16 @@ def test_phase2b_with_unknown_file_raises(tmp_path: Path) -> None:
 
 
 def test_recover_exactly_one_terminal_passes(tmp_path: Path) -> None:
+    # A realistic post-phase2b crash run_dir: base 4 + confirmation + the
+    # canonical seed-variability bind artifact (development_seed_variability.json,
+    # ALWAYS written by run_phase2b before the pre-access snapshot) + audit +
+    # pre-access ledger + exactly one terminal.
     run_dir = _rundir(tmp_path)
     _touch(
         run_dir,
         *_PHASE2A_FOUR,
         _CONFIRMATION_MANIFEST,
+        DEVELOPMENT_SEED_VARIABILITY_FILENAME,
         SEAL_AUDIT_FILENAME,
         PRE_ACCESS_LEDGER_FILENAME,
         Phase2bTerminal.COMPLETE_ARTIFACT,
@@ -272,6 +278,7 @@ def test_recover_terminal_with_partial_durable_subset_passes(tmp_path: Path) -> 
         run_dir,
         *_PHASE2A_FOUR,
         _CONFIRMATION_MANIFEST,
+        DEVELOPMENT_SEED_VARIABILITY_FILENAME,
         SEAL_AUDIT_FILENAME,
         PRE_ACCESS_LEDGER_FILENAME,
         Phase2bTerminal.COMPLETE_ARTIFACT,
@@ -283,6 +290,26 @@ def test_recover_terminal_with_partial_durable_subset_passes(tmp_path: Path) -> 
 
 
 def test_recover_terminal_zero_with_audit_claim_passes(tmp_path: Path) -> None:
+    # State 2 (terminal=0 + audit claim): the seed-variability report is
+    # causally prior to even the pre-access ledger, so a legitimate post-seal
+    # crash with no terminal yet always carries it too.
+    run_dir = _rundir(tmp_path)
+    _touch(
+        run_dir,
+        *_PHASE2A_FOUR,
+        _CONFIRMATION_MANIFEST,
+        DEVELOPMENT_SEED_VARIABILITY_FILENAME,
+        SEAL_AUDIT_FILENAME,
+        PRE_ACCESS_LEDGER_FILENAME,
+        Phase2bTerminal.LOCK_FILE,
+    )
+    assert_run_dir_roster(run_dir, "recover")
+
+
+def test_recover_terminal_zero_missing_seed_variability_raises(tmp_path: Path) -> None:
+    # Proves the new state-2 requirement: audit claim + pre-access ledger
+    # present, no terminal, but the causally-prior seed-variability report is
+    # ABSENT -> an inconsistent partial state, must raise.
     run_dir = _rundir(tmp_path)
     _touch(
         run_dir,
@@ -290,9 +317,9 @@ def test_recover_terminal_zero_with_audit_claim_passes(tmp_path: Path) -> None:
         _CONFIRMATION_MANIFEST,
         SEAL_AUDIT_FILENAME,
         PRE_ACCESS_LEDGER_FILENAME,
-        Phase2bTerminal.LOCK_FILE,
     )
-    assert_run_dir_roster(run_dir, "recover")
+    with pytest.raises(RunDirStateError):
+        assert_run_dir_roster(run_dir, "recover")
 
 
 def test_recover_both_ephemeral_locks_allowed(tmp_path: Path) -> None:
@@ -301,6 +328,7 @@ def test_recover_both_ephemeral_locks_allowed(tmp_path: Path) -> None:
         run_dir,
         *_PHASE2A_FOUR,
         _CONFIRMATION_MANIFEST,
+        DEVELOPMENT_SEED_VARIABILITY_FILENAME,
         SEAL_AUDIT_FILENAME,
         PRE_ACCESS_LEDGER_FILENAME,
         DRIVER_LOCK_FILE,
@@ -358,6 +386,7 @@ def test_recover_durable_without_terminal_raises(tmp_path: Path) -> None:
         run_dir,
         *_PHASE2A_FOUR,
         _CONFIRMATION_MANIFEST,
+        DEVELOPMENT_SEED_VARIABILITY_FILENAME,
         SEAL_AUDIT_FILENAME,
         PRE_ACCESS_LEDGER_FILENAME,
         DURABLE_COMMIT_FILENAME,

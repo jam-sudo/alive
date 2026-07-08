@@ -17,9 +17,10 @@ library entry point. This module centralises those four checks:
 - ``recover``: same two locks ephemeral-allowed; the upstream 4 + confirmation
   must already exist, and exactly one of two disjoint states must hold —
   exactly-one-terminal, or (terminal absent + a durable audit claim with its
-  causally-prior pre-access provenance); an already-produced partial subset of
-  the durable finalize artifacts is accepted as crash-recovery input only
-  alongside a terminal.
+  causally-prior pre-access provenance AND the even-earlier causally-prior
+  seed-variability report ``run_phase2b`` always writes before either);
+  an already-produced partial subset of the durable finalize artifacts is
+  accepted as crash-recovery input only alongside a terminal.
 
 This module is pure directory-listing + basename-roster comparison. It opens
 no seal, constructs no outcome store, and imports no ``gears``/``cpa`` — it
@@ -42,6 +43,7 @@ from alive.compose.durable import (
     SEAL_AUDIT_FILENAME,
 )
 from alive.compose.provenance2 import PRE_ACCESS_LEDGER_FILENAME
+from alive.compose.seed_variability import DEVELOPMENT_SEED_VARIABILITY_FILENAME
 from alive.compose.terminal import Phase2bTerminal
 
 __all__ = [
@@ -216,7 +218,11 @@ def _assert_recover_roster(present: frozenset[str]) -> None:
         _PHASE2B_ENTRY_REQUIRED
         | _TERMINAL_BASENAMES
         | _DURABLE_BASENAMES
-        | {SEAL_AUDIT_FILENAME, PRE_ACCESS_LEDGER_FILENAME}
+        | {
+            SEAL_AUDIT_FILENAME,
+            PRE_ACCESS_LEDGER_FILENAME,
+            DEVELOPMENT_SEED_VARIABILITY_FILENAME,
+        }
     )
     unknown = core - known
     if unknown:
@@ -234,10 +240,16 @@ def _assert_recover_roster(present: frozenset[str]) -> None:
         return
 
     # State 2: terminal=0 -> requires exactly-one durable audit claim together
-    # with its causally-prior pre-access provenance (spec §3.3 step 5 order:
-    # pre-access ledger -> durable audit claim -> terminal -> durable finalize).
+    # with its causally-prior pre-access provenance AND the even-earlier
+    # causally-prior seed-variability report (spec §3.3 step 5 order:
+    # seed-variability report -> pre-access ledger -> durable audit claim ->
+    # terminal -> durable finalize; run_phase2b/_preaccess_seed_variability
+    # always writes development_seed_variability.json before
+    # persist_pre_access_ledger, so a legitimate post-seal crash always has
+    # it too).
     audit_present = SEAL_AUDIT_FILENAME in core
     pre_access_present = PRE_ACCESS_LEDGER_FILENAME in core
+    seed_variability_present = DEVELOPMENT_SEED_VARIABILITY_FILENAME in core
     if not audit_present:
         raise RunDirStateError(
             "recover: terminal=0 and no durable audit claim "
@@ -247,6 +259,12 @@ def _assert_recover_roster(present: frozenset[str]) -> None:
         raise RunDirStateError(
             "recover: terminal=0 audit claim present without its causally-prior "
             f"pre-access provenance ({PRE_ACCESS_LEDGER_FILENAME!r}) — inconsistent partial state"
+        )
+    if not seed_variability_present:
+        raise RunDirStateError(
+            "recover: terminal=0 audit claim present without the even-earlier "
+            f"causally-prior seed-variability report "
+            f"({DEVELOPMENT_SEED_VARIABILITY_FILENAME!r}) — inconsistent partial state"
         )
     durable_present = core & _DURABLE_BASENAMES
     if durable_present:
