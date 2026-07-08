@@ -23,7 +23,7 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 from alive.compose.config2 import _EXPECTED_COMPARATOR_FAMILY, _EXPECTED_METHOD_ROSTER
 from alive.io import atomic_write_once
@@ -44,9 +44,12 @@ SEAL_CONFIRMATION_MANIFEST_SCHEMA = "compose_seal_confirmation_manifest_v1"
 
 #: Exact top-level key roster of a v1 seal-confirmation manifest (spec §3.2
 #: tail): run/execution identity, the ResolvedRunSpec's own file SHA, the exact
-#: approved Git SHA + clean status, the caller-supplied pre-seal content
-#: checksums, the two config2-sourced rosters, and the self-excluding
-#: ``confirmation_checksum``.
+#: approved Git SHA + clean status, the FULL pre-seal content checksum set, the
+#: selected hyperparameters, the per-method worker identity, the double/single
+#: pair counts, the ordered seal-request intent checksum, the ``CONTINUE``
+#: futility status, the zero sealed-access count, the forbidden-output-absence
+#: attestation, the owner-approved ``accepted_limitations`` roster, the two
+#: config2-sourced rosters, and the self-excluding ``confirmation_checksum``.
 SEAL_CONFIRMATION_MANIFEST_KEYS: frozenset[str] = frozenset(
     {
         "schema",
@@ -56,6 +59,15 @@ SEAL_CONFIRMATION_MANIFEST_KEYS: frozenset[str] = frozenset(
         "approved_git_sha",
         "git_clean",
         "preseal_checksums",
+        "selected_hyperparameters",
+        "worker_identity",
+        "double_pair_count",
+        "single_pair_count",
+        "ordered_seal_request_checksum",
+        "futility_status",
+        "sealed_access_count",
+        "forbidden_output_absence",
+        "accepted_limitations",
         "method_roster",
         "comparator_roster",
         "confirmation_checksum",
@@ -72,8 +84,47 @@ _BUILD_INPUT_KEYS: frozenset[str] = frozenset(
         "approved_git_sha",
         "git_clean",
         "preseal_checksums",
+        "selected_hyperparameters",
+        "worker_identity",
+        "double_pair_count",
+        "single_pair_count",
+        "ordered_seal_request_checksum",
+        "futility_status",
+        "sealed_access_count",
+        "forbidden_output_absence",
+        "accepted_limitations",
     }
 )
+
+#: The COMPLETE pre-seal content-checksum roster (spec §3.2): config, data-card,
+#: manifest, sequence, feature, factor, response(-space), model, bundle, ledger,
+#: pair-index and seed-report. Every one is a required 64-lowercase-hex digest;
+#: ``preseal_checksums`` must carry exactly this set (no missing, no extra).
+_REQUIRED_PRESEAL_CHECKSUM_KEYS: frozenset[str] = frozenset(
+    {
+        "config_checksum",
+        "data_card_checksum",
+        "manifest_checksum",
+        "sequence_checksum",
+        "feature_checksum",
+        "factor_checksum",
+        "response_space_checksum",
+        "model_checksum",
+        "bundle_checksum",
+        "ledger_checksum",
+        "pair_index_checksum",
+        "seed_report_checksum",
+    }
+)
+
+#: The exact per-method worker-identity keys (spec §3.2): the two subprocess
+#: methods whose ``ExecutionIdentityLock`` (worker/config/resource/env) identity
+#: is bound into the confirmation.
+_WORKER_IDENTITY_METHODS: frozenset[str] = frozenset({"gears", "cpa"})
+
+#: The only futility status a confirmation may be built on (spec §3.2): a
+#: confirmation is authorised solely on ``CONTINUE``.
+_FUTILITY_CONTINUE = "CONTINUE"
 
 _HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
 
@@ -99,19 +150,157 @@ def _canonical_bytes(obj: object) -> bytes:
     return json.dumps(obj, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
 
-def _validate_preseal_checksums(preseal_checksums: Mapping[str, str]) -> dict[str, str]:
-    if not isinstance(preseal_checksums, Mapping) or not preseal_checksums:
-        raise ConfirmationError("preseal_checksums must be a non-empty mapping")
+def _validate_preseal_checksums(preseal_checksums: object) -> dict[str, str]:
+    """Validate the COMPLETE pre-seal checksum set (spec §3.2).
+
+    ``preseal_checksums`` must carry EXACTLY
+    :data:`_REQUIRED_PRESEAL_CHECKSUM_KEYS` — no missing, no extra — and every
+    value must be a 64-lowercase-hex digest string.
+    """
+    if not isinstance(preseal_checksums, Mapping):
+        raise ConfirmationError("preseal_checksums must be a mapping")
+    keys = set(preseal_checksums)
+    if keys != set(_REQUIRED_PRESEAL_CHECKSUM_KEYS):
+        raise ConfirmationError(
+            "preseal_checksums key roster mismatch: "
+            f"missing={sorted(_REQUIRED_PRESEAL_CHECKSUM_KEYS - keys)} "
+            f"unexpected={sorted(keys - _REQUIRED_PRESEAL_CHECKSUM_KEYS)}"
+        )
     checksums: dict[str, str] = {}
-    for key, value in preseal_checksums.items():
-        if not isinstance(key, str) or not key:
-            raise ConfirmationError("preseal_checksums keys must be non-empty strings")
+    for key in _REQUIRED_PRESEAL_CHECKSUM_KEYS:
+        value = preseal_checksums[key]
         if not _is_hex64(value):
             raise ConfirmationError(
                 f"preseal_checksums[{key!r}] must be 64 lowercase hex chars, got {value!r}"
             )
         checksums[key] = value
     return checksums
+
+
+def _validate_selected_hyperparameters(selected_hyperparameters: object) -> dict[str, Any]:
+    """Validate ``selected_hyperparameters`` (spec §3.2): a non-empty, canonical
+    JSON-serialisable mapping keyed by non-empty strings."""
+    if not isinstance(selected_hyperparameters, Mapping) or not selected_hyperparameters:
+        raise ConfirmationError("selected_hyperparameters must be a non-empty mapping")
+    normalized: dict[str, Any] = {}
+    for key, value in selected_hyperparameters.items():
+        if not isinstance(key, str) or not key:
+            raise ConfirmationError("selected_hyperparameters keys must be non-empty strings")
+        normalized[key] = value
+    try:
+        json.dumps(normalized, sort_keys=True, separators=(",", ":"))
+    except (TypeError, ValueError) as exc:
+        raise ConfirmationError(
+            f"selected_hyperparameters must be JSON-serialisable: {exc}"
+        ) from exc
+    return normalized
+
+
+def _validate_worker_identity(worker_identity: object) -> dict[str, Any]:
+    """Validate the per-method ``worker_identity`` (spec §3.2).
+
+    Must be a mapping keyed by EXACTLY :data:`_WORKER_IDENTITY_METHODS`
+    (``{gears, cpa}``). Each method's value is either a non-empty content-digest
+    string, or a non-empty mapping of the (worker/config/resource/env)
+    ``ExecutionIdentityLock`` identity fields — string keys to non-empty string
+    values.
+    """
+    if not isinstance(worker_identity, Mapping):
+        raise ConfirmationError("worker_identity must be a mapping")
+    keys = set(worker_identity)
+    if keys != set(_WORKER_IDENTITY_METHODS):
+        raise ConfirmationError(
+            "worker_identity must have exactly the method keys "
+            f"{sorted(_WORKER_IDENTITY_METHODS)}, got {sorted(keys)}"
+        )
+    normalized: dict[str, Any] = {}
+    for method in _WORKER_IDENTITY_METHODS:
+        value = worker_identity[method]
+        if isinstance(value, str):
+            if not value:
+                raise ConfirmationError(
+                    f"worker_identity[{method!r}] digest string must be non-empty"
+                )
+            normalized[method] = value
+        elif isinstance(value, Mapping):
+            if not value:
+                raise ConfirmationError(
+                    f"worker_identity[{method!r}] identity mapping must be non-empty"
+                )
+            fields: dict[str, str] = {}
+            for field_key, field_value in value.items():
+                if not isinstance(field_key, str) or not field_key:
+                    raise ConfirmationError(
+                        f"worker_identity[{method!r}] field keys must be non-empty strings"
+                    )
+                if not isinstance(field_value, str) or not field_value:
+                    raise ConfirmationError(
+                        f"worker_identity[{method!r}][{field_key!r}] must be a non-empty string"
+                    )
+                fields[field_key] = field_value
+            normalized[method] = fields
+        else:
+            raise ConfirmationError(
+                f"worker_identity[{method!r}] must be a digest string or an identity mapping"
+            )
+    return normalized
+
+
+def _validate_pair_count(value: object, name: str) -> int:
+    """Validate a non-negative int pair count (rejecting ``bool``)."""
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ConfirmationError(f"{name} must be a non-negative int, got {value!r}")
+    return value
+
+
+def _require_continue(value: object) -> None:
+    """Fail closed unless ``futility_status`` is exactly ``CONTINUE`` (spec §3.2)."""
+    if value != _FUTILITY_CONTINUE:
+        raise ConfirmationError(
+            f"futility_status must be exactly {_FUTILITY_CONTINUE!r} "
+            f"(a confirmation is only built on CONTINUE), got {value!r}"
+        )
+
+
+def _require_zero_sealed_access_count(value: object) -> None:
+    """Fail closed unless ``sealed_access_count`` is exactly ``0`` (spec §3.2).
+
+    Rejects ``bool`` (``False == 0`` in Python) so ``false`` cannot masquerade
+    as a zero count.
+    """
+    if isinstance(value, bool) or not isinstance(value, int) or value != 0:
+        raise ConfirmationError(
+            f"sealed_access_count must be exactly 0 at confirmation time "
+            f"(the seal is never open here), got {value!r}"
+        )
+
+
+def _require_forbidden_output_absence(value: object) -> None:
+    """Fail closed unless ``forbidden_output_absence`` attests absence (``True``)."""
+    if not isinstance(value, bool) or value is not True:
+        raise ConfirmationError(
+            "forbidden_output_absence must be True (attesting that no forbidden "
+            f"output artifact is present), got {value!r}"
+        )
+
+
+def _validate_accepted_limitations(accepted_limitations: object) -> list[str]:
+    """Validate the owner-approved ``accepted_limitations`` roster (spec §3.2).
+
+    Must be a non-empty list/tuple of non-empty strings (a bare string is
+    rejected). Returned as a list; element order is preserved as the exact
+    owner-approved roster.
+    """
+    if isinstance(accepted_limitations, str) or not isinstance(accepted_limitations, (list, tuple)):
+        raise ConfirmationError("accepted_limitations must be a list of strings")
+    limitations: list[str] = []
+    for item in accepted_limitations:
+        if not isinstance(item, str) or not item:
+            raise ConfirmationError("accepted_limitations must be a list of non-empty strings")
+        limitations.append(item)
+    if not limitations:
+        raise ConfirmationError("accepted_limitations must be a non-empty list of strings")
+    return limitations
 
 
 def build_seal_confirmation_manifest(
@@ -122,6 +311,15 @@ def build_seal_confirmation_manifest(
     approved_git_sha: str,
     git_clean: bool,
     preseal_checksums: Mapping[str, str],
+    selected_hyperparameters: Mapping[str, Any],
+    worker_identity: Mapping[str, Any],
+    double_pair_count: int,
+    single_pair_count: int,
+    ordered_seal_request_checksum: str,
+    futility_status: str,
+    sealed_access_count: int,
+    forbidden_output_absence: bool,
+    accepted_limitations: Sequence[str],
 ) -> dict[str, Any]:
     """Build a self-checksummed v1 seal-confirmation manifest (spec §3.2 tail).
 
@@ -130,7 +328,7 @@ def build_seal_confirmation_manifest(
     :data:`alive.compose.config2._EXPECTED_METHOD_ROSTER` (9, order-fixed) and
     :data:`alive.compose.config2._EXPECTED_COMPARATOR_FAMILY` (5, order-fixed),
     referenced directly so the manifest can never drift from the registered
-    config contract.
+    config contract. Every other field is caller-supplied and fully validated.
 
     Parameters
     ----------
@@ -145,11 +343,29 @@ def build_seal_confirmation_manifest(
     git_clean : bool
         Whether the working tree was clean at confirmation time.
     preseal_checksums : Mapping[str, str]
-        The caller-supplied pre-seal content checksums (config / data-card /
-        manifest / response-space / factor / etc. — exactly the set the caller
-        passes; each value must be 64 lowercase hex chars). This module does
-        not prescribe the key roster; the caller owns which pre-seal artifacts
-        are bound into the confirmation.
+        The COMPLETE pre-seal content-checksum set (spec §3.2): EXACTLY
+        :data:`_REQUIRED_PRESEAL_CHECKSUM_KEYS` — config / data-card / manifest /
+        sequence / feature / factor / response(-space) / model / bundle / ledger /
+        pair-index / seed-report — each a 64-lowercase-hex digest.
+    selected_hyperparameters : Mapping[str, Any]
+        The selected hyperparameters (non-empty, JSON-serialisable, string keys).
+    worker_identity : Mapping[str, Any]
+        Per-method ``{gears, cpa}`` worker/config/resource/env identity — each a
+        content-digest string or the ``ExecutionIdentityLock`` identity mapping.
+    double_pair_count, single_pair_count : int
+        The non-negative double-unseen / single-unseen pair counts.
+    ordered_seal_request_checksum : str
+        The intent checksum over the ORDERED pair set the seal will request
+        (64 lowercase hex). phase2b's Task-9 ``intent_checksum`` re-verifies it.
+    futility_status : str
+        Must be exactly ``"CONTINUE"`` — a confirmation is only built on CONTINUE.
+    sealed_access_count : int
+        Must be ``0`` at confirmation time (the seal is never opened here).
+    forbidden_output_absence : bool
+        Must be ``True``, attesting no forbidden output artifact is present.
+    accepted_limitations : Sequence[str]
+        The owner-approved EXACT roster of accepted limitations (non-empty list
+        of non-empty strings; element order preserved).
 
     Returns
     -------
@@ -173,6 +389,16 @@ def build_seal_confirmation_manifest(
     if not isinstance(git_clean, bool):
         raise ConfirmationError("git_clean must be a bool")
     checksums = _validate_preseal_checksums(preseal_checksums)
+    hyperparameters = _validate_selected_hyperparameters(selected_hyperparameters)
+    workers = _validate_worker_identity(worker_identity)
+    double_count = _validate_pair_count(double_pair_count, "double_pair_count")
+    single_count = _validate_pair_count(single_pair_count, "single_pair_count")
+    if not _is_hex64(ordered_seal_request_checksum):
+        raise ConfirmationError("ordered_seal_request_checksum must be 64 lowercase hex chars")
+    _require_continue(futility_status)
+    _require_zero_sealed_access_count(sealed_access_count)
+    _require_forbidden_output_absence(forbidden_output_absence)
+    limitations = _validate_accepted_limitations(accepted_limitations)
 
     payload: dict[str, Any] = {
         "schema": SEAL_CONFIRMATION_MANIFEST_SCHEMA,
@@ -182,6 +408,15 @@ def build_seal_confirmation_manifest(
         "approved_git_sha": approved_git_sha,
         "git_clean": git_clean,
         "preseal_checksums": checksums,
+        "selected_hyperparameters": hyperparameters,
+        "worker_identity": workers,
+        "double_pair_count": double_count,
+        "single_pair_count": single_count,
+        "ordered_seal_request_checksum": ordered_seal_request_checksum,
+        "futility_status": futility_status,
+        "sealed_access_count": sealed_access_count,
+        "forbidden_output_absence": forbidden_output_absence,
+        "accepted_limitations": limitations,
         "method_roster": list(_EXPECTED_METHOD_ROSTER),
         "comparator_roster": list(_EXPECTED_COMPARATOR_FAMILY),
     }
@@ -252,6 +487,13 @@ def verify_seal_confirmation_manifest(
     6. ``method_roster`` / ``comparator_roster`` equal exactly
        :data:`alive.compose.config2._EXPECTED_METHOD_ROSTER` /
        ``_EXPECTED_COMPARATOR_FAMILY`` (order-fixed);
+    6b. the FULL extended §3.2 field schema (defense in depth, independent of
+       ``reconstruct_inputs``): the complete pre-seal checksum set, the selected
+       hyperparameters, the per-method worker identity, the non-negative pair
+       counts, the hex64 ordered seal-request checksum, ``futility_status ==
+       "CONTINUE"``, ``sealed_access_count == 0``, ``forbidden_output_absence is
+       True`` and a non-empty ``accepted_limitations`` list of strings — any
+       violation fails closed;
     7. ``token == manifest["confirmation_checksum"]`` — checked BEFORE
        reconstruction. A token equal to ``run_id`` (or any other non-matching
        value) is rejected; this is the landmine the ``--confirm-seal`` CLI
@@ -273,10 +515,15 @@ def verify_seal_confirmation_manifest(
         ``confirmation_checksum``.
     reconstruct_inputs : Mapping[str, Any]
         The exact keyword inputs :func:`build_seal_confirmation_manifest`
-        expects (``run_id``, ``execution_id``, ``resolved_run_spec_file_sha256``,
-        ``approved_git_sha``, ``git_clean``, ``preseal_checksums``), computed by
-        the caller from the CURRENT non-sealed files/environment + attested
-        sealed-input identity (never from the sealed source itself).
+        expects (:data:`_BUILD_INPUT_KEYS`: ``run_id``, ``execution_id``,
+        ``resolved_run_spec_file_sha256``, ``approved_git_sha``, ``git_clean``,
+        ``preseal_checksums``, ``selected_hyperparameters``, ``worker_identity``,
+        ``double_pair_count``, ``single_pair_count``,
+        ``ordered_seal_request_checksum``, ``futility_status``,
+        ``sealed_access_count``, ``forbidden_output_absence``,
+        ``accepted_limitations``), computed by the caller from the CURRENT
+        non-sealed files/environment + attested sealed-input identity (never
+        from the sealed source itself).
 
     Raises
     ------
@@ -350,6 +597,19 @@ def verify_seal_confirmation_manifest(
             "config2._EXPECTED_COMPARATOR_FAMILY"
         )
 
+    # 6b. FULL extended §3.2 field schema (defense in depth) ------------------
+    _validate_preseal_checksums(manifest.get("preseal_checksums"))
+    _validate_selected_hyperparameters(manifest.get("selected_hyperparameters"))
+    _validate_worker_identity(manifest.get("worker_identity"))
+    _validate_pair_count(manifest.get("double_pair_count"), "double_pair_count")
+    _validate_pair_count(manifest.get("single_pair_count"), "single_pair_count")
+    if not _is_hex64(manifest.get("ordered_seal_request_checksum")):
+        raise ConfirmationError("ordered_seal_request_checksum must be 64 lowercase hex chars")
+    _require_continue(manifest.get("futility_status"))
+    _require_zero_sealed_access_count(manifest.get("sealed_access_count"))
+    _require_forbidden_output_absence(manifest.get("forbidden_output_absence"))
+    _validate_accepted_limitations(manifest.get("accepted_limitations"))
+
     # 7. token FIRST, before any reconstruction -------------------------------
     if not isinstance(token, str) or token != declared_checksum:
         raise ConfirmationError(
@@ -371,6 +631,15 @@ def verify_seal_confirmation_manifest(
         approved_git_sha=reconstruct_inputs["approved_git_sha"],
         git_clean=reconstruct_inputs["git_clean"],
         preseal_checksums=reconstruct_inputs["preseal_checksums"],
+        selected_hyperparameters=reconstruct_inputs["selected_hyperparameters"],
+        worker_identity=reconstruct_inputs["worker_identity"],
+        double_pair_count=reconstruct_inputs["double_pair_count"],
+        single_pair_count=reconstruct_inputs["single_pair_count"],
+        ordered_seal_request_checksum=reconstruct_inputs["ordered_seal_request_checksum"],
+        futility_status=reconstruct_inputs["futility_status"],
+        sealed_access_count=reconstruct_inputs["sealed_access_count"],
+        forbidden_output_absence=reconstruct_inputs["forbidden_output_absence"],
+        accepted_limitations=reconstruct_inputs["accepted_limitations"],
     )
     if _canonical_bytes(reconstructed) != _canonical_bytes(manifest):
         raise ConfirmationError(
