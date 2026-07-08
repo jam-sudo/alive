@@ -215,6 +215,33 @@ def test_payload_within_fixture_bounds(tmp_path: Path) -> None:
     assert bundle.dev_store_audit["access_audit"].source_kind == "synthetic_fixture"
 
 
+def test_fit_role_carries_a_combo_cell_per_calibration_pair(tmp_path: Path) -> None:
+    """The fit-role artifact holds one ``combo_calibration`` cell per calibration
+    pair — the D2 seed-variability ``COMPLETE`` prerequisite (T9/T13).
+
+    ``development_seed_variability`` re-derives, per ``(method, seed, fold)``, a
+    fold-scoped fit-role artifact restricted to that fold's TRAIN pairs; the
+    reference worker fails closed unless that artifact carries a
+    ``combo_calibration`` cell. Because each OOF fold's ``train ∪ test ∪ excluded``
+    equals the full calibration set, every fold's TRAIN subset retains a combo cell
+    IFF the base artifact carries a cell for every calibration pair. A short slice
+    left most folds with zero combo cells → an INCOMPLETE report.
+    """
+    bundle = build_compose_fixture(tmp_path)
+    adata = anndata.read_h5ad(bundle.paths["fit_role_artifact"])
+    roles = [str(r) for r in adata.obs["role"]]
+    perts = [str(p) for p in adata.obs["perturbation"]]
+    cal_pairs = tuple(tuple(p) for p in bundle.phase2a_inputs.cal_pair_ids)
+
+    combo_tokens = {tok for tok, role in zip(perts, roles) if role == "combo_calibration"}
+    # exactly one combo cell per calibration pair, tokens byte-canonical "a_b".
+    assert roles.count("combo_calibration") == len(cal_pairs)
+    assert combo_tokens == {f"{a}_{b}" for a, b in cal_pairs}
+    # still bounded synthetic: a tiny cell/gene count well within the fixture limits.
+    assert adata.n_obs == 12 + 8 + len(cal_pairs)
+    assert adata.n_vars == bundle.phase2a_inputs.response_dim + 1
+
+
 def test_run_dir_starts_empty(tmp_path: Path) -> None:
     # stage-1 inputs live outside run_dir; the driver installs run-produced
     # artifacts INTO run_dir (spec §7.1), so it must start empty.

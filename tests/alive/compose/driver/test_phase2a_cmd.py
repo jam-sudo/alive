@@ -91,6 +91,39 @@ def test_continue_installs_exactly_four_artifacts(
     assert not (bundle.run_dir / "development_seed_variability.json").exists()
 
 
+def test_continue_seed_variability_report_is_complete(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The REAL D2 ``development_seed_variability`` over the committed fixture is
+    ``COMPLETE`` — the phase2b-fixture / mini-e2e prerequisite (T9/T13).
+
+    The fixture fit-role carries one ``combo_calibration`` cell per calibration
+    pair, so every ``(method, seed, fold)`` job's fold-scoped fit-role artifact
+    (restricted to that fold's TRAIN pairs) retains combo cells and the reference
+    worker fits — no seed fails, so the written report is ``COMPLETE`` (a short
+    combo slice left most folds with zero combo cells → BaselineUnavailable per
+    seed → INCOMPLETE, which ``verify_seed_variability_binding_bounded`` rejects).
+    """
+    bundle = build_compose_fixture(tmp_path)
+    _forbid_compose_outcome_store(monkeypatch)
+
+    rc = run_phase2a_subcommand(bundle, approved_artifacts_root=tmp_path, run_dir=bundle.run_dir)
+    assert rc == 0
+
+    report = json.loads((bundle.run_dir / "phase2a_development_seed_variability.json").read_text())
+    assert report["status"] == "COMPLETE"
+    assert report["registered_seeds"] == [11, 23, 37]
+    # every seed-refittable comparator produced a finite OOF scalar for every seed.
+    assert {s["method"] for s in report["summaries"]} == {"gears", "cpa"}
+    for summary in report["summaries"]:
+        assert summary["failed_seeds"] == []
+        assert summary["failure_class_by_seed"] == []
+        # every registered seed contributed a finite OOF scalar (none dropped).
+        seeds_scored = [seed for seed, _ in summary["oof_mse_by_seed"]]
+        assert seeds_scored == [11, 23, 37]
+        assert all(np.isfinite(value) for _, value in summary["oof_mse_by_seed"])
+
+
 def test_continue_ledger_carries_driver_added_shas(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

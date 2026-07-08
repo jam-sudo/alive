@@ -319,7 +319,19 @@ def _build_response_and_fit_role(
     rng = np.random.default_rng(4242)
     n_genes = response_dim + 1
     gene_order = [f"T{i}" for i in range(n_genes)]
-    combo_pairs = cal_pair_ids[: min(4, len(cal_pair_ids))]
+    # ONE combo_calibration cell per calibration pair (spec §6). The D2
+    # ``development_seed_variability`` harness re-derives, per (method, seed, fold),
+    # a fold-scoped fit-role artifact restricted to that fold's TRAIN pairs, then
+    # runs the reference worker over it — and the worker fails closed unless the
+    # fold artifact carries >=1 ``combo_calibration`` cell. Since each OOF fold's
+    # ``train ∪ test ∪ excluded`` equals the full calibration set, EVERY fold's
+    # TRAIN subset retains a combo cell IFF the base artifact carries a cell for
+    # every calibration pair. A 4-pair slice left most folds with zero combo cells
+    # → BaselineUnavailable per seed → an INCOMPLETE report. One cell per pair is
+    # the minimal faithful design: it mirrors the real stage-1 fit-role (a cell per
+    # calibration pair), stays bounded (|Cal| = len(cal_pair_ids) rows), and — as
+    # only calibration pairs are stored — never smuggles a sealed pair into the fit.
+    combo_pairs = [tuple(p) for p in cal_pair_ids]
     n_control, n_single, n_combo = 12, 8, len(combo_pairs)
     n_cells = n_control + n_single + n_combo
     counts = rng.integers(1, 50, size=(n_cells, n_genes)).astype(np.float64)
