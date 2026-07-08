@@ -2022,11 +2022,20 @@ expected_dev_store_checksum : str or None, optional
         raise SeedVariabilityPreflightError(
             "report fold-scoped fit-role artifact digests do not bind to the executed folds"
         )
-    if len(report.fold_execution_records) != len(roster) * len(seed_roster) * n_folds:
+    observed = [(rec.method, int(rec.seed), int(rec.fold)) for rec in report.fold_execution_records]
+    observed_set = set(observed)
+    if len(observed) != len(observed_set):
         raise SeedVariabilityPreflightError(
-            "a COMPLETE report must execute every (method, seed, fold) combination; "
-            f"got {len(report.fold_execution_records)} records, expected "
-            f"{len(roster) * len(seed_roster) * n_folds}"
+            "duplicate (method, seed, fold) execution record(s) present; each combination "
+            "must appear exactly once"
+        )
+    expected = {(m, int(s), f) for m in roster for s in seed_roster for f in range(n_folds)}
+    if observed_set != expected:
+        missing = sorted(expected - observed_set)
+        extra = sorted(observed_set - expected)
+        raise SeedVariabilityPreflightError(
+            "a COMPLETE report must execute EXACTLY the (method, seed, fold) Cartesian product; "
+            f"missing={missing!r} extra={extra!r}"
         )
     return report
 

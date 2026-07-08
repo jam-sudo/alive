@@ -1563,6 +1563,62 @@ def test_preflight_fold_execution_record_defect_fails_closed(tmp_path, mutate):
         verify_seed_variability_for_preflight(**_verify_kwargs(fx, cfg, ledger, run_dir))
 
 
+def test_preflight_rejects_duplicate_tuple_compensated_by_drop(tmp_path):
+    # A duplicated (method, seed, fold) record that exactly compensates a dropped
+    # victim keeps the record COUNT unchanged, so the old coarse count guard passed.
+    # The exact-Cartesian-product check catches the duplicate. worker_locks and the
+    # fold-scoped fit-role digests are rebuilt from the doctored records so the earlier
+    # binding legs stay self-consistent and ONLY the duplicate leg can fire.
+    fx = _fixture(tmp_path)
+    cfg = _config()
+    report = _complete_report(fx, cfg)
+
+    recs = list(report.fold_execution_records)
+    dup = recs[0]
+    victim_idx = next(
+        i
+        for i, r in enumerate(recs)
+        if (r.method, int(r.seed), int(r.fold)) != (dup.method, int(dup.seed), int(dup.fold))
+    )
+    recs[victim_idx] = dataclasses.replace(dup)  # a 2nd copy of dup's (method, seed, fold)
+    bad = dataclasses.replace(
+        report,
+        fold_execution_records=tuple(recs),
+        worker_locks=tuple(sorted({r.worker_identity_sha256 for r in recs})),
+        fold_fit_role_artifact_sha256s=tuple(sorted(r.fold_fit_role_artifact_sha256 for r in recs)),
+    )
+    # the duplicate exactly compensates the dropped victim: the COUNT is unchanged.
+    assert len(bad.fold_execution_records) == len(report.fold_execution_records)
+
+    run_dir = _run_dir(tmp_path)
+    ledger = _d2_ledger(fx, cfg)
+    bind_development_seed_variability(run_dir=run_dir, ledger=ledger, report=bad)
+    with pytest.raises(SeedVariabilityPreflightError, match="duplicate"):
+        verify_seed_variability_for_preflight(**_verify_kwargs(fx, cfg, ledger, run_dir))
+
+
+def test_preflight_rejects_missing_cartesian_cell(tmp_path):
+    # Dropping one fold record (with the two binding fields rebuilt so the earlier
+    # legs stay self-consistent) leaves the (method, seed, fold) set short of the exact
+    # Cartesian product; the set-equality leg fails closed naming the missing cell.
+    fx = _fixture(tmp_path)
+    cfg = _config()
+    report = _complete_report(fx, cfg)
+
+    recs = list(report.fold_execution_records)[:-1]  # drop one cell entirely
+    bad = dataclasses.replace(
+        report,
+        fold_execution_records=tuple(recs),
+        worker_locks=tuple(sorted({r.worker_identity_sha256 for r in recs})),
+        fold_fit_role_artifact_sha256s=tuple(sorted(r.fold_fit_role_artifact_sha256 for r in recs)),
+    )
+    run_dir = _run_dir(tmp_path)
+    ledger = _d2_ledger(fx, cfg)
+    bind_development_seed_variability(run_dir=run_dir, ledger=ledger, report=bad)
+    with pytest.raises(SeedVariabilityPreflightError, match="Cartesian"):
+        verify_seed_variability_for_preflight(**_verify_kwargs(fx, cfg, ledger, run_dir))
+
+
 def test_preflight_directory_at_report_path_fails_closed(tmp_path):
     # A DIRECTORY at the report path (not a symlink, not missing) is rejected
     # fail-closed by the is_file() regular-file guard, before any ledger read.
