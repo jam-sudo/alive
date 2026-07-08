@@ -1,0 +1,677 @@
+"""``phase2b`` subcommand orchestration (COMPOSE production driver, spec §3.3).
+
+The LAST of the three driver subcommands (canonical order ``phase2a → preflight
+→ phase2b``) and the **single sealed-store construction point in the entire
+driver** (spec §4). Everything before the seal is a re-verification of the
+non-sealed state the earlier subcommands installed; the store is built HERE and
+ONLY here, so this module is the one place permitted to import/construct
+:class:`~alive.compose.outcome_store.ComposeOutcomeStore` /
+:func:`~alive.compose.outcome_store.build_fixture_outcome_store` (Task 12 asserts
+this structurally). It re-implements no science — it verifies, assembles the
+sealed store, hands off to the library entry point, and re-reads the durable
+export.
+
+Steps (spec §3.3 steps 0-6):
+
+0. acquire the non-blocking OS-exclusive driver lock ``run_dir/phase2b.lock`` and
+   assert the phase2b ENTRY roster (the 4 phase2a artifacts + the confirmation
+   manifest required; terminal / audit / pre-access / durable forbidden) — a
+   stray seal-adjacent artifact or a missing confirmation fails closed here;
+1. (scientific only) re-verify the clean-git + activation carrier state BEFORE
+   confirmation — the fixture path has no real Git tree (``git_clean == True``);
+2. reload the frozen bundle + RE-READ the persisted phase2a ledger and run the
+   outcome-free :func:`~alive.compose.preflight.run_preflight` gate (re-verifying
+   CONTINUE + every pre-seal checksum) to obtain the frozen
+   :class:`~alive.compose.preflight.EvaluationLock`;
+3. re-verify the installed ``seal_confirmation_manifest.json`` via
+   :func:`~alive.compose.driver.confirmation.verify_seal_confirmation_manifest`
+   — the ``--confirm-seal`` token must equal the manifest's FULL
+   ``confirmation_checksum`` (a run-id-only token is rejected), THEN the manifest
+   is reconstructed byte-for-byte from the CURRENT non-sealed inputs (assembled
+   by the SHARED Task-8 :func:`~alive.compose.driver.preflight_cmd.build_confirmation_inputs`).
+   The sealed access count is still 0;
+4. ONLY after confirmation: integrity-check the sealed source (``O_NOFOLLOW``
+   regular-file fd, ``(device, inode, size, mtime_ns)`` compared around a
+   streamed hash, digest verified), check the run-bound audit destination is
+   absent/empty, run the obs-alignment validator
+   (:func:`~alive.compose.outcome_store.validate_pair_index_against_source_obs`),
+   then **construct the sealed store in THIS function only** with
+   ``audit_path = <run_dir>/audit.jsonl`` (:data:`~alive.compose.durable.SEAL_AUDIT_FILENAME`
+   — the exact path ``recover`` reconstructs to salvage a consumed seal);
+5. dispatch the correct library entry point (``run_phase2b_fixture`` /
+   ``run_phase2b``); the seal is opened EXACTLY once inside it;
+6. INDEPENDENTLY re-read ``phase2b_durable_commit.json`` (canonical bytes +
+   self-checksum + every recorded file SHA), then map the terminal state to an
+   exit code.
+
+Output discipline (spec §3.3). Nothing scientific is emitted before the step-6
+durable re-read; this subcommand returns only a terminal-state exit code and
+never an aggregate, verdict, or per-pair value.
+
+Exit codes (§1.1): ``0`` = a ``COMPLETE`` terminal with a verified durable commit
+marker; ``30`` = a non-``COMPLETE`` terminal (``INVALID`` / ``ABORTED``) OR an
+incomplete durable export. A pre-seal violation (roster, confirmation, source
+integrity, obs alignment) fails closed by RAISING — the seal is never opened, no
+audit is written, and no terminal artifact is left behind.
+
+See docs/superpowers/specs/2026-07-07-compose-production-driver-design.md §3.3.
+"""
+
+from __future__ import annotations
+
+import contextlib
+import fcntl
+import hashlib
+import json
+import os
+import stat
+from pathlib import Path
+from typing import Any, Iterator, Mapping
+
+import anndata
+
+from alive.compose.config2 import load_compose_phase2_config
+from alive.compose.driver.confirmation import verify_seal_confirmation_manifest
+from alive.compose.driver.preflight_cmd import build_confirmation_inputs
+from alive.compose.driver.run_dir_state import DRIVER_LOCK_FILE, assert_run_dir_roster
+from alive.compose.driver.run_spec import (
+    RUN_PRODUCED_BASENAMES,
+    ResolvedRunSpec,
+    load_resolved_run_spec,
+)
+from alive.compose.durable import (
+    COMMIT_CHECKSUM_FIELD,
+    DURABLE_COMMIT_FILENAME,
+    SEAL_AUDIT_FILENAME,
+)
+from alive.compose.freeze import FrozenPredictionBundle
+from alive.compose.outcome_store import (
+    ComposeOutcomeStore,
+    build_fixture_outcome_store,
+    validate_pair_index_against_source_obs,
+)
+from alive.compose.phase2b import run_phase2b, run_phase2b_fixture
+from alive.compose.preflight import run_preflight
+from alive.compose.split import ROLE_NAMES
+from alive.compose.terminal import TerminalState
+from alive.provenance import RunLedger, sha256_file, sha256_json
+
+__all__ = [
+    "PHASE2B_COMPLETE_EXIT",
+    "PHASE2B_NONCOMPLETE_EXIT",
+    "Phase2bSubcommandError",
+    "run_phase2b_subcommand",
+]
+
+#: Exit code for a ``COMPLETE`` terminal with a verified durable commit marker.
+PHASE2B_COMPLETE_EXIT = 0
+
+#: Exit code for a non-``COMPLETE`` terminal (``INVALID`` / ``ABORTED``) OR an
+#: incomplete durable export (the commit marker absent).
+PHASE2B_NONCOMPLETE_EXIT = 30
+
+#: Streaming-hash chunk size for the sealed-source integrity check.
+_HASH_CHUNK = 1 << 20
+
+#: The durable commit-marker file-SHA entry keys that carry a ``{filename,
+#: sha256}`` pair the step-6 re-read cross-checks against the on-disk bytes. A
+#: summary-bearing marker (``COMPLETE`` / ``INVALID``) carries all five; an
+#: ``ABORTED_AFTER_SEAL`` marker omits ``registered_summary``.
+_MARKER_FILE_ENTRY_KEYS: tuple[str, ...] = (
+    "terminal",
+    "registered_summary",
+    "final_ledger",
+    "pre_access_ledger",
+    "seed_variability",
+)
+
+
+class Phase2bSubcommandError(RuntimeError):
+    """Raised on a driver-level phase2b orchestration failure (fail-closed).
+
+    Distinct from the library entry point's own errors and from the seal-boundary
+    :class:`~alive.compose.outcome_store.ComposeSealingError`. Covers a failed
+    driver-lock acquisition (a concurrent phase2b/recover), a sealed-source
+    integrity failure (symlink / non-regular node / identity change during
+    hashing / digest mismatch), a non-absent/non-empty run-bound audit
+    destination, and a durable commit marker that re-reads inconsistently.
+    """
+
+
+# --------------------------------------------------------------------------- #
+# Public subcommand
+# --------------------------------------------------------------------------- #
+
+
+def run_phase2b_subcommand(
+    run_spec: Any,
+    *,
+    approved_artifacts_root: str | Path,
+    run_dir: str | Path,
+    confirm_seal_token: str,
+) -> int:
+    """Construct the sealed store and run the one-time Phase-2b evaluation (§3.3).
+
+    Parameters
+    ----------
+    run_spec
+        The stage-1 DATA carrier (locally the committed fixture builder's
+        :class:`~alive.compose.driver.fixture_builder.FixtureBundle`). It carries
+        the canonical ResolvedRunSpec path (``spec_path``), the LIVE response
+        artifact (``response_artifact``), and the sealed-outcome DATA
+        (``sealed_outcome`` — the source path + expected digest, the ``pair_index``,
+        the split + pair-index manifests, the corpus attestation triple, and the
+        perturbation-column / combo-separator rules) a sealed store is built FROM.
+        No sealed store is ever carried; it is constructed here.
+    approved_artifacts_root
+        The out-of-band CLI trust root; its canonical realpath must equal the
+        ResolvedRunSpec's declared ``approved_artifacts_root``.
+    run_dir
+        The shared run directory. Must hold EXACTLY the 4 phase2a artifacts + the
+        confirmation manifest at entry (§7.1); the driver lock is the only new
+        install before the seal opens.
+    confirm_seal_token
+        The ``--confirm-seal`` token; must equal the installed manifest's FULL
+        ``confirmation_checksum`` (never the recomputable run id).
+
+    Returns
+    -------
+    int
+        ``0`` for a ``COMPLETE`` terminal with a verified durable commit marker;
+        ``30`` for a non-``COMPLETE`` terminal or an incomplete durable export.
+
+    Raises
+    ------
+    RunDirStateError
+        If the phase2b entry roster is violated (checked at step 0).
+    RunSpecError
+        If the ResolvedRunSpec fails validation.
+    ConfirmationError
+        If the ``--confirm-seal`` token or the manifest reconstruction fails.
+    ComposeSealingError
+        If the pair index does not align with the source obs labels, or the
+        sealed store rejects its inputs — raised BEFORE any seal access.
+    Phase2bSubcommandError
+        On a lock/integrity/audit-destination/durable-marker failure.
+    """
+    run_dir = Path(run_dir)
+
+    # Step 0: acquire the non-blocking OS-exclusive driver lock, then assert the
+    # phase2b entry roster. Both fail closed BEFORE any store construction; the
+    # roster forbids a stray audit / terminal / durable artifact and requires the
+    # confirmation manifest, so omitting preflight fails here.
+    with _driver_lock(run_dir):
+        assert_run_dir_roster(run_dir, "phase2b")
+        return _run_confirmed_phase2b(
+            run_spec,
+            approved_artifacts_root=approved_artifacts_root,
+            run_dir=run_dir,
+            confirm_seal_token=confirm_seal_token,
+        )
+
+
+def _run_confirmed_phase2b(
+    run_spec: Any,
+    *,
+    approved_artifacts_root: str | Path,
+    run_dir: Path,
+    confirm_seal_token: str,
+) -> int:
+    """Steps 1-6, executed under the acquired driver lock."""
+    # Step 1/2 setup: load + validate the immutable ResolvedRunSpec (trust
+    # boundary), the config, the frozen bundle, and RE-READ the persisted phase2a
+    # ledger (never reconstructed — that would make the ledger↔bundle check a
+    # tautology).
+    spec_path = Path(run_spec.spec_path)
+    mode = _peek_mode(spec_path)
+    spec = load_resolved_run_spec(
+        spec_path, approved_artifacts_root=approved_artifacts_root, mode_expected=mode
+    )
+    config = load_compose_phase2_config(spec.pre_seal["config"].path)
+    bundle = FrozenPredictionBundle.load(run_dir / RUN_PRODUCED_BASENAMES["frozen_bundle"])
+    ledger_path = run_dir / RUN_PRODUCED_BASENAMES["run_ledger"]
+    ledger = RunLedger.read(ledger_path)
+
+    sealed_outcome = run_spec.sealed_outcome
+    response_artifact = run_spec.response_artifact
+    payload_response = {
+        "response_space": response_artifact["response_space"],
+        "control_mean": response_artifact["control_mean"],
+    }
+    pair_manifest = sealed_outcome["manifest"]  # the split manifest (roles + checksum)
+
+    # Step 1: scientific-only clean-git + activation re-verification (before
+    # confirmation). Fixture mode has no real Git tree (git_clean == True).
+    git_clean = _resolve_git_clean(spec, run_spec)
+
+    # Step 2: the outcome-free preflight gate re-verifies CONTINUE + every
+    # pre-seal checksum and yields the frozen EvaluationLock (the seal is
+    # untouched; a rejection raises PreflightError, leaving no terminal/audit).
+    lock = run_preflight(
+        bundle=bundle,
+        pair_manifest=pair_manifest,
+        config=config,
+        data_card_digest=spec.data_card_digest,
+        raw_or_source_digest=spec.raw_or_source_digest,
+        sequence_mapping_digest=spec.sequence_mapping_digest,
+        ledger=ledger,
+        expected_response_dim=int(response_artifact["response_space"].pca_dim),
+    )
+
+    # Step 3: re-verify the installed confirmation manifest against the token FIRST
+    # (a run-id-only token is rejected), then require the manifest to reconstruct
+    # byte-for-byte from the CURRENT non-sealed inputs (assembled by the SHARED
+    # Task-8 helper — never a divergent copy). The sealed access count is still 0.
+    reconstruct_inputs = build_confirmation_inputs(
+        spec=spec,
+        config=config,
+        ledger=ledger,
+        ledger_path=ledger_path,
+        lock=lock,
+        git_clean=git_clean,
+    )
+    verify_seal_confirmation_manifest(
+        run_dir / RUN_PRODUCED_BASENAMES["seal_confirmation_manifest"],
+        confirm_seal_token,
+        reconstruct_inputs=reconstruct_inputs,
+    )
+
+    # Step 4: ONLY after confirmation. Integrity-check the sealed source, check the
+    # run-bound audit destination, validate the pair index against the source obs,
+    # then construct the sealed store — the driver's SOLE construction point (§4).
+    outcome_store = _build_sealed_store(
+        spec=spec, run_dir=run_dir, sealed_outcome=sealed_outcome, pair_manifest=pair_manifest
+    )
+
+    # Step 5: dispatch the correct library entry point. The seal opens EXACTLY
+    # once inside it; every consumed access leaves a terminal artifact.
+    if spec.mode == "fixture":
+        result = run_phase2b_fixture(
+            run_dir=run_dir,
+            outcome_store=outcome_store,
+            frozen_bundle=bundle,
+            pair_manifest=pair_manifest,
+            response_artifact=payload_response,
+            config=config,
+            ledger=ledger,
+        )
+    else:
+        # Scientific dispatch (a PREPARE obligation; NOT exercised by the local
+        # fixture path). run_phase2b re-verifies activation + clean git itself and
+        # binds the phase2a DISTINCT seed-variability report (never the canonical
+        # name phase2b installs) as seed_variability_report_path.
+        seed_report_path = run_dir / RUN_PRODUCED_BASENAMES["phase2a_seed_variability_report"]
+        scientific_response = {
+            **payload_response,
+            "checksum": response_artifact["combined_checksum"],
+        }
+        result = run_phase2b(
+            run_dir=run_dir,
+            outcome_store=outcome_store,
+            frozen_bundle=bundle,
+            pair_manifest=pair_manifest,
+            response_artifact=scientific_response,
+            config=config,
+            ledger=ledger,
+            activation_record=run_spec.activation_record,
+            git_is_clean=git_clean,
+            provenance_inputs=getattr(run_spec, "provenance_inputs", None),
+            oof_manifest_path=run_dir / RUN_PRODUCED_BASENAMES["oof_manifest"],
+            oof_manifest_checksum=bundle.dev_diagnostics["oof_fold_manifest_checksum"],
+            seed_variability_report_path=seed_report_path,
+            seed_variability_report_checksum=sha256_file(seed_report_path),
+        )
+
+    # Step 6: INDEPENDENTLY re-read the durable commit marker (never the returned
+    # result alone), then map the terminal state to an exit code. Nothing
+    # scientific is emitted here — only the terminal-state exit code.
+    marker_verified = _reread_durable_commit(
+        run_dir, expected_checksum=result.durable_commit_checksum
+    )
+    if result.terminal_state == TerminalState.COMPLETE and marker_verified:
+        return PHASE2B_COMPLETE_EXIT
+    return PHASE2B_NONCOMPLETE_EXIT
+
+
+# --------------------------------------------------------------------------- #
+# Step 0: driver lock
+# --------------------------------------------------------------------------- #
+
+
+@contextlib.contextmanager
+def _driver_lock(run_dir: Path) -> Iterator[None]:
+    """Hold the non-blocking OS-exclusive ``run_dir/phase2b.lock`` (spec §3.3 step 0).
+
+    Uses ``flock(LOCK_EX | LOCK_NB)`` on a dedicated lock file so a concurrent
+    ``phase2b`` / ``recover`` fails closed immediately (never blocks) and the lock
+    is released even if this process dies. The lock file itself is an ephemeral
+    artifact the phase2b/recover rosters allow.
+
+    Raises
+    ------
+    Phase2bSubcommandError
+        If the lock is already held (a concurrent driver run) or cannot be opened.
+    """
+    lock_path = run_dir / DRIVER_LOCK_FILE
+    flags = os.O_CREAT | os.O_RDWR | getattr(os, "O_CLOEXEC", 0)
+    try:
+        fd = os.open(lock_path, flags, 0o600)
+    except OSError as exc:
+        raise Phase2bSubcommandError(
+            f"cannot open the phase2b driver lock {str(lock_path)!r}: {exc}"
+        ) from exc
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            raise Phase2bSubcommandError(
+                f"another phase2b/recover holds the driver lock {str(lock_path)!r}; "
+                "refusing to run concurrently"
+            ) from exc
+        try:
+            yield
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
+
+
+# --------------------------------------------------------------------------- #
+# Step 4: sealed-source integrity + sealed-store construction (the SOLE point)
+# --------------------------------------------------------------------------- #
+
+
+def _build_sealed_store(
+    *,
+    spec: ResolvedRunSpec,
+    run_dir: Path,
+    sealed_outcome: Mapping[str, Any],
+    pair_manifest: Mapping[str, Any],
+) -> ComposeOutcomeStore:
+    """Construct the sealed outcome store — the driver's SOLE construction site (§4).
+
+    Runs entirely AFTER confirmation: integrity-check the sealed source file,
+    enforce the run-bound audit destination is absent/empty, enforce each pair's
+    declared role against the split role names, validate the pair index against
+    the source obs labels, THEN build the store with ``audit_path =
+    <run_dir>/audit.jsonl``. Fixture mode mints a sanctioned
+    :class:`~alive.compose.outcome_store.FixtureOutcomeStore` via the allowlisted
+    :func:`~alive.compose.outcome_store.build_fixture_outcome_store`; scientific
+    mode builds a plain :class:`~alive.compose.outcome_store.ComposeOutcomeStore`.
+    """
+    pair_index = sealed_outcome["pair_index"]
+    source_path = Path(sealed_outcome["source_path"])
+    expected_source_sha = sealed_outcome["source_file_sha256"]
+    perturbation_col = sealed_outcome["perturbation_column"]
+    combo_sep = sealed_outcome["combo_sep"]
+
+    # Cross-check the two carrier artifacts agree on the expected source digest
+    # (the pair-index manifest and the declared sealed-input digest), then verify
+    # the source file bytes against it (O_NOFOLLOW, identity-stable around hashing).
+    manifest_source_sha = sealed_outcome["pair_index_manifest"]["source_file_sha256"]
+    if manifest_source_sha != expected_source_sha:
+        raise Phase2bSubcommandError(
+            "sealed-outcome carrier disagrees on the expected source digest: "
+            f"pair_index_manifest ({manifest_source_sha!r}) != declared "
+            f"({expected_source_sha!r})"
+        )
+    _verify_sealed_source_integrity(source_path, expected_source_sha)
+
+    # ⚑ The recover-critical audit destination: derived from the module constant,
+    # never a bare string. Check it is run-bound + absent/empty BEFORE the store
+    # is constructed — a consumed (non-empty) audit means the seal was opened.
+    audit_path = run_dir / SEAL_AUDIT_FILENAME
+    _assert_audit_destination_free(audit_path, run_dir=run_dir)
+
+    # Enforce each pair's declared role against the registered split roles (a
+    # bogus role fails closed before the seal is built).
+    _assert_pair_roles(sealed_outcome["pair_index_manifest"])
+
+    # Load the source's obs (bounded synthetic fixture) and validate that every
+    # indexed row's perturbation label canonicalizes to the pair it is filed
+    # under. This is the ONLY driver read of the sealed source's obs labels, done
+    # AFTER confirmation and BEFORE any store construction (C0 contract).
+    source_obj = anndata.read_h5ad(source_path)
+    validate_pair_index_against_source_obs(
+        source_obj,
+        pair_index,
+        pair_manifest,
+        perturbation_col=perturbation_col,
+        combo_sep=combo_sep,
+    )
+
+    if spec.mode == "fixture":
+        # Fixture-vs-real-source byte comparison stays OFF (validated by index +
+        # attestation, not raw source bytes): the allowlisted attestation triple
+        # is passed through and checked against the committed allowlist only.
+        return build_fixture_outcome_store(
+            pair_index,
+            source_obj,
+            pair_manifest,
+            audit_path=audit_path,
+            corpus_id=sealed_outcome["corpus_id"],
+            source_sha256=sealed_outcome["source_sha256"],
+            builder_code_sha256=sealed_outcome["builder_code_sha256"],
+        )
+    return ComposeOutcomeStore(
+        pair_index,
+        source_obj,
+        pair_manifest,
+        audit_path=audit_path,
+    )
+
+
+def _verify_sealed_source_integrity(source_path: Path, expected_sha: str) -> None:
+    """Integrity-check the sealed source file (spec §3.3 step 4).
+
+    Opens the source with ``O_NOFOLLOW`` (rejecting a symlink final component),
+    fstat-verifies it is a regular file, captures its
+    ``(device, inode, size, mtime_ns)`` identity, streams the SHA-256, then
+    re-captures the identity and requires it unchanged (a swap during hashing
+    fails closed). The streamed digest must equal ``expected_sha``.
+
+    Raises
+    ------
+    Phase2bSubcommandError
+        On a symlink / non-regular node, an identity change during hashing, an
+        unreadable file, or a digest mismatch.
+    """
+    if source_path.is_symlink():
+        raise Phase2bSubcommandError(
+            f"sealed source {str(source_path)!r} is a symlink (node-kind policy)"
+        )
+    flags = os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0)
+    try:
+        fd = os.open(source_path, flags)
+    except OSError as exc:
+        raise Phase2bSubcommandError(
+            f"cannot open sealed source {str(source_path)!r} (O_NOFOLLOW): {exc}"
+        ) from exc
+    try:
+        pre = os.fstat(fd)
+        if not stat.S_ISREG(pre.st_mode):
+            raise Phase2bSubcommandError(
+                f"sealed source {str(source_path)!r} is not a regular file (node-kind policy)"
+            )
+        identity_before = (pre.st_dev, pre.st_ino, pre.st_size, pre.st_mtime_ns)
+        digest = hashlib.sha256()
+        while True:
+            chunk = os.read(fd, _HASH_CHUNK)
+            if not chunk:
+                break
+            digest.update(chunk)
+        post = os.fstat(fd)
+        identity_after = (post.st_dev, post.st_ino, post.st_size, post.st_mtime_ns)
+    finally:
+        os.close(fd)
+    if identity_before != identity_after:
+        raise Phase2bSubcommandError(
+            f"sealed source {str(source_path)!r} changed identity during hashing "
+            f"(before={identity_before!r} after={identity_after!r})"
+        )
+    actual_sha = digest.hexdigest()
+    if actual_sha != expected_sha:
+        raise Phase2bSubcommandError(
+            f"sealed source {str(source_path)!r} digest mismatch "
+            f"(expected {expected_sha!r}, got {actual_sha!r})"
+        )
+
+
+def _assert_audit_destination_free(audit_path: Path, *, run_dir: Path) -> None:
+    """Fail closed unless the run-bound audit destination is absent or empty (§3.3).
+
+    The audit file is the durable seal-consumption boundary; a pre-existing
+    non-empty file means the seal was (or is being) opened. It must also be a
+    direct child of ``run_dir`` and not a symlink.
+
+    Raises
+    ------
+    Phase2bSubcommandError
+        If the audit destination is not run-bound, is a symlink, or already
+        carries content.
+    """
+    if audit_path.parent.resolve() != run_dir.resolve():
+        raise Phase2bSubcommandError(
+            f"audit destination {str(audit_path)!r} is not a direct child of run_dir "
+            f"{str(run_dir)!r}"
+        )
+    if audit_path.is_symlink():
+        raise Phase2bSubcommandError(f"audit destination {str(audit_path)!r} is a symlink; refused")
+    if audit_path.exists() and audit_path.stat().st_size > 0:
+        raise Phase2bSubcommandError(
+            f"audit destination {str(audit_path)!r} already carries content; the seal "
+            "may be opened exactly once (refusing to construct a store over a burned audit)"
+        )
+
+
+def _assert_pair_roles(pair_index_manifest: Mapping[str, Any]) -> None:
+    """Fail closed unless every pair's declared role is a registered split role.
+
+    Enforces each ``pairs[i].role`` against the canonical
+    :data:`~alive.compose.split.ROLE_NAMES` (a bogus role must never reach the
+    seal boundary).
+
+    Raises
+    ------
+    Phase2bSubcommandError
+        On a pair entry whose ``role`` is not in ``ROLE_NAMES``.
+    """
+    for entry in pair_index_manifest["pairs"]:
+        role = entry.get("role")
+        if role not in ROLE_NAMES:
+            raise Phase2bSubcommandError(
+                f"pair {entry.get('gene_a')!r}/{entry.get('gene_b')!r} declares role "
+                f"{role!r}, not one of the registered split roles {sorted(ROLE_NAMES)}"
+            )
+
+
+# --------------------------------------------------------------------------- #
+# Step 6: independent durable commit-marker re-read
+# --------------------------------------------------------------------------- #
+
+
+def _reread_durable_commit(run_dir: Path, *, expected_checksum: str | None) -> bool:
+    """Independently re-read + verify ``phase2b_durable_commit.json`` (spec §3.3 step 6).
+
+    Re-reads the marker from disk (never trusting the returned result alone),
+    requires canonical JSON, re-verifies the self-excluding ``commit_checksum``,
+    cross-checks it against the result's ``durable_commit_checksum`` when present,
+    and re-verifies every recorded file SHA against the on-disk bytes.
+
+    Returns
+    -------
+    bool
+        ``True`` if the marker is present and fully verified; ``False`` if the
+        marker is ABSENT (an incomplete durable export → the caller maps to 30).
+
+    Raises
+    ------
+    Phase2bSubcommandError
+        If the marker is PRESENT but fails any integrity check (non-canonical
+        bytes, a self-checksum mismatch, a checksum divergence from the result,
+        or a file-SHA mismatch) — a corrupt export fails closed.
+    """
+    marker_path = run_dir / DURABLE_COMMIT_FILENAME
+    if not marker_path.is_file():
+        return False  # incomplete durable export (no marker installed)
+
+    raw = marker_path.read_bytes()
+    try:
+        marker = json.loads(raw)
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise Phase2bSubcommandError(
+            f"durable commit marker {str(marker_path)!r} is not valid JSON: {exc}"
+        ) from exc
+    if not isinstance(marker, dict):
+        raise Phase2bSubcommandError(
+            f"durable commit marker {str(marker_path)!r} is not a JSON object"
+        )
+    if raw != _canonical_bytes(marker):
+        raise Phase2bSubcommandError(
+            f"durable commit marker {str(marker_path)!r} is not canonical JSON"
+        )
+    declared = marker.get(COMMIT_CHECKSUM_FIELD)
+    core = {k: v for k, v in marker.items() if k != COMMIT_CHECKSUM_FIELD}
+    if sha256_json(core) != declared:
+        raise Phase2bSubcommandError(
+            f"durable commit marker {str(marker_path)!r} self-checksum failed re-verification"
+        )
+    if expected_checksum is not None and declared != expected_checksum:
+        raise Phase2bSubcommandError(
+            "durable commit marker checksum diverges from the returned result "
+            f"(marker {declared!r} != result {expected_checksum!r})"
+        )
+    for key in _MARKER_FILE_ENTRY_KEYS:
+        entry = marker.get(key)
+        if entry is None:
+            continue  # registered_summary is absent on the ABORTED reduced publish
+        filename = entry["filename"]
+        on_disk = hashlib.sha256((run_dir / filename).read_bytes()).hexdigest()
+        if on_disk != entry["sha256"]:
+            raise Phase2bSubcommandError(
+                f"durable commit marker file-SHA for {filename!r} failed re-verification "
+                f"(marker {entry['sha256']!r} != on-disk {on_disk!r})"
+            )
+    return True
+
+
+# --------------------------------------------------------------------------- #
+# Assembly helpers
+# --------------------------------------------------------------------------- #
+
+
+def _peek_mode(spec_path: Path) -> str:
+    """Read the declared ``mode`` before the full load (loader re-validates it)."""
+    try:
+        raw = json.loads(spec_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise Phase2bSubcommandError(f"cannot read ResolvedRunSpec {spec_path}: {exc}") from exc
+    mode = raw.get("mode") if isinstance(raw, dict) else None
+    if mode not in {"fixture", "scientific"}:
+        raise Phase2bSubcommandError(f"ResolvedRunSpec declares an unrecognised mode {mode!r}")
+    return mode
+
+
+def _resolve_git_clean(spec: ResolvedRunSpec, run_spec: Any) -> bool:
+    """Resolve the clean-git flag for the confirmation reconstruction + dispatch.
+
+    Fixture mode has no real Git working tree (``approved_git_sha`` is a fixed
+    placeholder), so the deterministic fixture value is ``True``. Scientific mode
+    takes the carrier's verified ``git_is_clean`` and fails closed if it is absent
+    or not a clean committed tree — a scientific sealed run must never proceed on
+    an unverified / dirty tree (spec §3.3 step 1).
+    """
+    if spec.mode == "fixture":
+        return True
+    git_is_clean = getattr(run_spec, "git_is_clean", None)
+    if git_is_clean is not True:
+        raise Phase2bSubcommandError(
+            "scientific phase2b requires a clean committed Git tree (git_is_clean is True) "
+            f"from the run_spec carrier, got {git_is_clean!r}"
+        )
+    return True
+
+
+def _canonical_bytes(obj: object) -> bytes:
+    """Canonical JSON bytes (``sort_keys`` + compact separators)."""
+    return json.dumps(obj, sort_keys=True, separators=(",", ":")).encode("utf-8")
