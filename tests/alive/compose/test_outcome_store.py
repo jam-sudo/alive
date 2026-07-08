@@ -22,6 +22,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 import pytest
 
 from alive.compose.outcome_store import (
@@ -29,6 +30,7 @@ from alive.compose.outcome_store import (
     ComposeSealingError,
     ObservedPair,
     OutcomeStore,
+    validate_pair_index_against_source_obs,
 )
 from alive.compose.split import build_split_manifest
 
@@ -118,6 +120,29 @@ def _sealed_union(manifest: dict) -> list[tuple[str, str]]:
     )
 
 
+class _ObsSource:
+    """Source stub carrying ``.obs`` (a perturbation-label DataFrame).
+
+    Unlike :class:`_InMemorySource` (which exposes only ``.X``), this stub
+    exposes ``.obs`` so the standalone obs-label validator has a per-row
+    perturbation label to check against the pair_index.
+    """
+
+    def __init__(self, x: np.ndarray, labels: list[str]) -> None:  # labels aligned to rows
+        self.X = x
+        self.obs = pd.DataFrame({"perturbation": labels})
+
+
+def _labels_for(pair_index: dict[tuple[str, str], np.ndarray], combo_sep: str = "_") -> list[str]:
+    """Build a correct label array: each row gets its pair's combo token."""
+    n = 1 + max(int(i) for rows in pair_index.values() for i in rows)
+    labels = [""] * n
+    for (a, b), rows in pair_index.items():
+        for i in rows:
+            labels[int(i)] = f"{a}{combo_sep}{b}"
+    return labels
+
+
 # Sanity check the fixture itself: all three roles must be non-empty so the
 # tests below actually exercise both sealed regimes and the calibration role.
 def test_fixture_populates_all_three_roles() -> None:
@@ -125,6 +150,33 @@ def test_fixture_populates_all_three_roles() -> None:
     assert len(_canonical_pairs(manifest, "combo_calibration")) >= 1
     assert len(_canonical_pairs(manifest, "sealed_double_unseen")) >= 1
     assert len(_canonical_pairs(manifest, "sealed_single_unseen")) >= 1
+
+
+# ---------------------------------------------------------------------------
+# 0. Standalone obs-label alignment validator (phase2b, pre-store)
+# ---------------------------------------------------------------------------
+
+
+def test_validate_pair_index_obs_alignment_passes_on_correct_labels() -> None:
+    manifest = _build_manifest()
+    _source, pair_index = _build_pair_index(manifest)
+    labels = _labels_for(pair_index)
+    source = _ObsSource(np.zeros((len(labels), 4), dtype=float), labels)
+    # Correct labels: every indexed row carries its own pair's combo token.
+    validate_pair_index_against_source_obs(source, pair_index, manifest)  # no raise
+
+
+def test_validate_pair_index_obs_alignment_rejects_mislabeled_row() -> None:
+    manifest = _build_manifest()
+    _source, pair_index = _build_pair_index(manifest)
+    labels = _labels_for(pair_index)
+    # Corrupt ONE row so it carries a DIFFERENT valid pair's combo token.
+    victim = int(next(iter(pair_index.values()))[0])
+    other_pair = list(pair_index.keys())[1]
+    labels[victim] = f"{other_pair[0]}_{other_pair[1]}"
+    source = _ObsSource(np.zeros((len(labels), 4), dtype=float), labels)
+    with pytest.raises(ComposeSealingError, match="perturbation label"):
+        validate_pair_index_against_source_obs(source, pair_index, manifest)
 
 
 # ---------------------------------------------------------------------------

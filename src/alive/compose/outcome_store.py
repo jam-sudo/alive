@@ -874,3 +874,78 @@ class ComposeOutcomeStore:
                 "the seal may be opened exactly once"
             ) from exc
         return record
+
+
+# ---------------------------------------------------------------------------
+# Standalone obs-label alignment validator (phase2b, pre-store)
+# ---------------------------------------------------------------------------
+
+
+def validate_pair_index_against_source_obs(
+    source: object,
+    pair_index: Mapping[PairID, np.ndarray],
+    manifest: Mapping,
+    *,
+    perturbation_col: str = "perturbation",
+    combo_sep: str = "_",
+) -> None:
+    """Verify each pair-index row's obs perturbation label canonicalizes to its pair.
+
+    Reads ``source.obs[perturbation_col]`` (a str label per row) and, for every
+    (canonical pair -> row indices) entry, asserts every indexed row's label
+    parses (on ``combo_sep``) and canonicalizes to that exact pair. Fails closed
+    on a missing obs column, an unparsable label, or any mismatch. Reuses
+    :meth:`ComposeOutcomeStore._canonical` so the parsed label and the pair key
+    use the SAME canonicalization.
+
+    This is deliberately a STANDALONE function, not part of
+    :meth:`ComposeOutcomeStore.__init__`: the store ctor / preflight / phase2a
+    never read ``source.obs`` (a capability restriction). Only the phase2b
+    production driver calls this, AFTER confirmation and BEFORE constructing the
+    sealed store. The ``manifest`` argument is part of that driver's call
+    contract; the manifest key-set is already validated inside
+    :meth:`ComposeOutcomeStore.__init__`, so this validator does not re-read it.
+
+    Parameters
+    ----------
+    source : object
+        Any object exposing ``.obs`` with a ``perturbation_col`` column of str
+        labels aligned to source rows (duck-typed; anndata is never imported).
+    pair_index : Mapping[tuple of str, np.ndarray]
+        Canonical pair -> bounded int row-index array.
+    manifest : Mapping
+        The pair-split manifest (part of the driver call contract; not re-read
+        here because the store ctor already validates its key-set).
+    perturbation_col : str, optional
+        Name of the obs column holding per-row perturbation labels.
+    combo_sep : str, optional
+        Separator joining the two gene ids inside a combo label.
+
+    Raises
+    ------
+    ComposeSealingError
+        If the obs column is missing/absent, a label is not a 2-gene combo
+        token, or any indexed row's label canonicalizes to a different pair.
+    """
+    obs = getattr(source, "obs", None)
+    if obs is None or perturbation_col not in getattr(obs, "columns", ()):
+        raise ComposeSealingError(
+            f"source obs is missing the {perturbation_col!r} perturbation column"
+        )
+    labels = obs[perturbation_col].to_numpy()
+    for raw_pair, rows in pair_index.items():
+        pair = ComposeOutcomeStore._canonical(raw_pair)
+        for i in rows:
+            label = str(labels[int(i)])
+            parts = label.split(combo_sep)
+            if len(parts) != 2 or not parts[0] or not parts[1]:
+                raise ComposeSealingError(
+                    f"row {int(i)} perturbation label {label!r} is not a 2-gene "
+                    f"combo token on {combo_sep!r}"
+                )
+            observed = ComposeOutcomeStore._canonical((parts[0], parts[1]))
+            if observed != pair:
+                raise ComposeSealingError(
+                    f"row {int(i)} perturbation label {label!r} canonicalizes to "
+                    f"{observed!r}, but it is indexed under pair {pair!r}"
+                )
