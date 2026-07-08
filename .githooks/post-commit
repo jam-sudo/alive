@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# A (reminder) — if a commit changed COMPOSE progress surfaces (compose src /
+# configs / compose plans+specs) but did NOT update the readiness index, print a
+# non-blocking reminder to bump it. Fires on ALL commits (manual + tool-made),
+# which a Claude Code settings.json hook cannot do. Read-only; never mutates.
+INDEX="docs/superpowers/COMPOSE-SEAL-READINESS.md"
+
+changed="$(git diff-tree --no-commit-id --name-only -r HEAD 2>/dev/null)"
+[ -n "$changed" ] || exit 0
+
+progress="$(printf '%s\n' "$changed" \
+  | grep -E '^(src/alive/compose/|configs/compose|docs/superpowers/(plans|specs)/[^/]*compose)' 2>/dev/null)"
+[ -n "$progress" ] || exit 0
+
+# index updated in the same commit → nothing to remind
+printf '%s\n' "$changed" | grep -qxF "$INDEX" && exit 0
+[ -f "$INDEX" ] || exit 0
+
+{
+  echo ""
+  echo "⚠️  COMPOSE progress changed but $INDEX was NOT updated:"
+  printf '     - %s\n' $progress
+  echo "     → bump the status row, then: scripts/bump-readiness-stamp.sh"
+  echo "       (or stage the index in the same commit — the stamp auto-refreshes)"
+  echo ""
+} >&2
+exit 0
