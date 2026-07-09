@@ -119,15 +119,14 @@ POSTSEAL_NONCOMPLETE_EXIT = 30
 #: ``10``). Each is a documented, fail-closed validation/rejection type raised
 #: by the CLI's own carrier-construction gate or by one of the four
 #: subcommands (or a library call one of them makes) BEFORE any seal access —
-#: never a bare/unexpected error. ``Phase2bSubcommandError`` is a KNOWN
-#: exception (deliberately listed per the task brief's own enumeration) but is
-#: not exclusively pre-seal: its docstring also covers a durable-commit-marker
-#: re-read failure at ``phase2b`` step 6, which runs AFTER the seal is opened.
-#: This CLI maps every ``Phase2bSubcommandError`` to ``10`` uniformly (the
-#: driver has no subclass distinguishing the pre-/post-seal cases, and Task 11
-#: may not modify ``phase2b_cmd.py``); a step-6 marker-corruption case is
-#: therefore reported as ``10`` even though the seal WAS in fact consumed — a
-#: known imprecision flagged in the Task 11 report, not silently resolved.
+#: never a bare/unexpected error. ``Phase2bSubcommandError`` IS exclusively
+#: pre-seal by the time it reaches this CLI: ``phase2b_cmd.py`` step 6 (its
+#: independent durable-commit-marker re-read, which runs AFTER the seal is
+#: opened) catches its own post-seal ``Phase2bSubcommandError`` internally,
+#: emits one stderr diagnostic, and RETURNS the post-seal exit ``30`` itself —
+#: it never lets that exception propagate. So a ``Phase2bSubcommandError`` that
+#: reaches this module's ``except`` clause always means the seal was never
+#: consumed, and mapping it to ``10`` here is correct in every case.
 _KNOWN_PRESEAL_REJECTIONS: tuple[type[Exception], ...] = (
     RunSpecError,  # covers UnsupportedModeError (subclass)
     RunDirStateError,
