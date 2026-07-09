@@ -244,6 +244,13 @@ def test_real_fit_body_raises_worker_unavailable_without_backend(worker_name, tm
     # (c) Without monkeypatching, the real fit path is import-guarded. gears/cpa is
     # absent on this host, so _fit_and_predict raises the clear typed
     # WorkerUnavailable (NOT a silent stub, NOT a leaking NotImplementedError).
+    # On the GPU pod the package IS installed → the fit body raises
+    # NotImplementedError instead, so skip there (the pod Norman smoke covers it).
+    if importlib.util.find_spec(worker_name) is not None:
+        pytest.skip(
+            f"{worker_name} installed; real fit body raises NotImplementedError here "
+            "— covered by the pod Norman smoke, not this contract test"
+        )
     worker = _load_worker(worker_name)
     _spec, payload, _work_dir, _approved_root = _setup(tmp_path)
     with pytest.raises(worker.WorkerUnavailable):
