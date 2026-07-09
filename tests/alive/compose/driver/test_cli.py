@@ -14,30 +14,32 @@ SAME technique ``test_phase2a_cmd.py`` uses directly against
 ``run_phase2a_subcommand``, since the committed fixture corpus
 (``build_compose_fixture``) is CONTINUE-only (no futility knob).
 
-``main``'s own carrier construction calls ``build_compose_fixture`` exactly
-once (spec §1.1 / ``cli.py`` module docstring: write-once fit-role artifact, so
-it cannot be called twice on the same ``--approved-artifacts-root``). Tests
-that need a WORKING carrier therefore learn ``build_compose_fixture``'s
-deterministic ``spec_path``/``run_dir`` naming via ``_fixture_cli_args`` (one
-THROWAWAY build, immediately wiped) rather than pre-building a bundle
-``main()`` would then collide with.
+Since Task 11.5, ``main()`` LOADS the carrier from the ResolvedRunSpec's on-disk
+stage-1 artifacts (via ``load_run_spec_carrier``) — it NEVER rebuilds the corpus.
+The corpus is therefore produced ONCE up-front by ``_fixture_cli_args`` (a single
+``build_compose_fixture`` call, LEFT in place) and every ``main()`` call reads it,
+so independent CLI processes can share ONE ``--run-spec`` / ``--run-dir`` (the spec
+§11 three-independent-process e2e).
 
-Coverage (the four brief scenarios):
+Coverage:
 
   1. ``phase2a`` on the fixture spec -> 0;
   2. a pre-seal validation failure (``--run-spec`` pointing at a file that was
-     never written, which the CLI's own ``_peek_mode`` rejects as a
-     ``RunSpecError`` before any carrier is built) -> 10, with stderr carrying
-     the exception class name + the subcommand stage, and NO outcome value on
-     stdout;
+     never written, which the loader's ``_peek_mode`` rejects as a
+     ``RunSpecError`` before any carrier is reconstructed) -> 10, with stderr
+     carrying the exception class name + the subcommand stage, and NO outcome
+     value on stdout;
   3. a futility fixture via ``phase2a`` (forced by monkeypatching
      ``run_phase2a_fixture``) -> 20;
-  4. an unknown subcommand -> argparse's own error (``SystemExit(2)``).
+  4. an unknown subcommand -> argparse's own error (``SystemExit(2)``);
+  5. the three-independent-process ``phase2a → preflight → phase2b`` e2e the
+     from-disk loader enables (previously impossible while the CLI rebuilt a
+     write-once fixture per call).
 """
 
 from __future__ import annotations
 
-import shutil
+import json
 from pathlib import Path
 
 import numpy as np
@@ -53,21 +55,16 @@ from alive.compose.phase2a import Phase2aResult
 
 
 def _fixture_cli_args(tmp_path: Path) -> tuple[str, str, str]:
-    """Learn ``build_compose_fixture``'s deterministic paths, then wipe them.
+    """Build the committed fixture corpus ONCE and return its CLI args.
 
-    ``build_compose_fixture`` writes a write-once fit-role ``.h5ad`` (spec
-    §2.1), so it cannot be called twice on the same root — and ``main()``'s
-    own carrier construction IS the one real build per test. This throwaway
-    call only harvests the deterministic ``spec_path``/``run_dir`` naming
-    (never hardcoded here), then removes everything so ``main()`` starts from
-    a clean, empty ``--approved-artifacts-root``.
+    Since Task 11.5 ``main()`` LOADS the carrier from disk (it never rebuilds),
+    so the corpus must EXIST when ``main()`` runs: this builds it up-front and
+    LEAVES it in place (unlike the Task-11 throwaway-then-wipe shape). The
+    ``spec_path`` / ``approved_artifacts_root`` / ``run_dir`` are the builder's
+    own deterministic values (never hardcoded here).
     """
     bundle = build_compose_fixture(tmp_path)
-    spec_path = str(bundle.spec_path)
-    approved_root = str(bundle.approved_artifacts_root)
-    run_dir = str(bundle.run_dir)
-    shutil.rmtree(bundle.approved_artifacts_root)
-    return spec_path, approved_root, run_dir
+    return str(bundle.spec_path), str(bundle.approved_artifacts_root), str(bundle.run_dir)
 
 
 def _real_futility_result() -> Phase2aResult:
@@ -146,11 +143,9 @@ def test_preseal_validation_failure_returns_ten(
 ) -> None:
     root = tmp_path / "root"
     root.mkdir()
-    # NOT "resolved_run_spec.json" — build_compose_fixture's own carrier
-    # construction (main()'s first internal step) writes exactly that name, so
-    # a deliberately different, never-written filename is what actually
-    # exercises the CLI's --run-spec validation gate (step 2/3) rather than a
-    # write-once collision (step 1).
+    # main() LOADS the carrier from disk; pointing --run-spec at a file no
+    # builder ever wrote fails closed in the loader's mode-peek (a RunSpecError:
+    # cannot read) before any carrier is reconstructed.
     never_written_spec = root / "not-the-real-spec.json"
     run_dir = root / "run"
 
@@ -284,43 +279,32 @@ def test_recover_dispatches_with_run_dir_only_and_maps_library_result(
 
 
 # --------------------------------------------------------------------------- #
-# Known limitation (pinned, not silently worked around — see cli.py module
-# docstring "KNOWN LIMITATION"): main()'s carrier construction re-invokes
-# build_compose_fixture on every call, so a SECOND subcommand call against the
-# SAME --approved-artifacts-root (the canonical phase2a -> preflight -> phase2b
-# process-per-stage sequence) currently fails with an uncaught, unmapped
-# FitRoleArtifactError rather than dispatching to preflight. This test pins
-# that exact behaviour so a future carrier-loader fix must consciously update
-# it rather than silently leaving a stale assumption in place.
+# Scenario 5: the three-independent-process phase2a -> preflight -> phase2b e2e
+# the from-disk carrier loader (Task 11.5) enables. This FLIPS the previously-
+# pinned second-call failure: because main() now LOADS the carrier from disk
+# (no write-once rebuild), a SECOND (and THIRD) CLI process against the SAME
+# --run-spec / --run-dir now SUCCEEDS instead of dying on a FitRoleArtifactError.
+# Three separate main() invocations share ONE ResolvedRunSpec / run_dir and end
+# in a COMPLETE phase2b seal (exit 0) — the spec §11 DoD.
 # --------------------------------------------------------------------------- #
-def test_second_call_against_same_root_currently_fails_closed_uncaught(
-    tmp_path: Path,
-) -> None:
-    from alive.compose.fit_role import FitRoleArtifactError
-
+def test_three_independent_processes_full_e2e(tmp_path: Path) -> None:
     spec_path, approved_root, run_dir = _fixture_cli_args(tmp_path)
-    rc = main(
-        [
-            "phase2a",
-            "--run-spec",
-            spec_path,
-            "--approved-artifacts-root",
-            approved_root,
-            "--run-dir",
-            run_dir,
-        ]
-    )
-    assert rc == 0
+    common = [
+        "--run-spec",
+        spec_path,
+        "--approved-artifacts-root",
+        approved_root,
+        "--run-dir",
+        run_dir,
+    ]
 
-    with pytest.raises(FitRoleArtifactError):
-        main(
-            [
-                "preflight",
-                "--run-spec",
-                spec_path,
-                "--approved-artifacts-root",
-                approved_root,
-                "--run-dir",
-                run_dir,
-            ]
-        )
+    assert main(["phase2a", *common]) == 0
+    assert main(["preflight", *common]) == 0
+
+    # the --confirm-seal token is the installed confirmation manifest's FULL
+    # confirmation_checksum (never the run id), read from the run_dir preflight
+    # just populated — exactly what an independent phase2b process would read.
+    manifest = json.loads((Path(run_dir) / "seal_confirmation_manifest.json").read_text())
+    token = manifest["confirmation_checksum"]
+
+    assert main(["phase2b", *common, "--confirm-seal", token]) == 0

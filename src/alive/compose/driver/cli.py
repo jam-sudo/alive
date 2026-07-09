@@ -38,86 +38,52 @@ rejection, exactly one line — ``f"{stage}: {type(exc).__name__}: {exc}"`` — 
 written to STDERR. Nothing is ever written to STDOUT: no aggregate, no verdict,
 no per-pair value, no outcome of any kind.
 
-Run-spec carrier reconstruction (a resolved brief ambiguity — see the Task 11
-report). The four subcommands' ``run_spec`` parameter is documented as "the
-stage-1 DATA carrier" (locally the committed fixture builder's
-:class:`~alive.compose.driver.fixture_builder.FixtureBundle`) — an object
-exposing ``spec_path`` PLUS live in-memory stage-1 objects
-(``phase2a_inputs``/``dev_store_audit``/``response_artifact``/
-``sealed_outcome``/...). A bare :class:`~alive.compose.driver.run_spec.ResolvedRunSpec`
-(the object :func:`~alive.compose.driver.run_spec.load_resolved_run_spec`
-returns) carries none of those — passing it directly raises ``AttributeError``
-in every subcommand. There is no committed loader that reconstructs a full
-carrier purely from an on-disk ``ResolvedRunSpec`` either (deserialising a live
-``Phase2aInputs``/``ResponseSpace``/sealed-outcome ``pair_index`` back out of
-JSON is a separate PREPARE sub-project obligation, spec §0 "Out of scope"). For
-``mode == "fixture"`` — the only mode this CLI can currently service — this CLI
-therefore performs THREE steps for ``phase2a``/``preflight``/``phase2b``:
+Run-spec carrier reconstruction (Task 11.5). The four subcommands' ``run_spec``
+parameter is "the stage-1 DATA carrier": an object exposing ``spec_path`` PLUS the
+live stage-1 objects (``phase2a_inputs``/``dev_store_audit``/``response_artifact``/
+``sealed_outcome``) — NOT a bare
+:class:`~alive.compose.driver.run_spec.ResolvedRunSpec` (which carries none of
+those; passing it directly raises ``AttributeError`` in every subcommand). This CLI
+therefore LOADS the carrier from disk via
+:func:`~alive.compose.driver.carrier_loader.load_run_spec_carrier`, which:
 
-1. construct the carrier: :func:`~alive.compose.driver.fixture_builder.build_compose_fixture`
-   is the ONLY committed carrier-construction path today, attempted
-   unconditionally against ``--approved-artifacts-root``. It is deterministic
-   (fixed seeds throughout) but writes a WRITE-ONCE fit-role artifact, so it
-   can be called at most once per ``--approved-artifacts-root`` — a second
-   call (e.g. a stale re-run over an already-populated root) fails closed by
-   propagating the library's own write-once error (an unrecognised/unexpected
-   error, not one of :data:`_KNOWN_PRESEAL_REJECTIONS`);
-2. peek ``mode`` from the CALLER-DECLARED ``--run-spec`` path (mirrors each
-   subcommand's own private ``_peek_mode`` helper) — a missing/unreadable file
-   or an unrecognised mode fails closed here as
-   :class:`~alive.compose.driver.run_spec.RunSpecError`. Scientific mode has
-   no carrier-construction path yet and fails closed here as
-   :class:`UnsupportedModeError` (a
-   :class:`~alive.compose.driver.run_spec.RunSpecError` subclass, so it is
-   caught by the same pre-seal-rejection mapping) rather than silently
-   dispatching against the (wrong-mode) fixture carrier step 1 just built;
-3. an explicit, CLI-owned pre-seal validation gate over that SAME
-   ``--run-spec`` path: ``load_resolved_run_spec`` (canonical bytes / schema /
+1. peeks the CALLER-DECLARED ``--run-spec`` mode BEFORE any work — a missing /
+   unreadable file or an unrecognised mode fails closed as
+   :class:`~alive.compose.driver.run_spec.RunSpecError`; a scientific mode fails
+   closed as :class:`UnsupportedModeError` (a ``RunSpecError`` subclass, caught by
+   the same pre-seal-rejection mapping), since scientific carrier assembly is a
+   separate PREPARE obligation (spec §0 "Out of scope");
+2. loads + fully validates the immutable ResolvedRunSpec (canonical bytes / schema /
    self-checksum / file SHA / path policy / every declared pre-seal byte-SHA /
-   recomputed ``run_id``) — this is independent of what step 1 just built, so
-   a caller pointing ``--run-spec`` at a mismatched, stale, or tampered file
-   fails closed here even though a (different) carrier was already
-   constructed at ``--approved-artifacts-root``. ANY violation raises
-   :class:`~alive.compose.driver.run_spec.RunSpecError` before any subcommand
-   is invoked.
+   recomputed ``run_id``), so a mismatched, stale, or tampered ``--run-spec`` fails
+   closed before any subcommand runs;
+3. reconstructs the carrier from the ALREADY-serialized, SHA-verified on-disk
+   stage-1 artifacts — writing NO new bytes, deriving nothing.
 
-A production PREPARE-backed CLI would instead LOAD a pre-built carrier from
-disk without ever re-deriving it; today's fixture-only build-then-validate
-order is the pragmatic, testable shape given the write-once and no-loader
-constraints above — flagged explicitly here (and in the Task 11 report) rather
-than silently glossed over.
+Because the loader is a pure reader (no write-once producer), this CLI can service
+each of ``phase2a`` / ``preflight`` / ``phase2b`` as an INDEPENDENT process against
+the SAME ``--approved-artifacts-root`` / ``--run-spec`` / ``--run-dir`` — the spec
+§1.1/§11 three-independent-process ``phase2a → preflight → phase2b`` e2e (previously
+impossible while the CLI rebuilt a write-once fixture per call). The corpus itself is
+produced once up-front (by the test harness / e2e driver / PREPARE), never per CLI
+process.
 
-KNOWN LIMITATION (flagged, not silently worked around): because step 1 above
-re-invokes ``build_compose_fixture`` on every ``main()`` call, THIS CLI can
-service AT MOST ONE subcommand call per fresh ``--approved-artifacts-root``.
-The canonical ``phase2a -> preflight -> phase2b`` sequence — three independent
-process invocations sharing ONE ``ResolvedRunSpec``/``run_dir`` (spec §1.1's
-own CLI usage example) — currently fails on the SECOND call with an
-uncaught ``FitRoleArtifactError`` propagating out of ``build_compose_fixture``
-(the write-once fit-role artifact already exists from the first call). This is
-NOT one of :data:`_KNOWN_PRESEAL_REJECTIONS` and is deliberately left
-uncaught/unmapped rather than silently swallowed into a misleading exit code.
-Closing this gap needs either a genuine carrier LOADER (reconstructing
-``Phase2aInputs``/``ResponseSpace``/sealed-outcome data from the ALREADY-
-WRITTEN pre-seal files without rebuilding them — the real "PREPARE" shape) or
-an idempotent ``build_compose_fixture`` (skip-if-already-built) — both are
-out of Task 11's scope (four files only; ``fixture_builder.py`` is off
-limits). Task 11's own four tested scenarios only exercise a single
-``phase2a`` call, so this gap does not block them.
-
-See docs/superpowers/specs/2026-07-07-compose-production-driver-design.md §1.1.
+See docs/superpowers/specs/2026-07-07-compose-production-driver-design.md §1.1/§11.
 """
 
 from __future__ import annotations
 
 import argparse
-import json
 import sys
 from pathlib import Path
 from typing import Sequence
 
+from alive.compose.driver.carrier_loader import (
+    RunSpecCarrier,
+    UnsupportedModeError,
+    load_run_spec_carrier,
+)
 from alive.compose.driver.confirmation import ConfirmationError
-from alive.compose.driver.fixture_builder import FixtureBundle, build_compose_fixture
 from alive.compose.driver.identity_lock import AssemblerError
 from alive.compose.driver.phase2a_cmd import Phase2aSubcommandError, run_phase2a_subcommand
 from alive.compose.driver.phase2b_cmd import Phase2bSubcommandError, run_phase2b_subcommand
@@ -127,7 +93,7 @@ from alive.compose.driver.preflight_cmd import (
 )
 from alive.compose.driver.recover_cmd import RecoverSubcommandError, run_recover_subcommand
 from alive.compose.driver.run_dir_state import RunDirStateError
-from alive.compose.driver.run_spec import RunSpecError, load_resolved_run_spec
+from alive.compose.driver.run_spec import RunSpecError
 from alive.compose.outcome_store import ComposeSealingError
 from alive.compose.preflight import PreflightError
 from alive.provenance import LedgerError
@@ -148,22 +114,6 @@ SUCCESS_EXIT = 0
 PRESEAL_REJECT_EXIT = 10
 FUTILITY_EXIT = 20
 POSTSEAL_NONCOMPLETE_EXIT = 30
-
-_MODES = frozenset({"fixture", "scientific"})
-
-
-class UnsupportedModeError(RunSpecError):
-    """Raised when this CLI build cannot yet construct a run_spec carrier.
-
-    Subclasses :class:`~alive.compose.driver.run_spec.RunSpecError` so it is
-    caught by the SAME known-pre-seal-rejection mapping (exit ``10``) without a
-    separate ``except`` clause. Scientific-mode carrier assembly (raw Norman ->
-    ``Phase2aInputs``/factor bank/response artifact/pair manifest/... ) is a
-    separate PREPARE sub-project obligation (spec §0 "Out of scope"); a
-    scientific ResolvedRunSpec fails closed here rather than being silently
-    dispatched against a carrier this CLI has no way to build.
-    """
-
 
 #: The driver's KNOWN pre-seal rejection exception types (spec §1.1 exit code
 #: ``10``). Each is a documented, fail-closed validation/rejection type raised
@@ -242,55 +192,27 @@ def _build_parser() -> argparse.ArgumentParser:
 # --------------------------------------------------------------------------- #
 
 
-def _peek_mode(spec_path: Path) -> str:
-    """Read the declared ``mode`` before the full load (mirrors each subcommand's
-    own ``_peek_mode`` helper; the loader re-validates it)."""
-    try:
-        raw = json.loads(spec_path.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:
-        raise RunSpecError(f"cannot read ResolvedRunSpec {spec_path}: {exc}") from exc
-    mode = raw.get("mode") if isinstance(raw, dict) else None
-    if mode not in _MODES:
-        raise RunSpecError(f"ResolvedRunSpec declares an unrecognised mode {mode!r}")
-    return mode
+def _build_run_spec_carrier(spec_path: Path, approved_artifacts_root: Path) -> RunSpecCarrier:
+    """LOAD the stage-1 carrier from the ResolvedRunSpec's on-disk artifacts.
 
-
-def _build_run_spec_carrier(spec_path: Path, approved_artifacts_root: Path) -> FixtureBundle:
-    """Peek mode, construct the stage-1 carrier, then validate ``--run-spec``.
-
-    See the module docstring "Run-spec carrier reconstruction" section for why
-    this build-then-validate order (rather than validate-then-build) is
-    necessary given ``build_compose_fixture``'s write-once fit-role artifact
-    and the absence of a from-disk carrier loader.
+    Delegates to :func:`~alive.compose.driver.carrier_loader.load_run_spec_carrier`,
+    which peeks the declared ``mode`` BEFORE any work (fixture is the only committed
+    carrier path; a scientific spec fails closed with
+    :class:`~alive.compose.driver.carrier_loader.UnsupportedModeError`), then loads +
+    fully validates the ResolvedRunSpec (canonical bytes / schema / self-checksum /
+    file SHA / path policy / every declared pre-seal byte-SHA / recomputed
+    ``run_id``) and reconstructs the carrier from the already-serialized stage-1
+    artifacts. It writes NO bytes, so this CLI can now service each of the
+    ``phase2a → preflight → phase2b`` stages as an INDEPENDENT process against the
+    same approved-root (spec §11).
 
     Raises
     ------
     RunSpecError
-        If ``mode`` cannot be peeked/is unrecognised, if ``mode ==
-        "scientific"`` (:class:`UnsupportedModeError`), or if the FINAL
-        ``load_resolved_run_spec`` validation of the caller-declared
-        ``--run-spec`` path rejects it.
+        If ``mode`` cannot be peeked / is unrecognised, if ``mode == "scientific"``
+        (:class:`UnsupportedModeError`), or if the ResolvedRunSpec fails validation.
     """
-    # Fixture is the only carrier-construction path currently committed (see
-    # module docstring); attempt it unconditionally so a genuinely missing
-    # ``--run-spec`` file (never written by any builder) is distinguishable
-    # from a merely-mismatched one, both caught by the validation gate below.
-    carrier = build_compose_fixture(approved_artifacts_root)
-    mode = _peek_mode(spec_path)
-    if mode != "fixture":
-        raise UnsupportedModeError(
-            "this CLI build can only construct a run_spec carrier for "
-            f"mode='fixture' (scientific carrier assembly is a separate PREPARE "
-            f"obligation, spec §0); got mode={mode!r}"
-        )
-    # CLI-owned pre-seal validation gate over the CALLER-DECLARED path (not
-    # necessarily ``carrier.spec_path`` — see module docstring): fails closed
-    # BEFORE any subcommand is invoked. The subcommand re-validates
-    # independently too (defense in depth); this return value is discarded.
-    load_resolved_run_spec(
-        spec_path, approved_artifacts_root=approved_artifacts_root, mode_expected=mode
-    )
-    return carrier
+    return load_run_spec_carrier(spec_path, approved_artifacts_root=approved_artifacts_root)
 
 
 # --------------------------------------------------------------------------- #
