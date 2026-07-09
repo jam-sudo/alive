@@ -4,7 +4,7 @@
 > **이 문서는 아무것도 정의하지 않는다** — 세부(task)는 plan, claim은 spec, exact param은 config,
 > 시간순 audit는 git이 authoritative다(sources-of-truth: `CLAUDE.md`#sources). 상태 행이 authoritative
 > 문서와 어긋나면 **authoritative 문서가 옳다**; 이 인덱스를 갱신한다.
-> **Updated:** 2026-07-09 @ `910dab3` (branch `main`)
+> **Updated:** 2026-07-09 @ `a12c0fd` (branch `main`)
 > **갱신 트리거:** sub-project/gate **상태가 바뀔 때만**(커밋마다 아님).
 > **종결 상태:** COMPOSE seal이 정확히 한 번 열리면 이 인덱스는 **frozen/은퇴**한다. 이후 진행상황은
 > seal 결과와 post-hoc analysis가 대신한다.
@@ -38,7 +38,7 @@
 1. ~~C0 마무리~~ ✅ **done** (7/7 fixes, merged via C).
 2. ~~C production driver 구현~~ ✅ **done** — 단일 committed driver(`phase2a`/`preflight`/`phase2b --confirm-seal`/`recover`), synthetic fixture로 orchestration·fail-closed 전량 검증. *Gate PASS ≠ scientific verdict.*
 3. ~~branch → main 병합~~ ✅ **done** (merge commit `1c46708`, 2026-07-09; whole-branch 리뷰 + Important 2건 fix; clean git tree 확보).
-4. **development pod (real workers + evidence 재생성)** — plan `plans/2026-07-09-compose-dev-pod-real-workers.md` (spec-review loop-gate **PASS**, LOCAL; 7/7 tier1 yes, 4 open_items가 plan에 반영됨). **선행 gate: open decision #1–#5(GEARS/CPA published config·revision, GO-graph URL/version/license/SHA, approximation-bias metric, pod provider) owner 확정 필요.** §2.2 real `gears_worker`/`cpa_worker` + GO graph + pinned env 구현·검증·commit; §4 activation-evidence를 **finalized active config로 real Norman data에서 재생성** + null requirement(config `power_status` · gears/cpa `environment_status`/`revision` · GEARS `approximation_bias_report_sha256`) 확립. ⚑ config 확정(null 채움 → 새 run identity) **후** evidence 재생성. real fit은 pod-only. *(현재 committed evidence는 pre-activation `d8c65ac4…`/`activation=BLOCKED`; active config는 `a4700194…` → §2.5 재생성 규칙 발효됨.)*
+4. **development pod (real workers + evidence 재생성)** — plan `plans/2026-07-09-compose-dev-pod-real-workers.md` (spec-review loop-gate **PASS**, LOCAL; 7/7 tier1 yes, 4 open_items가 plan에 반영됨). **선행 gate: open decision #1–#5(GEARS/CPA published config·revision, GO-graph URL/version/license/SHA, approximation-bias metric, pod provider) owner 확정 필요** — 근거 기반 제안값 초안 `2026-07-09-compose-dev-pod-decision-proposals.md` (PROPOSED, config 미인코딩; sourced 값 + 남은 pod/owner gap 명시). §2.2 real `gears_worker`/`cpa_worker` + GO graph + pinned env 구현·검증·commit; §4 activation-evidence를 **finalized active config로 real Norman data에서 재생성** + null requirement(config `power_status` · gears/cpa `environment_status`/`revision` · GEARS `approximation_bias_report_sha256`) 확립. ⚑ config 확정(null 채움 → 새 run identity) **후** evidence 재생성. real fit은 pod-only. *(현재 committed evidence는 pre-activation `d8c65ac4…`/`activation=BLOCKED`; active config는 `a4700194…` → §2.5 재생성 규칙 발효됨.)*
 5. **§2.5 release gate** — worker locked-env integration green + 독립 검토 + **owner의 exact Git SHA 승인** → runbook을 `READY`로.
 6. **A100 sealed-run pod: runbook 실행** — 유효한 `ActivationRecord`(requirement별 non-empty evidence) + clean tree 하에 `phase2a → preflight → phase2b --confirm-seal`. **COMPOSE seal 1회 개봉** — `TG-K562`와 독립.
 
