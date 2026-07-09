@@ -4,7 +4,7 @@
 > **이 문서는 아무것도 정의하지 않는다** — 세부(task)는 plan, claim은 spec, exact param은 config,
 > 시간순 audit는 git이 authoritative다(sources-of-truth: `CLAUDE.md`#sources). 상태 행이 authoritative
 > 문서와 어긋나면 **authoritative 문서가 옳다**; 이 인덱스를 갱신한다.
-> **Updated:** 2026-07-08 @ `6a06a4c` (branch `compose-c-driver`)
+> **Updated:** 2026-07-09 @ `48bc22a` (branch `compose-c-driver`)
 > **갱신 트리거:** sub-project/gate **상태가 바뀔 때만**(커밋마다 아님).
 > **종결 상태:** COMPOSE seal이 정확히 한 번 열리면 이 인덱스는 **frozen/은퇴**한다. 이후 진행상황은
 > seal 결과와 post-hoc analysis가 대신한다.
@@ -30,7 +30,7 @@
 | D1 | durable-publish + non-circular provenance | ✅ merged | `specs/2026-07-05-compose-durable-ledger-design.md`; `plans/2026-07-06-compose-durable-ledger-d1.md` |
 | D2 | development seed-variability (Task 1–6) | ✅ merged | `plans/2026-07-06-compose-durable-ledger-d2.md` |
 | C0 | seal-critical library fixes (7) | 🟡 **7/7 done** — branch `compose-production-driver`, main 미병합 | `plans/2026-07-07-compose-c0-library-fixes.md` |
-| C | 단일 production driver | 🟡 **in-progress** — branch `compose-c-driver`, T1–T11 + Task 11.5 carrier-loader 완료(+3 seal-fix; cross-process gap CLOSED, driver suite 186 green); 잔여 **T12(seal-safety 구조)·T13(3-process e2e)·T14(doc+gate)** | `specs/2026-07-07-compose-production-driver-design.md`; `plans/2026-07-08-compose-c-production-driver.md` |
+| C | 단일 production driver | 🟡 **in-progress** — branch `compose-c-driver`, T1–T13 + Task 11.5 carrier-loader 완료(cross-process gap CLOSED, driver suite **206 green**, ruff clean); 잔여 **T14 마무리**(whole-branch 리뷰 → fix wave → `finishing-a-development-branch`로 →main 병합; runbook reconcile은 `6a06a4c`에서 완료) | `specs/2026-07-07-compose-production-driver-design.md`; `plans/2026-07-08-compose-c-production-driver.md` |
 | — | **pod sealed confirmatory run (opens seal once)** | ⛔ not started (C 완료가 선행) | `runbooks/2026-07-02-compose-k562-pod-sealed-run.md` |
 
 ## Critical path to seal
