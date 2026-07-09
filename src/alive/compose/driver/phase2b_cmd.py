@@ -42,7 +42,10 @@ Steps (spec §3.3 steps 0-6):
    ``run_phase2b``); the seal is opened EXACTLY once inside it;
 6. INDEPENDENTLY re-read ``phase2b_durable_commit.json`` (canonical bytes +
    self-checksum + every recorded file SHA), then map the terminal state to an
-   exit code.
+   exit code. This runs AFTER the seal is consumed, so a present-but-corrupt
+   marker is a POST-seal failure: it RETURNS the non-``COMPLETE`` exit (30) with
+   a single stderr diagnostic — symmetric with the absent-marker case — rather
+   than raising a (pre-seal-looking) ``Phase2bSubcommandError``.
 
 Output discipline (spec §3.3). Nothing scientific is emitted before the step-6
 durable re-read; this subcommand returns only a terminal-state exit code and
@@ -50,9 +53,12 @@ never an aggregate, verdict, or per-pair value.
 
 Exit codes (§1.1): ``0`` = a ``COMPLETE`` terminal with a verified durable commit
 marker; ``30`` = a non-``COMPLETE`` terminal (``INVALID`` / ``ABORTED``) OR an
-incomplete durable export. A pre-seal violation (roster, confirmation, source
-integrity, obs alignment) fails closed by RAISING — the seal is never opened, no
-audit is written, and no terminal artifact is left behind.
+incomplete/corrupt durable export (an absent marker, or a present marker that
+fails its self-checksum / recorded file-SHA re-verification — a POST-seal
+failure, RETURNED not raised, since the seal was already consumed). A pre-seal
+violation (roster, confirmation, source integrity, obs alignment) fails closed by
+RAISING — the seal is never opened, no audit is written, and no terminal artifact
+is left behind.
 
 See docs/superpowers/specs/2026-07-07-compose-production-driver-design.md §3.3.
 """
@@ -65,6 +71,7 @@ import hashlib
 import json
 import os
 import stat
+import sys
 from pathlib import Path
 from typing import Any, Iterator, Mapping
 
@@ -325,9 +332,23 @@ def _run_confirmed_phase2b(
     # Step 6: INDEPENDENTLY re-read the durable commit marker (never the returned
     # result alone), then map the terminal state to an exit code. Nothing
     # scientific is emitted here — only the terminal-state exit code.
-    marker_verified = _reread_durable_commit(
-        run_dir, expected_checksum=result.durable_commit_checksum
-    )
+    #
+    # This runs AFTER the seal is consumed (step 5 opened it EXACTLY once, writing
+    # a terminal + audit). A PRESENT-but-CORRUPT marker (a self-checksum or
+    # recorded file-SHA mismatch) is therefore a genuinely-POST-seal failure: it
+    # is made SYMMETRIC with the ABSENT-marker case (which returns the
+    # non-COMPLETE exit via ``marker_verified is False``) — emit ONE diagnostic
+    # and RETURN 30, never raise. Letting the Phase2bSubcommandError propagate
+    # here would surface a consumed-seal failure to the CLI, which maps
+    # Phase2bSubcommandError to the PRE-seal exit 10 ("no seal consumed"),
+    # mislabelling a post-seal failure. No seal/terminal/audit state is touched.
+    try:
+        marker_verified = _reread_durable_commit(
+            run_dir, expected_checksum=result.durable_commit_checksum
+        )
+    except Phase2bSubcommandError as exc:
+        print(f"{type(exc).__name__}: {exc}", file=sys.stderr)
+        return PHASE2B_NONCOMPLETE_EXIT
     if result.terminal_state == TerminalState.COMPLETE and marker_verified:
         return PHASE2B_COMPLETE_EXIT
     return PHASE2B_NONCOMPLETE_EXIT
@@ -590,6 +611,15 @@ def _reread_durable_commit(run_dir: Path, *, expected_checksum: str | None) -> b
         If the marker is PRESENT but fails any integrity check (non-canonical
         bytes, a self-checksum mismatch, a checksum divergence from the result,
         or a file-SHA mismatch) — a corrupt export fails closed.
+
+    Notes
+    -----
+    This helper runs at step 6, AFTER the seal is consumed, so its
+    ``Phase2bSubcommandError`` is a POST-seal failure. The caller
+    (:func:`_run_confirmed_phase2b`) therefore CATCHES it, emits one stderr
+    diagnostic, and RETURNS the non-``COMPLETE`` exit (30) — symmetric with the
+    ``False`` (absent-marker) return — rather than letting it propagate to the
+    CLI, which would mislabel a consumed-seal failure as the pre-seal exit 10.
     """
     marker_path = run_dir / DURABLE_COMMIT_FILENAME
     if not marker_path.is_file():

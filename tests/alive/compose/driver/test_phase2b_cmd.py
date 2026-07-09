@@ -41,6 +41,7 @@ from pathlib import Path
 
 import pytest
 
+import alive.compose.driver.phase2b_cmd as phase2b_mod
 import alive.compose.outcome_store as outcome_store_mod
 from alive.compose.driver.confirmation import ConfirmationError
 from alive.compose.driver.fixture_builder import build_compose_fixture
@@ -259,6 +260,53 @@ def test_reject_when_audit_already_present(tmp_path: Path) -> None:
         run_phase2b_subcommand(
             fx, approved_artifacts_root=tmp_path, run_dir=fx.run_dir, confirm_seal_token=token
         )
+
+
+# --------------------------------------------------------------------------- #
+# Guard: a PRESENT-but-CORRUPT durable marker at step 6 is a POST-seal failure —
+# it must RETURN the non-COMPLETE exit (30), not RAISE. Step 6 runs AFTER the
+# seal is consumed (step 5 opened it, wrote a COMPLETE terminal + audit); a raise
+# here would let the CLI mislabel a genuinely-consumed-seal failure as pre-seal
+# exit 10 ("no seal consumed"). The ABSENT-marker case already returns 30 via
+# pass-through, so the present-but-corrupt case must be made symmetric.
+# --------------------------------------------------------------------------- #
+def test_corrupt_durable_marker_returns_thirty_post_seal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    fx = _run_preseal(tmp_path)
+    token = _confirmation_token(fx.run_dir)
+
+    # Wrap the real fixture dispatch (step 5) so the seal is genuinely consumed —
+    # a COMPLETE terminal + audit + a real durable marker are written — THEN flip
+    # a recorded file-SHA in the marker (leaving the self-checksum stale) so the
+    # independent step-6 re-read sees a present-but-corrupt marker.
+    real_fixture = phase2b_mod.run_phase2b_fixture
+
+    def _dispatch_then_corrupt(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        result = real_fixture(*args, **kwargs)
+        marker_path = fx.run_dir / DURABLE_COMMIT_FILENAME
+        marker = json.loads(marker_path.read_bytes())
+        marker["terminal"]["sha256"] = "0" * 64  # corrupt a recorded file SHA
+        marker_path.write_bytes(
+            json.dumps(marker, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        )
+        return result
+
+    monkeypatch.setattr(phase2b_mod, "run_phase2b_fixture", _dispatch_then_corrupt)
+
+    rc = run_phase2b_subcommand(
+        fx, approved_artifacts_root=tmp_path, run_dir=fx.run_dir, confirm_seal_token=token
+    )
+
+    # RETURNS 30 (does not raise) — a genuinely-consumed-seal post-seal failure.
+    assert rc == PHASE2B_NONCOMPLETE_EXIT
+    # The seal WAS consumed: a COMPLETE terminal + audit are present (step 5 ran).
+    assert _terminal_artifacts(fx.run_dir) == [fx.run_dir / Phase2bTerminal.COMPLETE_ARTIFACT]
+    assert (fx.run_dir / SEAL_AUDIT_FILENAME).is_file()
+    # A single stderr diagnostic names the failure; stdout stays clean.
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "Phase2bSubcommandError" in captured.err
 
 
 # --------------------------------------------------------------------------- #
