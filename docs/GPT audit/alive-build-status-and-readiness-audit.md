@@ -2,7 +2,7 @@
 
 > **⚠ SUPERSEDED (2026-07-04) — 2026-06-21 시점 snapshot.** 이 감사는 TG-K562를 "full-data 미시작 /
 > sealed 미실행"으로 기술하지만, 이후 `TG-K562-v1` sealed run이 실행되어 **`NO_DISTINCT_WIN`**을
-> registered했고 `COMPOSE-K562-v1`이 ACTIVE(2026-06-30)가 됐다. 현재 상태는 `CLAUDE.md` §4 registry.
+> registered했고 `COMPOSE-K562-v1`이 ACTIVE(2026-06-30)가 됐다. 현재 상태는 `CLAUDE.md` §5 registry.
 > 원본은 point-in-time 기록으로 보존한다.
 
 작성일: 2026-06-21  

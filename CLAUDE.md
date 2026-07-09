@@ -138,7 +138,7 @@ Run directory와 ledger는 write-once state machine이다:
 | protocol | status | 한 줄 목적 | 문서 · seal |
 |---|---|---|---|
 | `TG-K562-v1` | COMPLETE | K562-internal held-out(four-way split)에서 Trust-Gate가 사전등록 UQ comparator보다 prediction error를 잘 순위화하는가 (sealed eval; verdict: **NO_DISTINCT_WIN**) | spec `docs/superpowers/specs/2026-06-20-cartographer-design.md`; plan `.../plans/2026-06-20-cartographer-mvp.md`; config `configs/cartographer_trust_gate_k562_v1.yaml`; K562-internal seal (opened once) |
-| `COMPOSE-K562-v1` | **ACTIVE** | Norman K562 CRISPRa combo(pair-level split)에서 단일-gene signature로 고정한 factor로 비가산 성분을 identifiable bilinear operator로 예측 | spec `docs/superpowers/specs/2026-06-22-compose-epistasis-operator-design.md`; plan series `docs/superpowers/plans/*compose*.md` (phase1 → 2a/2b → deep-baselines → fit/payload → durable-ledger …); config `configs/compose_k562_v1_phase2.yaml`; 독립 COMPOSE seal (protocol당 1회; 아직 미개봉, A100 sealed run 대기) |
+| `COMPOSE-K562-v1` | **ACTIVE** | Norman K562 CRISPRa combo(pair-level split)에서 단일-gene signature로 고정한 factor로 비가산 성분을 identifiable bilinear operator로 예측 | spec `docs/superpowers/specs/2026-06-22-compose-epistasis-operator-design.md`; plan series `docs/superpowers/plans/*compose*.md` (phase1 → 2a/2b → deep-baselines → fit/payload → durable-ledger …); config `configs/compose_k562_v1_phase2.yaml`; 진행 index `docs/superpowers/COMPOSE-SEAL-READINESS.md` (seal 시 retire); 독립 COMPOSE seal (protocol당 1회; 아직 미개봉, A100 sealed run 대기) |
 | `CT-RPE1-v1` | DEFERRED | K562→RPE1 shared-target **context transfer** 평가 (clean cell-type split 아님) | 별도 spec/config/seal 필요 (미작성) |
 
 **`COMPOSE-K562-v1` activation (2026-06-30).** spec §10.1의 activation blocker가 version-controlled
