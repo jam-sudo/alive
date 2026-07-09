@@ -275,6 +275,7 @@ def _run_confirmed_phase2b(
         ledger=ledger,
         ledger_path=ledger_path,
         lock=lock,
+        bundle=bundle,
         git_clean=git_clean,
     )
     verify_seal_confirmation_manifest(

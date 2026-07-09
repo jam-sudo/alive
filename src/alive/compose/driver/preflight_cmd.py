@@ -226,6 +226,7 @@ def run_preflight_subcommand(
         ledger=ledger,
         ledger_path=ledger_path,
         lock=lock,
+        bundle=bundle,
         git_clean=git_clean,
     )
     manifest = build_seal_confirmation_manifest(**inputs)
@@ -247,6 +248,7 @@ def build_confirmation_inputs(
     ledger: RunLedger,
     ledger_path: str | Path,
     lock: EvaluationLock,
+    bundle: FrozenPredictionBundle,
     git_clean: bool,
 ) -> dict[str, Any]:
     """Assemble the 15 keyword inputs :func:`build_seal_confirmation_manifest` consumes.
@@ -276,6 +278,12 @@ def build_confirmation_inputs(
         The frozen :class:`~alive.compose.preflight.EvaluationLock` (the
         bundle/manifest/response-space/factor/model checksums, the run id, the
         per-regime sealed pair sets).
+    bundle
+        The re-read :class:`~alive.compose.freeze.FrozenPredictionBundle`; supplies
+        the SELECTED hyperparameter point (``selected_k_total`` /
+        ``selected_lambda``) bound into the manifest's ``selected_hyperparameters``.
+        Both callers (preflight install and phase2b reconstruction) already load
+        the identical bundle, so this stays byte-reproducible.
     git_clean
         The resolved clean-git flag (True in fixture mode; the scientific carrier
         value otherwise).
@@ -299,7 +307,7 @@ def build_confirmation_inputs(
         "preseal_checksums": _preseal_checksums(
             spec=spec, config=config, ledger=ledger, ledger_path=ledger_path, lock=lock
         ),
-        "selected_hyperparameters": _selected_hyperparameters(config),
+        "selected_hyperparameters": _selected_hyperparameters(config, bundle),
         "worker_identity": _worker_identity(spec, config),
         "double_pair_count": len(lock.pair_ids_double_unseen),
         "single_pair_count": len(lock.pair_ids_single_unseen),
@@ -353,14 +361,22 @@ def _preseal_checksums(
     }
 
 
-def _selected_hyperparameters(config: ComposePhase2Config) -> dict[str, Any]:
-    """The registered/frozen fit + selection hyperparameters, sourced from config.
+def _selected_hyperparameters(
+    config: ComposePhase2Config, bundle: FrozenPredictionBundle
+) -> dict[str, Any]:
+    """The registered search space AND the SELECTED point, deterministically bound.
 
     COMPOSE pre-registers the identifiable-operator search space and the
-    selection-controlling knobs in the committed config; those frozen values are
-    the confirmation manifest's ``selected_hyperparameters`` (deterministic and
-    reproducible in a separate phase2b process, avoiding any dependence on
-    fit-time float state).
+    selection-controlling knobs in the committed config, and the frozen prediction
+    bundle records the point actually selected by the dev-OOF procedure
+    (``selected_k_total`` / ``selected_lambda``). The confirmation manifest's
+    ``selected_hyperparameters`` binds BOTH — the search configuration (what was
+    searched) and the selected point (what is being sealed) — so the manifest
+    self-describes the sealed hyperparameters, not only the grid. Both are
+    deterministic and reproducible in a separate phase2b process: the selected
+    point is read from the SAME frozen bundle in the bundle's canonical
+    ``round(., 12)`` lambda representation (freeze.py), avoiding any dependence on
+    fit-time float state.
     """
     return {
         "total_k_grid": [int(k) for k in config.total_k_grid],
@@ -371,6 +387,8 @@ def _selected_hyperparameters(config: ComposePhase2Config) -> dict[str, Any]:
         "uncovered_tolerance": float(config.uncovered_tolerance),
         "dev_oof_metric": str(config.dev_oof_metric),
         "dev_oof_threshold": float(config.dev_oof_threshold),
+        "selected_k_total": int(bundle.selected_k_total),
+        "selected_lambda": round(float(bundle.selected_lambda), 12),
     }
 
 

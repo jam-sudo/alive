@@ -106,7 +106,7 @@ def _rederive(fx, root: Path):
         ledger=ledger,
         expected_response_dim=dim,
     )
-    return spec, ledger, ledger_path, config, lock
+    return spec, ledger, ledger_path, config, lock, frozen
 
 
 def _run_chain(tmp_path: Path):
@@ -131,9 +131,15 @@ def test_preflight_passes_installs_and_reconstructs(tmp_path: Path) -> None:
 
     # Independently re-derive the reconstruction inputs (as a separate process
     # would) and require verify's byte-for-byte reconstruction to pass.
-    spec, ledger, ledger_path, config, lock = _rederive(fx, tmp_path)
+    spec, ledger, ledger_path, config, lock, frozen = _rederive(fx, tmp_path)
     inputs = build_confirmation_inputs(
-        spec=spec, config=config, ledger=ledger, ledger_path=ledger_path, lock=lock, git_clean=True
+        spec=spec,
+        config=config,
+        ledger=ledger,
+        ledger_path=ledger_path,
+        lock=lock,
+        bundle=frozen,
+        git_clean=True,
     )
     verify_seal_confirmation_manifest(
         manifest_path, manifest["confirmation_checksum"], reconstruct_inputs=inputs
@@ -147,6 +153,14 @@ def test_preflight_passes_installs_and_reconstructs(tmp_path: Path) -> None:
     assert manifest["sealed_access_count"] == 0
     assert manifest["forbidden_output_absence"] is True
 
+    # §3.2 (owner-ratified): selected_hyperparameters binds BOTH the search
+    # config AND the actually-selected point (k*/lambda*) from the frozen bundle,
+    # in the bundle's canonical round(.,12) lambda representation.
+    sel = manifest["selected_hyperparameters"]
+    assert sel["selected_k_total"] == int(frozen.selected_k_total)
+    assert sel["selected_lambda"] == round(float(frozen.selected_lambda), 12)
+    assert "total_k_grid" in sel and "lambda_grid" in sel  # grid still present
+
 
 # --------------------------------------------------------------------------- #
 # Contract 2: ordered_seal_request_checksum == phase2b intent_checksum bytes
@@ -156,7 +170,7 @@ def test_ordered_seal_request_checksum_matches_phase2b_expression(tmp_path: Path
     run_preflight_subcommand(fx, approved_artifacts_root=tmp_path, run_dir=fx.run_dir)
     manifest = json.loads((fx.run_dir / _CONFIRMATION).read_bytes())
 
-    _, _, _, _, lock = _rederive(fx, tmp_path)
+    _, _, _, _, lock, _ = _rederive(fx, tmp_path)
     # The exact phase2b.py:1269-1277 intent_checksum expression, recomputed here.
     expected = sha256_json(
         {
@@ -202,7 +216,7 @@ def test_worker_identity_is_six_field_lock_form_and_full_preseal_set(tmp_path: P
         "seed_report_checksum",
     }
     # The lock-sourced members equal the EvaluationLock exactly.
-    _, _, _, _, lock = _rederive(fx, tmp_path)
+    _, _, _, _, lock, _ = _rederive(fx, tmp_path)
     ps = manifest["preseal_checksums"]
     assert ps["bundle_checksum"] == lock.bundle_checksum
     assert ps["manifest_checksum"] == lock.manifest_checksum
