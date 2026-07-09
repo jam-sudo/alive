@@ -118,6 +118,7 @@ from typing import Sequence
 
 from alive.compose.driver.confirmation import ConfirmationError
 from alive.compose.driver.fixture_builder import FixtureBundle, build_compose_fixture
+from alive.compose.driver.identity_lock import AssemblerError
 from alive.compose.driver.phase2a_cmd import Phase2aSubcommandError, run_phase2a_subcommand
 from alive.compose.driver.phase2b_cmd import Phase2bSubcommandError, run_phase2b_subcommand
 from alive.compose.driver.preflight_cmd import (
@@ -188,6 +189,14 @@ _KNOWN_PRESEAL_REJECTIONS: tuple[type[Exception], ...] = (
     RecoverSubcommandError,
     PreflightError,
     LedgerError,
+    # AssemblerError (a ``ValueError`` subclass, so NOT covered by any entry
+    # above) is the §7.1 execution-lock-mismatch abort — a worker-digest /
+    # execution-identity-lock divergence surfaced BEFORE any seal access by
+    # phase2a's ``assemble_baseline_backends`` (via ``_assemble_adapters``) or
+    # preflight's ``assemble_execution_identity_lock`` (via ``_worker_identity``).
+    # Spec §1.1 assigns it exit 10; without this entry it propagated uncaught
+    # (traceback + exit 1) instead of the contracted single-stderr-line + 10.
+    AssemblerError,
 )
 
 

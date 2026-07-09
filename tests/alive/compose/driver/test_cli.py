@@ -46,6 +46,7 @@ import pytest
 from alive.compose.diagnostics2 import FutilityResult
 from alive.compose.driver.cli import main
 from alive.compose.driver.fixture_builder import build_compose_fixture
+from alive.compose.driver.identity_lock import AssemblerError
 from alive.compose.gates import GateResult
 from alive.compose.identify import RankReport
 from alive.compose.phase2a import Phase2aResult
@@ -200,6 +201,46 @@ def test_futility_via_phase2a_returns_twenty(
     assert present == ["phase2a_futility.json"]
     captured = capsys.readouterr()
     assert captured.out == ""
+
+
+# --------------------------------------------------------------------------- #
+# Scenario: an AssemblerError (execution-lock / worker-digest mismatch) raised
+# during a subcommand's carrier assembly -> 10 (pre-seal). AssemblerError is a
+# ``ValueError`` subclass, NOT a member of any other _KNOWN_PRESEAL_REJECTIONS
+# entry, so before the fix it propagated uncaught (traceback + exit 1) instead
+# of the contracted single-stderr-line + exit 10. Monkeypatching phase2a's
+# ``assemble_baseline_backends`` symbol (the same technique the futility test
+# uses for ``run_phase2a_fixture``) forces the reachable §7.1 abort row.
+# --------------------------------------------------------------------------- #
+def test_assembler_error_returns_ten(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    spec_path, approved_root, run_dir = _fixture_cli_args(tmp_path)
+
+    def _raise_assembler(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        raise AssemblerError("execution-lock mismatch: declared digest diverges")
+
+    monkeypatch.setattr(
+        "alive.compose.driver.phase2a_cmd.assemble_baseline_backends",
+        _raise_assembler,
+    )
+
+    rc = main(
+        [
+            "phase2a",
+            "--run-spec",
+            spec_path,
+            "--approved-artifacts-root",
+            approved_root,
+            "--run-dir",
+            run_dir,
+        ]
+    )
+
+    assert rc == 10
+    captured = capsys.readouterr()
+    assert captured.out == ""  # NO outcome value on stdout
+    assert "phase2a: AssemblerError:" in captured.err
 
 
 # --------------------------------------------------------------------------- #
