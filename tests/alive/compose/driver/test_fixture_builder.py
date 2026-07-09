@@ -175,11 +175,20 @@ def test_pair_index_manifest_passes_preseal_validation(tmp_path: Path) -> None:
     manifest = bundle.sealed_outcome["pair_index_manifest"]
     attestation = bundle.sealed_outcome["attestation"]
     # no raise
-    validate_pair_index_manifest_preseal(manifest, attestation=attestation)
+    pair_index_file_sha256 = sha256_file(bundle.paths["pair_index_manifest"])
+    validate_pair_index_manifest_preseal(
+        manifest,
+        attestation=attestation,
+        pair_index_manifest_file_sha256=pair_index_file_sha256,
+    )
     # the on-disk pair-index manifest / attestation are the SAME objects.
     on_disk_manifest = json.loads(bundle.paths["pair_index_manifest"].read_text())
     on_disk_attestation = json.loads(bundle.paths["approved_sealed_input_attestation"].read_text())
-    validate_pair_index_manifest_preseal(on_disk_manifest, attestation=on_disk_attestation)
+    validate_pair_index_manifest_preseal(
+        on_disk_manifest,
+        attestation=on_disk_attestation,
+        pair_index_manifest_file_sha256=pair_index_file_sha256,
+    )
 
 
 def test_sealed_source_obs_labels_align_with_pair_index(tmp_path: Path) -> None:

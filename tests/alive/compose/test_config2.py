@@ -11,6 +11,7 @@ blocked config, and the activated canonical config is checked to pass the gate.
 from __future__ import annotations
 
 import hashlib
+import json
 from pathlib import Path
 
 import pytest
@@ -70,6 +71,45 @@ def _activation_record() -> ActivationRecord:
             for req in cfg.activation_requirements
         },
         evidence_files=dict(_EVIDENCE_FILES),
+    )
+
+
+def _fully_activated_raw() -> dict:
+    """Return a synthetic config with every local activation blocker resolved."""
+    raw = _raw()
+    raw["status"] = "active"
+    raw["regimes"]["power_status"] = "established_from_registered_report"
+    raw["baselines"]["gears"]["revision"] = "cell-gears==0.1.2"
+    raw["baselines"]["gears"]["environment_status"] = "pinned_and_fresh_sync_verified"
+    raw["baselines"]["gears"]["approximation_bias_report_sha256"] = "a" * 64
+    raw["baselines"]["cpa"]["revision"] = "cpa-tools==0.8.5"
+    raw["baselines"]["cpa"]["environment_status"] = "pinned_and_fresh_sync_verified"
+    return raw
+
+
+def _activation_record_for_config(tmp_path: Path, cfg: ComposePhase2Config) -> ActivationRecord:
+    """Create synthetic READY evidence whose lineage matches ``cfg`` exactly."""
+    files = dict(_EVIDENCE_FILES)
+    for requirement in (
+        "real_norman_phi_rank_and_condition_report",
+        "regime_specific_detectable_effect_analysis",
+    ):
+        payload = json.loads(Path(files[requirement]).read_text(encoding="utf-8"))
+        payload["protocol"] = cfg.protocol
+        payload["config_sha256"] = cfg.config_sha256
+        payload["activation"] = "READY — synthetic unit-test evidence"
+        path = tmp_path / f"{requirement}.json"
+        path.write_text(json.dumps(payload, sort_keys=True, separators=(",", ":")))
+        files[requirement] = str(path)
+    return ActivationRecord(
+        owner="owner@example.org",
+        approved_protocol=cfg.protocol,
+        approved_phase=cfg.phase,
+        evidence_hashes={
+            req: "sha256:" + hashlib.sha256(Path(files[req]).read_bytes()).hexdigest()
+            for req in cfg.activation_requirements
+        },
+        evidence_files=files,
     )
 
 
@@ -605,7 +645,8 @@ def test_activated_canonical_config_is_blocked_by_missing_pseudobulk_bias_report
     # remains an approximation whose registered bias report checksum is null.
     cfg = load_compose_phase2_config(CANON)
     assert cfg.status == "active"
-    with pytest.raises(ScientificModeError, match="approximation-bias report"):
+    assert "baselines.approximation_bias_report_sha256" in cfg.activation_blockers
+    with pytest.raises(ScientificModeError, match="activation blockers"):
         assert_scientific_mode_allowed(
             cfg,
             fixture_mode=False,
@@ -683,17 +724,56 @@ def test_scientific_mode_requires_matching_protocol(tmp_path):
 
 
 def test_scientific_mode_allowed_when_fully_activated(tmp_path):
-    raw = _raw()
-    raw["status"] = "active"
-    raw["baselines"]["gears"]["approximation_bias_report_sha256"] = "a" * 64
+    raw = _fully_activated_raw()
     cfg = load_compose_phase2_config(_write(tmp_path, raw))
-    # All four scientific-mode preconditions satisfied -> must not raise.
+    assert cfg.activation_blockers == ()
+    # Every runtime and evidence-lineage precondition is satisfied -> no raise.
     assert_scientific_mode_allowed(
         cfg,
         fixture_mode=False,
-        activation_record=_activation_record(),
+        activation_record=_activation_record_for_config(tmp_path, cfg),
         git_is_clean=True,
     )
+
+
+@pytest.mark.parametrize(
+    ("field", "expected"),
+    [
+        ("power", "regimes.power_status"),
+        ("gears_revision", "baselines.gears.revision"),
+        ("gears_environment", "baselines.gears.environment_status"),
+        ("cpa_revision", "baselines.cpa.revision"),
+        ("cpa_environment", "baselines.cpa.environment_status"),
+    ],
+)
+def test_each_unresolved_activation_field_blocks_scientific_mode(tmp_path, field, expected):
+    raw = _fully_activated_raw()
+    if field == "power":
+        raw["regimes"]["power_status"] = "unestablished_activation_blocker"
+    else:
+        method, key = field.split("_", 1)
+        raw["baselines"][method]["environment_status" if key == "environment" else "revision"] = (
+            "unpinned_activation_blocker" if key == "environment" else None
+        )
+    cfg = load_compose_phase2_config(_write(tmp_path, raw))
+    assert expected in cfg.activation_blockers
+    with pytest.raises(ScientificModeError, match=expected.replace(".", r"\.")):
+        assert_scientific_mode_allowed(
+            cfg,
+            activation_record=_activation_record_for_config(tmp_path, cfg),
+            git_is_clean=True,
+        )
+
+
+def test_stale_config_bound_evidence_blocks_scientific_mode(tmp_path):
+    cfg = load_compose_phase2_config(_write(tmp_path, _fully_activated_raw()))
+    assert cfg.activation_blockers == ()
+    with pytest.raises(ScientificModeError, match="config_sha256 mismatch"):
+        assert_scientific_mode_allowed(
+            cfg,
+            activation_record=_activation_record(),
+            git_is_clean=True,
+        )
 
 
 def test_empty_evidence_hashes_blocks_scientific_mode(tmp_path):

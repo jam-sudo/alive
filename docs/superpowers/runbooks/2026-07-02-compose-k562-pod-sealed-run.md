@@ -3,11 +3,14 @@
 > **문서 역할:** COMPOSE-K562-v1의 일회성 sealed evaluation을 위한 운영 계약.
 > **개정일:** 2026-07-02
 > **현재 실행 상태:** **BLOCKED — §2의 pre-seal release blocker가 모두 해결·검토·commit되기 전에는 실행 금지.**
-> **코드 기준점:** `main` `1c46708`(2026-07-09). §2.1 fit-role artifact(A1)+payload-v2(A2), §2.4 durable
+> **코드 기준점:** `main` `21ddf1c`(2026-07-09). §2.1 fit-role artifact(A1)+payload-v2(A2), §2.4 durable
 > final-ledger+seed-variability(D1/D2), 그리고 §2.3 단일 production driver(sub-project C, `phase2a`/
 > `preflight`/`phase2b --confirm-seal`/`recover`)가 모두 **main에 병합됐다**(C = merge commit `1c46708`;
-> whole-branch 2-lens 리뷰 + Important 2건 fix 후, driver 211 / compose 1106 green). **남은 blocker:
-> §2.2 real GEARS/CPA worker(+GO graph·pinned env), §4 activation-evidence를 active config(`a4700194…`)로
+> whole-branch 2-lens 리뷰 + Important 2건 fix 후, driver 211 / compose 1106 green). Local dev-pod
+> prep scaffold는 `21ddf1c`에 병합됐지만 실제 fit body는 아직 pod-authored 상태다. **남은 blocker:
+> scientific ResolvedRunSpec/PREPARE carrier assembly(현재 committed carrier loader는
+> `mode="scientific"`을 fail-closed 거부), §2.2 real GEARS/CPA worker(+GO graph·pinned env),
+> §4 activation-evidence를 active config(`a4700194…`)로
 > 재생성 + null requirement 확립, §2.5 release gate(worker locked-env green + owner의 exact Git SHA 승인).**
 > 이들이 별도 development pod에서 해결·검토·commit되기 전에는 runbook은 계속 BLOCKED다.
 > **상위 계약:** COMPOSE spec §7/§10.5–§10.6, deep-baseline design §1/§7,
@@ -202,13 +205,13 @@ builder가 생성한 digest/revision 및 `environment.python_version/platform/gi
 `real_norman_detectable_effect_report.json`은 canonical `config_sha256=d8c65ac4…`, `activation=BLOCKED`,
 git `79b01e0`/`82a9c83`를 내장한 **pre-activation development snapshot**이다. 현재 active config의
 authoritative canonical digest는 `config_sha256 = sha256_json(raw) = a4700194…`
-(`load_compose_phase2_config`, config2.py:692)로 evidence값(`d8c65ac4…`)과 다르다 — activation flip
+(`load_compose_phase2_config`, config2.py)로 evidence값(`d8c65ac4…`)과 다르다 — activation flip
 (`d507a09`) 이후에도 config parsed 구조가 A2 task 5(`42d71ce`: gears/cpa에 `prediction_representation`·
 `approximation_bias_report_sha256` 추가)에서 바뀌어 canonical digest가 재차 이동했다. (raw file-bytes sha는
-canonical `config_sha256`과 다른 값이니 lineage 비교에는 쓰지 않는다.) `ActivationRecord`는 evidence 파일
-*bytes*를 recorded hash에 대조할 뿐 파일 내부 config_sha를 검사하지 않으므로(`config2.py`) old-config
-evidence로도 기계적으로는 통과하나, 그럴 경우 일회성 seal의 activation lineage가 pre-activation·pre-A2
-snapshot에 결속된다. 따라서 §2.5의 "config digest가 바뀌면 evidence 결속 재생성" 규칙은 **이미 발효**됐다:
+canonical `config_sha256`과 다른 값이니 lineage 비교에는 쓰지 않는다.) Scientific guard는 evidence 파일
+*bytes*를 recorded hash에 대조한 뒤 두 config-bound Norman report의 내부 `protocol`·`config_sha256`·
+`activation`도 파싱한다. 따라서 old-config 또는 `activation=BLOCKED` evidence는 런타임에서 fail-closed된다.
+§2.5의 "config digest가 바뀌면 evidence 결속 재생성" 규칙은 **이미 발효**됐다:
 pod에서 real Norman data로 두 evidence를 현재 active config(`a4700194…`) 하에 **재생성**하고, 아직 null인
 requirement(config `power_status`, GEARS/CPA `environment_status`, GEARS `approximation_bias_report_sha256`)를
 실데이터로 확립해 모든 ActivationRecord requirement가 active run identity에 결속된 non-empty evidence hash를

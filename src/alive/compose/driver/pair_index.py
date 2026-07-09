@@ -202,7 +202,7 @@ def _validate_manifest_shape(manifest: Mapping[str, Any]) -> tuple[str, str]:
     return source_file_sha256, obs_row_identity_sha256
 
 
-def _validate_attestation_shape(attestation: Mapping[str, Any]) -> tuple[str, str]:
+def _validate_attestation_shape(attestation: Mapping[str, Any]) -> tuple[str, str, str]:
     """Validate the attestation's v1 schema shape + self-checksum.
 
     Returns
@@ -250,15 +250,18 @@ def _validate_attestation_shape(attestation: Mapping[str, Any]) -> tuple[str, st
     source_row_identity_sha256 = _require_hex64(
         attestation, "source_row_identity_sha256", where="approved_sealed_input_attestation"
     )
-    _require_hex64(attestation, "pair_index_file_sha256", where="approved_sealed_input_attestation")
+    pair_index_file_sha256 = _require_hex64(
+        attestation, "pair_index_file_sha256", where="approved_sealed_input_attestation"
+    )
 
-    return expected_source_file_sha256, source_row_identity_sha256
+    return expected_source_file_sha256, source_row_identity_sha256, pair_index_file_sha256
 
 
 def validate_pair_index_manifest_preseal(
     manifest: Mapping[str, Any],
     *,
     attestation: Mapping[str, Any],
+    pair_index_manifest_file_sha256: str,
 ) -> None:
     """Validate a pair-index manifest v1 at PRE-SEAL time — no source access.
 
@@ -276,7 +279,9 @@ def validate_pair_index_manifest_preseal(
        no two entries may declare the same canonical pair;
     3. ``manifest.self_checksum == sha256_json(manifest excluding self_checksum)``;
     4. the attestation's own v1 shape and self-checksum;
-    5. the binding: ``manifest.source_file_sha256 ==
+    5. the binding: the attested ``pair_index_file_sha256`` equals the loader-
+       verified SHA of the actual pair-index manifest file, and
+       ``manifest.source_file_sha256 ==
        attestation.expected_source_file_sha256`` AND
        ``manifest.obs_row_identity_sha256 == attestation.source_row_identity_sha256``.
 
@@ -294,6 +299,9 @@ def validate_pair_index_manifest_preseal(
         The parsed ``pair_index_manifest`` JSON object.
     attestation : Mapping
         The parsed ``approved_sealed_input_attestation`` JSON object.
+    pair_index_manifest_file_sha256 : str
+        SHA-256 of the actual pair-index manifest file, already stream-verified
+        by :func:`load_resolved_run_spec`.
 
     Raises
     ------
@@ -301,9 +309,20 @@ def validate_pair_index_manifest_preseal(
         On ANY schema, self-checksum, or attestation-binding violation.
     """
     source_file_sha256, obs_row_identity_sha256 = _validate_manifest_shape(manifest)
-    expected_source_file_sha256, source_row_identity_sha256 = _validate_attestation_shape(
-        attestation
-    )
+    (
+        expected_source_file_sha256,
+        source_row_identity_sha256,
+        attested_pair_index_file_sha256,
+    ) = _validate_attestation_shape(attestation)
+
+    if re.fullmatch(r"[0-9a-f]{64}", pair_index_manifest_file_sha256) is None:
+        raise RunSpecError("pair_index_manifest_file_sha256 must be 64 lowercase hex chars")
+    if attested_pair_index_file_sha256 != pair_index_manifest_file_sha256:
+        raise RunSpecError(
+            "approved_sealed_input_attestation.pair_index_file_sha256 "
+            f"({attested_pair_index_file_sha256}) != actual pair-index manifest file digest "
+            f"({pair_index_manifest_file_sha256})"
+        )
 
     if source_file_sha256 != expected_source_file_sha256:
         raise RunSpecError(

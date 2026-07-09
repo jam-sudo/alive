@@ -467,6 +467,10 @@ def load_resolved_run_spec(
         raise RunSpecError(
             f"top-level key roster mismatch: missing={sorted(missing)} unexpected={sorted(extra)}"
         )
+    if payload["schema"] != RESOLVED_RUN_SPEC_SCHEMA:
+        raise RunSpecError(
+            f"schema must be {RESOLVED_RUN_SPEC_SCHEMA!r}, got {payload['schema']!r}"
+        )
 
     # 6. self_checksum -----------------------------------------------------
     declared_self = payload["self_checksum"]

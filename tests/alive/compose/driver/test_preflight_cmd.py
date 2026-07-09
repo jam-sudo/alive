@@ -55,7 +55,7 @@ from alive.compose.driver.run_spec import RunSpecError, load_resolved_run_spec
 from alive.compose.freeze import FrozenPredictionBundle
 from alive.compose.preflight import run_preflight
 from alive.compose.terminal import Phase2bTerminal
-from alive.provenance import RunLedger, sha256_json
+from alive.provenance import RunLedger, sha256_file, sha256_json
 
 _CONFIRMATION = "seal_confirmation_manifest.json"
 _LEDGER = "phase2a_run_ledger.json"
@@ -297,9 +297,15 @@ def test_preflight_invokes_preseal_pair_index_validator(
     seen: list[tuple] = []
     real = preflight_mod.validate_pair_index_manifest_preseal
 
-    def _spy(manifest, *, attestation):  # noqa: ANN001, ANN202
-        seen.append((manifest, attestation))
-        return real(manifest, attestation=attestation)
+    def _spy(  # noqa: ANN001, ANN202
+        manifest, *, attestation, pair_index_manifest_file_sha256
+    ):
+        seen.append((manifest, attestation, pair_index_manifest_file_sha256))
+        return real(
+            manifest,
+            attestation=attestation,
+            pair_index_manifest_file_sha256=pair_index_manifest_file_sha256,
+        )
 
     monkeypatch.setattr(preflight_mod, "validate_pair_index_manifest_preseal", _spy)
 
@@ -307,9 +313,10 @@ def test_preflight_invokes_preseal_pair_index_validator(
     assert rc == PREFLIGHT_PASS_EXIT
     # Invoked EXACTLY once, over the fixture's pair-index manifest + attestation.
     assert len(seen) == 1
-    manifest, attestation = seen[0]
+    manifest, attestation, pair_index_file_sha256 = seen[0]
     assert manifest == fx.sealed_outcome["pair_index_manifest"]
     assert attestation == fx.sealed_outcome["attestation"]
+    assert pair_index_file_sha256 == sha256_file(fx.paths["pair_index_manifest"])
 
 
 # --------------------------------------------------------------------------- #
@@ -322,7 +329,9 @@ def test_preflight_fails_closed_on_pair_index_rejection(
 ) -> None:
     fx = _run_chain(tmp_path)
 
-    def _reject(manifest, *, attestation):  # noqa: ANN001, ANN202
+    def _reject(  # noqa: ANN001, ANN202
+        manifest, *, attestation, pair_index_manifest_file_sha256
+    ):
         raise RunSpecError("pair-index manifest failed pre-seal attestation binding")
 
     monkeypatch.setattr(preflight_mod, "validate_pair_index_manifest_preseal", _reject)

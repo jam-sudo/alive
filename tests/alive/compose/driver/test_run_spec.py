@@ -213,6 +213,16 @@ def test_happy_fixture_spec_loads(tmp_path: Path) -> None:
     )
 
 
+def test_wrong_schema_discriminator_rejected(tmp_path: Path) -> None:
+    spec_path, root = _write_spec(tmp_path, overrides={"schema": "attacker_schema_v0"})
+    with pytest.raises(RunSpecError, match="schema must be"):
+        load_resolved_run_spec(
+            spec_path,
+            mode_expected="fixture",
+            approved_artifacts_root=root,
+        )
+
+
 def test_execution_id_is_deterministic_and_unstored(tmp_path: Path) -> None:
     spec_path, root = _write_spec(tmp_path)
     spec = load_resolved_run_spec(spec_path, approved_artifacts_root=root, mode_expected="fixture")

@@ -15,7 +15,9 @@ import pytest
 from alive.compose.driver.pair_index import (
     ATTESTATION_SCHEMA,
     PAIR_INDEX_MANIFEST_SCHEMA,
-    validate_pair_index_manifest_preseal,
+)
+from alive.compose.driver.pair_index import (
+    validate_pair_index_manifest_preseal as _validate_pair_index_manifest_preseal,
 )
 from alive.compose.driver.run_spec import RunSpecError
 from alive.provenance import sha256_json
@@ -28,6 +30,20 @@ _HEX_PAIR_INDEX_FILE = "e" * 64
 
 #: Sentinel meaning "delete this key" when passed as an override value.
 _MISSING = object()
+
+
+def validate_pair_index_manifest_preseal(
+    manifest: dict,
+    *,
+    attestation: dict,
+    pair_index_manifest_file_sha256: str = _HEX_PAIR_INDEX_FILE,
+) -> None:
+    """Invoke the production validator with the test manifest's actual digest."""
+    _validate_pair_index_manifest_preseal(
+        manifest,
+        attestation=attestation,
+        pair_index_manifest_file_sha256=pair_index_manifest_file_sha256,
+    )
 
 
 def _pair_entry(gene_a: str, gene_b: str, role: str, rows: list[int], row_id_sha: str) -> dict:
@@ -91,6 +107,15 @@ def _attestation(**overrides: object) -> dict:
 
 def test_happy_manifest_binds_to_attestation() -> None:
     validate_pair_index_manifest_preseal(_manifest(), attestation=_attestation())  # no raise
+
+
+def test_attested_pair_index_file_digest_must_match_actual_file_digest() -> None:
+    with pytest.raises(RunSpecError, match="actual pair-index manifest file digest"):
+        validate_pair_index_manifest_preseal(
+            _manifest(),
+            attestation=_attestation(),
+            pair_index_manifest_file_sha256="f" * 64,
+        )
 
 
 # ---------------------------------------------------------------------------

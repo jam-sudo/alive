@@ -15,6 +15,7 @@ contract self-enforcing:
    legitimately retain old section numbers, so the numbering guard is scoped to
    code only.
 """
+
 from __future__ import annotations
 
 import re

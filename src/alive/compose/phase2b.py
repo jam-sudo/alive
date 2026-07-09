@@ -851,18 +851,18 @@ or None, optional
             report_source_path=seed_variability_report_path,
             report_checksum=seed_variability_report_checksum,
         )
-    assert_scientific_mode_allowed(
-        config,
-        fixture_mode=False,
-        activation_record=activation_record,
-        git_is_clean=git_is_clean,
-    )
     if _is_fixture_store(outcome_store):
         raise ScientificModeError(
             "scientific Phase2b refuses a synthetic-fixture outcome store; a sanctioned "
             "FixtureOutcomeStore (dedicated type + allowlisted corpus attestation) is not "
             "scientific evidence. Use run_phase2b_fixture for bounded synthetic runs."
         )
+    assert_scientific_mode_allowed(
+        config,
+        fixture_mode=False,
+        activation_record=activation_record,
+        git_is_clean=git_is_clean,
+    )
     return _run_phase2b_core(
         run_dir=run_dir,
         outcome_store=outcome_store,

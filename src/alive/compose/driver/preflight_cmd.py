@@ -213,7 +213,9 @@ def run_preflight_subcommand(
     manifest_bytes = Path(spec.pre_seal["pair_index_manifest"].path).read_bytes()
     attestation_bytes = Path(spec.pre_seal["approved_sealed_input_attestation"].path).read_bytes()
     validate_pair_index_manifest_preseal(
-        json.loads(manifest_bytes), attestation=json.loads(attestation_bytes)
+        json.loads(manifest_bytes),
+        attestation=json.loads(attestation_bytes),
+        pair_index_manifest_file_sha256=spec.pre_seal["pair_index_manifest"].sha256,
     )
 
     # Step 3: the outcome-free pre-seal gate. A rejection returns 10 (no seal

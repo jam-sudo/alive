@@ -13,13 +13,16 @@ For each non-sealed group (control, each single, each ``combo_calibration`` pair
 — grouped by ``(role, perturbation)`` in the fit-role artifact) with raw cell
 counts ``raw`` over the block's gene order:
 
-    delta_pb = z(mean_cells(raw))                     # pseudobulk path
-    delta_pc = mean_cells(z(raw))                     # per-cell path
+    delta_pb = z(mean_cells(raw)) - control_mean      # pseudobulk path
+    delta_pc = mean_cells(z(raw)) - control_mean      # per-cell path
     b        = delta_pb - delta_pc                    # representation gap
 
 where ``z`` is :func:`alive.compose.fit_role.apply_response_projection`. The
 control-mean subtraction cancels in the difference, so ``b`` is purely the
-aggregation gap on the group.
+aggregation gap on the group. It is nevertheless applied to both paths so
+the relative-magnitude denominator is the registered perturbation effect
+``delta_pc = mean(z(raw)) - control_mean``, not an origin-dependent PCA
+coordinate.
 
 This is a MODEL-INDEPENDENT, NON-SEALED activation-requirement report: it opens
 NO seal, reads NO sealed outcome, fits NO model, imports no ``gears``/``cpa``,
@@ -107,18 +110,25 @@ def _group_bias_vectors(
     out: dict[str, dict[str, np.ndarray]] = {}
     for key in sorted(groups):
         raw = np.asarray(X[groups[key]].toarray(), dtype=np.float64)
-        delta_pb = apply_response_projection(
-            block,
-            raw.mean(axis=0, keepdims=True),
-            gene_order,
-            representation="raw_pseudobulk_approximation",
-        )[0]
-        delta_pc = apply_response_projection(
-            block,
-            raw,
-            gene_order,
-            representation="cell_raw_counts",
-        ).mean(axis=0)
+        control_mean = np.asarray(block["control_mean"], dtype=np.float64)
+        delta_pb = (
+            apply_response_projection(
+                block,
+                raw.mean(axis=0, keepdims=True),
+                gene_order,
+                representation="raw_pseudobulk_approximation",
+            )[0]
+            - control_mean
+        )
+        delta_pc = (
+            apply_response_projection(
+                block,
+                raw,
+                gene_order,
+                representation="cell_raw_counts",
+            ).mean(axis=0)
+            - control_mean
+        )
         out[key] = {"b": delta_pb - delta_pc, "delta_pc": delta_pc}
     return out
 
@@ -173,7 +183,8 @@ def measure_pseudobulk_approximation_bias(
             "b = z(mean_cells(raw)) - mean_cells(z(raw)) with z = frozen §2.2 "
             "normalize_total_median+log1p then HVG+PCA (control_mean cancels in "
             "the difference). directional_bias_l2 = ||mean_g b|| (non-cancelling "
-            "component); relative_magnitude = ||b|| / ||mean_cells(z(raw))|| over "
+            "component); relative_magnitude = ||b|| / "
+            "||mean_cells(z(raw)) - control_mean|| over "
             "groups with non-zero per-cell delta."
         ),
         "git_sha": str(git_sha),

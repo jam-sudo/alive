@@ -26,11 +26,13 @@ import json
 import math
 from pathlib import Path
 
+import anndata as ad
 import numpy as np
 from scipy import sparse
 
 from alive.compose.fit_role import (
     ComposeFitRoleExtractor,
+    apply_response_projection,
     build_response_projection,
     extract_fit_roles,
     generate_fit_role_artifact,
@@ -267,6 +269,24 @@ def test_known_answer_identical_vs_heterogeneous(tmp_path):
     assert isinstance(report["relative_magnitude_max"], float)
     assert report["relative_magnitude_max"] > 0.0
     assert isinstance(report["relative_magnitude_median"], float)
+
+
+def test_relative_magnitude_uses_registered_effect_delta(tmp_path):
+    module = _load_metric_module()
+    artifact = _mixed_artifact(tmp_path)
+    block = _build_projection()
+
+    groups = module._group_bias_vectors(artifact, block)
+    adata = ad.read_h5ad(artifact)
+    mask = np.asarray(adata.obs["perturbation"].astype(str) == "AAA")
+    raw = np.asarray(adata.X[mask].toarray(), dtype=np.float64)
+    expected = apply_response_projection(
+        block,
+        raw,
+        list(adata.var_names),
+        representation="cell_raw_counts",
+    ).mean(axis=0) - np.asarray(block["control_mean"], dtype=np.float64)
+    np.testing.assert_allclose(groups["singles::AAA"]["delta_pc"], expected)
 
 
 def test_relative_magnitude_sentinel_when_all_delta_pc_zero(tmp_path, monkeypatch):

@@ -33,6 +33,7 @@ started from it.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -48,6 +49,17 @@ from alive.provenance import sha256_json
 # ---------------------------------------------------------------------------
 _EXPECTED_PROTOCOL = "COMPOSE-K562-v1"
 _EXPECTED_PHASE = 2
+
+# Evidence reports whose payloads are required to bind to the finalized config.
+# Other activation requirements intentionally point at heterogeneous artifacts
+# (a data card, source code, tests, dependency lock) and therefore cannot share
+# this JSON lineage contract.
+_CONFIG_BOUND_EVIDENCE_REQUIREMENTS = frozenset(
+    {
+        "real_norman_phi_rank_and_condition_report",
+        "regime_specific_detectable_effect_analysis",
+    }
+)
 _EXPECTED_TOTAL_K_GRID: tuple[int, ...] = (4, 6, 8)
 _EXPECTED_EXPRESSION_DIMS: tuple[int, ...] = (2, 4, 6)
 _EXPECTED_ESM_PROJECTION_DIM = 2
@@ -415,6 +427,8 @@ class ComposePhase2Config:
     comparator_family: tuple[str, ...]
     method_roster: tuple[str, ...]
     baseline_representations: tuple[tuple[str, str, str | None], ...]
+    baseline_activation_statuses: tuple[tuple[str, str | None, str], ...]
+    power_status: str
     metric_primary: str
     metric_formula: str
     material_margin_vs_additive: float
@@ -453,6 +467,29 @@ class ComposePhase2Config:
             representation in _APPROXIMATE_REPRESENTATIONS and bias is None
             for _name, representation, bias in self.baseline_representations
         )
+
+    @property
+    def activation_blockers(self) -> tuple[str, ...]:
+        """Return every unresolved scientific-activation blocker.
+
+        The active status flag is necessary but not sufficient.  Power must be
+        established, every deep baseline must have an immutable revision and a
+        pinned environment, and approximate representations must carry their
+        registered bias report.  Blocker-valued strings remain legal in a
+        preregistration config so the file can be loaded and inspected, but the
+        scientific boundary rejects them fail-closed.
+        """
+        blockers: list[str] = []
+        if not self.power_status or self.power_status.endswith("_activation_blocker"):
+            blockers.append("regimes.power_status")
+        for method, revision, environment_status in self.baseline_activation_statuses:
+            if revision is None or not revision.strip():
+                blockers.append(f"baselines.{method}.revision")
+            if not environment_status or environment_status.endswith("_activation_blocker"):
+                blockers.append(f"baselines.{method}.environment_status")
+        if self.pseudobulk_representation_activation_blocked:
+            blockers.append("baselines.approximation_bias_report_sha256")
+        return tuple(blockers)
 
 
 def _require(mapping: dict[str, Any], key: str, context: str) -> Any:
@@ -632,9 +669,12 @@ def load_compose_phase2_config(path: str | Path) -> ComposePhase2Config:
     futility_conditions, dev_oof_metric, dev_oof_threshold = _validate_futility(
         _require(raw, "futility", "top-level")
     )
-    method_roster, baseline_representations = _validate_baselines(
+    method_roster, baseline_representations, baseline_activation_statuses = _validate_baselines(
         _require(raw, "baselines", "top-level")
     )
+    power_status = _require(_require(raw, "regimes", "top-level"), "power_status", "regimes")
+    if not isinstance(power_status, str) or not power_status.strip():
+        raise Phase2ConfigError("regimes.power_status must be a non-empty string")
     (
         metric_primary,
         metric_formula,
@@ -672,6 +712,8 @@ def load_compose_phase2_config(path: str | Path) -> ComposePhase2Config:
         comparator_family=comparator_family,
         method_roster=method_roster,
         baseline_representations=baseline_representations,
+        baseline_activation_statuses=baseline_activation_statuses,
+        power_status=power_status,
         metric_primary=metric_primary,
         metric_formula=metric_formula,
         material_margin_vs_additive=material_margin,
@@ -944,16 +986,22 @@ def _validate_futility(block: dict[str, Any]) -> tuple[tuple[str, ...], str, flo
 
 def _validate_baselines(
     block: dict[str, Any],
-) -> tuple[tuple[str, ...], tuple[tuple[str, str, str | None], ...]]:
+) -> tuple[
+    tuple[str, ...],
+    tuple[tuple[str, str, str | None], ...],
+    tuple[tuple[str, str | None, str], ...],
+]:
     """Validate the method roster and the per-method representation lock.
 
     Returns
     -------
     tuple
-        ``(method_roster, representations)`` where ``representations`` is a tuple
+        ``(method_roster, representations, activation_statuses)`` where
+        ``representations`` is a tuple
         of ``(method, prediction_representation, approximation_bias_report_sha256)``
         for the deep baselines (``gears``, ``cpa``); the bias element is ``None``
-        when no report is registered.
+        when no report is registered. ``activation_statuses`` contains
+        ``(method, revision, environment_status)`` for the scientific gate.
     """
     _close_schema(block, _KNOWN_BASELINES, "baselines")
     lower_bounds = _require(block, "lower_bounds", "baselines")
@@ -962,11 +1010,25 @@ def _validate_baselines(
         raise Phase2ConfigError("baselines.lower_bounds must be [no_change, perturbation_mean]")
     if ladder != ["l1_bilinear_identifiable", "l2_saturation", "l3_hypernetwork"]:
         raise Phase2ConfigError("baselines.ablation_ladder does not match the registered ladder")
-    representations = tuple(
-        (name, *_validate_baseline_method_representation(_require(block, name, "baselines"), name))
-        for name in ("gears", "cpa")
-    )
-    return _EXPECTED_METHOD_ROSTER, representations
+    representations: list[tuple[str, str, str | None]] = []
+    activation_statuses: list[tuple[str, str | None, str]] = []
+    for name in ("gears", "cpa"):
+        method_block = _require(block, name, "baselines")
+        representation, bias = _validate_baseline_method_representation(method_block, name)
+        package = _require(method_block, "package", f"baselines.{name}")
+        if not isinstance(package, str) or not package.strip():
+            raise Phase2ConfigError(f"baselines.{name}.package must be a non-empty string")
+        revision = _require(method_block, "revision", f"baselines.{name}")
+        if revision is not None and (not isinstance(revision, str) or not revision.strip()):
+            raise Phase2ConfigError(f"baselines.{name}.revision must be null or a non-empty string")
+        environment_status = _require(method_block, "environment_status", f"baselines.{name}")
+        if not isinstance(environment_status, str) or not environment_status.strip():
+            raise Phase2ConfigError(
+                f"baselines.{name}.environment_status must be a non-empty string"
+            )
+        representations.append((name, representation, bias))
+        activation_statuses.append((name, revision, environment_status))
+    return _EXPECTED_METHOD_ROSTER, tuple(representations), tuple(activation_statuses)
 
 
 def _validate_metric(
@@ -1258,8 +1320,45 @@ def assert_scientific_mode_allowed(
             f"{sorted(mismatched_files)}"
         )
 
-    if config.pseudobulk_representation_activation_blocked:
+    if config.activation_blockers:
         raise ScientificModeError(
-            "scientific mode blocked: a raw-pseudobulk baseline representation "
-            "has no registered approximation-bias report checksum"
+            "scientific mode blocked: unresolved activation blockers "
+            f"{list(config.activation_blockers)}"
         )
+
+    # The two real-Norman analytical reports are JSON lineage artifacts.  Their
+    # bytes being hash-pinned is not enough: an owner could otherwise approve a
+    # stale, pre-activation report whose embedded config identity no longer
+    # matches this run.  Parse only this explicitly registered subset and bind it
+    # to the finalized config/protocol before scientific execution is allowed.
+    for requirement in sorted(_CONFIG_BOUND_EVIDENCE_REQUIREMENTS):
+        if requirement not in expected_requirements:
+            continue
+        path = Path(activation_record.evidence_files[requirement])
+        try:
+            report = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, ValueError) as exc:
+            raise ScientificModeError(
+                "scientific mode blocked: config-bound activation evidence "
+                f"{requirement!r} is not readable canonical JSON: {exc}"
+            ) from exc
+        if not isinstance(report, dict):
+            raise ScientificModeError(
+                "scientific mode blocked: config-bound activation evidence "
+                f"{requirement!r} must be a JSON object"
+            )
+        if report.get("protocol") != config.protocol:
+            raise ScientificModeError(
+                "scientific mode blocked: activation evidence protocol mismatch for "
+                f"{requirement!r}"
+            )
+        if report.get("config_sha256") != config.config_sha256:
+            raise ScientificModeError(
+                "scientific mode blocked: activation evidence config_sha256 mismatch for "
+                f"{requirement!r}"
+            )
+        activation = report.get("activation")
+        if not isinstance(activation, str) or "BLOCKED" in activation.upper():
+            raise ScientificModeError(
+                f"scientific mode blocked: activation evidence remains BLOCKED for {requirement!r}"
+            )
