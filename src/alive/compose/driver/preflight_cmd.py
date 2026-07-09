@@ -66,6 +66,7 @@ from alive.compose.driver.identity_lock import (
     DEEP_BASELINE_METHODS,
     assemble_execution_identity_lock,
 )
+from alive.compose.driver.pair_index import validate_pair_index_manifest_preseal
 from alive.compose.driver.phase2a_cmd import (
     LEDGER_EXECUTION_ID,
     LEDGER_PAIR_INDEX_MANIFEST,
@@ -201,6 +202,19 @@ def run_preflight_subcommand(
     # ResolvedRunSpec (spec §1/§3.2: after re-reading, bind artifact SHAs to the
     # ResolvedRunSpec). A ledger vouching for a different spec fails closed.
     _assert_ledger_binds_spec(ledger, spec)
+
+    # Step 2c: pre-seal pair-index manifest validation + attestation binding
+    # (spec §2.3 / Task 2). Verify the pair_index_manifest v1 schema + self-
+    # checksum and its binding to the approved_sealed_input_attestation (source-
+    # file SHA + obs row-identity SHA equality) over the already-SHA-verified
+    # pre-seal bytes — WITHOUT opening the sealed source (the semantic obs-
+    # alignment check is phase2b step 4's C0 validate_pair_index_against_source_obs).
+    # A violation raises RunSpecError → the CLI's pre-seal exit 10 (no seal armed).
+    manifest_bytes = Path(spec.pre_seal["pair_index_manifest"].path).read_bytes()
+    attestation_bytes = Path(spec.pre_seal["approved_sealed_input_attestation"].path).read_bytes()
+    validate_pair_index_manifest_preseal(
+        json.loads(manifest_bytes), attestation=json.loads(attestation_bytes)
+    )
 
     # Step 3: the outcome-free pre-seal gate. A rejection returns 10 (no seal
     # consumed, no manifest installed); it builds no store of any kind.

@@ -38,6 +38,7 @@ from pathlib import Path
 
 import pytest
 
+import alive.compose.driver.preflight_cmd as preflight_mod
 import alive.compose.outcome_store as outcome_store_mod
 from alive.compose.config2 import load_compose_phase2_config
 from alive.compose.driver.confirmation import verify_seal_confirmation_manifest
@@ -50,7 +51,7 @@ from alive.compose.driver.preflight_cmd import (
     run_preflight_subcommand,
 )
 from alive.compose.driver.run_dir_state import RunDirStateError
-from alive.compose.driver.run_spec import load_resolved_run_spec
+from alive.compose.driver.run_spec import RunSpecError, load_resolved_run_spec
 from alive.compose.freeze import FrozenPredictionBundle
 from alive.compose.preflight import run_preflight
 from alive.compose.terminal import Phase2bTerminal
@@ -276,5 +277,56 @@ def test_deleted_ledger_fails_closed(tmp_path: Path) -> None:
 
     # A missing required phase2a artifact violates the preflight entry roster.
     with pytest.raises(RunDirStateError):
+        run_preflight_subcommand(fx, approved_artifacts_root=tmp_path, run_dir=fx.run_dir)
+    assert not (fx.run_dir / _CONFIRMATION).exists()
+
+
+# --------------------------------------------------------------------------- #
+# Contract 7: the pre-seal pair-index manifest / attestation validator (Task 2)
+# is actually WIRED into the pre-seal gate — not dead code. It is invoked EXACTLY
+# once over the fixture's pair-index manifest + attestation (the on-disk bytes
+# were already SHA-verified by load_resolved_run_spec). The validator's own
+# rejection behaviour (schema / self-checksum / attestation-binding) is unit-
+# tested in test_pair_index_preseal.py; here we prove it runs in the flow.
+# --------------------------------------------------------------------------- #
+def test_preflight_invokes_preseal_pair_index_validator(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fx = _run_chain(tmp_path)
+
+    seen: list[tuple] = []
+    real = preflight_mod.validate_pair_index_manifest_preseal
+
+    def _spy(manifest, *, attestation):  # noqa: ANN001, ANN202
+        seen.append((manifest, attestation))
+        return real(manifest, attestation=attestation)
+
+    monkeypatch.setattr(preflight_mod, "validate_pair_index_manifest_preseal", _spy)
+
+    rc = run_preflight_subcommand(fx, approved_artifacts_root=tmp_path, run_dir=fx.run_dir)
+    assert rc == PREFLIGHT_PASS_EXIT
+    # Invoked EXACTLY once, over the fixture's pair-index manifest + attestation.
+    assert len(seen) == 1
+    manifest, attestation = seen[0]
+    assert manifest == fx.sealed_outcome["pair_index_manifest"]
+    assert attestation == fx.sealed_outcome["attestation"]
+
+
+# --------------------------------------------------------------------------- #
+# Contract 7b: a pre-seal pair-index / attestation rejection fails the gate CLOSED
+# — RunSpecError propagates (→ the CLI's pre-seal exit 10) and NO confirmation
+# manifest is installed, so the seal can never be armed off an unbound pair index.
+# --------------------------------------------------------------------------- #
+def test_preflight_fails_closed_on_pair_index_rejection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fx = _run_chain(tmp_path)
+
+    def _reject(manifest, *, attestation):  # noqa: ANN001, ANN202
+        raise RunSpecError("pair-index manifest failed pre-seal attestation binding")
+
+    monkeypatch.setattr(preflight_mod, "validate_pair_index_manifest_preseal", _reject)
+
+    with pytest.raises(RunSpecError):
         run_preflight_subcommand(fx, approved_artifacts_root=tmp_path, run_dir=fx.run_dir)
     assert not (fx.run_dir / _CONFIRMATION).exists()
