@@ -84,11 +84,30 @@ the **installed 0.7.2 wheel + its contemporaneous tutorial** on the dev pod. (I 
 tutorial on request, but a version-matched pod read is safer.)
 - Output representation (per-cell, NB raw counts → `cpa.prediction_representation = cell_raw_counts`) holds for CPA
   generally; that part of the research is version-robust.
-- **OWNER decision — keep 0.7.2 or upgrade to 0.8.8?** Keeping 0.7.2 reuses the fresh-sync-verified lock (cheapest,
-  lowest risk). Upgrading to 0.8.8 gives the current, better-documented Norman combo tutorial (my 0.8.8 research
-  applies) BUT invalidates the verified env lock — the whole 2023-era pin stack (scvi 0.20.3 / jax 0.4.38 / anndata
-  <0.11) would need re-resolution + re-verification on the dev pod. Default recommendation: **keep 0.7.2** unless the
-  owner has a reason to upgrade.
+**"0.7.2로 해도 문제 없나?" — investigated (v0.7.2…main code diff + PyPI timeline + the committed lock):**
+- **Science (core model): 0.7.2 is NOT a weakened baseline.** The compositional latent `z = z_basal + z_pert +
+  z_covs` in `cpa/_module.py` is IDENTICAL across 0.7.2→0.8.8; the 137-commit delta is dominated by
+  packaging/python-version/docs/tutorials + a new autotuner (`_tuner.py`, purely additive) + optional prediction
+  flexibility (`covars_to_add`, `z_no_pert` latents). No combo-algorithm change. 0.7.2 is also paper-contemporaneous
+  (Sep 2023, same era as the MSB-2023 paper). (Timeline caveat: 0.8.0 branched the SAME DAY as 0.7.2 — 0.8.x is the
+  maintained line; 0.7.x ended at 0.7.2.)
+- **⚠️ Runtime landmine — 0.7.2 + the committed env likely CANNOT run the Norman gene-combo setup.** The 0.7.2→main
+  diff shows two fixes in `cpa/_model.py::setup_anndata` that 0.7.2 lacks: (1) `.astype(np.int)` → `.astype(int)` —
+  `np.int` was REMOVED in numpy ≥1.24, and the committed `requirements.cpa_env.lock` pins **`cpa-tools==0.7.2` +
+  `numpy==1.26.4` together**, so the `deg_uns_key` branch the Norman combo tutorial exercises would raise
+  `AttributeError: module 'numpy' has no attribute 'int'`; (2) a `if smiles_key is not None:` guard for the
+  no-SMILES (gene) perturbation path 0.7.2 lacks. **The committed lock verified IMPORT only** (`both_backends_import_ok`),
+  NOT running `setup_anndata`/fit on Norman — so these landmines were not caught. (High confidence from the files;
+  not yet executed → RUN-verify on the dev pod.)
+- **So the cpa version is NOT actually settled by the "verified" lock.** Governance (§6 baseline: the baseline must
+  actually RUN at published strength) requires a dev-pod Phase-0 gate that **runs the Norman gene-combo
+  `setup_anndata` + a short fit end-to-end** (not just import). Whichever version passes THAT is the pin.
+- **Recommendation (reversed from the first draft's "keep 0.7.2"):** the science is equivalent, so choose the version
+  that RELIABLY RUNS Norman on a sane stack. That favors a **0.8.x** version (which fixed the numpy/SMILES bugs;
+  0.8.8 has the documented Norman tutorial). BUT 0.8.8's declared bounds (torch≤2.0.1) differ from the committed
+  torch-2.6 stack, so its env must be re-resolved + RUN-verified too. **Net: treat "cpa version + Norman actually
+  runs" as an OPEN dev-pod Phase-0 item, not a settled pin.** If 0.7.2 is kept, it MUST pass the Norman-run gate
+  (patch np.int or adjust numpy) or it is disqualified.
 
 ## #4 — GEARS pseudobulk-approximation bias metric (→ `baselines.gears.approximation_bias_report_sha256`)
 
@@ -145,8 +164,8 @@ pattern works.** Real provisioning specifics (from the lock, not new constraints
 | #1 | `baselines.gears.revision` (+ dep lock) | `cell-gears==0.1.2` + SHA | **committed lock (verified)**; clarify `package` (import `gears` vs pip `cell-gears`); pod-verify wheel |
 | #1 | GEARS hyperparams (worker + dep lock) | master defaults above as REFERENCE | **pod-verify against installed 0.1.2 wheel**; worker pins explicit values |
 | #2 | `go_resource_manifest.json` | url `datafile/6153417`, MD5 `77c9af0c…` | **license + GO version + SHA-256 = pod** |
-| #3 | `baselines.cpa.revision` (+ dep lock) | `cpa-tools==0.7.2` + SHA | **committed lock (verified)** — NOT 0.8.8 |
-| #3 | CPA combo config (worker + dep lock) | **POD-VERIFY (0.7.2)** | 0.8.8 research does NOT apply; owner: keep 0.7.2 or upgrade |
+| #3 | `baselines.cpa.revision` (+ dep lock) | **UNSETTLED** — lock says `0.7.2` but it likely can't run Norman (np.int vs numpy 1.26.4) | **dev-pod Phase-0 must RUN Norman setup+fit, not just import**; 0.8.x fixes the bug |
+| #3 | CPA combo config (worker + dep lock) | **POD-VERIFY (version-matched)** | 0.8.8 research applies only if 0.8.x chosen; 0.7.2 config = read from 0.7.2 |
 | #4 | `baselines.gears.approximation_bias_report_sha256` | Task-2.2 report SHA (metric above) | run on pod, non-sealed |
 | #4 | `baselines.cpa.approximation_bias_report_sha256` | **null** (exact representation) | none |
 | #5 | env locks / provider | 2 verified envs, both cu124 | committed lock; **owner picks provider** |
