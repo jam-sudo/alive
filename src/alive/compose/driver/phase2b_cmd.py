@@ -292,43 +292,58 @@ def _run_confirmed_phase2b(
     )
 
     # Step 5: dispatch the correct library entry point. The seal opens EXACTLY
-    # once inside it; every consumed access leaves a terminal artifact.
-    if spec.mode == "fixture":
-        result = run_phase2b_fixture(
-            run_dir=run_dir,
-            outcome_store=outcome_store,
-            frozen_bundle=bundle,
-            pair_manifest=pair_manifest,
-            response_artifact=payload_response,
-            config=config,
-            ledger=ledger,
-        )
-    else:
-        # Scientific dispatch (a PREPARE obligation; NOT exercised by the local
-        # fixture path). run_phase2b re-verifies activation + clean git itself and
-        # binds the phase2a DISTINCT seed-variability report (never the canonical
-        # name phase2b installs) as seed_variability_report_path.
-        seed_report_path = run_dir / RUN_PRODUCED_BASENAMES["phase2a_seed_variability_report"]
-        scientific_response = {
-            **payload_response,
-            "checksum": response_artifact["combined_checksum"],
-        }
-        result = run_phase2b(
-            run_dir=run_dir,
-            outcome_store=outcome_store,
-            frozen_bundle=bundle,
-            pair_manifest=pair_manifest,
-            response_artifact=scientific_response,
-            config=config,
-            ledger=ledger,
-            activation_record=run_spec.activation_record,
-            git_is_clean=git_clean,
-            provenance_inputs=getattr(run_spec, "provenance_inputs", None),
-            oof_manifest_path=run_dir / RUN_PRODUCED_BASENAMES["oof_manifest"],
-            oof_manifest_checksum=bundle.dev_diagnostics["oof_fold_manifest_checksum"],
-            seed_variability_report_path=seed_report_path,
-            seed_variability_report_checksum=sha256_file(seed_report_path),
-        )
+    # once inside it; every consumed access burns the run-bound audit + writes a
+    # terminal artifact. A RAISE from the library AFTER that consumption (the
+    # abort path re-raises the boundary exception; a normal-path durable-finalize
+    # failure raises DurableLedgerError) is a POST-seal failure: it is made
+    # SYMMETRIC with step 6 — emit ONE diagnostic and RETURN 30 (recover can
+    # salvage the consumed-seal terminal), NEVER let it propagate to the CLI,
+    # which would mislabel a consumed seal as the pre-seal exit 10 (or crash to
+    # exit 1 for the unlisted DurableLedgerError). A genuinely PRE-seal raise
+    # (nothing consumed → audit still empty/absent) is re-raised so the CLI's
+    # pre-seal mapping stays correct.
+    try:
+        if spec.mode == "fixture":
+            result = run_phase2b_fixture(
+                run_dir=run_dir,
+                outcome_store=outcome_store,
+                frozen_bundle=bundle,
+                pair_manifest=pair_manifest,
+                response_artifact=payload_response,
+                config=config,
+                ledger=ledger,
+            )
+        else:
+            # Scientific dispatch (a PREPARE obligation; NOT exercised by the local
+            # fixture path). run_phase2b re-verifies activation + clean git itself and
+            # binds the phase2a DISTINCT seed-variability report (never the canonical
+            # name phase2b installs) as seed_variability_report_path.
+            seed_report_path = run_dir / RUN_PRODUCED_BASENAMES["phase2a_seed_variability_report"]
+            scientific_response = {
+                **payload_response,
+                "checksum": response_artifact["combined_checksum"],
+            }
+            result = run_phase2b(
+                run_dir=run_dir,
+                outcome_store=outcome_store,
+                frozen_bundle=bundle,
+                pair_manifest=pair_manifest,
+                response_artifact=scientific_response,
+                config=config,
+                ledger=ledger,
+                activation_record=run_spec.activation_record,
+                git_is_clean=git_clean,
+                provenance_inputs=getattr(run_spec, "provenance_inputs", None),
+                oof_manifest_path=run_dir / RUN_PRODUCED_BASENAMES["oof_manifest"],
+                oof_manifest_checksum=bundle.dev_diagnostics["oof_fold_manifest_checksum"],
+                seed_variability_report_path=seed_report_path,
+                seed_variability_report_checksum=sha256_file(seed_report_path),
+            )
+    except Exception as exc:  # noqa: BLE001 - re-raised unless the seal was consumed
+        if _seal_consumed(run_dir):
+            print(f"{type(exc).__name__}: {exc}", file=sys.stderr)
+            return PHASE2B_NONCOMPLETE_EXIT
+        raise
 
     # Step 6: INDEPENDENTLY re-read the durable commit marker (never the returned
     # result alone), then map the terminal state to an exit code. Nothing
@@ -564,6 +579,31 @@ def _assert_audit_destination_free(audit_path: Path, *, run_dir: Path) -> None:
             f"audit destination {str(audit_path)!r} already carries content; the seal "
             "may be opened exactly once (refusing to construct a store over a burned audit)"
         )
+
+
+def _seal_consumed(run_dir: Path) -> bool:
+    """Return ``True`` once the seal's durable audit carries content (§3.3 step 5).
+
+    The seal — opened EXACTLY once inside ``run_phase2b[_fixture]`` — burns the
+    run-bound ``<run_dir>/audit.jsonl`` as its durable consumption boundary, the
+    exact inverse of the emptiness :func:`_assert_audit_destination_free` requires
+    BEFORE store construction. A post-dispatch exception with a non-empty audit is
+    therefore a POST-seal failure (the caller returns exit ``30`` + ``recover``
+    salvages the terminal); an empty/absent audit means nothing was consumed (the
+    caller re-raises so the CLI's pre-seal mapping stays correct).
+
+    Parameters
+    ----------
+    run_dir : Path
+        The run directory whose ``audit.jsonl`` is the seal-consumption boundary.
+
+    Returns
+    -------
+    bool
+        ``True`` if ``<run_dir>/audit.jsonl`` exists and is non-empty.
+    """
+    audit_path = run_dir / SEAL_AUDIT_FILENAME
+    return audit_path.exists() and audit_path.stat().st_size > 0
 
 
 def _assert_pair_roles(pair_index_manifest: Mapping[str, Any]) -> None:

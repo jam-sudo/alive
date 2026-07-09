@@ -58,6 +58,7 @@ from alive.compose.durable import (
     COMMIT_CHECKSUM_FIELD,
     DURABLE_COMMIT_FILENAME,
     SEAL_AUDIT_FILENAME,
+    DurableLedgerError,
 )
 from alive.compose.outcome_store import ComposeSealingError
 from alive.compose.terminal import Phase2bTerminal
@@ -307,6 +308,85 @@ def test_corrupt_durable_marker_returns_thirty_post_seal(
     captured = capsys.readouterr()
     assert captured.out == ""
     assert "Phase2bSubcommandError" in captured.err
+
+
+# --------------------------------------------------------------------------- #
+# Guard: a library RAISE from step 5 AFTER the seal is consumed is a POST-seal
+# failure — it must RETURN the non-COMPLETE exit (30), never propagate. The abort
+# path re-raises the boundary exception (e.g. ComposeSealingError) and a normal-
+# path durable-finalize failure raises DurableLedgerError; unwrapped, the CLI
+# would mislabel the FIRST as pre-seal exit 10 ("no seal consumed") and crash on
+# the SECOND (unlisted → traceback + exit 1). Both are made SYMMETRIC with the
+# step-6 corrupt-marker case: emit ONE stderr line and RETURN 30 (recover can
+# then salvage the consumed-seal terminal).
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize(
+    "exc_factory",
+    [
+        lambda: ComposeSealingError("boundary abort re-raised after the seal was consumed"),
+        lambda: DurableLedgerError("durable export incomplete after the seal was consumed"),
+    ],
+    ids=["abort-reraise", "durable-finalize"],
+)
+def test_post_seal_step5_raise_returns_thirty(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+    exc_factory,  # noqa: ANN001
+) -> None:
+    fx = _run_preseal(tmp_path)
+    token = _confirmation_token(fx.run_dir)
+
+    # Run the REAL fixture dispatch first (genuinely consuming the seal — a
+    # COMPLETE terminal + a non-empty audit are written), THEN raise a post-seal
+    # library exception, exactly as the abort / durable-finalize paths do.
+    real_fixture = phase2b_mod.run_phase2b_fixture
+
+    def _dispatch_then_raise(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        real_fixture(*args, **kwargs)
+        assert (fx.run_dir / SEAL_AUDIT_FILENAME).stat().st_size > 0  # seal consumed
+        raise exc_factory()
+
+    monkeypatch.setattr(phase2b_mod, "run_phase2b_fixture", _dispatch_then_raise)
+
+    rc = run_phase2b_subcommand(
+        fx, approved_artifacts_root=tmp_path, run_dir=fx.run_dir, confirm_seal_token=token
+    )
+
+    # RETURNS 30 (does not raise) — a genuinely-consumed-seal post-seal failure.
+    assert rc == PHASE2B_NONCOMPLETE_EXIT
+    assert (fx.run_dir / SEAL_AUDIT_FILENAME).is_file()
+    # A single stderr diagnostic names the exception class; stdout stays clean
+    # (no scientific value ever reaches either stream).
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert type(exc_factory()).__name__ in captured.err
+
+
+# --------------------------------------------------------------------------- #
+# Guard: a genuinely PRE-seal raise from step 5 (nothing consumed — no non-empty
+# audit) must PROPAGATE so the CLI's pre-seal mapping (exit 10) stays correct.
+# The post-seal guard gates on seal-consumption and must never swallow a pre-seal
+# failure as exit 30.
+# --------------------------------------------------------------------------- #
+def test_preseal_step5_raise_propagates(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    fx = _run_preseal(tmp_path)
+    token = _confirmation_token(fx.run_dir)
+
+    def _raise_before_seal(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        # Raise WITHOUT running the real dispatch → the seal is never opened and
+        # no audit content is written.
+        raise ComposeSealingError("failed before opening the seal")
+
+    monkeypatch.setattr(phase2b_mod, "run_phase2b_fixture", _raise_before_seal)
+
+    with pytest.raises(ComposeSealingError):
+        run_phase2b_subcommand(
+            fx, approved_artifacts_root=tmp_path, run_dir=fx.run_dir, confirm_seal_token=token
+        )
+    # Nothing was consumed: the audit is absent or empty (the guard's own signal).
+    audit = fx.run_dir / SEAL_AUDIT_FILENAME
+    assert not (audit.exists() and audit.stat().st_size > 0)
 
 
 # --------------------------------------------------------------------------- #
