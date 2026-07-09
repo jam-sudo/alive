@@ -4,7 +4,7 @@
 > **개정일:** 2026-07-04
 > **상위 protocol:** `COMPOSE-K562-v1` (ACTIVE, 2026-06-30 activation)
 > **상위 runbook:** `docs/superpowers/specs/2026-07-01-compose-deep-baselines-design.md` (Changes A/B/C — 전부 완료)
-> **거버넌스:** `CLAUDE.md` §5, §6, §7, §9, §11, §15
+> **거버넌스:** `CLAUDE.md`#invariants, #seal, #data-eval, #provenance, #agent
 > **선행:** deep-baselines A(=A1 fit-role + A2 payload-v2), B+C(provenance/ledger) 모두 merged. 실제 sealed run은 A100 + 유효 `ActivationRecord` + clean tree로 1회.
 
 ---
@@ -151,7 +151,7 @@ governed·validated된 payload 입력이다(`baseline_subprocess`: 모든 pair �
 
 ---
 
-## 7. 테스트 (전부 로컬 실행 가능, `CLAUDE.md` §13)
+## 7. 테스트 (전부 로컬 실행 가능, `CLAUDE.md`#verify)
 
 - **freeze:** create/verify/roundtrip에서 model-artifact 바인딩; 집계·per-method digest 변조 거부.
 - **phase2a:** subprocess가 freeze로 배선; response-space 발산·representation 발산 거부(2 신규 음성).
@@ -183,4 +183,4 @@ governed·validated된 payload 입력이다(`baseline_subprocess`: 모든 pair �
 ## 참고
 - 상위 runbook: `2026-07-01-compose-deep-baselines-design.md` §1–§3.
 - 상위 계약: COMPOSE spec `2026-06-22-compose-epistasis-operator-design.md` §10.4–§10.6.
-- 거버넌스: `CLAUDE.md` §5, §6, §7, §9, §11, §15.
+- 거버넌스: `CLAUDE.md`#invariants, #seal, #data-eval, #provenance, #agent.

@@ -5,8 +5,8 @@ modules — :mod:`~alive.compose.outcome_store`, :mod:`~alive.compose.preflight`
 :mod:`~alive.compose.inference2`, :mod:`~alive.compose.scoring2`,
 :mod:`~alive.compose.verdict2`, :mod:`~alive.compose.provenance2` and
 :mod:`~alive.compose.terminal` — into the one-time sealed evaluation that opens
-the COMPOSE seal EXACTLY ONCE and produces the confirmatory verdict (CLAUDE.md
-§6 multiple-seal rule, §11 write-once provenance).
+the COMPOSE seal EXACTLY ONCE and produces the confirmatory verdict
+(CLAUDE.md#seal multiple-seal rule, #provenance write-once provenance).
 
 The load-bearing safety properties
 ----------------------------------
@@ -34,8 +34,10 @@ Two-entry activation pattern (mirrors :mod:`alive.compose.phase2a`)
   rejects any ``fixture_mode``-style bypass and refuses a synthetic-fixture
   store as scientific evidence.
 * :func:`run_phase2b_fixture` — the BOUNDED SYNTHETIC entry the integration
-  tests use (no activation required; the synthetic store carries a fixture
-  marker; the payload is bounded like Phase-2a's fixture guard).
+  tests use (no activation required; the synthetic store must be a dedicated
+  :class:`~alive.compose.outcome_store.FixtureOutcomeStore` carrying an
+  allowlisted corpus attestation; the payload is bounded like Phase-2a's fixture
+  guard).
 
 Both delegate to a shared :func:`_run_phase2b_core`. NEITHER entry accepts raw
 truth.
@@ -62,7 +64,13 @@ from alive.compose.config2 import (
 )
 from alive.compose.durable import finalize_phase2b_durable_outputs
 from alive.compose.freeze import FrozenPredictionBundle
-from alive.compose.outcome_store import ComposeOutcomeStore, ObservedPair, SealedAccessClaim
+from alive.compose.outcome_store import (
+    _FIXTURE_CORPUS_ALLOWLIST,
+    ComposeOutcomeStore,
+    FixtureOutcomeStore,
+    ObservedPair,
+    SealedAccessClaim,
+)
 from alive.compose.preflight import EvaluationLock, run_preflight
 from alive.compose.provenance2 import (
     PRE_ACCESS_LEDGER_FILENAME,
@@ -515,23 +523,34 @@ def _build_provenance(
     response-space / factor / model), the scientific provenance digests, the
     registered seeds and the regime-result checksums.
 
-    On the fixture path the scientific digests are synthetic-empty (they are not
-    real evidence). On the scientific path the run-identity digests
-    (``data_card`` / ``raw_data`` / ``sequence_mapping``) come from the upstream
-    ledger — the same values preflight and the run-id recomputation consume, so
-    there is ONE source of truth — and the remaining scientific digests come from
-    ``inputs``. A scientific run with ``inputs is None`` fails closed (an
-    activated run must supply real evidence, never empty digests).
+    The run-identity digests (``data_card`` / ``raw_data`` /
+    ``sequence_mapping``) come from the upstream ledger on BOTH paths — the same
+    values preflight and the run-id recomputation consume, so there is ONE source
+    of truth and the durable ledger<->provenance cross-check holds actively even
+    on the fixture path. The remaining scientific EVIDENCE digests
+    (processed / feature-bank / dependency-lock / gears / cpa / environment) are
+    synthetic-empty on the fixture path (a fixture is not real evidence); on the
+    scientific path they come from ``inputs``, and a scientific run with
+    ``inputs is None`` fails closed (an activated run must supply real evidence,
+    never empty digests).
 
     ``regime_double`` / ``regime_single`` may be ``None`` to build the pre-access
     record (Change C): the regime-result checksums are then empty, which is
     correct because the pre-access subset excludes them.
     """
     if fixture_execution:
-        data_card_sha256 = ""
-        raw_or_source_sha256 = ""
+        # The run-IDENTITY digests (data_card / raw_data / sequence_mapping) are the
+        # inputs to compute_compose_run_id, so they MUST match the upstream ledger the
+        # run_id was computed from — on BOTH paths (single source of truth = the
+        # ledger; this keeps the durable ledger<->provenance cross-check holding
+        # ACTIVELY, not trivially, on the fixture path). The remaining scientific
+        # EVIDENCE digests (processed / feature_bank / dependency_lock / gears / cpa /
+        # environment) stay empty: a fixture is not real evidence and must never
+        # masquerade as an activated run.
+        data_card_sha256 = _required_digest(ledger, "data_card")
+        raw_or_source_sha256 = _required_digest(ledger, "raw_data")
+        sequence_mapping_sha256 = _required_digest(ledger, "sequence_mapping")
         processed_sha256 = ""
-        sequence_mapping_sha256 = ""
         feature_bank_sha256 = ""
         dependency_lock_sha256 = ""
         gears_revision = ""
@@ -598,7 +617,7 @@ def _build_provenance(
 #: Sentinel substituted for any non-finite embedded float. A ``NaN`` / ``Infinity``
 #: anywhere in the registered summary would make the shared terminal canonicalizer
 #: REFUSE the write (a latent forced abort on the seal path), so the summary carries
-#: only finite floats or this string sentinel (spec §2, CLAUDE.md §5 / §10.10 —
+#: only finite floats or this string sentinel (spec §2, CLAUDE.md#invariants / #data-eval —
 #: report the degenerate value honestly, never a silent NaN).
 _NON_FINITE_SENTINEL = "NON_FINITE"
 
@@ -661,10 +680,11 @@ def build_registered_evaluation_summary(
         verdict input). Only sample counts, checksums and the double-regime
         secondary GI block are read; per-pair arrays are never embedded.
     per_method_aggregate_mse : Mapping
-        ``{"double": {method -> mean(pair_errors[method])}, "single": {...}}`` —
-        the per-method aggregate MSE for BOTH regimes, computed ONCE inside the
-        protected evaluation. ``double`` is the headline / verdict-linked regime;
-        ``single`` is the registered secondary (CLAUDE.md §10). Each regime is
+        ``{"double": {method -> mean(descriptive_pair_errors[method])}, "single":
+        {...}}`` — the per-method aggregate MSE over the FULL nine-method descriptive
+        roster for BOTH regimes, computed ONCE inside the protected evaluation.
+        ``double`` is the headline / verdict-linked regime;
+        ``single`` is the registered secondary (CLAUDE.md#data-eval). Each regime is
         scored INDEPENDENTLY over its own pairs and the two are NEVER pooled.
     final_verdict : ComposeSealedResult
         The FINAL sealed verdict (swapped to ``INVALID`` on a post-access
@@ -687,6 +707,7 @@ def build_registered_evaluation_summary(
     secondary = regime_double.secondary
     gi_lower, gi_upper = secondary.gi_explained_interval
     return {
+        "schema": "compose_registered_evaluation_summary_v1",
         "protocol": protocol,
         "run_id": run_id,
         "terminal_state": terminal_state,
@@ -838,8 +859,9 @@ or None, optional
     )
     if _is_fixture_store(outcome_store):
         raise ScientificModeError(
-            "scientific Phase2b refuses a synthetic-fixture outcome store; a fixture marker "
-            "is not scientific evidence. Use run_phase2b_fixture for bounded synthetic runs."
+            "scientific Phase2b refuses a synthetic-fixture outcome store; a sanctioned "
+            "FixtureOutcomeStore (dedicated type + allowlisted corpus attestation) is not "
+            "scientific evidence. Use run_phase2b_fixture for bounded synthetic runs."
         )
     return _run_phase2b_core(
         run_dir=run_dir,
@@ -871,8 +893,9 @@ def run_phase2b_fixture(
     """Run the BOUNDED SYNTHETIC Phase-2b sealed evaluation (no activation).
 
     The integration-test path. No activation is required, but the outcome store
-    must carry a synthetic-fixture marker and the sealed payload must be bounded
-    (mirrors Phase-2a's fixture guard). NEVER accepts raw truth.
+    must be a dedicated :class:`~alive.compose.outcome_store.FixtureOutcomeStore`
+    carrying an allowlisted corpus attestation and the sealed payload must be
+    bounded (mirrors Phase-2a's fixture guard). NEVER accepts raw truth.
 
     Parameters
     ----------
@@ -898,8 +921,8 @@ def run_phase2b_fixture(
     """
     if not _is_fixture_store(outcome_store):
         raise Phase2bError(
-            "run_phase2b_fixture requires a synthetic-fixture outcome store (a store "
-            "carrying the fixture marker); the scientific store must use run_phase2b"
+            "run_phase2b_fixture requires a sanctioned FixtureOutcomeStore (dedicated type "
+            "+ allowlisted corpus attestation); the scientific store must use run_phase2b"
         )
     _assert_fixture_payload(frozen_bundle)
     return _run_phase2b_core(
@@ -930,8 +953,19 @@ def _canonical_pair(pair) -> tuple[str, str]:
 
 
 def _is_fixture_store(outcome_store: object) -> bool:
-    """Return ``True`` if the store carries the synthetic-fixture marker."""
-    return getattr(outcome_store, "_compose_fixture_marker", False) is True
+    """Return ``True`` only for a sanctioned synthetic-fixture store.
+
+    A store is a fixture store IFF it is a :class:`FixtureOutcomeStore` AND its
+    carried corpus attestation is in the committed allowlist. BOTH conditions are
+    required: a raw ``FixtureOutcomeStore`` built with a non-allowlisted
+    attestation does NOT pass, and setting any attribute on a real
+    :class:`ComposeOutcomeStore` can never make it read as a fixture store (the
+    old spoofable ``_compose_fixture_marker`` boolean is retired).
+    """
+    return (
+        isinstance(outcome_store, FixtureOutcomeStore)
+        and getattr(outcome_store, "fixture_corpus_attestation", None) in _FIXTURE_CORPUS_ALLOWLIST
+    )
 
 
 def _assert_fixture_payload(bundle: FrozenPredictionBundle) -> None:
@@ -1169,15 +1203,9 @@ def _run_phase2b_core(
         bundle=frozen_bundle,
         pair_manifest=pair_manifest,
         config=config,
-        data_card_digest="data-card-checksum"
-        if fixture_execution
-        else _required_digest(ledger, "data_card"),
-        raw_or_source_digest="raw-data-checksum"
-        if fixture_execution
-        else _required_digest(ledger, "raw_data"),
-        sequence_mapping_digest="sequence-mapping-checksum"
-        if fixture_execution
-        else _required_digest(ledger, "sequence_mapping"),
+        data_card_digest=_required_digest(ledger, "data_card"),
+        raw_or_source_digest=_required_digest(ledger, "raw_data"),
+        sequence_mapping_digest=_required_digest(ledger, "sequence_mapping"),
         ledger=ledger,
         expected_response_dim=expected_response_dim,
     )
@@ -1191,15 +1219,9 @@ def _run_phase2b_core(
     # any mismatch/absence this RAISES, leaving the seal closed.
     recomputed_run_id = recompute_run_id(
         config_digest=config.config_sha256,
-        data_card_digest="data-card-checksum"
-        if fixture_execution
-        else _required_digest(ledger, "data_card"),
-        raw_or_source_sha256="raw-data-checksum"
-        if fixture_execution
-        else _required_digest(ledger, "raw_data"),
-        sequence_mapping_sha256="sequence-mapping-checksum"
-        if fixture_execution
-        else _required_digest(ledger, "sequence_mapping"),
+        data_card_digest=_required_digest(ledger, "data_card"),
+        raw_or_source_sha256=_required_digest(ledger, "raw_data"),
+        sequence_mapping_sha256=_required_digest(ledger, "sequence_mapping"),
     )
     verify_upstream_before_access(
         expected_run_id=lock.run_id,
@@ -1262,7 +1284,7 @@ def _run_phase2b_core(
     # --- Change C: persist the pre-access provenance subset BEFORE the seal opens.
     # The subset excludes post-access result/terminal checksums, so it is fully
     # computable here; recording it write-once lets the post-access check
-    # cross-verify a PERSISTED value instead of a self-reference (CLAUDE.md §11).
+    # cross-verify a PERSISTED value instead of a self-reference (CLAUDE.md#provenance).
     audit_reference = str(audit_path) if audit_path is not None else "in-memory"
     pre_access_provenance = _build_provenance(
         bundle=frozen_bundle,
@@ -1283,7 +1305,7 @@ def _run_phase2b_core(
     # pre-access ledger is persisted (its file SHA and the provenance self-checksum
     # are the only two common-roster fields not known at construction). Binding
     # BEFORE the seal-open block guarantees an ABORT written from the protection
-    # boundary still emits the full common identity roster (CLAUDE.md §11).
+    # boundary still emits the full common identity roster (CLAUDE.md#provenance).
     # Bind the pre-access provenance SUBSET checksum (the value persisted into the
     # write-once pre-access ledger under PRE_ACCESS_PROVENANCE_ARTIFACT by
     # record_pre_access_provenance, i.e. provenance.pre_access_checksum), NOT the
@@ -1527,16 +1549,22 @@ def _evaluate_inside_boundary(
     # arrays and per-pair CIs are NEVER embedded — only the per-method mean MSE.
     # Reported for BOTH regimes, regime-labeled and scored INDEPENDENTLY (never
     # pooled): double = headline / verdict-linked, single = registered secondary
-    # (CLAUDE.md §10). Each embedded float passes _finite_or_sentinel so a
+    # (CLAUDE.md#data-eval). Each embedded float passes _finite_or_sentinel so a
     # degenerate mean becomes the sentinel string, never a summary-write abort.
+    # Aggregate over the FULL nine-method DESCRIPTIVE roster (descriptive_pair_errors),
+    # NOT the six verdict methods (pair_errors): freeze validates all nine per regime,
+    # so l2_saturation / no_change / perturbation_mean are reported descriptively. The
+    # verdict remains driven solely by the six-method pair_errors via the bounds.
+    double_desc = regime_double.descriptive_pair_errors
+    single_desc = regime_single.descriptive_pair_errors
     per_method_aggregate_mse: dict[str, dict[str, float | str]] = {
         "double": {
-            method: _finite_or_sentinel(float(np.mean(regime_double.pair_errors[method])))
-            for method in sorted(regime_double.pair_errors)
+            method: _finite_or_sentinel(float(np.mean(double_desc[method])))
+            for method in sorted(double_desc)
         },
         "single": {
-            method: _finite_or_sentinel(float(np.mean(regime_single.pair_errors[method])))
-            for method in sorted(regime_single.pair_errors)
+            method: _finite_or_sentinel(float(np.mean(single_desc[method])))
+            for method in sorted(single_desc)
         },
     }
     # evaluation_payload_checksum binds the regime/bounds scoring results directly
@@ -1563,7 +1591,7 @@ def _evaluate_inside_boundary(
         terminal_state = TerminalState.COMPLETE
     else:
         # A post-access inconsistency dominates: the sealed axis is INVALID and the
-        # result is not trustworthy (CLAUDE.md §6 / §11).
+        # result is not trustworthy (CLAUDE.md#seal / #provenance).
         final_verdict = ComposeSealedResult(
             sealed_axis=SealedAxis.INVALID,
             method_axis=verdict.method_axis,
@@ -1636,9 +1664,11 @@ def _evaluate_inside_boundary(
 def _required_digest(ledger: RunLedger, name: str) -> str:
     """Return a provenance digest from the ledger, raising if absent.
 
-    Used only on the SCIENTIFIC path where the run-identity provenance digests
-    are recorded in the upstream ledger. The fixture path uses the bound
-    synthetic digests directly (they are not real evidence).
+    Used on BOTH the scientific and fixture paths: the run-identity provenance
+    digests (``data_card`` / ``raw_data`` / ``sequence_mapping``) are recorded
+    in the upstream ledger by Phase2a in both modes, so the fixture path
+    recomputes the run id from the SAME ledger-recorded values as the run id was
+    built from (rather than from placeholder digests).
     """
     from alive.provenance import LedgerError
 

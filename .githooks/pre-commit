@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# B (auto-stamp) — when the COMPOSE readiness index is part of this commit,
+# refresh its "Updated:" line (date @ current-HEAD sha, branch) and re-stage it
+# so the fresh stamp lands IN this commit. The sha is HEAD *before* this commit =
+# the repo state the index summarizes, which is the stamp's intended meaning.
+# FAIL-OPEN: any error here must never block a commit.
+INDEX="docs/superpowers/COMPOSE-SEAL-READINESS.md"
+
+git diff --cached --name-only 2>/dev/null | grep -qxF "$INDEX" || exit 0
+[ -f "$INDEX" ] || exit 0
+
+sha="$(git rev-parse --short HEAD 2>/dev/null || echo '(root)')"
+branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo '(detached)')"
+today="$(date +%Y-%m-%d)"
+new_line="> **Updated:** ${today} @ \`${sha}\` (branch \`${branch}\`)"
+
+tmp="$(mktemp 2>/dev/null)" || exit 0
+if awk -v repl="$new_line" '/^> \*\*Updated:\*\*/ { print repl; next } { print }' \
+      "$INDEX" > "$tmp" 2>/dev/null; then
+  mv "$tmp" "$INDEX" 2>/dev/null && git add "$INDEX" 2>/dev/null
+else
+  rm -f "$tmp" 2>/dev/null
+fi
+exit 0

@@ -1,7 +1,7 @@
 """Norman et al. 2019 K562 CRISPRa GI Perturb-seq ingestion (COMPOSE Phase 1).
 
 Outcome-independent: eligibility uses cell counts + feature availability only,
-never GI strength (CLAUDE.md §5; spec §2.2). Combo labels are "<g><sep><h>".
+never GI strength (CLAUDE.md#invariants; spec §2.2). Combo labels are "<g><sep><h>".
 """
 
 from __future__ import annotations

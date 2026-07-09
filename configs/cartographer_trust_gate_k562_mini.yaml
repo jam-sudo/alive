@@ -1,7 +1,7 @@
 # CARTOGRAPHER Trust-Gate — MINI / PLUMBING-VALIDATION config (NOT a scientific run).
 #
 # Purpose: validate the full pipeline end-to-end on a small real-data mini with the
-# REAL ESM-2 encoder BEFORE the full run (CLAUDE.md §14.2: verify leakage, metric,
+# REAL ESM-2 encoder BEFORE the full run (CLAUDE.md#compute: verify leakage, metric,
 # provenance, resume/report on the mini, then start the full run).
 #
 # The scientific parameters (response space, conformal alpha, selection coverage,

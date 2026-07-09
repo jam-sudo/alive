@@ -7,7 +7,7 @@ split-half measurability ceiling of the non-additive residual ``ε`` on the
 split-half noise, and the pre-registered power gate per *evaluation* regime
 (``sealed_double_unseen`` as headline, ``sealed_single_unseen`` as fallback).
 
-Leakage discipline (CLAUDE.md §6, spec §2.4): ``ε`` is computed ONLY on the
+Leakage discipline (CLAUDE.md#seal, spec §2.4): ``ε`` is computed ONLY on the
 ``combo_calibration`` development role; the sealed evaluation regimes contribute
 their outcome-independent **pair and cell counts** only (never their outcomes).
 :func:`alive.compose.gates.measurability_gate` additionally fails closed if asked

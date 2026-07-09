@@ -1,6 +1,6 @@
 """Structurally sealed outcome store for COMPOSE-K562-v1 combo outcomes.
 
-This module is THE seal boundary for COMPOSE-K562-v1 Phase 2b (CLAUDE.md §6
+This module is THE seal boundary for COMPOSE-K562-v1 Phase 2b (CLAUDE.md#seal
 multiple-seal rule, §11 write-once provenance). It is the ONLY path that will
 ever read observed Norman combo cell populations, and it mirrors the integrity
 discipline of :mod:`alive.data.outcome_store` (the Replogle store) rather than
@@ -50,6 +50,7 @@ ComposeOutcomeStore
 
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -151,6 +152,63 @@ class SealedAccessClaim:
     request_checksum: str
     manifest_checksum: str
     pair_ids: tuple[PairID, ...]
+
+
+# ---------------------------------------------------------------------------
+# Synthetic-fixture corpus attestation + committed allowlist
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class FixtureCorpusAttestation:
+    """Immutable identity of a sanctioned synthetic-fixture corpus.
+
+    Carried by a :class:`FixtureOutcomeStore` and validated against the committed
+    :data:`_FIXTURE_CORPUS_ALLOWLIST` by :func:`build_fixture_outcome_store` — the
+    only sanctioned fixture-store constructor. It replaces the old mutable
+    ``_compose_fixture_marker`` boolean (which any caller could set on a REAL
+    store), so fixture-vs-scientific routing is a type + allowlist decision, not a
+    spoofable attribute.
+
+    Parameters
+    ----------
+    corpus_id : str
+        Stable identifier of the synthetic fixture corpus.
+    source_sha256 : str
+        Committed digest identifying the synthetic-source bytes of the corpus.
+    builder_code_sha256 : str
+        Committed digest identifying the fixture-builder code that produced it.
+    """
+
+    corpus_id: str
+    source_sha256: str
+    builder_code_sha256: str
+
+
+# C0-forward-declared synthetic-fixture corpus identity. Sub-project C (§6) will
+# replace these with the real synthetic-source / builder digests and wire
+# build_fixture_outcome_store to compute source_sha256 from the passed source and
+# compare (fixture-vs-real-source binding). At C0 the factory only checks that the
+# passed triple is one of these committed allowlisted triples; it does NOT yet
+# digest the actual source bytes.
+_FIXTURE_CORPUS_V1_SOURCE_SHA = hashlib.sha256(
+    b"compose_c_fixture_v1::synthetic-source::c0-forward-declared"
+).hexdigest()
+_FIXTURE_CORPUS_V1_BUILDER_SHA = hashlib.sha256(
+    b"compose_c_fixture_v1::builder-code::c0-forward-declared"
+).hexdigest()
+
+#: The single forward-declared allowlisted fixture corpus (see note above).
+FIXTURE_CORPUS_V1 = FixtureCorpusAttestation(
+    corpus_id="compose_c_fixture_v1",
+    source_sha256=_FIXTURE_CORPUS_V1_SOURCE_SHA,
+    builder_code_sha256=_FIXTURE_CORPUS_V1_BUILDER_SHA,
+)
+
+#: Committed allowlist of sanctioned synthetic fixture corpora (extend as new
+#: fixture corpora are added). :func:`build_fixture_outcome_store` fails closed
+#: for any attestation triple not in this set.
+_FIXTURE_CORPUS_ALLOWLIST: frozenset[FixtureCorpusAttestation] = frozenset({FIXTURE_CORPUS_V1})
 
 
 # ---------------------------------------------------------------------------
@@ -874,3 +932,182 @@ class ComposeOutcomeStore:
                 "the seal may be opened exactly once"
             ) from exc
         return record
+
+
+# ---------------------------------------------------------------------------
+# Synthetic-fixture store subtype + sanctioned constructor
+# ---------------------------------------------------------------------------
+
+
+class FixtureOutcomeStore(ComposeOutcomeStore):
+    """A synthetic-fixture sealed store — the ONLY store type the bounded fixture
+    Phase-2b path (:func:`alive.compose.phase2b.run_phase2b_fixture`) accepts.
+
+    Built solely by :func:`build_fixture_outcome_store`, which validates the
+    carried :class:`FixtureCorpusAttestation` against the committed
+    :data:`_FIXTURE_CORPUS_ALLOWLIST`. There is no mutable marker: fixture-vs-
+    scientific routing is decided by ``isinstance`` + an allowlisted attestation,
+    so setting an attribute on a REAL :class:`ComposeOutcomeStore` can never make
+    it read as a fixture store. The subtype ADDS only the attestation; the seal
+    boundary (:class:`ComposeOutcomeStore`) is inherited unchanged.
+
+    Parameters
+    ----------
+    *args
+        Positional arguments forwarded to :class:`ComposeOutcomeStore`
+        (``pair_index``, ``source``, ``manifest``).
+    fixture_corpus_attestation : FixtureCorpusAttestation
+        The corpus identity this fixture store attests to.
+    **kwargs
+        Keyword arguments forwarded to :class:`ComposeOutcomeStore` (e.g.
+        ``audit_path``).
+    """
+
+    def __init__(
+        self,
+        *args,
+        fixture_corpus_attestation: FixtureCorpusAttestation,
+        **kwargs,
+    ) -> None:
+        super().__init__(*args, **kwargs)
+        object.__setattr__(self, "_fixture_corpus_attestation", fixture_corpus_attestation)
+
+    @property
+    def fixture_corpus_attestation(self) -> FixtureCorpusAttestation:
+        """The validated synthetic-fixture corpus attestation this store carries."""
+        return self._fixture_corpus_attestation
+
+
+def build_fixture_outcome_store(
+    pair_index: Mapping[PairID, np.ndarray],
+    source: _anndata.AnnData | str | Path | object,
+    manifest: Mapping,
+    *,
+    audit_path: str | Path,
+    corpus_id: str,
+    source_sha256: str,
+    builder_code_sha256: str,
+) -> FixtureOutcomeStore:
+    """Build the ONLY sanctioned :class:`FixtureOutcomeStore`.
+
+    Validates the ``(corpus_id, source_sha256, builder_code_sha256)`` triple
+    against the committed :data:`_FIXTURE_CORPUS_ALLOWLIST` and FAILS CLOSED
+    (:class:`ComposeSealingError`) if it is not allowlisted. This is the single
+    place a fixture store may be minted, so the bounded fixture Phase-2b path can
+    trust the type without a spoofable marker.
+
+    Parameters
+    ----------
+    pair_index, source, manifest, audit_path
+        Forwarded verbatim to :class:`ComposeOutcomeStore` (see its docstring).
+    corpus_id : str
+        Identifier of the synthetic fixture corpus; must be allowlisted.
+    source_sha256 : str
+        Committed synthetic-source digest; the full triple must match an
+        allowlisted entry.
+    builder_code_sha256 : str
+        Committed fixture-builder-code digest; the full triple must match an
+        allowlisted entry.
+
+    Returns
+    -------
+    FixtureOutcomeStore
+        A fixture store carrying the validated attestation.
+
+    Raises
+    ------
+    ComposeSealingError
+        If the attestation triple is not in the committed allowlist.
+    """
+    attestation = FixtureCorpusAttestation(
+        corpus_id=corpus_id,
+        source_sha256=source_sha256,
+        builder_code_sha256=builder_code_sha256,
+    )
+    if attestation not in _FIXTURE_CORPUS_ALLOWLIST:
+        raise ComposeSealingError(
+            f"fixture corpus {attestation!r} is not in the committed allowlist; "
+            "build_fixture_outcome_store refuses to mint an unattested fixture store"
+        )
+    return FixtureOutcomeStore(
+        pair_index,
+        source,
+        manifest,
+        audit_path=audit_path,
+        fixture_corpus_attestation=attestation,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Standalone obs-label alignment validator (phase2b, pre-store)
+# ---------------------------------------------------------------------------
+
+
+def validate_pair_index_against_source_obs(
+    source: object,
+    pair_index: Mapping[PairID, np.ndarray],
+    manifest: Mapping,
+    *,
+    perturbation_col: str = "perturbation",
+    combo_sep: str = "_",
+) -> None:
+    """Verify each pair-index row's obs perturbation label canonicalizes to its pair.
+
+    Reads ``source.obs[perturbation_col]`` (a str label per row) and, for every
+    (canonical pair -> row indices) entry, asserts every indexed row's label
+    parses (on ``combo_sep``) and canonicalizes to that exact pair. Fails closed
+    on a missing obs column, an unparsable label, or any mismatch. Reuses
+    :meth:`ComposeOutcomeStore._canonical` so the parsed label and the pair key
+    use the SAME canonicalization.
+
+    This is deliberately a STANDALONE function, not part of
+    :meth:`ComposeOutcomeStore.__init__`: the store ctor / preflight / phase2a
+    never read ``source.obs`` (a capability restriction). Only the phase2b
+    production driver calls this, AFTER confirmation and BEFORE constructing the
+    sealed store. The ``manifest`` argument is part of that driver's call
+    contract; the manifest key-set is already validated inside
+    :meth:`ComposeOutcomeStore.__init__`, so this validator does not re-read it.
+
+    Parameters
+    ----------
+    source : object
+        Any object exposing ``.obs`` with a ``perturbation_col`` column of str
+        labels aligned to source rows (duck-typed; anndata is never imported).
+    pair_index : Mapping[tuple of str, np.ndarray]
+        Canonical pair -> bounded int row-index array.
+    manifest : Mapping
+        The pair-split manifest (part of the driver call contract; not re-read
+        here because the store ctor already validates its key-set).
+    perturbation_col : str, optional
+        Name of the obs column holding per-row perturbation labels.
+    combo_sep : str, optional
+        Separator joining the two gene ids inside a combo label.
+
+    Raises
+    ------
+    ComposeSealingError
+        If the obs column is missing/absent, a label is not a 2-gene combo
+        token, or any indexed row's label canonicalizes to a different pair.
+    """
+    obs = getattr(source, "obs", None)
+    if obs is None or perturbation_col not in getattr(obs, "columns", ()):
+        raise ComposeSealingError(
+            f"source obs is missing the {perturbation_col!r} perturbation column"
+        )
+    labels = obs[perturbation_col].to_numpy()
+    for raw_pair, rows in pair_index.items():
+        pair = ComposeOutcomeStore._canonical(raw_pair)
+        for i in rows:
+            label = str(labels[int(i)])
+            parts = label.split(combo_sep)
+            if len(parts) != 2 or not parts[0] or not parts[1]:
+                raise ComposeSealingError(
+                    f"row {int(i)} perturbation label {label!r} is not a 2-gene "
+                    f"combo token on {combo_sep!r}"
+                )
+            observed = ComposeOutcomeStore._canonical((parts[0], parts[1]))
+            if observed != pair:
+                raise ComposeSealingError(
+                    f"row {int(i)} perturbation label {label!r} canonicalizes to "
+                    f"{observed!r}, but it is indexed under pair {pair!r}"
+                )

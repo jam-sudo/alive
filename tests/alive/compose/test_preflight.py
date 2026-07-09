@@ -116,6 +116,36 @@ def _tampered_ledger(res: Phase2aResult, *, artifact: str, value: str):
     return led
 
 
+def _ledger_with_header(res: Phase2aResult, *, run_id=None, config_sha256=None):
+    """Rebuild a RunLedger identical to ``res.ledger`` except its identity header.
+
+    Every recorded artifact SHA is copied verbatim (they still agree with the
+    bundle, so preflight steps 6-8 pass unchanged), but the ledger's OWN
+    ``run_id`` / ``config_sha256`` header is overridden. This isolates the new
+    header-identity check (step 9): only a header disagreement can fire, proving
+    the check is non-vacuous.
+    """
+    from alive.provenance import EnvironmentInfo, RunLedger
+
+    src = res.ledger.to_dict()
+    env_raw = src["environment"]
+    env = EnvironmentInfo(
+        python_version=env_raw["python_version"],
+        platform=env_raw["platform"],
+        git_commit=env_raw["git_commit"],
+        lockfile_sha256=env_raw["lockfile_sha256"],
+        registered_seeds=tuple(env_raw["registered_seeds"]),
+    )
+    led = RunLedger(
+        run_id=run_id if run_id is not None else src["run_id"],
+        config_sha256=config_sha256 if config_sha256 is not None else src["config_sha256"],
+        environment=env,
+    )
+    for art in src["artifacts"]:
+        led.record_artifact(art["name"], art["sha256"])
+    return led
+
+
 def _preflight_kwargs(res: Phase2aResult, *, manifest=None, ledger=None, **overrides):
     """Assemble the standard run_preflight kwargs from a Phase-2a result."""
     bundle = res.bundle
@@ -405,6 +435,29 @@ def test_ledger_upstream_artifact_mismatch_fails_closed(tmp_path):
     res, _ = _phase2a_result(seed=20)
     bad_ledger = _tampered_ledger(res, artifact="response_space", value="TAMPERED")
     with pytest.raises(PreflightError):
+        run_preflight(**_preflight_kwargs(res, ledger=bad_ledger))
+
+
+# --------------------------------------------------------------------------- #
+# ledger's OWN identity header disagrees with the bundle / config
+# --------------------------------------------------------------------------- #
+def test_preflight_rejects_ledger_run_id_mismatch(tmp_path):
+    # A ledger whose artifact SHAs agree with the bundle (steps 6-8 pass) but whose
+    # OWN header run_id vouches for a DIFFERENT run identity must fail closed.
+    res, _ = _phase2a_result(seed=21)
+    config = load_compose_phase2_config(_CONFIG_PATH)
+    bad_ledger = _ledger_with_header(res, run_id="deadbeef" * 8, config_sha256=config.config_sha256)
+    with pytest.raises(PreflightError, match="ledger.*run_id"):
+        run_preflight(**_preflight_kwargs(res, ledger=bad_ledger))
+
+
+def test_preflight_rejects_ledger_config_sha_mismatch(tmp_path):
+    # Header run_id agrees with the bundle, but the ledger's OWN config_sha256
+    # vouches for a different config than the one preflight was handed.
+    res, _ = _phase2a_result(seed=22)
+    bundle = res.bundle
+    bad_ledger = _ledger_with_header(res, run_id=bundle.run_id, config_sha256="0" * 64)
+    with pytest.raises(PreflightError, match="ledger.*config_sha256"):
         run_preflight(**_preflight_kwargs(res, ledger=bad_ledger))
 
 

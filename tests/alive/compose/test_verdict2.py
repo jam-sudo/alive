@@ -7,7 +7,7 @@ family, on TWO separate axes (method x sealed).
 
 Governance pins exercised here:
 
-* COMPOSE-SPECIFIC types (CLAUDE.md §6.3): the verdict / integrity types are
+* COMPOSE-SPECIFIC types (CLAUDE.md#seal): the verdict / integrity types are
   defined in ``alive.compose.verdict2`` and are NOT the CARTOGRAPHER
   ``alive.eval.verdict`` / ``alive.types.Verdict`` types.
 * Only DOUBLE-UNSEEN drives this verdict; the single-unseen regime fails closed
@@ -84,7 +84,7 @@ def _win_lower() -> dict[str, float]:
 
 
 # ---------------------------------------------------------------------------
-# COMPOSE-specific types (seal independence, CLAUDE.md §6.3)
+# COMPOSE-specific types (seal independence, CLAUDE.md#seal)
 # ---------------------------------------------------------------------------
 
 

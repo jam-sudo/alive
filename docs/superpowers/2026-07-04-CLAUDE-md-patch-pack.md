@@ -1,5 +1,9 @@
 # CLAUDE.md — owner patch pack (path 1: in-place staleness fixes, numbering preserved)
 
+> **⚠ SUPERSEDED (2026-07-08) — 미적용/폐기.** 이 패치팩은 "section 번호 보존" 전제의 in-place 수정안이나,
+> 실제 `CLAUDE.md`는 이후 16→9 section(#anchor 기반)으로 재구성됐다. 아래 `count==1` 패치는 현재 파일에
+> 적용되지 않으며 역사적 기록으로만 보존한다. 현재 governance는 `CLAUDE.md`(§1–§9)가 authoritative.
+>
 > **적용 방법:** `CLAUDE.md`는 agent Edit-guarded이므로 owner가 아래 python을 paste-run한 뒤 `git diff`
 > 검토 → commit(또는 `--amend`)한다. 각 replace는 `count == 1` assert로 보호되어 원문과 정확히
 > 일치하지 않으면 아무것도 바꾸지 않고 멈춘다.

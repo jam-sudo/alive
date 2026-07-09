@@ -18,7 +18,7 @@
 - **Write-once.** The pre-access checksum is recorded under one canonical artifact name exactly once. Any re-record (even same value) raises via the ledger's `DuplicateArtifactError`, surfaced as `ProvenanceError`.
 - **Fixture path is behavior-preserving.** `run_phase2b_fixture` passes `provenance_inputs=None` + `fixture_execution=True`; the fixture provenance keeps synthetic-empty scientific digests (`git_commit="UNKNOWN"`). Existing fixture tests must remain green unchanged.
 - **Scientific path fails closed on missing evidence.** On the non-fixture path, `_build_provenance` with `inputs=None` raises `Phase2bError` — an activated run must supply real provenance evidence, never assemble a record with empty scientific digests.
-- **Dev-stage wiring only.** No seal is opened by this work; the local stub/fixture tests touch no real Norman data and no sealed outcome. A green suite is NOT a scientific verdict (spec §5, CLAUDE.md §5/§6/§11).
+- **Dev-stage wiring only.** No seal is opened by this work; the local stub/fixture tests touch no real Norman data and no sealed outcome. A green suite is NOT a scientific verdict (spec §5, CLAUDE.md#invariants/#seal/#provenance).
 - ruff clean (line-length 100); NumPy-style docstrings + type hints on public API.
 
 ---
@@ -122,7 +122,7 @@ Then add these two members to `Phase2bProvenance`, immediately after the existin
         which are known only after the single sealed access. Recording this
         subset's checksum before access (Change C) turns the post-access
         provenance consistency check into a real tamper detector rather than a
-        self-reference (CLAUDE.md §11).
+        self-reference (CLAUDE.md#provenance).
 
         Returns
         -------
@@ -232,7 +232,7 @@ def record_pre_access_provenance(
     Persists :attr:`Phase2bProvenance.pre_access_checksum` under
     :data:`PRE_ACCESS_PROVENANCE_ARTIFACT` in the write-once ledger, so the
     post-access consistency check (Change C) can cross-verify against a PERSISTED
-    value rather than the in-memory record (CLAUDE.md §11). Called before the
+    value rather than the in-memory record (CLAUDE.md#provenance). Called before the
     seal opens; the seal stays closed if this raises.
 
     Parameters
@@ -645,7 +645,7 @@ In `test_post_access_never_raises_on_detected_inconsistency`:
     # --- Change C: persist the pre-access provenance subset BEFORE the seal opens.
     # The subset excludes post-access result/terminal checksums, so it is fully
     # computable here; recording it write-once lets the post-access check
-    # cross-verify a PERSISTED value instead of a self-reference (CLAUDE.md §11).
+    # cross-verify a PERSISTED value instead of a self-reference (CLAUDE.md#provenance).
     audit_reference = str(audit_path) if audit_path is not None else "in-memory"
     pre_access_provenance = _build_provenance(
         bundle=frozen_bundle,

@@ -185,7 +185,15 @@ class RegimeScore:
     pair_errors : dict[str, numpy.ndarray]
         Per-method per-pair MSE arrays (headline + every comparator), each
         ordered by :attr:`pair_ids`. Independent arrays — never shared across
-        regimes.
+        regimes. This is the SOLE verdict input from this layer (via
+        :attr:`bounds`).
+    descriptive_pair_errors : dict[str, numpy.ndarray]
+        DESCRIPTIVE (non-verdict) per-pair MSE arrays for EVERY roster method
+        present in ``predictions`` (all nine: the six verdict methods PLUS
+        ``l2_saturation`` / ``no_change`` / ``perturbation_mean``), each ordered
+        by :attr:`pair_ids`. The six shared methods' arrays are byte-identical to
+        :attr:`pair_errors`. NEVER a verdict input — surfaced only for the
+        registered per-method aggregate MSE report (CLAUDE.md#data-eval).
     bounds : ComposeSimultaneousBounds
         The registered family-wise simultaneous lower bounds — the SOLE verdict
         input from this layer.
@@ -202,6 +210,7 @@ class RegimeScore:
     regime: str
     pair_ids: tuple
     pair_errors: dict[str, NDArray[np.float64]]
+    descriptive_pair_errors: dict[str, NDArray[np.float64]]
     bounds: ComposeSimultaneousBounds
     secondary: SecondaryBlock
     sample_count: int
@@ -247,7 +256,7 @@ def _resolve_secondary_governance(config: ComposePhase2Config) -> SecondaryMetri
     The interval method and any material-regression margin MUST come from the
     activated config. A missing GI-explained spec, or a config that declares the
     secondaries to be verdict gates, is an activation/preflight-style failure
-    (CLAUDE.md §10 — secondaries are never verdict gates), not a silent default.
+    (CLAUDE.md#data-eval — secondaries are never verdict gates), not a silent default.
 
     Parameters
     ----------
@@ -602,6 +611,28 @@ def score_regime(
         except MetricError as exc:  # pragma: no cover - defensive
             raise ComposeScoringError(f"per-pair MSE failed for method {m!r}: {exc}") from exc
 
+    # --- 4b. DESCRIPTIVE (non-verdict) per-pair MSE over EVERY roster method. ---
+    # freeze validates the full nine-method roster per regime, so predictions
+    # carries three methods (l2_saturation / no_change / perturbation_mean) that the
+    # verdict does NOT consume. We surface their per-pair MSE descriptively — with
+    # the SAME argument shape as the verdict loop — for the registered per-method
+    # aggregate MSE report (CLAUDE.md#data-eval). This NEVER feeds the bounds/verdict.
+    descriptive_pair_errors: dict[str, NDArray[np.float64]] = {}
+    for m in sorted(predictions):
+        if m in pair_errors:
+            continue  # already computed by the verdict loop (byte-identical); reuse below.
+        pred = _prediction_matrix(m, scored, predictions, pca_dim)
+        try:
+            descriptive_pair_errors[m] = per_pair_mse(
+                pred, observed_delta, pair_ids=str_ids, truth_ids=str_ids
+            )
+        except MetricError as exc:  # pragma: no cover - defensive
+            raise ComposeScoringError(
+                f"descriptive per-pair MSE failed for method {m!r}: {exc}"
+            ) from exc
+    # the six verdict methods' descriptive values ARE the verdict values (identical).
+    descriptive_pair_errors.update(pair_errors)
+
     # --- 5. Registered simultaneous inference for THIS regime only. ------------
     bounds = simultaneous_theta_bounds(
         headline_errors=pair_errors[headline],
@@ -655,6 +686,7 @@ def score_regime(
         regime=regime,
         pair_ids=tuple(scored),
         pair_errors=pair_errors,
+        descriptive_pair_errors=descriptive_pair_errors,
         bounds=bounds,
         secondary=secondary,
         sample_count=len(scored),

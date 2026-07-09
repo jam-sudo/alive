@@ -22,6 +22,7 @@ import numpy as np
 import pytest
 
 from alive.compose.config2 import (
+    _EXPECTED_METHOD_ROSTER,
     SecondaryMetricSpec,
     load_compose_phase2_config,
 )
@@ -124,6 +125,11 @@ def _build_regime(seed_base: int = 100, pair_ids=None):
     additive_pred = {pid: rng.normal(size=2) for pid in pair_ids}
 
     # headline = additive + a small true-ish GI component close to observed eps.
+    # The bundle carries the FULL 9-method roster (freeze validates all nine per
+    # regime). The verdict consumes only headline + FAMILY (6); the remaining three
+    # (l2_saturation, no_change, perturbation_mean) are DESCRIPTIVE-only. Their draws
+    # are appended AFTER the six verdict methods so the verdict methods' predictions
+    # (and thus pair_errors) stay byte-identical.
     predictions = {
         HEADLINE: {},
         "additive": {},
@@ -131,6 +137,9 @@ def _build_regime(seed_base: int = 100, pair_ids=None):
         "cpa": {},
         "id_only": {},
         "l3_hypernetwork": {},
+        "l2_saturation": {},
+        "no_change": {},
+        "perturbation_mean": {},
     }
     for pid in pair_ids:
         eps_truth = observed_delta[pid] - additive_pred[pid]
@@ -142,6 +151,10 @@ def _build_regime(seed_base: int = 100, pair_ids=None):
         predictions["cpa"][pid] = additive_pred[pid] + 5.0 * rng.normal(size=2)
         predictions["id_only"][pid] = additive_pred[pid] + 5.0 * rng.normal(size=2)
         predictions["l3_hypernetwork"][pid] = additive_pred[pid] + 5.0 * rng.normal(size=2)
+        # descriptive-only roster methods (never enter the verdict pair_errors).
+        predictions["l2_saturation"][pid] = additive_pred[pid] + 3.0 * rng.normal(size=2)
+        predictions["no_change"][pid] = np.zeros(2)
+        predictions["perturbation_mean"][pid] = additive_pred[pid].copy()
 
     kwargs = dict(
         regime="sealed_double_unseen",
@@ -193,6 +206,30 @@ def test_happy_path_full_score():
     lo, hi = score.secondary.gi_explained_interval
     assert lo <= hi
     assert score.secondary.gi_structure is NOT_EVALUABLE
+
+
+def test_score_regime_descriptive_covers_full_roster():
+    """DESCRIPTIVE per-pair MSE spans the FULL 9-method roster; the VERDICT set stays 6.
+
+    ``descriptive_pair_errors`` is a non-verdict surface reported for EVERY roster
+    method present in ``predictions`` (all nine). The verdict ``pair_errors`` remain
+    exactly headline + the five registered comparators, and the shared-method
+    descriptive values are byte-identical to their verdict values.
+    """
+    kwargs, _, _ = _build_regime()
+    rs = score_regime(**kwargs)
+
+    # descriptive covers every roster method present in predictions (all 9).
+    assert set(rs.descriptive_pair_errors) == set(_EXPECTED_METHOD_ROSTER)
+    # verdict set is UNCHANGED: headline + the five registered comparators only (6).
+    assert set(rs.pair_errors) == {HEADLINE, *FAMILY}
+    # the six shared methods' descriptive arrays are byte-identical to the verdict arrays.
+    for name in rs.pair_errors:
+        np.testing.assert_array_equal(rs.descriptive_pair_errors[name], rs.pair_errors[name])
+    # each descriptive array is per-pair (one entry per scored pair) and non-negative.
+    for arr in rs.descriptive_pair_errors.values():
+        assert arr.shape == (rs.sample_count,)
+        assert np.all(arr >= 0.0)
 
 
 def test_per_pair_mse_matches_hand_computation():

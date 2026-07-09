@@ -1,7 +1,7 @@
 """Outcome-free Phase-2b preflight + frozen :class:`EvaluationLock` (Task 2b-2).
 
 Phase 2b opens the COMPOSE seal **exactly once** and produces the confirmatory
-verdict (CLAUDE.md §6 multiple-seal rule, §11 write-once provenance). This module
+verdict (CLAUDE.md#seal multiple-seal rule, #provenance write-once provenance). This module
 is everything that must be validated BEFORE the seal is touched: it consumes the
 frozen Phase-2a :class:`~alive.compose.freeze.FrozenPredictionBundle`, the pair
 manifest, the validated config, the run-identity provenance digests and the
@@ -30,7 +30,7 @@ The preflight enforces, in order:
 
 1. ``bundle.verify()`` (checksum integrity) and ``bundle.assert_no_outcomes()``.
 2. ``bundle.futility_status == "CONTINUE"`` — a futility-stopped dev run is
-   refused (CLAUDE.md §6.1: futility-stopped runs end with zero sealed access).
+   refused (CLAUDE.md#seal: futility-stopped runs end with zero sealed access).
 3. method roster EXACT equality (order + membership) against
    ``config.method_roster``.
 4. per regime, the bundle's pair-ID set equals the manifest role's pair set
@@ -42,6 +42,9 @@ The preflight enforces, in order:
 7. bundle/ledger checksum agreement for the frozen bundle and the manifest /
    response-space / factor-bank / model artifacts.
 8. ``bundle.manifest_checksum == pair_manifest["checksum"]``.
+9. the ledger's OWN identity header (``run_id`` / ``config_sha256`` from
+   ``ledger.to_dict()``) binds the same run identity and config as the bundle /
+   recomputed run id — a ledger vouching for a different run/config fails closed.
 """
 
 from __future__ import annotations
@@ -87,9 +90,11 @@ class PreflightError(ValueError):
     futility-stopped dev run, a roster mismatch (missing / extra / reordered
     method), a regime pair-set or prediction-key mismatch (missing / extra), a
     wrong-shape or non-finite prediction, a response-dimension mismatch, a
-    recomputed-run-id mismatch, a bundle/ledger checksum disagreement, or a
-    manifest-checksum mismatch. On any violation NO :class:`EvaluationLock` is
-    returned — the preflight refuses to hand a lock to the (later) seal opener.
+    recomputed-run-id mismatch, a bundle/ledger checksum disagreement, a
+    manifest-checksum mismatch, or a ledger identity-header (``run_id`` /
+    ``config_sha256``) disagreement with the bundle / config. On any violation NO
+    :class:`EvaluationLock` is returned — the preflight refuses to hand a lock to
+    the (later) seal opener.
     """
 
 
@@ -431,6 +436,23 @@ def run_preflight(
         raise PreflightError(
             f"bundle.manifest_checksum ({bundle.manifest_checksum!r}) != "
             f"pair_manifest['checksum'] ({pair_manifest['checksum']!r})"
+        )
+
+    # 9. ledger's OWN identity header must bind the same run/config as the bundle.
+    ledger_header = ledger.to_dict()
+    if ledger_header["run_id"] != bundle.run_id:
+        raise PreflightError(
+            f"ledger run_id {ledger_header['run_id']!r} != bundle.run_id {bundle.run_id!r}; "
+            "the ledger vouches for a different run identity than the bundle"
+        )
+    if ledger_header["run_id"] != recomputed:
+        raise PreflightError(
+            f"ledger run_id {ledger_header['run_id']!r} != recomputed run id {recomputed!r}"
+        )
+    if ledger_header["config_sha256"] != config.config_sha256:
+        raise PreflightError(
+            f"ledger config_sha256 {ledger_header['config_sha256']!r} != "
+            f"config.config_sha256 {config.config_sha256!r}"
         )
 
     # All checks passed: freeze the validated, outcome-free evaluation inputs.

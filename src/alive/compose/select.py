@@ -359,7 +359,7 @@ class OOFFoldManifest:
         Parameters
         ----------
         path : str or Path
-            Destination file; must not already exist (write-once, CLAUDE.md §11).
+            Destination file; must not already exist (write-once, CLAUDE.md#provenance).
 
         Raises
         ------

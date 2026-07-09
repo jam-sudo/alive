@@ -19,7 +19,7 @@
 - **No per-pair error arrays, no per-pair CI, no raw cell/count matrices** in any terminal / summary / ledger payload. Aggregates are computed ONCE in the protected evaluation and COPIED verbatim by the exporter — never recomputed.
 - **Write-once everywhere:** all installs use `atomic_write_once`; recovery uses `install_or_verify_exact` (install if absent, else verify byte-identical, else fail closed). Never overwrite an existing artifact; never write a second terminal.
 - **Durable completion is declared ONLY by a fully-verified `phase2b_durable_commit.json`.** A terminal without a marker is evidence of seal consumption, not of export completeness.
-- **Seal-critical migration (spec F3):** Task 8 re-runs the full CLAUDE.md §13 suite (leakage/provenance/tamper/resume) + `ruff`. Every task runs the compose suite.
+- **Seal-critical migration (spec F3):** Task 8 re-runs the full CLAUDE.md#verify suite (leakage/provenance/tamper/resume) + `ruff`. Every task runs the compose suite.
 
 ## Prerequisite Task 0: durable audit defines the consumed-seal boundary
 
@@ -321,7 +321,7 @@ def recover_phase2b_durable_outputs(*, run_dir) -> DurableFinalizeResult
 
 **Files:** none new (verification only).
 
-- [ ] **Step 1** — run the full CLAUDE.md §13 suite touched by the migration: `uv run pytest tests/alive/compose/test_provenance2.py tests/alive/compose/test_terminal.py tests/alive/compose/test_phase2b.py tests/alive/compose/test_durable.py tests/alive/compose/test_outcome_store.py tests/alive/test_provenance.py -v` (leakage / provenance / tamper / resume). Expected: all pass.
+- [ ] **Step 1** — run the full CLAUDE.md#verify suite touched by the migration: `uv run pytest tests/alive/compose/test_provenance2.py tests/alive/compose/test_terminal.py tests/alive/compose/test_phase2b.py tests/alive/compose/test_durable.py tests/alive/compose/test_outcome_store.py tests/alive/test_provenance.py -v` (leakage / provenance / tamper / resume). Expected: all pass.
 - [ ] **Step 2** — full suite + lint: `uv run pytest -q && uv run ruff check src tests && uv run ruff format --check src tests`. Expected: green.
 - [ ] **Step 3** — confirm the invariants by grep/inspection: no `terminal_report_sha256` remains in the embedded provenance path; no per-pair CI/array key appears in any terminal/summary/ledger payload; `Phase2bResult.result_checksum == final_result_checksum` at every terminal state.
 - [ ] **Step 4** — report the commands, results, and any skips. Then hand off to `science-dev` loop-gate (LOCAL) before merge.

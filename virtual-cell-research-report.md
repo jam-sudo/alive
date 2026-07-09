@@ -3,7 +3,7 @@
 > **⚠ SUPERSEDED (2026-07-04) — pre-pivot background.** 이 보고서는 Replogle K562→RPE1 held-out
 > cell-line 방향을 MVP로 권고하나, 그 축은 현재 `CT-RPE1-v1` = **DEFERRED**다. 활성 protocol은
 > `COMPOSE-K562-v1`(ACTIVE 2026-06-30)이고 `TG-K562-v1`은 COMPLETE(`NO_DISTINCT_WIN`)다. authoritative
-> 상태는 `CLAUDE.md` §4. background/evidence 기록으로 보존.
+> 상태는 `CLAUDE.md`#registry. background/evidence 기록으로 보존.
 
 > 목적: `virtual-cell-model-blueprint.md`의 첫 MVP("새로운 세포 맥락에서 단일 유전자 억제 24h 후 transcriptome 분포 예측")를 **실제로 시작하기 위한** 데이터셋·모델·split·baseline·지표 결정.
 > 방법: deep-research 파이프라인(7개 검색 각도 → 29개 1차 소스 → 주장 추출 → 3표 적대적 검증). 검증 결과 75표 중 단 3표만 단일 반박(killed 없음). 2024–2026 1차 문헌 중심.

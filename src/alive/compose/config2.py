@@ -3,7 +3,7 @@
 This module is intentionally standalone. It does **not** import or extend the
 CARTOGRAPHER ``alive.config.Config`` so that COMPOSE Phase-2 work cannot perturb
 that run identity, and so the two protocols' seals remain non-interchangeable
-(``CLAUDE.md`` §6.3).
+(``CLAUDE.md`` #seal).
 
 The loader (:func:`load_compose_phase2_config`) parses
 ``configs/compose_k562_v1_phase2.yaml`` into a frozen
@@ -44,7 +44,7 @@ from alive.provenance import sha256_json
 # ---------------------------------------------------------------------------
 # Frozen, pre-registered expected values. These are the contract the loader
 # validates the candidate YAML against. Changing any of them requires a new
-# protocol/run identity, not an in-place edit (CLAUDE.md §3.2, §11).
+# protocol/run identity, not an in-place edit (CLAUDE.md#sources, #provenance).
 # ---------------------------------------------------------------------------
 _EXPECTED_PROTOCOL = "COMPOSE-K562-v1"
 _EXPECTED_PHASE = 2
@@ -120,7 +120,7 @@ _KNOWN_STATUS = frozenset({"preregistered_activation_blocked", "active"})
 # effect size, a simultaneous interval and a chance/null definition, but they are
 # NOT verdict gates. They are therefore descriptive-only: no material-regression
 # margin is registered, and each carries a versioned governance note explaining
-# why (CLAUDE.md §10, brief Task 1 secondary clause).
+# why (CLAUDE.md#data-eval, brief Task 1 secondary clause).
 _EXPECTED_SECONDARY_METRICS: dict[str, dict[str, Any]] = {
     "gi_explained_fraction": {
         "definition": (

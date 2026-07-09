@@ -37,3 +37,7 @@ claude_science/
 .playwright-mcp/
 .idea/
 .vscode/
+*.bak
+
+# --- graphify knowledge-graph build output (regenerable; never commit) ---
+graphify-out/

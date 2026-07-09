@@ -40,6 +40,7 @@ import numpy as np
 import pytest
 
 from alive.compose.config2 import (
+    _EXPECTED_METHOD_ROSTER,
     ScientificModeError,
     load_compose_phase2_config,
 )
@@ -51,7 +52,15 @@ from alive.compose.durable import (
     recover_phase2b_durable_outputs,
 )
 from alive.compose.freeze import FrozenPredictionBundle
-from alive.compose.outcome_store import ComposeOutcomeStore, ComposeSealingError
+from alive.compose.outcome_store import (
+    FIXTURE_CORPUS_V1,
+    ComposeOutcomeStore,
+    ComposeSealingError,
+    FixtureCorpusAttestation,
+    FixtureOutcomeStore,
+    ObservedPair,
+    build_fixture_outcome_store,
+)
 from alive.compose.preflight import PreflightError
 from alive.compose.provenance2 import (
     PRE_ACCESS_LEDGER_FILENAME,
@@ -74,6 +83,7 @@ from alive.compose.phase2b import (  # isort: skip
     Phase2bError,
     Phase2bResult,
     _build_provenance,
+    _is_fixture_store,
     _preaccess_seed_variability,
     _run_phase2b_core,
     build_activation_provenance_inputs,
@@ -198,23 +208,31 @@ def _build_source_and_index(manifest: dict):
 
 
 def _build_store(audit_path, manifest: dict, *, fixture: bool = True):
-    """Build a ComposeOutcomeStore over a synthetic in-memory source.
+    """Build a Compose outcome store over a synthetic in-memory source.
 
-    Tests NEVER hand truth to ``run_phase2b*`` — the store hides the source. The
-    fixture marker (set when ``fixture=True``) lets ``run_phase2b_fixture`` accept
-    a bounded synthetic store without owner activation.
+    Tests NEVER hand truth to ``run_phase2b*`` — the store hides the source. When
+    ``fixture=True`` the store is a :class:`FixtureOutcomeStore` minted by the
+    sanctioned :func:`build_fixture_outcome_store` (allowlisted attestation), which
+    ``run_phase2b_fixture`` accepts by TYPE without owner activation. When
+    ``fixture=False`` it is a plain scientific :class:`ComposeOutcomeStore`.
     """
     source, pair_index = _build_source_and_index(manifest)
-    store = ComposeOutcomeStore(
+    if fixture:
+        return build_fixture_outcome_store(
+            pair_index=pair_index,
+            source=source,
+            manifest=manifest,
+            audit_path=audit_path,
+            corpus_id=FIXTURE_CORPUS_V1.corpus_id,
+            source_sha256=FIXTURE_CORPUS_V1.source_sha256,
+            builder_code_sha256=FIXTURE_CORPUS_V1.builder_code_sha256,
+        )
+    return ComposeOutcomeStore(
         pair_index=pair_index,
         source=source,
         manifest=manifest,
         audit_path=audit_path,
     )
-    if fixture:
-        # Synthetic-fixture marker; the bounded fixture entry verifies it.
-        object.__setattr__(store, "_compose_fixture_marker", True)
-    return store
 
 
 def _run_id(cfg) -> str:
@@ -310,6 +328,9 @@ def _build_ledger(manifest: dict, bundle: FrozenPredictionBundle, cfg) -> RunLed
     ledger = RunLedger(
         run_id=bundle.run_id, config_sha256=cfg.config_sha256, environment=_environment()
     )
+    ledger.record_artifact("data_card", _DATA_CARD)
+    ledger.record_artifact("raw_data", _RAW)
+    ledger.record_artifact("sequence_mapping", _SEQ)
     ledger.record_artifact("pair_manifest", manifest["checksum"])
     ledger.record_artifact("response_space", bundle.response_space_checksum)
     ledger.record_artifact("factor_bank", bundle.factor_checksum)
@@ -475,6 +496,9 @@ def test_preflight_failure_keeps_access_zero_and_no_terminal(tmp_path):
         config_sha256=kit["cfg"].config_sha256,
         environment=_environment(),
     )
+    bad_ledger.record_artifact("data_card", _DATA_CARD)
+    bad_ledger.record_artifact("raw_data", _RAW)
+    bad_ledger.record_artifact("sequence_mapping", _SEQ)
     bad_ledger.record_artifact("pair_manifest", kit["manifest"]["checksum"])
     bad_ledger.record_artifact("response_space", kit["bundle"].response_space_checksum)
     bad_ledger.record_artifact("factor_bank", kit["bundle"].factor_checksum)
@@ -559,32 +583,35 @@ def test_public_api_has_no_truth_parameter():
 # ===========================================================================
 
 
-class _SpyStore:
-    """Wraps a ComposeOutcomeStore, recording the access order of calls."""
+class _SpyStore(FixtureOutcomeStore):
+    """A FixtureOutcomeStore that records the access order of sealed calls.
+
+    Rebuilt over the wrapped store's own source/index/manifest/audit so it stays a
+    genuine (allowlisted) fixture store — the bounded fixture path accepts it by
+    TYPE — and it spies by overriding ONLY the sealed-access methods.
+    """
 
     def __init__(self, inner: ComposeOutcomeStore) -> None:
-        self._inner = inner
+        super().__init__(
+            inner._pair_index,
+            inner._source,
+            inner._manifest,
+            audit_path=inner._audit_path,
+            fixture_corpus_attestation=FIXTURE_CORPUS_V1,
+        )
         self.events: list[str] = []
-        self._compose_fixture_marker = True
 
     def claim_sealed_access(self, run_id, pair_ids):
         self.events.append("claim_sealed_access")
-        return self._inner.claim_sealed_access(run_id, pair_ids)
+        return super().claim_sealed_access(run_id, pair_ids)
 
     def materialize_claimed(self, claim):
         self.events.append("materialize_claimed")
-        return self._inner.materialize_claimed(claim)
+        return super().materialize_claimed(claim)
 
     def read_unsealed(self, pair_ids):  # pragma: no cover - defensive
         self.events.append("read_unsealed")
-        return self._inner.read_unsealed(pair_ids)
-
-    @property
-    def sealed_access_count(self):
-        return self._inner.sealed_access_count
-
-    def audit_records(self):
-        return self._inner.audit_records()
+        return super().read_unsealed(pair_ids)
 
 
 def test_predictions_consumed_readonly_no_access_until_step_six(tmp_path):
@@ -687,13 +714,15 @@ def test_single_unseen_outcomes_do_not_change_headline(tmp_path):
     for pair in _role_pairs(manifest, "sealed_single_unseen"):
         rows = index_a[pair]
         X[rows] = X[rows] + 13.0  # shift single-unseen observed cells only
-    store_b = ComposeOutcomeStore(
+    store_b = build_fixture_outcome_store(
         pair_index=index_a,
         source=_InMemorySource(X),
         manifest=manifest,
         audit_path=audit_path,
+        corpus_id=FIXTURE_CORPUS_V1.corpus_id,
+        source_sha256=FIXTURE_CORPUS_V1.source_sha256,
+        builder_code_sha256=FIXTURE_CORPUS_V1.builder_code_sha256,
     )
-    object.__setattr__(store_b, "_compose_fixture_marker", True)
 
     res_b = run_phase2b_fixture(
         run_dir=run_dir,
@@ -750,37 +779,27 @@ def test_terminal_artifact_blocks_rerun_in_same_dir(tmp_path):
 # ===========================================================================
 
 
-class _EmptyCellsStore:
-    """Store whose release returns an empty (0-row) observed population.
+class _EmptyCellsStore(FixtureOutcomeStore):
+    """A fixture store whose release returns an empty (0-row) observed population.
 
-    The seal opens normally (the audit is burned), but ``score_regime`` rejects
-    the empty population AFTER access — a genuine post-access scoring failure that
-    the terminal protection boundary must turn into a failure artifact.
+    The seal opens normally (the audit is burned by the inherited claim), but
+    ``score_regime`` rejects the empty population AFTER access — a genuine
+    post-access scoring failure that the terminal protection boundary must turn
+    into a failure artifact. Only ``materialize_claimed`` is overridden.
     """
 
     def __init__(self, inner: ComposeOutcomeStore) -> None:
-        self._inner = inner
-        self._audit_path = inner._audit_path
-        self._compose_fixture_marker = True
-
-    def claim_sealed_access(self, run_id, pair_ids):
-        return self._inner.claim_sealed_access(run_id, pair_ids)
+        super().__init__(
+            inner._pair_index,
+            inner._source,
+            inner._manifest,
+            audit_path=inner._audit_path,
+            fixture_corpus_attestation=FIXTURE_CORPUS_V1,
+        )
 
     def materialize_claimed(self, claim):
-        from alive.compose.outcome_store import ObservedPair
-
-        release = self._inner.materialize_claimed(claim)
+        release = super().materialize_claimed(claim)
         return {pid: ObservedPair(pair_id=pid, cells=op.cells[:0]) for pid, op in release.items()}
-
-    def read_unsealed(self, pair_ids):  # pragma: no cover - defensive
-        return self._inner.read_unsealed(pair_ids)
-
-    @property
-    def sealed_access_count(self):
-        return self._inner.sealed_access_count
-
-    def audit_records(self):
-        return self._inner.audit_records()
 
 
 def test_post_access_scoring_failure_writes_failure_terminal(tmp_path):
@@ -807,31 +826,24 @@ def test_post_access_scoring_failure_writes_failure_terminal(tmp_path):
 # ===========================================================================
 
 
-class _RaisingAfterClaimStore:
-    """Store whose durable claim burns the audit, then materialisation raises."""
+class _RaisingAfterClaimStore(FixtureOutcomeStore):
+    """A fixture store whose durable claim burns the audit (inherited), then
+    materialisation raises — the worst case the terminal boundary must survive
+    (ABORTED_AFTER_SEAL). Only ``materialize_claimed`` is overridden.
+    """
 
     def __init__(self, inner: ComposeOutcomeStore) -> None:
-        self._inner = inner
-        self._audit_path = inner._audit_path
-        self._compose_fixture_marker = True
-
-    def claim_sealed_access(self, run_id, pair_ids):
-        # Burn the audit exactly as the real store would (durable write FIRST).
-        return self._inner.claim_sealed_access(run_id, pair_ids)
+        super().__init__(
+            inner._pair_index,
+            inner._source,
+            inner._manifest,
+            audit_path=inner._audit_path,
+            fixture_corpus_attestation=FIXTURE_CORPUS_V1,
+        )
 
     def materialize_claimed(self, claim):
-        # Fail AFTER the audit is on disk — the worst-case the terminal survives.
+        # Fail AFTER the audit is on disk (the inherited claim already burned it).
         raise RuntimeError("synthetic materialisation failure")
-
-    def read_unsealed(self, pair_ids):  # pragma: no cover - defensive
-        return self._inner.read_unsealed(pair_ids)
-
-    @property
-    def sealed_access_count(self):
-        return self._inner.sealed_access_count
-
-    def audit_records(self):
-        return self._inner.audit_records()
 
 
 def test_materialisation_failure_burns_run_writes_failure(tmp_path):
@@ -1013,15 +1025,18 @@ def test_per_method_aggregate_mse_reports_both_regimes_unpooled(tmp_path):
     assert isinstance(per_method["double"], dict)
     assert isinstance(per_method["single"], dict)
 
-    # both regimes carry the SAME (full) method roster; per-method, never per-pair.
+    # both regimes carry the SAME (full 9-method) DESCRIPTIVE roster; per-method,
+    # never per-pair. The verdict pair_errors (6) are a subset; the aggregate MSE
+    # surfaces every roster method via descriptive_pair_errors.
     assert set(per_method["double"]) == set(per_method["single"])
-    assert set(per_method["single"]) == set(res.regime_single.pair_errors)
+    assert set(per_method["single"]) == set(res.regime_single.descriptive_pair_errors)
 
     # each embedded value is the INDEPENDENT per-regime mean over THAT regime's own
-    # pair_errors — proving it is regime-labeled, aggregate-scalar and NOT pooled.
-    for method in sorted(res.regime_single.pair_errors):
-        expected_double = float(np.mean(res.regime_double.pair_errors[method]))
-        expected_single = float(np.mean(res.regime_single.pair_errors[method]))
+    # descriptive_pair_errors — proving it is regime-labeled, aggregate-scalar and
+    # NOT pooled.
+    for method in sorted(res.regime_single.descriptive_pair_errors):
+        expected_double = float(np.mean(res.regime_double.descriptive_pair_errors[method]))
+        expected_single = float(np.mean(res.regime_single.descriptive_pair_errors[method]))
         assert per_method["double"][method] == pytest.approx(expected_double)
         assert per_method["single"][method] == pytest.approx(expected_single)
         # a finite aggregate scalar, never a per-pair array.
@@ -1033,8 +1048,8 @@ def test_per_method_aggregate_mse_reports_both_regimes_unpooled(tmp_path):
             np.mean(
                 np.concatenate(
                     [
-                        res.regime_double.pair_errors[method],
-                        res.regime_single.pair_errors[method],
+                        res.regime_double.descriptive_pair_errors[method],
+                        res.regime_single.descriptive_pair_errors[method],
                     ]
                 )
             )
@@ -1043,6 +1058,32 @@ def test_per_method_aggregate_mse_reports_both_regimes_unpooled(tmp_path):
 
     # single is a DISTINCT dict from double (independent regimes).
     assert per_method["single"] != per_method["double"]
+
+
+def test_per_method_aggregate_mse_covers_full_roster_both_regimes(tmp_path):
+    # The descriptive per-method aggregate MSE must span the FULL 9-method roster in
+    # BOTH regimes (not just the 6 verdict methods): freeze validates all nine per
+    # regime, so l2_saturation / no_change / perturbation_mean are reported
+    # descriptively even though the verdict consumes only headline + 5 comparators.
+    kit = _make_run(tmp_path)
+    res = run_phase2b_fixture(**_fixture_kwargs(kit))
+    assert res.terminal_state == TerminalState.COMPLETE
+
+    body = _read_terminal(kit["run_dir"], "complete")
+    pmm = body["registered_summary"]["per_method_aggregate_mse"]
+    assert set(pmm["double"]) == set(_EXPECTED_METHOD_ROSTER)
+    assert set(pmm["single"]) == set(_EXPECTED_METHOD_ROSTER)
+
+
+def test_registered_summary_has_schema_v1(tmp_path):
+    # The registered summary carries a versioned schema tag so downstream durable
+    # finalization (Task 6) can version-gate it. Task 5 only ADDS the tag.
+    kit = _make_run(tmp_path)
+    res = run_phase2b_fixture(**_fixture_kwargs(kit))
+    assert res.terminal_state == TerminalState.COMPLETE
+
+    body = _read_terminal(kit["run_dir"], "complete")
+    assert body["registered_summary"]["schema"] == "compose_registered_evaluation_summary_v1"
 
 
 def test_invalid_final_result_checksum_differs_from_complete(tmp_path):
@@ -1167,6 +1208,101 @@ def test_scientific_entry_rejects_fixture_store(tmp_path):
 
 
 # ===========================================================================
+# C0 #4: dedicated FixtureOutcomeStore type + corpus allowlist (retire marker)
+# ===========================================================================
+
+
+def _plain_and_fixture_stores(tmp_path):
+    """A plain scientific store and a sanctioned fixture store over fresh audits."""
+    manifest = _manifest()
+    source_r, index_r = _build_source_and_index(manifest)
+    real = ComposeOutcomeStore(
+        pair_index=index_r,
+        source=source_r,
+        manifest=manifest,
+        audit_path=tmp_path / "real_audit.jsonl",
+    )
+    source_f, index_f = _build_source_and_index(manifest)
+    fixture = build_fixture_outcome_store(
+        pair_index=index_f,
+        source=source_f,
+        manifest=manifest,
+        audit_path=tmp_path / "fix_audit.jsonl",
+        corpus_id=FIXTURE_CORPUS_V1.corpus_id,
+        source_sha256=FIXTURE_CORPUS_V1.source_sha256,
+        builder_code_sha256=FIXTURE_CORPUS_V1.builder_code_sha256,
+    )
+    return real, fixture
+
+
+def test_is_fixture_store_true_only_for_fixture_type(tmp_path):
+    real, fixture = _plain_and_fixture_stores(tmp_path)
+    # a real scientific store is NOT a fixture store...
+    assert _is_fixture_store(real) is False
+    # ...and the retired spoof (setting the old marker on a real store) is inert.
+    object.__setattr__(real, "_compose_fixture_marker", True)
+    assert _is_fixture_store(real) is False
+    # only a sanctioned FixtureOutcomeStore with an allowlisted attestation passes.
+    assert _is_fixture_store(fixture) is True
+
+
+def test_is_fixture_store_rejects_bogus_attestation(tmp_path):
+    # isinstance alone is INSUFFICIENT: a raw FixtureOutcomeStore built with a
+    # non-allowlisted attestation must NOT read as a fixture store.
+    manifest = _manifest()
+    source, pair_index = _build_source_and_index(manifest)
+    bogus = FixtureCorpusAttestation(
+        corpus_id="nope", source_sha256="0" * 64, builder_code_sha256="0" * 64
+    )
+    store = FixtureOutcomeStore(
+        pair_index,
+        source,
+        manifest,
+        audit_path=tmp_path / "bogus_audit.jsonl",
+        fixture_corpus_attestation=bogus,
+    )
+    assert isinstance(store, FixtureOutcomeStore)
+    assert _is_fixture_store(store) is False
+
+
+def test_run_phase2b_fixture_rejects_spoofed_marker(tmp_path):
+    # A plain store with a manually-set legacy marker must NOT pass the bounded
+    # fixture entry anymore (the marker is retired; type + allowlist decides).
+    kit = _make_run(tmp_path, fixture_store=False)
+    object.__setattr__(kit["store"], "_compose_fixture_marker", True)
+    with pytest.raises(Phase2bError, match="fixture"):
+        run_phase2b_fixture(**_fixture_kwargs(kit))
+    assert kit["store"].sealed_access_count == 0
+    assert _terminal_artifacts(kit["run_dir"]) == []
+
+
+def test_run_phase2b_rejects_fixture_type(tmp_path):
+    # The scientific entry refuses a synthetic-fixture store even when every OTHER
+    # scientific-mode gate is satisfied: a fixture TYPE is not scientific evidence.
+    # Unblock the UNRELATED pseudobulk-representation activation gate so the
+    # fixture-type check (the behavior under test) is the only remaining barrier.
+    kit = _make_run(tmp_path, fixture_store=True)
+    cfg = dataclasses.replace(
+        kit["cfg"], baseline_representations=(("additive", "cell_raw_counts", None),)
+    )
+    assert cfg.pseudobulk_representation_activation_blocked is False
+    with pytest.raises(ScientificModeError, match="fixture"):
+        run_phase2b(
+            run_dir=kit["run_dir"],
+            outcome_store=kit["store"],
+            frozen_bundle=kit["bundle"],
+            pair_manifest=kit["manifest"],
+            response_artifact=kit["response_artifact"],
+            config=cfg,
+            ledger=kit["ledger"],
+            activation_record=_activation_record(kit["cfg"]),
+            git_is_clean=True,
+        )
+    assert kit["store"].sealed_access_count == 0
+    assert _terminal_artifacts(kit["run_dir"]) == []
+
+
+# ===========================================================================
 # Change B: _build_provenance digest population
 # ===========================================================================
 
@@ -1200,9 +1336,21 @@ def test_build_provenance_fixture_leaves_scientific_digests_empty(tmp_path):
         inputs=None,
         fixture_execution=True,
     )
-    assert prov.data_card_sha256 == ""
+    # run-IDENTITY digests come from the ledger on BOTH paths (single source of
+    # truth) so the durable ledger<->provenance cross-check holds on the fixture
+    # path; the scientific EVIDENCE digests stay empty (a fixture is not evidence).
+    assert prov.data_card_sha256 == _DATA_CARD
+    assert prov.raw_or_source_sha256 == _RAW
+    assert prov.sequence_mapping_sha256 == _SEQ
     assert prov.processed_sha256 == ""
+    assert prov.feature_bank_sha256 == ""
+    assert prov.dependency_lock_sha256 == ""
     assert prov.gears_revision == ""
+    assert prov.cpa_revision == ""
+    assert prov.python_version == ""
+    assert prov.platform == ""
+    assert prov.device == ""
+    assert prov.precision == ""
     assert prov.git_commit == "UNKNOWN"
     # upstream (bundle-derived) hashes are still populated on the fixture path.
     assert prov.frozen_prediction_bundle_sha256 == kit["bundle"].bundle_checksum
@@ -1228,10 +1376,8 @@ def test_build_provenance_scientific_requires_inputs(tmp_path):
 def test_build_provenance_scientific_populates_from_ledger_and_inputs(tmp_path):
     kit = _make_run(tmp_path)
     ledger = kit["ledger"]
-    # Single source of truth: run-identity digests come from the upstream ledger.
-    ledger.record_artifact("data_card", "dc-sha")
-    ledger.record_artifact("raw_data", "raw-sha")
-    ledger.record_artifact("sequence_mapping", "seq-sha")
+    # Single source of truth: run-identity digests come from the upstream ledger
+    # (recorded by the shared _build_ledger as _DATA_CARD / _RAW / _SEQ).
     prov = _build_provenance(
         bundle=kit["bundle"],
         pair_manifest=kit["manifest"],
@@ -1245,9 +1391,9 @@ def test_build_provenance_scientific_populates_from_ledger_and_inputs(tmp_path):
         fixture_execution=False,
     )
     # from the ledger (run-identity path):
-    assert prov.data_card_sha256 == "dc-sha"
-    assert prov.raw_or_source_sha256 == "raw-sha"
-    assert prov.sequence_mapping_sha256 == "seq-sha"
+    assert prov.data_card_sha256 == _DATA_CARD
+    assert prov.raw_or_source_sha256 == _RAW
+    assert prov.sequence_mapping_sha256 == _SEQ
     # from the inputs object (evidence-sourced digests):
     assert prov.processed_sha256 == "1" * 64
     assert prov.feature_bank_sha256 == "2" * 64
@@ -1295,9 +1441,7 @@ def test_activation_provenance_inputs_reject_malformed_values(field, value):
 def test_build_provenance_rejects_environment_mismatch(tmp_path):
     kit = _make_run(tmp_path)
     ledger = kit["ledger"]
-    ledger.record_artifact("data_card", "dc-sha")
-    ledger.record_artifact("raw_data", "raw-sha")
-    ledger.record_artifact("sequence_mapping", "seq-sha")
+    # run-identity digests are already recorded by the shared _build_ledger.
     values = dataclasses.asdict(_prov_inputs())
     values["git_commit"] = "f" * 40
     with pytest.raises(Phase2bError, match="ledger environment"):
@@ -1542,6 +1686,9 @@ def test_pre_audit_failure_does_not_finalize(tmp_path, monkeypatch):
         config_sha256=kit["cfg"].config_sha256,
         environment=_environment(),
     )
+    bad_ledger.record_artifact("data_card", _DATA_CARD)
+    bad_ledger.record_artifact("raw_data", _RAW)
+    bad_ledger.record_artifact("sequence_mapping", _SEQ)
     bad_ledger.record_artifact("pair_manifest", kit["manifest"]["checksum"])
     bad_ledger.record_artifact("response_space", kit["bundle"].response_space_checksum)
     bad_ledger.record_artifact("factor_bank", kit["bundle"].factor_checksum)

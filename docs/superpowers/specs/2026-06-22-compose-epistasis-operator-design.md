@@ -26,7 +26,7 @@ clean tree를 요구하고 COMPOSE seal은 1회 열린다.
 5. `TG-K562-v1` seal과 독립된 신규 seal·run-identity·audit lifecycle
 6. adequate sample-size / detectable-effect 분석(§2.4)
 
-`COMPOSE-K562-v1` seal은 `TG-K562-v1` seal과 **교체 불가**다(CLAUDE.md §6.3). 하나의 run ID·audit·
+`COMPOSE-K562-v1` seal은 `TG-K562-v1` seal과 **교체 불가**다(CLAUDE.md#seal). 하나의 run ID·audit·
 report가 두 seal을 동시에 대표할 수 없다.
 
 본 milestone은 다음 durable finding 위에 선다(project-memory *alive-operator-design-incremental*):
@@ -246,7 +246,7 @@ bootstrap한다. additive가 큰 효과를 이미 잡으므로 이 대비는 비
   동시추론**으로만 우위 주장(사후 최강 comparator 선택 금지).
 - **(구조, 2차)** held-out 쌍의 GI 부호/class 복원 > chance(등록 metric·chance 기준).
 
-### 4.4 Known-answer metric tests (CLAUDE.md §13 known-answer 요건)
+### 4.4 Known-answer metric tests (CLAUDE.md#verify known-answer 요건)
 
 constant·shuffled-pairs·additive=truth($\Delta\approx0$)·perfect-GI($\Delta$ 최대)를 toy로 검증.
 
@@ -270,7 +270,7 @@ run 내부 자기검증이며 독립 audit이 아님을 명시한다(project-mem
 
 ---
 
-## 5. Phasing (I5; CLAUDE.md §15 최소 falsifying 실험)
+## 5. Phasing (I5; CLAUDE.md#agent 최소 falsifying 실험)
 
 - **Phase 1 (값쌈, go/no-go 결정).** 합성 식별가능성 입증(claim 1, §3.4) + Norman에서
   power·measurability·rank gate(§2.4)만. real 연구의 가치를 *결정*한다. gate 실패 시 GEARS/CPA
@@ -318,7 +318,7 @@ al. 2023, bilinear combination operator)이나 출력이 **scalar Bliss synergy*
 
 ## 7. Run-identity, provenance, governance mapping
 
-CLAUDE.md §11(write-once run identity)·§12(repo conventions)·§14(compute) 전부 적용. 기존
+CLAUDE.md#provenance(write-once run identity)·#repo(repo conventions)·#compute(compute) 전부 적용. 기존
 CARTOGRAPHER 인프라(RunLedger, composite run_id, append-only audit, stage-locking, ESM feature
 bank, cloud provenance recorder)를 재사용한다. 신규 요소: Norman data-card, pair-level manifest,
 bilinear 식별기, 합성 recovery harness, GI metric. 모든 production logic은 `src/alive/`에 두고
@@ -351,7 +351,7 @@ tests(unit/leakage/metric/repro/integration)를 동반한다.
 5. `TG-K562-v1`과 독립된 신규 seal·run-identity·audit lifecycle
 6. (Phase 2 한정) Norman data-card·license 확정 + GEARS/CPA 재현 환경
 
-활성화 시 CLAUDE.md §4 protocol registry에 본 protocol을 등재하고, 현재 결과에 소급해 주장하지
+활성화 시 CLAUDE.md#registry protocol registry에 본 protocol을 등재하고, 현재 결과에 소급해 주장하지
 않는다.
 
 ---
@@ -359,7 +359,7 @@ tests(unit/leakage/metric/repro/integration)를 동반한다.
 ## 10. Phase-2 candidate pre-registration (owner-approved design; activation blocked)
 
 Owner는 2026-06-23 Phase-2 설계와 사전등록 후보 작성을 승인했다. exact 후보 값은
-`configs/compose_k562_v1_phase2.yaml`가 source-of-truth(CLAUDE.md §3.1)이며, 본 절은
+`configs/compose_k562_v1_phase2.yaml`가 source-of-truth(CLAUDE.md#sources)이며, 본 절은
 claim·정직성 계약을 고정한다. 이는 sealed scientific run의 승인이 아니다.
 
 ### 10.1 Activation blockers

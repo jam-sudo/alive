@@ -5,7 +5,7 @@ Derives a small, deterministic, eligibility-preserving subset from the FULL
 data-card (same perturbation_key / control_value / provenance), writing a mini
 ``.h5ad`` + mini sequences JSON + mini data-card.  Run the mini through
 ``prepare -> fit -> develop -> futility -> calibrate`` with the REAL encoder and a
-mini config BEFORE the full run (CLAUDE.md §14.2).
+mini config BEFORE the full run (CLAUDE.md#compute).
 
 Thin CLI over :mod:`alive.data.mini`.  Run this on the A100 against the full file:
 the subset is materialised in memory (``adata[mask].to_memory()``), so it expects

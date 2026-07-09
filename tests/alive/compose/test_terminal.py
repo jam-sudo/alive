@@ -36,6 +36,7 @@ import pytest
 from alive.compose.outcome_store import ComposeOutcomeStore, ComposeSealingError
 from alive.compose.split import build_split_manifest
 from alive.compose.terminal import (
+    TERMINAL_PAYLOAD_CHECKSUM_FIELD,
     Phase2bTerminal,
     TerminalError,
     TerminalState,
@@ -1048,3 +1049,165 @@ def test_pre_audit_failure_writes_no_aborted_terminal(tmp_path: Path) -> None:
     assert not (term.run_dir / Phase2bTerminal.ABORTED_ARTIFACT).exists()
     assert _existing_terminal_artifacts(term.run_dir) == []
     assert term.state is TerminalState.ACCESS_ATTEMPTED
+
+
+# ---------------------------------------------------------------------------
+# Task 7 (C0 #5): recover_aborted_after_seal — the recovery-sanctioned entry
+# for the audit=1 / terminal=0 post-crash state. A hard process death AFTER the
+# durable seal claim burns the audit but may land before any terminal is written.
+# The FORWARD lifecycle (acquire -> attempt_access -> confirm_durable_access) is
+# DESIGNED to refuse this state (acquire rejects a burned audit + holds an
+# exclusive lock; aborted() needs ACCESS_CLAIMED, reachable only via acquire).
+# This classmethod is the encapsulated, auditable bypass: it writes EXCLUSIVELY
+# one ABORTED_AFTER_SEAL terminal recording the already-consumed seal, opens/
+# reopens NO seal, constructs NO outcome store, and fails closed when the burned
+# audit has no records or a terminal already exists. SYNTHETIC-ONLY.
+# ---------------------------------------------------------------------------
+
+_RECOVER_RUN_ID = "deadbeefdeadbeef"
+
+
+def _burned_audit(run_dir: Path, *, records: int = 1) -> Path:
+    """Write a burned seal audit (``records`` durable JSONL records) at run_dir/audit.jsonl.
+
+    Mirrors what :class:`~alive.compose.outcome_store.ComposeOutcomeStore` writes at
+    ``claim_sealed_access`` (one canonical-JSON record per line) at the PRODUCTION
+    location ``<run_dir>/audit.jsonl``.
+    """
+    audit_path = run_dir / "audit.jsonl"
+    lines = "".join(
+        json.dumps(
+            {"run_id": _RECOVER_RUN_ID, "pair_ids": [], "seq": i},
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n"
+        for i in range(records)
+    )
+    audit_path.write_text(lines, encoding="utf-8")
+    return audit_path
+
+
+def _recover(run_dir: Path, audit_path: Path) -> None:
+    """Invoke the recovery-sanctioned entry with fixed synthetic identity args."""
+    Phase2bTerminal.recover_aborted_after_seal(
+        run_dir,
+        ledger=_ledger(),
+        audit_path=audit_path,
+        protocol="COMPOSE-K562-v1",
+        run_id=_RECOVER_RUN_ID,
+        pre_access_ledger_sha256="c" * 64,
+        pre_access_provenance_checksum="d" * 64,
+        exception=RuntimeError("recovered: process death after seal claim, before terminal"),
+        stage="recover_audit_only",
+    )
+
+
+def test_recover_aborted_after_seal_writes_only_aborted_terminal(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    audit_path = _burned_audit(run_dir, records=1)
+
+    _recover(run_dir, audit_path)
+
+    aborted = run_dir / Phase2bTerminal.ABORTED_ARTIFACT
+    assert aborted.is_file()
+    # EXCLUSIVELY the ABORTED artifact — no COMPLETE / INVALID path exists.
+    assert not (run_dir / Phase2bTerminal.COMPLETE_ARTIFACT).exists()
+    assert not (run_dir / Phase2bTerminal.INVALID_ARTIFACT).exists()
+
+    body = json.loads(aborted.read_text(encoding="utf-8"))
+    assert body["terminal_state"] == TerminalState.ABORTED_AFTER_SEAL.value
+    assert body["registered_results_status"] == "NOT_AVAILABLE_DUE_TO_ABORT"
+    # The seal count is DERIVED from the burned audit (the truth), never asserted 0.
+    assert body["sealed_access_count"] == 1
+    assert body["sealed_access_count"] >= 1
+
+    # The durable audit reference is derived the SAME way the outcome store did
+    # (sha256_json over the FIRST parsed audit record) — non-empty in BOTH the common
+    # seal_audit_reference and the ABORTED state audit_reference.
+    first_record = json.loads(audit_path.read_text(encoding="utf-8").splitlines()[0])
+    expected_ref = sha256_json(first_record)
+    assert body["seal_audit_reference"] == expected_ref
+    assert body["audit_reference"] == expected_ref
+    assert body["seal_audit_reference"]  # non-empty
+
+    # The whole-body terminal_payload_checksum verifies through the SHARED canonicalizer.
+    core = {k: v for k, v in body.items() if k != TERMINAL_PAYLOAD_CHECKSUM_FIELD}
+    assert body[TERMINAL_PAYLOAD_CHECKSUM_FIELD] == sha256_json(
+        canonicalize_terminal_checksum_input(core)
+    )
+
+
+def test_recover_aborted_after_seal_counts_all_burned_records(tmp_path: Path) -> None:
+    """The auto-derived sealed_access_count is the TRUE consumed count (>= 1), read
+    from the burned audit — never asserted 0."""
+    run_dir = tmp_path / "run"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    audit_path = _burned_audit(run_dir, records=3)
+
+    _recover(run_dir, audit_path)
+
+    body = json.loads((run_dir / Phase2bTerminal.ABORTED_ARTIFACT).read_text(encoding="utf-8"))
+    assert body["sealed_access_count"] == 3
+
+
+def test_recover_aborted_after_seal_empty_audit_fails_closed(tmp_path: Path) -> None:
+    """An EMPTY burned audit (0 records) means the seal was never consumed — a
+    pre-access failure, not an ABORTED_AFTER_SEAL state. Fail closed, write nothing."""
+    run_dir = tmp_path / "run"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    audit_path = run_dir / "audit.jsonl"
+    audit_path.write_text("", encoding="utf-8")  # 0 records
+
+    with pytest.raises(TerminalError):
+        _recover(run_dir, audit_path)
+    assert not (run_dir / Phase2bTerminal.ABORTED_ARTIFACT).exists()
+
+
+def test_recover_aborted_after_seal_absent_audit_fails_closed(tmp_path: Path) -> None:
+    """An ABSENT burned audit fails closed (no seal consumed)."""
+    run_dir = tmp_path / "run"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    audit_path = run_dir / "audit.jsonl"  # never created
+
+    with pytest.raises(TerminalError):
+        _recover(run_dir, audit_path)
+    assert not (run_dir / Phase2bTerminal.ABORTED_ARTIFACT).exists()
+
+
+def test_recover_aborted_after_seal_existing_terminal_fails_closed(tmp_path: Path) -> None:
+    """A pre-existing terminal means the run already has a durable record — nothing to
+    recover. The guard refuses BEFORE any write (a COMPLETE terminal present must never
+    gain a second ABORTED terminal alongside it)."""
+    run_dir = tmp_path / "run"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    audit_path = _burned_audit(run_dir, records=1)
+    # A DIFFERENT terminal already exists: without the guard, aborted() would happily
+    # write terminal_aborted.json alongside it -> two terminals.
+    (run_dir / Phase2bTerminal.COMPLETE_ARTIFACT).write_text("{}", encoding="utf-8")
+
+    with pytest.raises(TerminalError):
+        _recover(run_dir, audit_path)
+    assert not (run_dir / Phase2bTerminal.ABORTED_ARTIFACT).exists()
+
+
+def test_recover_aborted_after_seal_broken_symlink_terminal_fails_closed(tmp_path: Path) -> None:
+    """A BROKEN symlink at a terminal artifact name must be refused by guard-1.
+
+    ``.exists()`` follows symlinks and returns False for a broken symlink, so guard-1 also
+    tests ``is_symlink()`` (mirrors durable.py._scan_terminals' symlink-refusing posture).
+    This is a PUBLIC seal-critical API a C driver can call directly, so a terminal-named
+    symlink must fail closed BEFORE any write — never terminal_aborted.json alongside it."""
+    run_dir = tmp_path / "run"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    audit_path = _burned_audit(run_dir, records=1)
+    # A BROKEN symlink at a terminal artifact name (points at a nonexistent target):
+    # is_symlink() is True but exists() is False, so it would slip past an exists()-only guard.
+    broken = run_dir / Phase2bTerminal.COMPLETE_ARTIFACT
+    broken.symlink_to(run_dir / "does-not-exist.json")
+    assert broken.is_symlink() and not broken.exists()
+
+    with pytest.raises(TerminalError):
+        _recover(run_dir, audit_path)
+    assert not (run_dir / Phase2bTerminal.ABORTED_ARTIFACT).exists()

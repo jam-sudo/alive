@@ -5,7 +5,7 @@ This module answers "why did the Trust-Gate not beat its comparator family?"
 out-of-fold (OOF) scores and realised per-perturbation errors persisted by the
 ``develop`` stage (``methodlock.json`` + ``dev_errors.npz``) — the same surface
 model/method selection was based on, which is **not** sealed under the
-``TG-K562-v1`` seal contract (CLAUDE.md §6.1).  Nothing here re-opens or
+``TG-K562-v1`` seal contract (CLAUDE.md#seal).  Nothing here re-opens or
 slices the sealed evaluation; the registered verdict is immutable.
 
 Sign conventions (matching :mod:`alive.metrics.selective`)

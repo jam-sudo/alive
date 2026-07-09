@@ -4,10 +4,12 @@
 > **개정일:** 2026-07-02
 > **현재 실행 상태:** **BLOCKED — §2의 pre-seal release blocker가 모두 해결·검토·commit되기 전에는 실행 금지.**
 > **코드 기준점:** `main` `62a2bd4` 이상(2026-07-04). `c324b33`(PR #5) 이후 PR #6–#8이 §2.1 fit-role
-> artifact(A1)와 payload-v2(A2) 계약을 추가했다. worker/driver/durable-ledger(sub-project B/C/D)는
-> 여전히 미구현이므로 runbook은 BLOCKED 유지.
+> artifact(A1)와 payload-v2(A2) 계약을 추가했다. §2.3 단일 production driver(sub-project C, `phase2a`/
+> `preflight`/`phase2b --confirm-seal`/`recover`)는 branch `compose-c-driver`에서 구현·3-subprocess
+> e2e까지 통과했으나 **아직 main에 병합되지 않았다.** §2.1/§2.2 real worker(GEARS/CPA)와 durable-ledger
+> 최종 export(§2.4)를 포함한 나머지 blocker가 해결·검토·commit되기 전에는 runbook은 계속 BLOCKED다.
 > **상위 계약:** COMPOSE spec §7/§10.5–§10.6, deep-baseline design §1/§7,
-> `CLAUDE.md` §5/§6/§9/§10/§11/§14.2.
+> `CLAUDE.md`#invariants/#seal/#data-eval/#provenance/#compute.
 > **seal 계약:** COMPOSE seal은 TG-K562와 독립이며 정확히 한 번만 연다. 재실행·resume 없음.
 
 ---
@@ -77,18 +79,43 @@ fit-role artifact의 생성 코드, schema validator, negative leakage tests와 
 
 ### 2.3 단일 production driver
 
-committed driver를 제공한다. Python REPL이나 수동 객체 조립은 허용하지 않는다. 최소 인터페이스:
+committed driver를 제공한다. Python REPL이나 수동 객체 조립은 허용하지 않는다. 단일 CLI entrypoint
+`scripts/run_compose_k562_phase2.py`는 네 subcommand를 노출한다: `phase2a`, `preflight`, `phase2b`,
+`recover`. `phase2a`/`preflight`/`phase2b`는 `--run-spec PATH --approved-artifacts-root PATH
+--run-dir PATH`를 받고, `phase2b`는 추가로 `--confirm-seal <confirmation_checksum>`을 받는다.
+`recover`는 `--run-dir PATH`만 받는다. **실행 순서는 canonical `phase2a → preflight → phase2b`다**
+(`preflight`는 phase2a가 만든 frozen bundle을 `futility_status=='CONTINUE'`일 때만 검증하므로 phase2a
+뒤에 실행된다):
 
 ```text
-python scripts/run_compose_k562_phase2.py preflight --run-spec RUN_SPEC
-python scripts/run_compose_k562_phase2.py phase2a   --run-spec RUN_SPEC
-python scripts/run_compose_k562_phase2.py phase2b   --run-spec RUN_SPEC --confirm-seal <run_id>
+python scripts/run_compose_k562_phase2.py phase2a    --run-spec RUN_SPEC --approved-artifacts-root ARTIFACTS_ROOT --run-dir RUN_DIR
+python scripts/run_compose_k562_phase2.py preflight  --run-spec RUN_SPEC --approved-artifacts-root ARTIFACTS_ROOT --run-dir RUN_DIR
+python scripts/run_compose_k562_phase2.py phase2b    --run-spec RUN_SPEC --approved-artifacts-root ARTIFACTS_ROOT --run-dir RUN_DIR --confirm-seal <confirmation_checksum>
 ```
+
+`recover`는 seal이 이미 소비된(burned `<run_dir>/audit.jsonl` 존재) run의 crash-recovery 전용 경로다:
+
+```text
+python scripts/run_compose_k562_phase2.py recover --run-dir RUN_DIR
+```
+
+⚑ `--confirm-seal`에 넣는 값은 **`<run_id>`가 아니다.** `preflight`가 성공 시 `<run_dir>/
+seal_confirmation_manifest.json`을 write-once로 설치하며, 그 manifest의 `confirmation_checksum`
+필드값이 유일하게 유효한 토큰이다. run-id-only 토큰은 driver가 명시적으로 거부한다(§6 human
+confirmation 절차 참조).
 
 driver는 `Phase2aInputs`, development/sealed stores, manifest, response artifact, exact OOF fold assignment,
 `EnvironmentInfo`, expected hashes, `ActivationRecord`, run directory와 ledger를 한 곳에서 조립한다.
 `preflight`와 `phase2a`는 seal handle을 생성하거나 열 수 없어야 한다. `phase2b`는 Phase-2a CONTINUE,
 frozen bundle checksum, clean tree와 confirmation token을 재검증해야 한다.
+
+exit code 계약: `0` 성공, `20` phase2a futility(`FUTILITY_STOPPED`, `phase2b` 금지), `30` phase2b/recover의
+post-seal non-COMPLETE(durable export 미완료 포함), `10` pre-seal rejection.
+
+> **Note (2026-07-07, sub-project C 설계 조정).** 위 stage-1 입력(`Phase2aInputs`/fit-role/response/
+> manifest)은 driver 상위의 **PREPARE**(별도 sub-project)가 만들며 §3 step 8처럼 pre-built로 sync된다.
+> `scripts/compose/build_fit_role_artifact.py`의 "source/split assembly = sub-project C" 문구는
+> stale이다. 설계 계약: `docs/superpowers/specs/2026-07-07-compose-production-driver-design.md`.
 
 ### 2.4 내구 artifact와 보고
 
@@ -101,7 +128,7 @@ frozen bundle checksum, clean tree와 confirmation token을 재검증해야 한�
   sample counts, integrity clauses, audit/checksums다.
 - 현재 등록 추론은 pair-resampled **aggregate simultaneous bound**다. 등록되지 않은 “per-pair CI”를
   사후 생성하거나 verdict 근거로 사용하지 않는다.
-- seed-variability 계약을 명시적으로 해결한다. CLAUDE.md §10은 seed variability 보고를 요구하고,
+- seed-variability 계약을 명시적으로 해결한다. CLAUDE.md#data-eval은 seed variability 보고를 요구하고,
   외부 seed로 재적합 가능한 stochastic learned comparator(`gears`, `cpa`)의 seed 민감도는 non-sealed
   development role에서 실제로 평가 가능하므로 이를 `gi_structure_recovery`처럼 `NOT_EVALUABLE`로 처리하지
   않는다. seed별 재적합으로 development-phase seed-variability 요약(comparator별 error spread)을 산출·보고하는
@@ -187,33 +214,46 @@ requirement(config `power_status`, GEARS/CPA `environment_status`, GEARS `approx
 
 ## 5. Phase-2a — seal closed
 
-1. production driver의 `preflight`를 실행하고 모든 digest, role count, pair alignment, response dimension,
+production driver의 `phase2a` subcommand(`--run-spec --approved-artifacts-root --run-dir`)를 실행한다.
+내부적으로 다음을 수행·검증해야 한다.
+
+1. run directory entry roster, 모든 digest, role count, pair alignment, response dimension,
    exact roster와 backend availability를 검증한다.
 2. `build_subprocess_fit_payload`는 keyword-only로 호출한다. §2.1의 확장 schema가 merge된 뒤에는
    driver가 canonical OOF fold assignment와 fit-role artifact를 함께 결속해야 한다.
 3. 각 backend에 `configure_payload(payload)`를 호출하고 `provenance_manifest`를 확인한다.
 4. `run_phase2a(..., baseline_adapters={"gears": ..., "cpa": ...})`를 실행한다.
 5. `model_factories`에는 L1/L2/L3/id_only만 둔다. GEARS/CPA stand-in은 금지한다.
-6. 결과가 `FUTILITY_STOPPED`이면 artifact를 백업·보고하고 종료한다. **Phase-2b 금지.**
-7. `CONTINUE`일 때만 frozen bundle, method lock, ledger, worker/payload/prediction checksum과
+6. 결과가 `FUTILITY_STOPPED`(exit 20)이면 artifact를 백업·보고하고 종료한다. **Phase-2b 금지.**
+7. `CONTINUE`(exit 0)일 때만 frozen bundle, method lock, ledger, worker/payload/prediction checksum과
    `sealed_access_count == 0`을 독립 검증한다.
 8. Phase-2a 산출물을 object storage에 업로드하고 다운로드 재검증을 수행한다.
 
+`CONTINUE` 확인 후, canonical order대로 production driver의 `preflight` subcommand를 실행한다.
+`preflight`는 `phase2a`가 만든 frozen prediction bundle(`futility_status=='CONTINUE'`)을 검증하고,
+성공하면 §6의 `seal_confirmation_manifest.json`을 write-once로 설치한다. `preflight`가 실패(exit 10)하면
+Phase-2b를 호출하지 않는다.
+
 ## 6. Final pause — human confirmation
 
-seal 직전에 자동화가 멈춰 다음 manifest를 화면과 파일로 출력해야 한다.
+`preflight` subcommand가 성공하면 seal 접근 전 마지막 단계로 `<run_dir>/seal_confirmation_manifest.json`을
+write-once로 설치한다. 이 manifest가 화면과 파일에 다음을 담아 출력해야 한다.
 
 - exact Git SHA와 clean status
 - run ID/config/data/manifest/sequence/feature/factor/response/model/bundle checksums
 - exact method/comparator roster와 selected hyperparameters
 - GEARS/CPA worker/config/resource/env/payload/prediction checksums
-- double/single pair counts와 seal request checksum
+- double/single pair counts와 ordered seal request checksum
 - Phase-2a CONTINUE 및 access count 0
 - 비어 있는 run directory, 존재하지 않는 terminal/pre-access snapshot, 비어 있는 seal audit
 - artifact backup destination과 가용성
+- self-excluding `confirmation_checksum` (manifest payload 전체의 SHA-256; manifest 자신은 제외하고 계산)
 
-두 번째 운영자가 manifest를 대조한 후 exact run ID를 confirmation token으로 입력한다. 불일치하거나
-확신할 수 없으면 중단한다. “일단 열고 확인”은 금지한다.
+두 번째 운영자가 manifest를 대조한 후, `seal_confirmation_manifest.json`에 적힌 정확한
+`confirmation_checksum` 값을 `phase2b`의 `--confirm-seal`에 confirmation token으로 입력한다.
+**run ID나 다른 값을 대신 입력하지 않는다** — driver는 run-id-only 토큰이나 checksum 불일치를
+명시적으로 거부한다(pre-seal rejection, seal 미소비). 불일치하거나 확신할 수 없으면 중단한다.
+“일단 열고 확인”은 금지한다.
 
 ## 7. Phase-2b — single seal open
 
@@ -234,6 +274,23 @@ production driver가 내부적으로 다음 순서를 강제해야 한다.
    ledger SHA를 결속한 durable commit marker를 마지막에 설치·검증한다.
 
 `INVALID`나 `ABORTED_AFTER_SEAL`도 seal 소비 결과다. 수정 후 재실행하지 않는다.
+
+### 7.1 Crash recovery — `recover` subcommand
+
+`phase2b` 실행 중 프로세스가 죽어 seal은 소비됐지만(`<run_dir>/audit.jsonl` 존재) durable terminal/commit
+marker가 미완결일 수 있다. 이 경우 upstream stage를 재실행하지 않고 `recover --run-dir RUN_DIR`만
+실행한다. `recover`는 새 seal을 열지 않으며 기존 audit로부터 다음만 수행한다.
+
+- terminal과 durable commit marker(`phase2b_durable_commit.json`)가 이미 있으면 재검증만 하고 아무것도
+  다시 쓰지 않는다.
+- terminal은 있으나 marker가 없으면 byte-identical 재파생으로 marker만 write-once 설치한다(divergence는
+  fail-closed).
+- `audit.jsonl`은 있으나 terminal이 없는 crash 상태(`audit=1 / terminal=0`)면 `ABORTED_AFTER_SEAL`
+  terminal을 합성해 기록한다.
+
+`recover`가 `phase2b_durable_commit.json` 존재+검증까지 확인해 COMPLETE로 판정하면 exit 0, 그 외
+non-COMPLETE 종결이나 실패는 exit 30이다. `recover`도 seal을 다시 열지 않으므로 §1의 write-once/재실행
+금지 불변식이 그대로 적용된다.
 
 ## 8. 결과 회수와 보고
 

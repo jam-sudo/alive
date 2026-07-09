@@ -10,7 +10,7 @@
 
 ## Global Constraints
 
-- Container is AnnData `.h5ad`; `X` holds **raw integer UMI counts** over the **full measured gene universe** (spec §3; CLAUDE.md §7). Never globally densify — slice bounded row subsets only.
+- Container is AnnData `.h5ad`; `X` holds **raw integer UMI counts** over the **full measured gene universe** (spec §3; CLAUDE.md#data-eval). Never globally densify — slice bounded row subsets only.
 - Artifact obs `role` ∈ exactly `{control, singles, combo_calibration}`; **no sealed role or sealed pair ever present** (spec §3.1). Sealed rows' expression must be **unmaterializable** by the extractor (spec §4).
 - `sha256_json(obj)` returns **bare lowercase hex** (`src/alive/provenance.py:123`). Content/gene/row digests use it directly (hex). The artifact **file** `sha256` field is `"sha256:" + hex` of the file bytes (spec §2.1).
 - `content_manifest_sha256` is the reproducibility criterion (logical identity); the file SHA is transport/immutability only. CSR is canonicalized with `sort_indices()` + `sum_duplicates()` + fixed dtype **before** hashing (spec §3.2).
