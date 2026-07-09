@@ -3,11 +3,13 @@
 > **문서 역할:** COMPOSE-K562-v1의 일회성 sealed evaluation을 위한 운영 계약.
 > **개정일:** 2026-07-02
 > **현재 실행 상태:** **BLOCKED — §2의 pre-seal release blocker가 모두 해결·검토·commit되기 전에는 실행 금지.**
-> **코드 기준점:** `main` `62a2bd4` 이상(2026-07-04). `c324b33`(PR #5) 이후 PR #6–#8이 §2.1 fit-role
-> artifact(A1)와 payload-v2(A2) 계약을 추가했다. §2.3 단일 production driver(sub-project C, `phase2a`/
-> `preflight`/`phase2b --confirm-seal`/`recover`)는 branch `compose-c-driver`에서 구현·3-subprocess
-> e2e까지 통과했으나 **아직 main에 병합되지 않았다.** §2.1/§2.2 real worker(GEARS/CPA)와 durable-ledger
-> 최종 export(§2.4)를 포함한 나머지 blocker가 해결·검토·commit되기 전에는 runbook은 계속 BLOCKED다.
+> **코드 기준점:** `main` `1c46708`(2026-07-09). §2.1 fit-role artifact(A1)+payload-v2(A2), §2.4 durable
+> final-ledger+seed-variability(D1/D2), 그리고 §2.3 단일 production driver(sub-project C, `phase2a`/
+> `preflight`/`phase2b --confirm-seal`/`recover`)가 모두 **main에 병합됐다**(C = merge commit `1c46708`;
+> whole-branch 2-lens 리뷰 + Important 2건 fix 후, driver 211 / compose 1106 green). **남은 blocker:
+> §2.2 real GEARS/CPA worker(+GO graph·pinned env), §4 activation-evidence를 active config(`a4700194…`)로
+> 재생성 + null requirement 확립, §2.5 release gate(worker locked-env green + owner의 exact Git SHA 승인).**
+> 이들이 별도 development pod에서 해결·검토·commit되기 전에는 runbook은 계속 BLOCKED다.
 > **상위 계약:** COMPOSE spec §7/§10.5–§10.6, deep-baseline design §1/§7,
 > `CLAUDE.md`#invariants/#seal/#data-eval/#provenance/#compute.
 > **seal 계약:** COMPOSE seal은 TG-K562와 독립이며 정확히 한 번만 연다. 재실행·resume 없음.
