@@ -231,6 +231,56 @@ Every task's requirements implicitly include these (copied from the C spec 2026-
 - [ ] **Step 2:** FAIL. **Step 3:** implement. **Step 4:** PASS + ruff.
 - [ ] **Step 5:** Commit `scripts/run_compose_k562_phase2.py src/alive/compose/driver/__init__.py tests/alive/compose/driver/test_cli.py` — `feat(compose-driver): main(argv) CLI + exit-code mapping`.
 
+## Task 11.5: from-disk carrier loader (AMENDMENT 2026-07-08 — owner-authorized)
+
+**Why (added after Task 11):** the four subcommands consume a fuller in-memory DATA carrier
+(`FixtureBundle`), not a bare `ResolvedRunSpec`; the only committed carrier source
+(`build_compose_fixture`) writes a write-once fit-role artifact and is callable once per
+approved-root. So the spec §0/§1.1/§11 three-INDEPENDENT-process e2e (Task 13) is impossible until a
+loader reconstructs the carrier from disk per process. Scoping verdict = **LOADER-ONLY**: every carrier
+field is already serialized to disk by the fixture builder and declared in `PRE_SEAL_PATH_FIELDS`
+(SHA-verified by `load_resolved_run_spec`); no fixture-builder serialization change, no
+`PRE_SEAL_PATH_FIELDS` change, no subcommand change. `recover` takes no carrier (only `run_dir`) — 3
+subcommands consume it (phase2a/preflight/phase2b).
+
+**Files:**
+- Create: `src/alive/compose/driver/carrier_loader.py`
+- Test: `tests/alive/compose/driver/test_carrier_loader.py`
+- Modify: `src/alive/compose/driver/cli.py` (`_build_run_spec_carrier` → call the loader, not `build_compose_fixture`) + `tests/alive/compose/driver/test_cli.py` (flip the `test_second_call_...` pin: a 2nd process now SUCCEEDS)
+- (deserializer homes — implementer's choice, no new bytes written) may add `ResponseSpace.load`/`from_payload` in `compose/response.py`, `FitRoleArtifactSpec.from_payload_block` in `compose/fit_role.py`, a pair-index dict reconstructor in `driver/pair_index.py`, and a `Phase2aInputs` from-JSON reader (in the loader or beside `_serialize_phase2a_inputs`).
+
+**Interfaces:**
+- Produces: `load_run_spec_carrier(spec_path, *, approved_artifacts_root) -> Carrier` returning an object
+  **duck-compatible with the attributes the subcommands read**: `.spec_path`, `.phase2a_inputs`
+  (`Phase2aInputs`), `.dev_store_audit` (dict w/ `combo_calibration_eps`/`combo_calibration_pair_ids`/
+  `access_audit:OutcomeAccessAudit`), `.response_artifact` (dict w/ `response_space:ResponseSpace`,
+  `control_mean`, `combined_checksum`, `gene_order`, `raw_data_sha256`, `fit_role_spec:FitRoleArtifactSpec`),
+  `.sealed_outcome` (dict w/ `manifest`, `pair_index:dict[(a,b)->np.ndarray]`, `source_path`,
+  `source_file_sha256`, `perturbation_column`, `combo_sep`, `pair_index_manifest`, `corpus_id`,
+  `source_sha256`, `builder_code_sha256`). Loads the ResolvedRunSpec via `load_resolved_run_spec`, then
+  reconstructs each field from its declared pre-seal on-disk artifact.
+- **Bucket A (thin `**dict`/JSON reads, data already exact on disk):** spec_path; dev_store_audit
+  (`development_outcome_source.json` + `development_outcome_manifest.json`→`OutcomeAccessAudit(**dict)`);
+  response_artifact scalars (`control_mean` via `np.asarray(list)`, `combined_checksum`, `gene_order`,
+  `raw_data_sha256`); sealed_outcome dicts (`pair_manifest.json`, `pair_index_manifest.json`,
+  `perturbation_column`, `combo_sep`); `source_path`/`source_file_sha256` from `spec.fixture["sealed_input"]`;
+  `corpus_id`/`source_sha256`/`builder_code_sha256` from `FIXTURE_CORPUS_V1`.
+- **Bucket B (NEW deserializers — data on disk, no reconstructor today):** (1) `phase2a_inputs.json` →
+  `Phase2aInputs`, re-binding `model_roster` names → `_MODEL_CLASS_BY_NAME` factories; (2)
+  response-space payload → live `alive.compose.response.ResponseSpace` (map payload→ctor, RECOMPUTE
+  `checksum`); (3) `fit_role_artifact` block → `FitRoleArtifactSpec` (block→11 dataclass fields); (4)
+  `pair_index_manifest.pairs[*]{gene_a,gene_b,row_indices}` → `dict[(gene_a,gene_b),np.array(row_indices)]`.
+- **⚑ FIDELITY GATE (seal-critical):** the response-space payload is written through `_round_array`/
+  `_round_float` (response.py). A rehydrated `ResponseSpace` is NOT guaranteed byte-identical to the
+  built one. The loader MUST make the reconstructed `response_space_checksum` equal the value in
+  `expected_hashes` / `Phase2aInputs.response_space_checksum` (checksum is over the rounded
+  `artifact_bytes()`, so recompute from the reconstructed payload) — else the phase2a hash gate fails
+  closed. Test this explicitly.
+
+- [ ] **Step 1:** Failing test — `build_compose_fixture(root)` once, then `load_run_spec_carrier(spec_path, approved_artifacts_root=root)` returns a carrier whose consumed attributes deep-equal the built `FixtureBundle`'s (arrays `allclose`/`array_equal`; `response_space_checksum` EXACT-equal; `Phase2aInputs` factories callable). Then drive `run_phase2a_subcommand(loaded_carrier, ...)` on a fresh run_dir → same result as with the built carrier.
+- [ ] **Step 2:** FAIL. **Step 3:** implement the loader + the 4 Bucket-B deserializers; rewire `cli.py::_build_run_spec_carrier` to build-corpus-once then load-per-call (peek mode BEFORE any disk write — fixes the Task-11 build-then-peek Minor); flip the `test_second_call_...` pin. **Step 4:** PASS + full `tests/alive/compose/driver/` green + ruff.
+- [ ] **Step 5:** Commit — `feat(compose-driver): from-disk carrier loader (per-process stage-1 reconstruction)`.
+
 ## Task 12: seal-safety structural test
 
 **Files:**
@@ -247,7 +297,7 @@ Every task's requirements implicitly include these (copied from the C spec 2026-
 **Files:**
 - Test: `tests/alive/compose/driver/test_mini_e2e.py`
 
-**Interfaces:** drives the real CLI via `subprocess.run` three times (phase2a → preflight → phase2b) on a `build_compose_fixture` tmp root, so process memory is not shared.
+**Interfaces:** drives the real CLI via `subprocess.run` three times (phase2a → preflight → phase2b) on a tmp root where `build_compose_fixture` produced the corpus ONCE up-front; each process reconstructs its carrier from disk via Task 11.5's `load_run_spec_carrier` (process memory is not shared → §4 seal isolation holds).
 
 - [ ] **Step 1:** Write tests asserting the full §6 list: CONTINUE → frozen bundle + OOF + durable commit marker + COMPLETE terminal; futility → phase2b not run; **activation-less scientific spec → fail closed (count 0) before store construction**; stub `{gears,cpa}` adapters exercise the lock assembler; **upstream ledger round-trips (delete/tamper phase2a's ledger → preflight/phase2b fail closed)**; omitting preflight → phase2b rejects before store construction; changing bundle/ledger/worker identity after confirmation → token rejected; phase2a/preflight raw access is digest-only (0 materialization); attestation source SHA ≠ actual snapshot bytes → reject before store; real source digest/pair-index in fixture mode (or marker-only) → fixture factory rejects; **swapping two pairs' row blocks → obs alignment gate rejects**; wrong ledger run/config/environment header → reject regardless of artifact SHAs; **⚑ constructing the store with an audit_path ≠ `<run_dir>/audit.jsonl` → a subsequent `recover` of an audit=1/terminal=0 crash cannot find the audit and fails closed (unrecoverable)**.
 - [ ] **Step 2:** Run — iterate until green (this is where cross-task integration bugs surface; fix the offending subcommand and re-run). **Step 3:** ruff.

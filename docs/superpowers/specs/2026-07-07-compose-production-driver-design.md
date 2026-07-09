@@ -95,9 +95,17 @@ SHA, phase2a seed-report SHA; §3.1)과 lockstep이어야 하므로, 두 plan은
 - versioned pair-index manifest 검증 및 source obs↔pair row alignment 인증
 - 각 method의 `ExecutionIdentityLock`을 실제 파일 digest에서 조립하는 assembler + subprocess
   `BaselineAdapter` 조립
-- committed **fixture builder** — bounded synthetic stage-1 artifact set + fixture ResolvedRunSpec 생성
+- committed **fixture builder** — bounded synthetic stage-1 artifact set + fixture ResolvedRunSpec 생성.
+  **1회성 corpus 생산자**다(write-once fit-role 포함, §7.1). driver의 세 process는 이걸 재실행하지 않는다.
+- committed **carrier loader** — 각 독립 process가 ResolvedRunSpec의 pre-seal on-disk stage-1 artifact
+  (`phase2a_inputs`·response artifact·dev-store source/manifest·pair-index manifest)에서 필요한 in-memory
+  객체(`Phase2aInputs`·`ResponseSpace`·`FitRoleArtifactSpec`·pair-index dict)를 declared digest 검증과
+  함께 **재조립**한다 — §1.1 step 3의 구현. fixture builder가 한 번 disk에 쓴 산출물을 세 process가
+  rebuild가 아니라 이 loader로 load한다. **raw→artifact 조립만 PREPARE(아래 out-of-scope)이고, 선언된
+  artifact를 ResolvedRunSpec path+digest로 disk-load하는 것은 driver(C)의 몫**이다(§10 문서 충돌 조정 참조).
 - local **mini e2e** — 실제 CLI를 세 독립 subprocess로 실행해 `phase2a → preflight → phase2b`를
-  fixture mode·stub `{gears,cpa}` adapter로 구동하는 integration test
+  fixture mode·stub `{gears,cpa}` adapter로 구동하는 integration test. 각 process는 carrier loader로
+  stage-1을 disk에서 재조립한다(in-memory carrier 공유 없음 → §4 seal 격리 유지).
 
 ### Out of scope (PREPARE는 별도 sub-project)
 
@@ -559,7 +567,8 @@ phase2b). 이 해석을 조용히 남기지 않고 runbook에서 두 gate의 이
 2. RunSpecTemplate/ResolvedRunSpec/pair-index/confirmation manifest의 versioned exact schema와 loader가 구현됨.
 3. Scientific ResolvedRunSpec file SHA가 phase2a ledger→confirmation→pre-access provenance→terminal→durable
    marker에서 동일하게 확인됨.
-4. `phase2a → preflight → phase2b` 세 독립 process e2e가 green이고 preflight 생략은 fail-closed함. 또한
+4. `phase2a → preflight → phase2b` 세 독립 process e2e가 green이고(각 process는 carrier loader로 stage-1을
+   disk에서 재조립하며 in-memory carrier를 공유하지 않는다) preflight 생략은 fail-closed함. 또한
    driver가 scientific store를 `audit_path=<run_dir>/audit.jsonl`로 생성하고, `audit=1/terminal=0` crash를
    재현한 뒤 `recover`가 `ABORTED_AFTER_SEAL`를 합성하는 e2e가 green이며, 다른 audit 경로로 생성하면 recover가
    복구 불능(fail-closed)임을 negative test로 고정한다.
