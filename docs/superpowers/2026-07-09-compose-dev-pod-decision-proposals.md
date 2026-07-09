@@ -112,6 +112,18 @@ tutorial on request, but a version-matched pod read is safer.)
   the cost of more dep re-resolution. **Either way the pin is CONFIRMED by the dev-pod Phase-0 Norman RUN-gate**
   (setup+1-epoch fit end-to-end, not import) — this cannot be finalized on the MacBook (no Norman data / GPU). 0.7.2
   is disqualified unless it somehow passes that gate.
+- **0.8.5 is numpy-clean EVERYWHERE (verified):** grepped ALL 9 `cpa/*.py` at tag v0.8.5 for every alias numpy 1.24
+  removed (`np.int/float/bool/object/str`) → ZERO hits. So the numpy-1.26.4 override that CRASHED 0.7.2 is code-safe
+  on 0.8.5.
+- **⚠️ dev-pod build instruction — do NOT naive-install.** v0.8.5's pyproject DECLARES conservative bounds
+  (`numpy>=1.22.4,<1.24`, `anndata>=0.9.0,<0.10.0`, `torch>1.8.0,<=2.0.1`). A plain `pip install cpa-tools==0.8.5`
+  would pull numpy `<1.24` (which HAS `np.int`) and conflict with numba 0.65 / torch 2.6. REBUILD
+  `requirements.cpa_env.lock` the SAME WAY as the committed 0.7.2 one — `uv pip sync … --index-strategy
+  unsafe-best-match` forcing **numpy 1.26.4 + anndata 0.10.9 + torch 2.6.0+cu124** — just with `cpa-tools==0.8.5`.
+  That override machinery is already proven on the 0.7.2 env; 0.8.5 being numpy-clean makes the numpy override safe.
+- **Residual to RUN-verify (why "0.8.5 = no problem" is NOT assertable without the gate):** 0.8.5's code must tolerate
+  the FORCED anndata 0.10.9 (declared bound `<0.10.0`; the 0.7.2 stack proved 0.7.2 tolerates 0.10.9, 0.8.5 is
+  adjacent but unverified) — the Phase-0 RUN-gate confirms it.
 
 ## #4 — GEARS pseudobulk-approximation bias metric (→ `baselines.gears.approximation_bias_report_sha256`)
 
