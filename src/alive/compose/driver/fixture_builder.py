@@ -67,7 +67,7 @@ from alive.compose.fit_role import (
     generate_fit_role_artifact,
 )
 from alive.compose.models import IDOnlyModel, L1Model, L2Model, L3Model
-from alive.compose.operator import bilinear_predict
+from alive.compose.operator import _sym_to_vec, bilinear_predict
 from alive.compose.outcome_store import FIXTURE_CORPUS_V1, FixtureCorpusAttestation
 from alive.compose.phase2a import OutcomeAccessAudit, Phase2aInputs
 from alive.compose.response import fit_response_space, verify_response_artifact
@@ -229,16 +229,6 @@ def _self_checksummed(body: Mapping[str, Any]) -> dict[str, Any]:
 
 def _path_sha(path: Path) -> dict[str, str]:
     return {"path": str(path), "sha256": sha256_file(path)}
-
-
-def _sym_to_vec(matrix: np.ndarray) -> np.ndarray:
-    """Half-vectorise a symmetric matrix with the off-diagonal √2 weighting."""
-    k = matrix.shape[0]
-    iu = np.triu_indices(k)
-    out = matrix[iu].astype(np.float64).copy()
-    off = iu[0] != iu[1]
-    out[off] *= np.sqrt(2.0)
-    return out
 
 
 # ---------------------------------------------------------------------------

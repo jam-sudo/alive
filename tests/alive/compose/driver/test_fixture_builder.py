@@ -27,6 +27,7 @@ import json
 from pathlib import Path
 
 import anndata
+import numpy as np
 
 from alive.compose.datacard import compute_compose_run_id
 from alive.compose.driver.fixture_builder import FixtureBundle, build_compose_fixture
@@ -36,6 +37,7 @@ from alive.compose.driver.run_spec import (
     ResolvedRunSpec,
     load_resolved_run_spec,
 )
+from alive.compose.operator import _sym_to_vec
 from alive.compose.outcome_store import (
     FIXTURE_CORPUS_V1,
     ComposeOutcomeStore,
@@ -90,6 +92,25 @@ def test_every_declared_digest_matches_on_disk_bytes(tmp_path: Path) -> None:
             "adapter_artifact",
         ):
             assert sha256_file(block[key]["path"]) == block[key]["sha256"], (method, key)
+
+
+# --------------------------------------------------------------------------- #
+# Contract 1b: the fixture's symmetric-vectorisation matches operator._sym_to_vec
+# --------------------------------------------------------------------------- #
+def test_fixture_sym_to_vec_matches_operator_sym_to_vec() -> None:
+    """Pin the fixture builder's coef construction to the SAME half-vectorisation
+    ``alive.compose.operator`` uses (the same sqrt(2) off-diagonal convention),
+    so the two can never silently diverge (fixture_builder.py imports
+    ``_sym_to_vec`` from ``operator`` rather than carrying its own copy).
+    """
+    rng = np.random.default_rng(7)
+    b = rng.normal(size=(5, 5))
+    sym = 0.5 * (b + b.T)
+
+    from alive.compose.driver import fixture_builder
+
+    assert fixture_builder._sym_to_vec is _sym_to_vec
+    np.testing.assert_array_equal(fixture_builder._sym_to_vec(sym), _sym_to_vec(sym))
 
 
 # --------------------------------------------------------------------------- #
