@@ -4,7 +4,7 @@ Read-only post-hoc diagnostics over the *development* OOF surface (NOT the
 sealed cohort).  All tests are pure-numpy with deterministic seeds; expected
 values are hand-verified inline where closed-form.
 
-Coverage discipline (CLAUDE.md §13.5): known-answer, constant, shuffled and
+Coverage discipline (CLAUDE.md#verify): known-answer, constant, shuffled and
 random-sanity cases for every new statistical function.
 """
 

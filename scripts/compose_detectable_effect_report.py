@@ -7,7 +7,7 @@ on the ``combo_calibration`` DEVELOPMENT pairs (split into two disjoint cell hal
 for the measurability noise-ceiling), and the outcome-independent pair / cell counts
 of the sealed evaluation regimes for the pre-registered power gate.
 
-Leakage discipline (CLAUDE.md §6, spec §2.4): ``ε`` is computed ONLY on
+Leakage discipline (CLAUDE.md#seal, spec §2.4): ``ε`` is computed ONLY on
 ``combo_calibration`` (development / ``audited_unsealed`` role). The sealed
 evaluation regimes (``sealed_double_unseen`` / ``sealed_single_unseen``) are read
 for their **cell counts only** — never their outcomes. No seal is opened.

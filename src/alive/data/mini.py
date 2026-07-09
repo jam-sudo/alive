@@ -1,4 +1,4 @@
-"""Mini-dataset selection logic (A100 prep, Gate D — CLAUDE.md §14.2).
+"""Mini-dataset selection logic (A100 prep, Gate D — CLAUDE.md#compute).
 
 A mini dataset is a small, deterministic, *eligibility-preserving* subset of the
 full Perturb-seq AnnData: only perturbations that pass ``min_cells`` AND have a

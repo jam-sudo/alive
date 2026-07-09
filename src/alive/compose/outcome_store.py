@@ -1,6 +1,6 @@
 """Structurally sealed outcome store for COMPOSE-K562-v1 combo outcomes.
 
-This module is THE seal boundary for COMPOSE-K562-v1 Phase 2b (CLAUDE.md §6
+This module is THE seal boundary for COMPOSE-K562-v1 Phase 2b (CLAUDE.md#seal
 multiple-seal rule, §11 write-once provenance). It is the ONLY path that will
 ever read observed Norman combo cell populations, and it mirrors the integrity
 discipline of :mod:`alive.data.outcome_store` (the Replogle store) rather than

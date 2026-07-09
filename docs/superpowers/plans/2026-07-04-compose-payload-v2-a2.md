@@ -10,7 +10,7 @@
 
 ## Global Constraints
 
-- **No seal, no real data.** A2 opens no seal and never reads real Norman. Every test builds a synthetic Norman-shaped fixture in `tmp_path` (never a committed `.h5ad`; `*.h5ad` is gitignored). (spec §0, §8; `CLAUDE.md` §6.3, §14.)
+- **No seal, no real data.** A2 opens no seal and never reads real Norman. Every test builds a synthetic Norman-shaped fixture in `tmp_path` (never a committed `.h5ad`; `*.h5ad` is gitignored). (spec §0, §8; `CLAUDE.md`#seal, #compute.)
 - **`_SCHEMA_VERSION = 2`** in `baseline_subprocess.py`. `_validate_payload` keeps enforcing `set(payload) == set(_REQUIRED_KEYS)` exact equality; v1 payloads must be rejected. (spec §2, §5.)
 - **Two new payload blocks, exact fields (spec §2.1 / §2.2).** `fit_role_artifact` is produced verbatim by `FitRoleArtifactSpec.to_payload_block()` (A1, already merged). `response_projection` has exactly these keys: `response_artifact_sha256, raw_data_sha256, gene_order_sha256, hvg_gene_ids, transform, median_library, pca_mean, pca_components, control_mean, delta_convention`.
 - **Digest formats.** File SHAs are `"sha256:" + hex`; content/gene/row/manifest digests are **bare** 64-char hex (`sha256_json`/`sha256_bytes` output). Do not prefix bare digests.

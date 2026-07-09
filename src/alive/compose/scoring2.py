@@ -193,7 +193,7 @@ class RegimeScore:
         ``l2_saturation`` / ``no_change`` / ``perturbation_mean``), each ordered
         by :attr:`pair_ids`. The six shared methods' arrays are byte-identical to
         :attr:`pair_errors`. NEVER a verdict input — surfaced only for the
-        registered per-method aggregate MSE report (CLAUDE.md §10).
+        registered per-method aggregate MSE report (CLAUDE.md#data-eval).
     bounds : ComposeSimultaneousBounds
         The registered family-wise simultaneous lower bounds — the SOLE verdict
         input from this layer.
@@ -256,7 +256,7 @@ def _resolve_secondary_governance(config: ComposePhase2Config) -> SecondaryMetri
     The interval method and any material-regression margin MUST come from the
     activated config. A missing GI-explained spec, or a config that declares the
     secondaries to be verdict gates, is an activation/preflight-style failure
-    (CLAUDE.md §10 — secondaries are never verdict gates), not a silent default.
+    (CLAUDE.md#data-eval — secondaries are never verdict gates), not a silent default.
 
     Parameters
     ----------
@@ -616,7 +616,7 @@ def score_regime(
     # carries three methods (l2_saturation / no_change / perturbation_mean) that the
     # verdict does NOT consume. We surface their per-pair MSE descriptively — with
     # the SAME argument shape as the verdict loop — for the registered per-method
-    # aggregate MSE report (CLAUDE.md §10). This NEVER feeds the bounds/verdict.
+    # aggregate MSE report (CLAUDE.md#data-eval). This NEVER feeds the bounds/verdict.
     descriptive_pair_errors: dict[str, NDArray[np.float64]] = {}
     for m in sorted(predictions):
         if m in pair_errors:

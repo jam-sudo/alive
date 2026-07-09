@@ -3,7 +3,7 @@
 This module summarises a dataset BEFORE any split or feature build, so the
 operator can (a) choose the data-card fields (``perturbation_key`` /
 ``control_value``) from real ``obs`` columns and (b) confirm the four-way split
-is feasible at the registered thresholds (CLAUDE.md §7: profile distributions and
+is feasible at the registered thresholds (CLAUDE.md#data-eval: profile distributions and
 pre-register thresholds; never hardcode cell/UMI cutoffs as universal facts).
 
 Nothing here reads a sealed evaluation outcome — it is a pure description of the

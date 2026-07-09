@@ -2,7 +2,7 @@
 
 A mini dataset is a small, deterministic, eligibility-preserving subset of the
 full Perturb-seq AnnData used to validate the whole pipeline end-to-end with the
-REAL encoder before the full run (CLAUDE.md §14.2).
+REAL encoder before the full run (CLAUDE.md#compute).
 """
 
 from __future__ import annotations

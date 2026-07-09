@@ -19,7 +19,7 @@ and the terminal writer (Task 7) consume around that single opening. It
      consumed, so the terminal writer records a terminal artifact rather than
      crashing).
 
-The CRITICAL distinction (CLAUDE.md §6 multiple-seal rule, §11 write-once
+The CRITICAL distinction (CLAUDE.md#seal multiple-seal rule, #provenance write-once
 provenance) is the two-path split implemented as two distinct functions:
 
   * a mismatch / absence detectable BEFORE access RAISES — abort, seal closed;
@@ -32,7 +32,7 @@ Layering (intentional, not duplication): Task-2 preflight
 check on the outcome-free inputs. This module is the COMPLETE composite
 assembly plus the pre/post-access split; it does not modify preflight.
 
-This module's run identity is independent of TG-K562 (CLAUDE.md §6.3): a COMPOSE
+This module's run identity is independent of TG-K562 (CLAUDE.md#seal): a COMPOSE
 run id, audit file or result can never represent a CARTOGRAPHER seal, and vice
 versa. SYNTHETIC-ONLY: this is code only — it touches no seal, no outcome
 store and no real Norman data.
@@ -124,7 +124,7 @@ def recompute_run_id(
     The single run-identity definition for Phase 2b: a thin canonical wrapper
     over :func:`alive.compose.datacard.compute_compose_run_id` so there is ONE
     place that binds config + data-card + raw/source + sequence-mapping. The same
-    config on different data yields a different ``run_id`` (CLAUDE.md §11), and
+    config on different data yields a different ``run_id`` (CLAUDE.md#provenance), and
     the identity stays independent of TG-K562 (§6.3).
 
     Parameters
@@ -167,7 +167,7 @@ _POST_ACCESS_FIELDS: tuple[str, ...] = (
 class Phase2bProvenance:
     """Frozen, self-checksummed COMPLETE Phase-2b provenance record.
 
-    Bundles the COMPLETE provenance set the brief lists (CLAUDE.md §11): the
+    Bundles the COMPLETE provenance set the brief lists (CLAUDE.md#provenance): the
     active protocol and resolved config digest; the pair and exclusion manifest
     hashes; the data-card, raw/source and processed hashes; the sequence-mapping
     and feature-bank hashes; the response-space and factor artifact hashes; the
@@ -315,7 +315,7 @@ class Phase2bProvenance:
         only after the single sealed access. Recording this
         subset's checksum before access (Change C) turns the post-access
         provenance consistency check into a real tamper detector rather than a
-        self-reference (CLAUDE.md §11).
+        self-reference (CLAUDE.md#provenance).
 
         Returns
         -------
@@ -393,7 +393,7 @@ def record_phase2b_provenance(
     """Assemble the COMPLETE Phase-2b provenance into a write-once ledger.
 
     Records the COMPLETE provenance set under canonical, write-once artifact
-    names (CLAUDE.md §11). Hash-valued fields (manifest / data-card / model /
+    names (CLAUDE.md#provenance). Hash-valued fields (manifest / data-card / model /
     bundle / regime-result digests) are recorded directly;
     string/scalar evidence (GEARS/CPA revisions, device, precision, the
     seal-audit reference, the clean-state flag) is recorded as ``sha256_json`` of
@@ -464,7 +464,7 @@ def record_pre_access_provenance(*, ledger: RunLedger, provenance: Phase2bProven
     Persists :attr:`Phase2bProvenance.pre_access_checksum` under
     :data:`PRE_ACCESS_PROVENANCE_ARTIFACT` in the write-once ledger, so the
     post-access consistency check (Change C) can cross-verify against a PERSISTED
-    value rather than the in-memory record (CLAUDE.md §11). Called before the
+    value rather than the in-memory record (CLAUDE.md#provenance). Called before the
     seal opens; the seal stays closed if this raises.
 
     Parameters

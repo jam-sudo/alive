@@ -1,7 +1,7 @@
 """Single-owner terminal state machine for COMPOSE-K562-v1 Phase 2b (Task 2b-7).
 
-This module is the SAFETY NET around the one-time COMPOSE seal opening (CLAUDE.md
-§6 multiple-seal rule, §11 write-once provenance). It does NOT open the seal
+This module is the SAFETY NET around the one-time COMPOSE seal opening
+(CLAUDE.md#seal multiple-seal rule, #provenance write-once provenance). It does NOT open the seal
 itself; it guards the lifecycle so the orchestrator (Task 8) can never consume a
 seal without producing a durable terminal record.
 
@@ -338,7 +338,7 @@ TERMINAL_PAYLOAD_CHECKSUM_FIELD = "terminal_payload_checksum"
 
 #: The common exact identity fields injected into EVERY terminal body BEFORE the
 #: self-excluding :data:`TERMINAL_PAYLOAD_CHECKSUM_FIELD`. Writer, recovery reader
-#: and durable finalizer all agree on this one roster (CLAUDE.md §11).
+#: and durable finalizer all agree on this one roster (CLAUDE.md#provenance).
 _COMMON_TERMINAL_FIELDS = frozenset(
     {
         "schema",
@@ -353,7 +353,7 @@ _COMMON_TERMINAL_FIELDS = frozenset(
 )
 
 #: The subset of :data:`_COMMON_TERMINAL_FIELDS` whose VALUE must be a non-empty
-#: string, not merely present (CLAUDE.md §11). These are the run-identity anchors:
+#: string, not merely present (CLAUDE.md#provenance). These are the run-identity anchors:
 #: a seal artifact recorded with a null/empty protocol, run id, seal reference or
 #: pre-access provenance identity is un-attributable and must NEVER be written
 #: (fail closed). Deliberately EXCLUDES ``schema`` (a writer-injected constant),
@@ -549,7 +549,7 @@ class Phase2bTerminal:
         #: artifacts, also as the state ``audit_reference`` — durable proof of
         #: consumption.
         self._audit_reference: str | None = None
-        #: v2 common identity fields (CLAUDE.md §11). ``protocol`` / ``run_id`` are
+        #: v2 common identity fields (CLAUDE.md#provenance). ``protocol`` / ``run_id`` are
         #: known at construction; the pre-access provenance identity is only known
         #: after the pre-access ledger is persisted and is bound via
         #: :meth:`bind_pre_access` BEFORE the seal-open block, so an ABORT written
@@ -1116,7 +1116,7 @@ class Phase2bTerminal:
         # 2. Inject the v2 common identity roster into a LOCAL copy of the body so
         #    COMPLETE / INVALID / ABORTED share one identity contract. The five
         #    identity fields are terminal-INSTANCE state, so an ABORT with no caller
-        #    payload still emits the full roster (CLAUDE.md §11).
+        #    payload still emits the full roster (CLAUDE.md#provenance).
         caller_state = body.get("terminal_state")
         if caller_state != expected_state.value:
             raise TerminalError(
@@ -1207,7 +1207,7 @@ class Phase2bTerminal:
         :data:`_REQUIRED_NONEMPTY_IDENTITY_FIELDS` must carry a NON-EMPTY value —
         presence alone is not enough: a ``None`` or blank run-identity anchor fails
         CLOSED (the seal artifact is un-attributable and must never be written,
-        CLAUDE.md §11). Every terminal state now has a FIXED state roster
+        CLAUDE.md#provenance). Every terminal state now has a FIXED state roster
         (``COMPLETE`` / ``INVALID`` share :data:`_COMPLETE_INVALID_STATE_FIELDS`;
         ``ABORTED_AFTER_SEAL`` its own), so the body must carry exactly
         ``common ∪ state`` — an unknown OR missing state field raises. The
@@ -1230,7 +1230,7 @@ class Phase2bTerminal:
         # Fail CLOSED on a null/empty run-identity anchor: presence is not enough —
         # a ``None`` or blank protocol / run id / seal reference / pre-access
         # provenance identity means the seal artifact is un-attributable and MUST
-        # NOT be recorded (CLAUDE.md §11). This is the canary that stops a future
+        # NOT be recorded (CLAUDE.md#provenance). This is the canary that stops a future
         # refactor dropping / reordering ``bind_pre_access`` from silently emitting
         # a null-identity seal artifact.
         for field in _REQUIRED_NONEMPTY_IDENTITY_FIELDS:

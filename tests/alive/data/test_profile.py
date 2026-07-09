@@ -3,7 +3,7 @@
 ``profile_perturbations`` summarises a Perturb-seq AnnData WITHOUT opening any
 sealed evaluation outcome — it is a pre-split, outcome-independent description
 used to choose the data-card fields and to confirm the four-way split is
-feasible (CLAUDE.md §7: profile distributions, pre-register thresholds).
+feasible (CLAUDE.md#data-eval: profile distributions, pre-register thresholds).
 """
 
 from __future__ import annotations

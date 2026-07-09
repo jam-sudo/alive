@@ -28,7 +28,7 @@ data:
   control_token: control
   combo_sep: "_"
 
-eligibility:                   # outcome-independent (CLAUDE.md §5); NEVER by GI strength
+eligibility:                   # outcome-independent (CLAUDE.md#invariants); NEVER by GI strength
   min_cells_per_gene: 50
   min_cells_per_pair: 50
   require_esm_feature: true     # ESM-2 sequence available for both genes (may shrink counts)

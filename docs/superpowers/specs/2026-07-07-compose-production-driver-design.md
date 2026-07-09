@@ -7,7 +7,7 @@
 > **상위 protocol:** `COMPOSE-K562-v1` (ACTIVE)
 > **상위 계약:** pod sealed-run runbook
 > `docs/superpowers/runbooks/2026-07-02-compose-k562-pod-sealed-run.md` §2.3, §5, §6, §7
-> **거버넌스:** `CLAUDE.md` §5, §11, §14, §15
+> **거버넌스:** `CLAUDE.md`#invariants, #provenance, #compute, #agent
 
 ## 0. 목적과 범위
 
@@ -22,7 +22,7 @@ driver의 세 normal subcommand(`phase2a`/`preflight`/`phase2b --confirm-seal`)�
 조립·호출할 뿐, 과학 계산을 재구현하지 않는다.
 
 이 작업은 실제 seal을 열거나 sealed 결과를 재계산하지 않는다. driver의 orchestration·assembly·
-fail-closed 로직 전체를 MacBook에서 synthetic fixture로 검증한다(`CLAUDE.md` §14.1). pod에서의 유일한 차이는
+fail-closed 로직 전체를 MacBook에서 synthetic fixture로 검증한다(`CLAUDE.md`#compute). pod에서의 유일한 차이는
 ResolvedRunSpec이 실제 artifact를 가리키는 것이다. Fixture template의 `mode`를 현장에서 바꿔 scientific
 run으로 승격하는 행위는 금지한다. Gate PASS는 scientific verdict가 아니다.
 
@@ -529,9 +529,9 @@ versioned `pair_index_manifest`, content-addressed read-only snapshot까지 산�
   Seal 전 owner가 (a) preregistered dependency-aware sensitivity amendment를 승인하거나 (b) primary 분석은
   유지하되 non-verdict sensitivity와 명시적 accepted limitation을 confirmation manifest에 포함해야 한다.
 - 빌드 후 science-dev loop gate 실행(LOCAL ONLY).
-- 관련 변경마다 CLAUDE.md §13(unit/integration/leakage/provenance) 실행.
+- 관련 변경마다 CLAUDE.md#verify(unit/integration/leakage/provenance) 실행.
 
-## 10. 문서 충돌 조정 (CLAUDE.md §3.2)
+## 10. 문서 충돌 조정 (CLAUDE.md#sources)
 
 `scripts/compose/build_fit_role_artifact.py`는 "real source/split assembly is the production driver's
 job (sub-project C)"라고 적혀 있으나, runbook §3 step 8은 fit-role/feature/GO resource를 **pre-built

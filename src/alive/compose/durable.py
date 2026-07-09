@@ -41,7 +41,7 @@ The whole-body ``terminal_payload_checksum`` is verified through the ONE shared
 :func:`~alive.compose.terminal.canonicalize_terminal_checksum_input`, never by
 ``sha256_json`` over the raw decoded body — a real terminal carries finite floats
 whose persisted JSON number differs from the ``float.hex()`` string the writer
-hashed (spec §2, CLAUDE.md §11).
+hashed (spec §2, CLAUDE.md#provenance).
 """
 
 from __future__ import annotations

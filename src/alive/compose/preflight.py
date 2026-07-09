@@ -1,7 +1,7 @@
 """Outcome-free Phase-2b preflight + frozen :class:`EvaluationLock` (Task 2b-2).
 
 Phase 2b opens the COMPOSE seal **exactly once** and produces the confirmatory
-verdict (CLAUDE.md §6 multiple-seal rule, §11 write-once provenance). This module
+verdict (CLAUDE.md#seal multiple-seal rule, #provenance write-once provenance). This module
 is everything that must be validated BEFORE the seal is touched: it consumes the
 frozen Phase-2a :class:`~alive.compose.freeze.FrozenPredictionBundle`, the pair
 manifest, the validated config, the run-identity provenance digests and the
@@ -30,7 +30,7 @@ The preflight enforces, in order:
 
 1. ``bundle.verify()`` (checksum integrity) and ``bundle.assert_no_outcomes()``.
 2. ``bundle.futility_status == "CONTINUE"`` — a futility-stopped dev run is
-   refused (CLAUDE.md §6.1: futility-stopped runs end with zero sealed access).
+   refused (CLAUDE.md#seal: futility-stopped runs end with zero sealed access).
 3. method roster EXACT equality (order + membership) against
    ``config.method_roster``.
 4. per regime, the bundle's pair-ID set equals the manifest role's pair set

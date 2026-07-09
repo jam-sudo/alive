@@ -1,7 +1,7 @@
 """Validated Norman data-card, composite run identity, and provenance capture.
 
 COMPOSE-K562-v1 Phase 2a, Task 2a-10. Implements spec §10.6 (composite ``run_id``
-inputs) and CLAUDE.md §11 (run identity, provenance, immutability) on top of the
+inputs) and CLAUDE.md#provenance (run identity, provenance, immutability) on top of the
 shared CARTOGRAPHER provenance spine (:mod:`alive.provenance`).
 
 A *data-card* is a JSON-serialisable dict that binds a processed Norman AnnData to
@@ -9,14 +9,14 @@ its declared source, its raw/source digest, its DIRECTLY-derived schema and coun
 and its outcome-independent exclusions. The counts and schema are derived from the
 AnnData / parsed labels — caller-supplied counts may be passed only as a *cross
 check* and can never silently overwrite a derived value: a contradiction raises
-:class:`DataCardError` (CLAUDE.md §5, §7; spec §2.2).
+:class:`DataCardError` (CLAUDE.md#invariants, #data-eval; spec §2.2).
 
 The composite ``run_id`` (spec §10.6) is
 
     run_id = sha256(config_digest, data_card_digest, raw/source_digest, sequence_mapping_digest)
 
 computed through :func:`alive.provenance.compute_run_id`, so the COMPOSE seal /
-run-identity stays permanently independent of TG-K562 (CLAUDE.md §6.3).
+run-identity stays permanently independent of TG-K562 (CLAUDE.md#seal).
 
 Public API
 ----------
@@ -226,7 +226,7 @@ def build_data_card(
 
     Schema and counts are derived DIRECTLY from the processed AnnData / parsed
     labels. Any ``declared_counts`` are treated as a cross check only: a mismatch
-    raises and the derived values always win (CLAUDE.md §5, §7). The processed
+    raises and the derived values always win (CLAUDE.md#invariants, #data-eval). The processed
     AnnData is opened in backed read mode so this is safe on large files.
 
     Parameters
@@ -327,7 +327,7 @@ def compute_compose_run_id(
     Binds the resolved config to the canonical data-card digest, the raw/source
     digest, and the sequence-mapping digest, so the same config on different data
     yields a different ``run_id`` and the COMPOSE seal stays independent of
-    TG-K562 (CLAUDE.md §6.3). Delegates to :func:`alive.provenance.compute_run_id`.
+    TG-K562 (CLAUDE.md#seal). Delegates to :func:`alive.provenance.compute_run_id`.
 
     Exactly one of ``data_card`` (canonicalised here) or ``data_card_digest``
     (precomputed) must be supplied.

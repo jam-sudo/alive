@@ -9,7 +9,7 @@
 > **상위 계약:** runbook `docs/superpowers/runbooks/2026-07-02-compose-k562-pod-sealed-run.md` §2.1,
 > deep-baseline design `docs/superpowers/specs/2026-07-01-compose-deep-baselines-design.md` §1,
 > COMPOSE spec `docs/superpowers/specs/2026-06-22-compose-epistasis-operator-design.md` §10,
-> `CLAUDE.md` §5/§6/§7/§9/§11/§14.
+> `CLAUDE.md`#invariants/#seal/#data-eval/#provenance/#compute.
 > **seal 관계:** sub-project A의 개발·테스트는 어떤 seal도 열지 않으며 real Norman에 접근하지 않는다.
 > production artifact 생성기는 full raw AnnData handle을 받지 않고 §4의 audited fit-role extractor만
 > 소비한다. extractor도 sealed row의 expression block을 materialize할 수 없다.
@@ -21,7 +21,7 @@
 - **A는 §2.1의 real-input fit-data 계약 하나만 구현한다.** PR #7이 aggregate-only 재구현(경로 B)을
   삭제했으므로 A에 대안 경로는 없다. `GI_LEARNABLE_WIN`은 real-input published GEARS/CPA를 이긴
   경우에만 성립한다(runbook §0/§2.1).
-- **container = AnnData `.h5ad`, raw counts 보존**(`CLAUDE.md` §7). full 측정 gene universe를
+- **container = AnnData `.h5ad`, raw counts 보존**(`CLAUDE.md`#data-eval). full 측정 gene universe를
   싣는다(baseline native 전처리 = strongest eligible baseline, §9).
 - **payload-v2 = 기존 aggregate payload(변경 없음) + 두 신규 블록**(`fit_role_artifact`,
   `response_projection`). L1/L2/L3(in-process `model_factories`)는 subprocess payload를 쓰지 않으므로
@@ -182,7 +182,7 @@ prediction representation과 전체 prediction SHA를 포함한다. Phase2a는 c
 
 ## 3. fit-role `.h5ad` 스키마
 
-- **`X`** — raw integer UMI counts `(n_cells, n_genes)`, sparse CSR. full 측정 gene universe(`CLAUDE.md` §7).
+- **`X`** — raw integer UMI counts `(n_cells, n_genes)`, sparse CSR. full 측정 gene universe(`CLAUDE.md`#data-eval).
 - **`obs.role`** — categorical, `{control, singles, combo_calibration}`. **sealed role은 절대 부재.**
 - **`obs.perturbation`** — token(`control` / `GENE` / canonical `GENEA_GENEB`). 모든 `combo_calibration`
   cell의 pair는 calibration pair 집합에 속하며 **sealed pair는 부재.**

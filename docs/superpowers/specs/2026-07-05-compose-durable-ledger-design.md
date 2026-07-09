@@ -5,7 +5,7 @@
 > **상위 protocol:** `COMPOSE-K562-v1`
 > **상위 계약:** pod sealed-run runbook
 > `docs/superpowers/runbooks/2026-07-02-compose-k562-pod-sealed-run.md` §2.4, §2.5, §7–§8
-> **거버넌스:** `CLAUDE.md` §5, §10, §11, §14, §15
+> **거버넌스:** `CLAUDE.md`#invariants, #data-eval, #provenance, #compute, #agent
 
 ## 0. 목적과 범위
 

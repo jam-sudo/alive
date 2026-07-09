@@ -2,7 +2,7 @@
 
 ``scripts/run_compose_k562_phase2.py`` is a THIN shim (``import`` + ``sys.exit(
 main())``); all argparse wiring, dispatch and exit-code mapping lives here per
-CLAUDE.md §7 (production logic in ``src/``, scripts stay thin). This module
+CLAUDE.md#data-eval (production logic in ``src/``, scripts stay thin). This module
 opens **no** seal and constructs **no**
 :class:`~alive.compose.outcome_store.ComposeOutcomeStore` — dispatch to the four
 already-committed subcommand entry points (Tasks 7-10:

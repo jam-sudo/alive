@@ -134,7 +134,7 @@ def _base_paths(run_dir: Path) -> tuple[Path, Path]:
 
 
 # ---------------------------------------------------------------------------
-# Upstream-stage locks (CLAUDE.md §11; spec §11.2)
+# Upstream-stage locks (CLAUDE.md#provenance; spec §11.2)
 #
 # Once a run reaches a terminal state (FUTILITY_STOPPED) or its seal has opened
 # (a sealed access recorded in audit.jsonl), the early stages must permanently
@@ -156,7 +156,7 @@ def _assert_not_sealed(run_dir: Path) -> None:
     The durable sealed-access audit is ``<run_dir>/audit.jsonl`` (written by the
     outcome store at sealed evaluation).  A non-empty audit means the seal has
     opened, so ``fit``/``develop``/``calibrate`` are all permanently locked for
-    this run (CLAUDE.md §11; spec §11.2).  Reading the file directly avoids
+    this run (CLAUDE.md#provenance; spec §11.2).  Reading the file directly avoids
     constructing an outcome store before the guard runs.
 
     Raises
@@ -176,7 +176,7 @@ def _assert_not_futility_terminal(run_dir: Path) -> None:
     """Refuse ``fit``/``develop`` re-runs once the run is FUTILITY_STOPPED (terminal).
 
     A FUTILITY_STOPPED run is terminal: its upstream model-building stages must
-    not be re-run (CLAUDE.md §11; spec §11.2).  This guard does NOT bind
+    not be re-run (CLAUDE.md#provenance; spec §11.2).  This guard does NOT bind
     ``calibrate`` — a futility-stopped run still ships its conformal error bound
     via ``calibrate`` (spec §9.3 / §12.1), so ``calibrate`` only carries the seal
     lock (:func:`_assert_not_sealed`).
@@ -704,7 +704,7 @@ def _append_artifact(run_dir: Path, name: str, checksum: str) -> None:
     :class:`~alive.provenance.DuplicateArtifactError` on any second record of the
     same name), and writes it back.  Unlike the removed ``_ledger_record``, this
     NEVER removes-then-reappends an entry, so a re-run can never silently replace
-    a recorded checksum (CLAUDE.md §11; spec §11.2 — ledger entries are append-only).
+    a recorded checksum (CLAUDE.md#provenance; spec §11.2 — ledger entries are append-only).
 
     Parameters
     ----------

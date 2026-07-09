@@ -667,7 +667,7 @@ class FrozenPredictionBundle:
         ----------
         path : str or Path
             Destination file. Must not already exist (the bundle is written ONCE
-            per the run-immutability contract, CLAUDE.md §11).
+            per the run-immutability contract, CLAUDE.md#provenance).
 
         Raises
         ------
@@ -683,7 +683,7 @@ class FrozenPredictionBundle:
         except FileExistsError as exc:
             raise FreezeError(
                 f"refusing to overwrite existing bundle at {path}: the frozen bundle "
-                "is write-once (CLAUDE.md §11)"
+                "is write-once (CLAUDE.md#provenance)"
             ) from exc
 
     @classmethod

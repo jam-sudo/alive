@@ -5,8 +5,8 @@ modules — :mod:`~alive.compose.outcome_store`, :mod:`~alive.compose.preflight`
 :mod:`~alive.compose.inference2`, :mod:`~alive.compose.scoring2`,
 :mod:`~alive.compose.verdict2`, :mod:`~alive.compose.provenance2` and
 :mod:`~alive.compose.terminal` — into the one-time sealed evaluation that opens
-the COMPOSE seal EXACTLY ONCE and produces the confirmatory verdict (CLAUDE.md
-§6 multiple-seal rule, §11 write-once provenance).
+the COMPOSE seal EXACTLY ONCE and produces the confirmatory verdict
+(CLAUDE.md#seal multiple-seal rule, #provenance write-once provenance).
 
 The load-bearing safety properties
 ----------------------------------
@@ -617,7 +617,7 @@ def _build_provenance(
 #: Sentinel substituted for any non-finite embedded float. A ``NaN`` / ``Infinity``
 #: anywhere in the registered summary would make the shared terminal canonicalizer
 #: REFUSE the write (a latent forced abort on the seal path), so the summary carries
-#: only finite floats or this string sentinel (spec §2, CLAUDE.md §5 / §10.10 —
+#: only finite floats or this string sentinel (spec §2, CLAUDE.md#invariants / #data-eval —
 #: report the degenerate value honestly, never a silent NaN).
 _NON_FINITE_SENTINEL = "NON_FINITE"
 
@@ -684,7 +684,7 @@ def build_registered_evaluation_summary(
         {...}}`` — the per-method aggregate MSE over the FULL nine-method descriptive
         roster for BOTH regimes, computed ONCE inside the protected evaluation.
         ``double`` is the headline / verdict-linked regime;
-        ``single`` is the registered secondary (CLAUDE.md §10). Each regime is
+        ``single`` is the registered secondary (CLAUDE.md#data-eval). Each regime is
         scored INDEPENDENTLY over its own pairs and the two are NEVER pooled.
     final_verdict : ComposeSealedResult
         The FINAL sealed verdict (swapped to ``INVALID`` on a post-access
@@ -1284,7 +1284,7 @@ def _run_phase2b_core(
     # --- Change C: persist the pre-access provenance subset BEFORE the seal opens.
     # The subset excludes post-access result/terminal checksums, so it is fully
     # computable here; recording it write-once lets the post-access check
-    # cross-verify a PERSISTED value instead of a self-reference (CLAUDE.md §11).
+    # cross-verify a PERSISTED value instead of a self-reference (CLAUDE.md#provenance).
     audit_reference = str(audit_path) if audit_path is not None else "in-memory"
     pre_access_provenance = _build_provenance(
         bundle=frozen_bundle,
@@ -1305,7 +1305,7 @@ def _run_phase2b_core(
     # pre-access ledger is persisted (its file SHA and the provenance self-checksum
     # are the only two common-roster fields not known at construction). Binding
     # BEFORE the seal-open block guarantees an ABORT written from the protection
-    # boundary still emits the full common identity roster (CLAUDE.md §11).
+    # boundary still emits the full common identity roster (CLAUDE.md#provenance).
     # Bind the pre-access provenance SUBSET checksum (the value persisted into the
     # write-once pre-access ledger under PRE_ACCESS_PROVENANCE_ARTIFACT by
     # record_pre_access_provenance, i.e. provenance.pre_access_checksum), NOT the
@@ -1549,7 +1549,7 @@ def _evaluate_inside_boundary(
     # arrays and per-pair CIs are NEVER embedded — only the per-method mean MSE.
     # Reported for BOTH regimes, regime-labeled and scored INDEPENDENTLY (never
     # pooled): double = headline / verdict-linked, single = registered secondary
-    # (CLAUDE.md §10). Each embedded float passes _finite_or_sentinel so a
+    # (CLAUDE.md#data-eval). Each embedded float passes _finite_or_sentinel so a
     # degenerate mean becomes the sentinel string, never a summary-write abort.
     # Aggregate over the FULL nine-method DESCRIPTIVE roster (descriptive_pair_errors),
     # NOT the six verdict methods (pair_errors): freeze validates all nine per regime,
@@ -1591,7 +1591,7 @@ def _evaluate_inside_boundary(
         terminal_state = TerminalState.COMPLETE
     else:
         # A post-access inconsistency dominates: the sealed axis is INVALID and the
-        # result is not trustworthy (CLAUDE.md §6 / §11).
+        # result is not trustworthy (CLAUDE.md#seal / #provenance).
         final_verdict = ComposeSealedResult(
             sealed_axis=SealedAxis.INVALID,
             method_axis=verdict.method_axis,

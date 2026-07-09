@@ -9,7 +9,7 @@
 > e2e까지 통과했으나 **아직 main에 병합되지 않았다.** §2.1/§2.2 real worker(GEARS/CPA)와 durable-ledger
 > 최종 export(§2.4)를 포함한 나머지 blocker가 해결·검토·commit되기 전에는 runbook은 계속 BLOCKED다.
 > **상위 계약:** COMPOSE spec §7/§10.5–§10.6, deep-baseline design §1/§7,
-> `CLAUDE.md` §5/§6/§9/§10/§11/§14.2.
+> `CLAUDE.md`#invariants/#seal/#data-eval/#provenance/#compute.
 > **seal 계약:** COMPOSE seal은 TG-K562와 독립이며 정확히 한 번만 연다. 재실행·resume 없음.
 
 ---
@@ -128,7 +128,7 @@ post-seal non-COMPLETE(durable export 미완료 포함), `10` pre-seal rejection
   sample counts, integrity clauses, audit/checksums다.
 - 현재 등록 추론은 pair-resampled **aggregate simultaneous bound**다. 등록되지 않은 “per-pair CI”를
   사후 생성하거나 verdict 근거로 사용하지 않는다.
-- seed-variability 계약을 명시적으로 해결한다. CLAUDE.md §10은 seed variability 보고를 요구하고,
+- seed-variability 계약을 명시적으로 해결한다. CLAUDE.md#data-eval은 seed variability 보고를 요구하고,
   외부 seed로 재적합 가능한 stochastic learned comparator(`gears`, `cpa`)의 seed 민감도는 non-sealed
   development role에서 실제로 평가 가능하므로 이를 `gi_structure_recovery`처럼 `NOT_EVALUABLE`로 처리하지
   않는다. seed별 재적합으로 development-phase seed-variability 요약(comparator별 error spread)을 산출·보고하는

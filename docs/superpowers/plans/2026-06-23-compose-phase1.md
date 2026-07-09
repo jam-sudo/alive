@@ -17,12 +17,12 @@
 
 - **Spec:** `docs/superpowers/specs/2026-06-22-compose-epistasis-operator-design.md`. This plan implements **Phase 1 only** (§5).
 - **No seal access (§2.5).** Phase 1 code must never read `sealed_double_unseen` or `secondary_sealed` expression/outcomes. Only `singles_train` + `combo_calibration` (+ outcome-independent cell-count metadata) are readable. A leakage test enforces this.
-- **Outcome-independent eligibility (§2.2, CLAUDE.md §5).** Eligible singles/pairs are chosen by cell-count/QC + ESM availability + graph structure ONLY — never by GI strength or response magnitude.
+- **Outcome-independent eligibility (§2.2, CLAUDE.md#invariants).** Eligible singles/pairs are chosen by cell-count/QC + ESM availability + graph structure ONLY — never by GI strength or response magnitude.
 - **Two-stage identification (§3.1–3.2).** `z_g` is fixed from singles BEFORE `B` is estimated; `B` estimation is a linear regularized least-squares.
 - **Identifiability ≠ recovery ≠ generalization (§1.4, C3).** Algebraic identifiability is the noiseless rank condition; noisy recovery is the synthetic known-answer result; neither is a real-generalization claim. Keep them separate in code, names, and reports.
 - **Measurability gate leakage guard (§2.4).** The noise-ceiling estimate uses only calibration/unsealed dev pairs or outcome-independent cell-count metadata — never sealed outcomes.
-- **Provenance (CLAUDE.md §11).** Phase-1 runs record config digest, data-card hash, seed, git SHA, dependency lock, and artifact checksums via `alive.provenance.RunLedger`; run dirs are write-once.
-- **Code conventions (CLAUDE.md §12).** Production logic in `src/alive/`; NumPy-style docstrings + type hints on public API; ruff line length 100; no hardcoded paths/thresholds/seeds in source (config-driven); tests alongside under `tests/alive/`.
+- **Provenance (CLAUDE.md#provenance).** Phase-1 runs record config digest, data-card hash, seed, git SHA, dependency lock, and artifact checksums via `alive.provenance.RunLedger`; run dirs are write-once.
+- **Code conventions (CLAUDE.md#repo).** Production logic in `src/alive/`; NumPy-style docstrings + type hints on public API; ruff line length 100; no hardcoded paths/thresholds/seeds in source (config-driven); tests alongside under `tests/alive/`.
 - **Commits** follow the repo trailer convention (Co-Authored-By + Claude-Session) already in use; the `git commit -m` lines below are abbreviated.
 - **Run commands** with `uv run` (e.g. `uv run pytest ...`, `uv run ruff ...`).
 
@@ -933,7 +933,7 @@ Expected: FAIL — `ModuleNotFoundError: No module named 'alive.data.norman'`.
 """Norman et al. 2019 K562 CRISPRa GI Perturb-seq ingestion (COMPOSE Phase 1).
 
 Outcome-independent: eligibility uses cell counts + feature availability only,
-never GI strength (CLAUDE.md §5; spec §2.2). Combo labels are "<g><sep><h>".
+never GI strength (CLAUDE.md#invariants; spec §2.2). Combo labels are "<g><sep><h>".
 """
 from __future__ import annotations
 

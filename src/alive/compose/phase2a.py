@@ -93,7 +93,7 @@ class HashMismatchError(ValueError):
     The orchestrator binds the manifest, response-space, factor and environment
     checksums it was built from. If the caller's expected hashes disagree, the run
     aborts before any selection / prediction so a mismatched lineage can never
-    produce a frozen bundle (CLAUDE.md §11).
+    produce a frozen bundle (CLAUDE.md#provenance).
     """
 
 

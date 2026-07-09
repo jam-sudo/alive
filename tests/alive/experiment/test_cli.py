@@ -541,7 +541,7 @@ class TestEndToEndFutility:
 # ===========================================================================
 # Task 4 (#4 / audit P1-2 pt3): lock upstream stages after terminal/sealed state
 #
-# Two distinct lock conditions (CLAUDE.md §11; spec §11.2):
+# Two distinct lock conditions (CLAUDE.md#provenance; spec §11.2):
 #   1. Seal lock — once a sealed access is recorded (audit.jsonl non-empty), the
 #      upstream stages fit/develop/calibrate are ALL permanently refused.
 #   2. Futility-terminal lock — once futility.json status == FUTILITY_STOPPED,

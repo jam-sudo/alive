@@ -8,7 +8,7 @@ COMPOSE sealed-axis verdict, over the EXACT registered comparator family.
 
 Why COMPOSE-specific verdict types (not CARTOGRAPHER's)
 -------------------------------------------------------
-``CLAUDE.md`` §6.3 (multiple-seal rule): a COMPOSE run ID, audit file or result
+``CLAUDE.md`` #seal (multiple-seal rule): a COMPOSE run ID, audit file or result
 can never represent a CARTOGRAPHER seal, and vice versa. So this module defines
 its **own** sealed/method enums (:class:`SealedAxis`, :class:`MethodAxis`),
 its own :class:`ComposeIntegrityReport`, and its own
@@ -228,7 +228,7 @@ class ComposeSealedResult:
 
     Mirrors CARTOGRAPHER's ``VerdictResult`` per-clause auditability (a ``bool``
     for every evaluated clause plus parallel evidence and a content checksum) but
-    is a distinct COMPOSE-specific type (``CLAUDE.md`` §6.3).
+    is a distinct COMPOSE-specific type (``CLAUDE.md`` #seal).
 
     Parameters
     ----------

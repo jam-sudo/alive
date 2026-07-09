@@ -5,7 +5,7 @@
 > did **not** beat the comparator family). The active protocol is now **`COMPOSE-K562-v1`** (Norman
 > K562 CRISPRa non-additive epistasis operator; ACTIVE 2026-06-30, A100 sealed confirmatory run
 > pending). **This README documents the now-complete CARTOGRAPHER pipeline and its mechanics** — the
-> `evaluate-once` seal described below has already been spent for `TG-K562-v1`. See `CLAUDE.md` §4
+> `evaluate-once` seal described below has already been spent for `TG-K562-v1`. See `CLAUDE.md`#registry
 > for the protocol registry.
 
 A retrospective, leakage-controlled **trust-gate** for single-gene CRISPRi perturbation-response
@@ -40,7 +40,7 @@ uv sync --extra features   # adds torch, transformers, fair-esm
 The numpy-only mock encoder is **opt-in only**, via the `--mock-encoder` flag on `prepare`
 (synthetic/CI runs). A scientific run (no `--mock-encoder`) requires the real ESM-2: if the
 `features` extras are absent, `prepare` fails loudly with a clear `error: …` — it **never silently
-falls back** to the mock encoder (see `CLAUDE.md` §8.1 and design spec §4.2).
+falls back** to the mock encoder (see `CLAUDE.md`#data-eval and design spec §4.2).
 
 Run the test suite and linters:
 

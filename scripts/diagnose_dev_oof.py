@@ -9,7 +9,7 @@ correlations (the registered ``added_value`` question) and the gate's most
 overconfident misses.
 
 This is **read-only** and operates only on the *development* surface, which is
-not sealed under the ``TG-K562-v1`` seal contract (CLAUDE.md §6.1).  It does
+not sealed under the ``TG-K562-v1`` seal contract (CLAUDE.md#seal).  It does
 not touch, re-open, or slice the sealed cohort; the registered verdict is
 immutable.
 

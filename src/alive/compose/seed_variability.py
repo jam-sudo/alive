@@ -811,7 +811,7 @@ _SEED_LOOP_ROSTER: frozenset[str] = frozenset({"gears", "cpa"})
 #: Subdirectory (beside the base fit-role artifact) the write-once fold-scoped
 #: fit-role artifacts are written into. Derived rather than passed so the entry
 #: keeps its declared signature; the fold artifacts are development derivatives of
-#: the base fit-role artifact and belong next to it (CLAUDE.md §12 ``artifacts/``).
+#: the base fit-role artifact and belong next to it (CLAUDE.md#repo ``artifacts/``).
 _FOLD_ARTIFACT_SUBDIR = "d2_seed_variability_folds"
 
 #: Top-level keys of a serialised :class:`SeedVariabilityReport` (exact set).
@@ -1211,7 +1211,7 @@ class SeedVariabilityReport:
         Parameters
         ----------
         path : str or Path
-            Destination file; must not already exist (write-once, CLAUDE.md §11).
+            Destination file; must not already exist (write-once, CLAUDE.md#provenance).
 
         Raises
         ------
@@ -1746,7 +1746,7 @@ def bind_development_seed_variability(
     byte SHA, and records it into ``ledger`` under ``ledger_artifact_name`` BEFORE
     any :func:`~alive.compose.provenance2.persist_pre_access_ledger` snapshot. It
     NEVER overwrites an existing report and NEVER mutates an already-persisted
-    snapshot (write-once, CLAUDE.md §11). It opens NO seal.
+    snapshot (write-once, CLAUDE.md#provenance). It opens NO seal.
 
     Parameters
     ----------
