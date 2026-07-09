@@ -30,7 +30,7 @@ Copied verbatim from the runbook (§1/§2.2/§4/§2.5), the B design spec, and `
 
 ## Open decisions to settle BEFORE Phase 1 (owner + pod)
 
-These are the B spec §7 open questions; the plan pins the contract, not these values. Confirm before authoring the workers:
+These are the B spec §7 open questions; the plan pins the contract, not these values. **Hard Phase-0 entry gate — Phase 1 MUST NOT begin until all five are recorded** (owner-supplied values + pod acquisition); this is a gate, not a preamble:
 
 1. **GEARS published config + revision.** Exact `epoch/batch/optimizer/early-stop/seed` and the pinned `gears` package revision to record in `configs/…yaml::baselines.gears.revision` and the dependency lock. Source: GEARS paper/repo default for K562 Perturb-seq.
 2. **GEARS GO-graph / gene2go source.** Exact URL + version + license + SHA-256 to record in the resource manifest (Phase 0). Must be pre-acquired, not fetched at fit time.
@@ -101,7 +101,7 @@ These are the B spec §7 open questions; the plan pins the contract, not these v
 - Manifest keys (must match stub, `stub_worker.py:139-157`): `prediction_representation, adapter_version, adapter_sha256, expected_gene_order_sha256, observed_gene_order_sha256, checkpoint_sha256, worker_sha256, config_sha256, resource_sha256, environment_lock_sha256, fit_artifact_content_sha256, combined_request_sha256, predictions_sha256`.
 - Worker MUST call `validate_fit_role_artifact(path, spec=…, approved_root=…, calibration_pair_ids=…, sealed_pair_ids=payload["pair_ids"], single_gene_ids=…)` before any fit (leakage guard).
 
-- [ ] **Step 1: Write the failing test.** Build a tiny synthetic fit-role artifact (reuse `scripts/compose/build_fit_role_artifact.py` helpers or the existing fixture builders) with `{control, singles, combo_calibration}` rows; a minimal valid payload; then invoke each real worker with `--prediction-representation` set per config, with the fit body **import-guarded** so the *contract surface* runs without `gears`/`cpa`. Assert: (a) the envelope round-trips via `read_payload`/`write_predictions`; (b) manifest has exactly the 13 keys above; (c) `validate_fit_role_artifact` is invoked with `sealed_pair_ids == payload["pair_ids"]` (spy); (d) missing `gears`/`cpa` import raises a clear `WorkerUnavailable`-style error, not a silent stub. Run: `.venv/bin/python -m pytest tests/alive/compose/test_worker_contract.py -v` → FAIL (workers absent).
+- [ ] **Step 1: Write the failing test.** Build a tiny synthetic fit-role artifact (reuse `scripts/compose/build_fit_role_artifact.py` helpers or the existing fixture builders) with `{control, singles, combo_calibration}` rows; a minimal valid payload; then invoke each real worker with `--prediction-representation` set per config, with the fit body **import-guarded** so the *contract surface* runs without `gears`/`cpa`. Assert: (a) the envelope round-trips via `read_payload`/`write_predictions`; (b) manifest has exactly the 13 keys above — assert `predictions_sha256` is emitted as an empty placeholder by the worker and **filled by `write_predictions` downstream** (placeholder-then-filled, not a static value snapshot, so the test is not brittle to the fill); (c) `validate_fit_role_artifact` is invoked with `sealed_pair_ids == payload["pair_ids"]` (spy); (d) missing `gears`/`cpa` import raises a clear `WorkerUnavailable`-style error, not a silent stub. Run: `.venv/bin/python -m pytest tests/alive/compose/test_worker_contract.py -v` → FAIL (workers absent).
 - [ ] **Step 2:** Run → FAIL.
 - [ ] **Step 3–4:** (workers created in 1.2/1.3) → PASS; ruff.
 - [ ] **Step 5: Commit** `tests/alive/compose/test_worker_contract.py` — `test(compose): real-worker contract surface (env-agnostic)`.
@@ -150,7 +150,7 @@ These are the B spec §7 open questions; the plan pins the contract, not these v
 **Steps:**
 - [ ] Pin `baselines.gears.revision` / `baselines.cpa.revision` to the confirmed env revisions (Task 0.1) in BOTH the config and the dependency lock.
 - [ ] Set `baselines.{gears,cpa}.environment_status` from `unpinned_activation_blocker` → the pinned/established value once both locked envs are fresh-sync-verified (Task 0.1).
-- [ ] Run the detectable-effect report (Task 2.3 tooling) to establish `regimes.power_status`; set it from `unestablished_activation_blocker` → the established value (double-unseen power passed / SNR per the report).
+- [ ] Run the detectable-effect report (Task 2.3 tooling) to establish `regimes.power_status`; set it from `unestablished_activation_blocker` → the established value (double-unseen power passed / SNR per the report). **Consistency guard:** this is the SAME computation Task 2.3 regenerates under the finalized config — the `power_status` set here MUST equal what the Task-2.3 regenerated detectable-effect report shows. If they differ, the intermediate config drifted between 2.1 and 2.3; reconcile (re-read power under the finalized config) before committing the finalized config.
 - [ ] **⚑ Do NOT regenerate evidence yet** — Task 2.2 must land the `approximation_bias_report_sha256` first so the config is FULLY finalized before evidence binds it (Global ⚑).
 
 ### Task 2.2: GEARS pseudobulk-approximation bias report
@@ -158,7 +158,8 @@ These are the B spec §7 open questions; the plan pins the contract, not these v
 **Files:** Create `scripts/compose/measure_pseudobulk_approximation_bias.py`; MODIFY `configs/compose_k562_v1_phase2.yaml` (`baselines.gears.approximation_bias_report_sha256`).
 
 **Steps:**
-- [ ] Author a script that quantifies, on **non-sealed** roles only, the bias introduced by `raw_pseudobulk_approximation` vs per-cell for GEARS (decision #4); emit a canonical-JSON report with the bias metric + provenance.
+- [ ] **Pre-register the bias metric first** (decision #4): fix what is measured (the `raw_pseudobulk_approximation` vs per-cell discrepancy), on which **non-sealed** roles, and its direction/aggregation — BEFORE running it, so the report SHA that binds the final `config_sha256` is not outcome-shaped (it is an activation requirement, not a tunable).
+- [ ] Author a script that quantifies, on **non-sealed** roles only, the pre-registered bias for GEARS; emit a canonical-JSON report with the bias metric + provenance.
 - [ ] Run it on the pod; set `baselines.gears.approximation_bias_report_sha256` = the report file SHA-256 (CPA stays null — exact representation).
 - [ ] **Acceptance + Commit:** `configs/compose_k562_v1_phase2.yaml` is now fully finalized (no `*_activation_blocker` / null activation field remains for the active roster). Record the new `config_sha256` (`load_compose_phase2_config(...).config_sha256`). Commit `configs/compose_k562_v1_phase2.yaml docs/activation-evidence/compose/gears_cpa_dependency_lock.json scripts/compose/measure_pseudobulk_approximation_bias.py <bias_report>` — `feat(compose): establish activation requirements (env/revision/power/bias) → finalize active config`. **This commit mints the FINAL run identity.**
 
