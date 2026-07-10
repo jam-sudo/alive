@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import subprocess
 import sys
 import types
@@ -220,3 +221,69 @@ def test_backend_module_origin_must_be_inside_launched_prefix(tmp_path, monkeypa
     module.__file__ = str(outside)
     with pytest.raises(WorkerIdentityError, match="outside sys.prefix"):
         require_module_from_environment(module, expected_name="cpa")
+
+
+def test_worker_identity_rejects_symlinked_config(tmp_path, monkeypatch):
+    # The re-hash path must refuse a symlinked identity file even when the bytes
+    # behind the link hash to the controller-locked digest — an ABA/redirect
+    # surface distinct from a byte-tamper (which the digest check already covers).
+    paths = _install_identity_env(tmp_path, monkeypatch)
+    real = tmp_path / "config_real"
+    real.write_bytes(paths["CONFIG"].read_bytes())
+    link = tmp_path / "config_link"
+    link.symlink_to(real)
+    monkeypatch.setenv("ALIVE_WORKER_CONFIG_PATH", str(link))
+    # Digest env is unchanged and still matches the bytes; only the symlink differs.
+    with pytest.raises(WorkerIdentityError, match="regular non-symlink file"):
+        load_verified_worker_identity(method="gears")
+
+
+def test_backend_module_origin_rejects_name_and_shape_violations(tmp_path, monkeypatch):
+    prefix = tmp_path / "venv"
+    package = prefix / "lib" / "python" / "site-packages" / "cpa"
+    package.mkdir(parents=True)
+    origin = package / "__init__.py"
+    origin.write_text("# pinned backend\n", encoding="utf-8")
+    monkeypatch.setattr(worker_identity.sys, "prefix", str(prefix))
+
+    with pytest.raises(WorkerIdentityError, match="is not 'cpa'"):
+        require_module_from_environment(
+            types.SimpleNamespace(__name__="not_cpa", __file__=str(origin)),
+            expected_name="cpa",
+        )
+    with pytest.raises(WorkerIdentityError, match="absolute origin"):
+        require_module_from_environment(
+            types.SimpleNamespace(__name__="cpa", __file__=os.path.join("cpa", "__init__.py")),
+            expected_name="cpa",
+        )
+    shadow = package / "shadow.py"
+    shadow.symlink_to(origin)
+    with pytest.raises(WorkerIdentityError, match="regular non-symlink file"):
+        require_module_from_environment(
+            types.SimpleNamespace(__name__="cpa", __file__=str(shadow)),
+            expected_name="cpa",
+        )
+
+
+def test_worker_executable_rejects_pathshape_violations(tmp_path, monkeypatch):
+    # Realpath the tmp root so the extension check is reached rather than the
+    # canonical-path check on hosts whose temp dir has symlinked parents.
+    root = Path(os.path.realpath(tmp_path))
+
+    monkeypatch.setenv("ALIVE_WORKER_EXECUTABLE_PATH", "worker.pyz")
+    with pytest.raises(WorkerIdentityError, match="absolute and normalized"):
+        worker_identity.load_verified_worker_executable()
+
+    real = root / "real.pyz"
+    real.write_bytes(b"# bundle\n")
+    link = root / "link.pyz"
+    link.symlink_to(real)
+    monkeypatch.setenv("ALIVE_WORKER_EXECUTABLE_PATH", str(link))
+    with pytest.raises(WorkerIdentityError, match="canonical and non-symlinked"):
+        worker_identity.load_verified_worker_executable()
+
+    other = root / "worker.bin"
+    other.write_bytes(b"# bundle\n")
+    monkeypatch.setenv("ALIVE_WORKER_EXECUTABLE_PATH", str(other))
+    with pytest.raises(WorkerIdentityError, match=r"\.pyz bundle or local \.py"):
+        worker_identity.load_verified_worker_executable()

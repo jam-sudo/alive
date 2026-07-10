@@ -176,8 +176,14 @@ def _install_fake_gears(
             return self
 
     class FakeBestModel:
+        # ``tag`` distinguishes the fixed final-epoch ``model`` from GEARS'
+        # monitoring-selected ``best_model`` so the checkpoint's bound state is
+        # falsifiable: removing the worker's final-epoch rebind must change it.
+        def __init__(self, tag):
+            self._tag = tag
+
         def state_dict(self):
-            return {"layer.weight": FakeTensor(7)}
+            return {"layer.weight": FakeTensor(self._tag)}
 
     class FakeGEARS:
         def __init__(self, pert_data, *, device):
@@ -195,7 +201,8 @@ def _install_fake_gears(
                 self.pert_data.data_path,
             )
             events.append(("initialize", dict(kwargs)))
-            self.model = FakeBestModel()
+            # After ``train`` this attribute holds the fixed final-epoch weights.
+            self.model = FakeBestModel("final_epoch")
 
         def train(self, **kwargs):
             events.append(("train", dict(kwargs)))
@@ -211,7 +218,9 @@ def _install_fake_gears(
             assert train_conditions == {"AAA+ctrl", "BBB+ctrl", "AAA+BBB"}
             assert val_conditions == train_conditions
             assert self.pert_data.set2conditions["train"] == sorted(train_conditions)
-            self.best_model = FakeBestModel()
+            # GEARS selects this via the monitoring loader; the worker must
+            # discard it in favour of the fixed final-epoch ``model``.
+            self.best_model = FakeBestModel("monitoring_selected")
 
         def predict(self, requests):
             events.append(("predict", tuple(tuple(pair) for pair in requests)))
@@ -239,6 +248,12 @@ def _install_fake_gears(
     def _save(obj, file_obj):
         assert obj["schema"] == "compose_gears_trained_model_v1"
         assert obj["model_state_dict"]
+        # The checkpoint must bind the fixed final-epoch model, never GEARS'
+        # monitoring-selected best_model. Fails if the worker drops the rebind.
+        assert obj["model_state_dict"]["layer.weight"].value == "final_epoch", (
+            "checkpoint bound the monitoring-selected best_model instead of the "
+            "fixed final-epoch model"
+        )
         assert obj["training_device"] == "cuda"
         assert obj["numeric_precision"] == "float32"
         assert obj["training_config"]["model_selection_policy"] == "fixed_final_epoch"
