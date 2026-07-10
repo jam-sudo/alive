@@ -21,6 +21,7 @@ from alive.compose.fit_role import (
     content_manifest_sha256,
     extract_fit_roles,
     generate_fit_role_artifact,
+    read_verified_fit_role_artifact,
     row_identity_sha256,
     validate_fit_role_artifact,
 )
@@ -171,6 +172,53 @@ def test_generate_writes_valid_h5ad_and_spec(tmp_path):
     assert block["counts_location"] == "X"
 
 
+def test_read_verified_fit_role_artifact_uses_bound_file_bytes(tmp_path):
+    spec = _gen(tmp_path)
+    adata = read_verified_fit_role_artifact(
+        spec.path,
+        spec=spec,
+        approved_root=str(tmp_path),
+    )
+    assert adata.shape == (spec.n_cells, spec.n_genes)
+    assert [str(value) for value in adata.var_names] == ["G1", "G2", "G3"]
+
+
+def test_read_verified_fit_role_artifact_rejects_replaced_bytes(tmp_path):
+    spec = _gen(tmp_path)
+    replacement = _gen(tmp_path, "replacement.h5ad", config_sha256="different")
+    _os.replace(replacement.path, spec.path)
+    with pytest.raises(FitRoleArtifactError, match="SHA mismatch"):
+        read_verified_fit_role_artifact(
+            spec.path,
+            spec=spec,
+            approved_root=str(tmp_path),
+        )
+
+
+def test_read_verified_fit_role_artifact_rejects_mutated_returned_snapshot(
+    tmp_path, monkeypatch
+):
+    import anndata as ad
+
+    spec = _gen(tmp_path)
+    real_read_h5ad = ad.read_h5ad
+
+    def _mutated_snapshot(path):
+        snapshot = real_read_h5ad(path)
+        changed = sparse.csr_matrix(snapshot.X).tolil()
+        changed[0, 0] = float(changed[0, 0]) + 1000.0
+        snapshot.X = changed.tocsr()
+        return snapshot
+
+    monkeypatch.setattr(ad, "read_h5ad", _mutated_snapshot)
+    with pytest.raises(FitRoleArtifactError, match="content-manifest"):
+        read_verified_fit_role_artifact(
+            spec.path,
+            spec=spec,
+            approved_root=str(tmp_path),
+        )
+
+
 def test_generate_is_content_deterministic(tmp_path):
     a = _gen(tmp_path, "a.h5ad")
     b = _gen(tmp_path, "b.h5ad")
@@ -254,6 +302,15 @@ def test_validate_rejects_singles_token_outside_universe(tmp_path):
     spec = _gen(tmp_path)
     with pytest.raises(FitRoleArtifactError, match="single-gene id"):
         _validate(spec, str(tmp_path), single_gene_ids=["KLF1", "CEBPE", "BBB"])  # drop AAA
+
+
+def test_validate_rejects_declared_single_without_fit_rows(tmp_path):
+    # A declared target without any single-perturbation fit row would let a deep
+    # worker register/predict an embedding learned only from the requested OOD
+    # category.  The governed single universe and artifact roster must be exact.
+    spec = _gen(tmp_path)
+    with pytest.raises(FitRoleArtifactError, match="singles roster"):
+        _validate(spec, str(tmp_path), single_gene_ids=[*_SINGLES, "ZZZ"])
 
 
 def test_validate_rejects_empty_or_duplicate_single_gene_universe(tmp_path):

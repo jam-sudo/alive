@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import zipfile
 from pathlib import Path
 
 import anndata
@@ -44,6 +45,7 @@ from alive.compose.outcome_store import (
     validate_pair_index_against_source_obs,
 )
 from alive.compose.phase2a import DevelopmentOutcomeStore, Phase2aInputs
+from alive.compose.worker_bundle import validate_worker_bundle
 from alive.provenance import sha256_file
 
 _ADAPTER_METHODS = ("gears", "cpa")
@@ -161,10 +163,14 @@ def test_worker_file_digests_match_stub_constants(tmp_path: Path) -> None:
         assert lock["adapter_version"] == "stub-2"
 
 
-def test_worker_script_is_the_committed_stub(tmp_path: Path) -> None:
+def test_worker_bundle_contains_the_committed_stub_and_exact_helpers(tmp_path: Path) -> None:
     bundle = build_compose_fixture(tmp_path)
     repo_stub = Path(__file__).resolve().parents[4] / "scripts" / "baselines" / "stub_worker.py"
-    assert bundle.worker_paths["worker_script"].read_bytes() == repo_stub.read_bytes()
+    worker_path = bundle.worker_paths["worker_script"]
+    info = validate_worker_bundle(worker_path, expected_method="stub")
+    assert info.path == str(worker_path)
+    with zipfile.ZipFile(worker_path, "r") as archive:
+        assert archive.read("__main__.py") == repo_stub.read_bytes()
 
 
 # --------------------------------------------------------------------------- #
@@ -267,8 +273,13 @@ def test_fit_role_carries_a_combo_cell_per_calibration_pair(tmp_path: Path) -> N
     # exactly one combo cell per calibration pair, tokens byte-canonical "a_b".
     assert roles.count("combo_calibration") == len(cal_pairs)
     assert combo_tokens == {f"{a}_{b}" for a, b in cal_pairs}
-    # still bounded synthetic: a tiny cell/gene count well within the fixture limits.
-    assert adata.n_obs == 12 + 8 + len(cal_pairs)
+    # Every governed single gene must be present exactly once: the strict worker
+    # roster check intentionally rejects the old eight-row convenience subset.
+    single_tokens = [tok for tok, role in zip(perts, roles) if role == "singles"]
+    governed_singles = list(bundle.phase2a_inputs.gene_index)
+    assert single_tokens == governed_singles
+    # Still bounded synthetic: a tiny cell/gene count within the fixture limits.
+    assert adata.n_obs == 12 + len(governed_singles) + len(cal_pairs)
     assert adata.n_vars == bundle.phase2a_inputs.response_dim + 1
 
 

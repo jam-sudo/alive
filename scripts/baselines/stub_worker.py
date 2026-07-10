@@ -20,12 +20,20 @@ import json
 import anndata as ad
 import numpy as np
 
-from alive.compose.baseline_subprocess import read_payload, write_predictions
+from alive.compose.baseline_subprocess import (
+    canonical_payload_sha256,
+    read_payload,
+    write_predictions,
+)
 from alive.compose.fit_role import (
     FitRoleArtifactSpec,
     apply_response_projection,
     canonical_gene_order_sha256,
     validate_fit_role_artifact,
+)
+from alive.compose.worker_identity import (
+    load_verified_worker_executable,
+    require_loaded_alive_helpers_from_executable,
 )
 
 # Fixed-constant execution identity. The controller's ``ExecutionIdentityLock``
@@ -39,6 +47,8 @@ _ENVIRONMENT_LOCK_SHA256 = hashlib.sha256(b"stub-environment").hexdigest()
 
 def main() -> None:
     """Run the reference operator path once and emit the prediction envelope."""
+    executable = load_verified_worker_executable()
+    require_loaded_alive_helpers_from_executable(executable)
     ap = argparse.ArgumentParser()
     ap.add_argument("--in", dest="work_dir", required=True)
     ap.add_argument("--out", dest="out", required=True)
@@ -49,7 +59,8 @@ def main() -> None:
         choices=("cell_raw_counts", "raw_pseudobulk_approximation"),
     )
     a = ap.parse_args()
-    payload = read_payload(a.work_dir)
+    payload = read_payload(a.work_dir, require_expected_sha256=True)
+    payload_sha256 = canonical_payload_sha256(payload)
     fit_role = payload["fit_role_artifact"]
     proj = payload["response_projection"]
     dim = int(payload["response_dim"])
@@ -134,8 +145,6 @@ def main() -> None:
         )
         preds[(g, h)] = (z.mean(axis=0) - control_mean)[:dim]
 
-    with open(__file__, "rb") as fh:
-        worker_sha256 = hashlib.sha256(fh.read()).hexdigest()
     manifest = {
         "prediction_representation": representation,
         "adapter_version": _ADAPTER_VERSION,
@@ -143,10 +152,11 @@ def main() -> None:
         "expected_gene_order_sha256": proj["gene_order_sha256"],
         "observed_gene_order_sha256": canonical_gene_order_sha256(gene_order),
         "checkpoint_sha256": checkpoint,
-        "worker_sha256": worker_sha256,
+        "worker_sha256": executable.sha256,
         "config_sha256": _CONFIG_SHA256,
         "resource_sha256": _RESOURCE_SHA256,
         "environment_lock_sha256": _ENVIRONMENT_LOCK_SHA256,
+        "payload_sha256": payload_sha256,
         "fit_artifact_content_sha256": fit_role["content_manifest_sha256"],
         "combined_request_sha256": hashlib.sha256(
             json.dumps([list(pr) for pr in payload["pair_ids"]], separators=(",", ":")).encode(

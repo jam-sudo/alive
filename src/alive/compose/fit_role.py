@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import stat
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 
@@ -26,6 +27,75 @@ _ARTIFACT_SCHEMA_VERSION = 1
 
 class FitRoleArtifactError(ValueError):
     """Raised on any fit-role artifact identity/leakage/validation failure."""
+
+
+def _sha256_open_fd(fd: int) -> str:
+    """Hash an already-open descriptor without changing its final offset."""
+    digest = hashlib.sha256()
+    os.lseek(fd, 0, os.SEEK_SET)
+    while True:
+        chunk = os.read(fd, 1 << 20)
+        if not chunk:
+            break
+        digest.update(chunk)
+    os.lseek(fd, 0, os.SEEK_SET)
+    return digest.hexdigest()
+
+
+def read_verified_fit_role_artifact(
+    path: str,
+    *,
+    spec: "FitRoleArtifactSpec",
+    approved_root: str,
+):
+    """Read the exact fit-role bytes named by ``spec`` through one stable FD.
+
+    ``validate_fit_role_artifact`` performs the full logical contract audit.  A
+    worker must then train on the *same byte identity*, not reopen the pathname
+    unchecked after validation.  This loader opens a regular file with
+    ``O_NOFOLLOW``, verifies its SHA-256, asks HDF5 to read through the descriptor
+    path, and re-hashes the still-open descriptor after the read.  Renaming or
+    replacing ``path`` therefore cannot redirect the model to different bytes.
+
+    The returned AnnData is in-memory (never backed), so the descriptor can be
+    closed before model fitting without losing the verified snapshot.
+    """
+    import anndata as ad
+
+    resolved = _assert_canonical_path(path, approved_root)
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+    try:
+        fd = os.open(resolved, flags)
+    except OSError as exc:
+        raise FitRoleArtifactError(f"cannot open fit-role artifact safely: {exc}") from exc
+    try:
+        opened = os.fstat(fd)
+        if not stat.S_ISREG(opened.st_mode):
+            raise FitRoleArtifactError("fit-role artifact descriptor is not a regular file")
+        before = "sha256:" + _sha256_open_fd(fd)
+        if before != spec.sha256:
+            raise FitRoleArtifactError("artifact file SHA mismatch on stable descriptor")
+
+        fd_root = "/proc/self/fd" if os.path.isdir("/proc/self/fd") else "/dev/fd"
+        try:
+            adata = ad.read_h5ad(os.path.join(fd_root, str(fd)))
+        except Exception as exc:
+            raise FitRoleArtifactError(f"cannot read verified fit-role descriptor: {exc}") from exc
+
+        after = "sha256:" + _sha256_open_fd(fd)
+        if after != before:
+            raise FitRoleArtifactError("fit-role artifact bytes changed while being read")
+        post = os.fstat(fd)
+        if (post.st_dev, post.st_ino, post.st_size) != (
+            opened.st_dev,
+            opened.st_ino,
+            opened.st_size,
+        ):
+            raise FitRoleArtifactError("fit-role artifact identity changed while being read")
+        _validate_loaded_snapshot_identity(adata, spec=spec)
+        return adata
+    finally:
+        os.close(fd)
 
 
 def _check_gene_ids(var_names: Sequence[str]) -> list[str]:
@@ -89,6 +159,68 @@ def content_manifest_sha256(
         "role_counts": {str(k): int(v) for k, v in sorted(role_counts.items())},
     }
     return sha256_json(manifest)
+
+
+def _validate_loaded_snapshot_identity(adata, *, spec: "FitRoleArtifactSpec") -> None:
+    """Bind the exact returned in-memory AnnData to the trusted artifact spec.
+
+    Before/after descriptor hashes reject persistent replacement, but a hostile
+    writer could mutate an HDF5 node during the read and restore the original file
+    before the second hash (an ABA race).  Recomputing the logical identity from
+    the returned snapshot proves that the object handed to model fitting is the
+    same content that the independently validated spec names.
+    """
+    try:
+        roles = [str(value) for value in adata.obs["role"]]
+        if not set(roles) <= _ALLOWED_ROLES:
+            raise FitRoleArtifactError("loaded snapshot contains a non-whitelisted role")
+        perturbations = [str(value) for value in adata.obs["perturbation"]]
+        source_rows = [str(value) for value in adata.obs["source_row_id"]]
+        if any(not value for value in source_rows) or len(source_rows) != len(set(source_rows)):
+            raise FitRoleArtifactError(
+                "loaded snapshot source_row_id values are not unique/non-empty"
+            )
+        genes = [str(value) for value in adata.var_names]
+        rows = tuple(zip(source_rows, roles, perturbations))
+        role_counts = {
+            role: sum(observed == role for observed in roles) for role in sorted(_ALLOWED_ROLES)
+        }
+        provenance = {str(key): str(value) for key, value in dict(adata.uns["provenance"]).items()}
+        for key in ("raw_data_sha256", "pair_manifest_sha256", "eligibility_hash"):
+            if provenance.get(key) != str(getattr(spec, key)):
+                raise FitRoleArtifactError(f"loaded snapshot {key} differs from spec")
+        if canonical_gene_order_sha256(genes) != spec.gene_order_sha256:
+            raise FitRoleArtifactError("loaded snapshot gene-order digest differs from spec")
+        if row_identity_sha256(rows) != spec.row_identity_sha256:
+            raise FitRoleArtifactError("loaded snapshot row-identity digest differs from spec")
+        if provenance.get("gene_order_sha256") != spec.gene_order_sha256:
+            raise FitRoleArtifactError(
+                "loaded snapshot provenance gene-order digest differs from spec"
+            )
+        if provenance.get("row_identity_sha256") != spec.row_identity_sha256:
+            raise FitRoleArtifactError(
+                "loaded snapshot provenance row-identity digest differs from spec"
+            )
+        recomputed = content_manifest_sha256(
+            schema_version=_ARTIFACT_SCHEMA_VERSION,
+            X=sparse.csr_matrix(adata.X),
+            var_names=genes,
+            rows=rows,
+            provenance=provenance,
+            role_counts=role_counts,
+        )
+        if recomputed != spec.content_manifest_sha256:
+            raise FitRoleArtifactError("loaded snapshot content-manifest digest differs from spec")
+        if str(adata.uns["content_manifest_sha256"]) != spec.content_manifest_sha256:
+            raise FitRoleArtifactError("loaded snapshot stored content manifest differs from spec")
+        if adata.n_obs != spec.n_cells or adata.n_vars != spec.n_genes:
+            raise FitRoleArtifactError("loaded snapshot shape differs from spec")
+        if role_counts != spec.role_counts:
+            raise FitRoleArtifactError("loaded snapshot role counts differ from spec")
+    except FitRoleArtifactError:
+        raise
+    except Exception as exc:
+        raise FitRoleArtifactError(f"malformed loaded fit-role snapshot: {exc!r}") from exc
 
 
 def _canonical_pair(perturbation: str, combo_sep: str = "_") -> tuple[str, str]:
@@ -781,6 +913,15 @@ def _validate_fit_role_artifact_checks(
             raise FitRoleArtifactError(
                 f"token {pert!r} classified 'singles' is not a registered single-gene id"
             )
+
+    observed_singles = {pert for role, pert in zip(roles, perts) if role == "singles"}
+    if observed_singles != single_set:
+        missing = sorted(single_set - observed_singles, key=lambda value: value.encode("utf-8"))
+        extra = sorted(observed_singles - single_set, key=lambda value: value.encode("utf-8"))
+        raise FitRoleArtifactError(
+            "fit-role artifact singles roster differs from single_gene_ids "
+            f"(missing={missing}, extra={extra})"
+        )
 
     # non-empty, unique source_row_id before recomputing row/content digests
     if any(s == "" for s in srcs):

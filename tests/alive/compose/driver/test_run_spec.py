@@ -339,6 +339,17 @@ def test_worker_block_missing_adapter_artifact_raises(tmp_path: Path) -> None:
         load_resolved_run_spec(spec_path, approved_artifacts_root=root, mode_expected="fixture")
 
 
+@pytest.mark.parametrize("bad_path", ["", "python3", "./python3", "/usr/bin/../bin/python3"])
+def test_worker_env_python_requires_absolute_normalized_path(tmp_path: Path, bad_path: str) -> None:
+    spec_path, root = _write_spec(tmp_path)
+    payload = json.loads(spec_path.read_text())
+    payload["worker_blocks"]["gears"]["env_python"] = bad_path
+    _reseal(payload)
+    spec_path.write_text(_canonical(payload), encoding="utf-8")
+    with pytest.raises(RunSpecError, match="absolute normalized path"):
+        load_resolved_run_spec(spec_path, approved_artifacts_root=root, mode_expected="fixture")
+
+
 # ---------------------------------------------------------------------------
 # (e) expected_hashes missing / extra key
 # ---------------------------------------------------------------------------
