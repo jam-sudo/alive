@@ -620,8 +620,13 @@ def _parse_worker_blocks(obj: Any, root_real: str) -> dict[str, WorkerBlock]:
                 raise RunSpecError(f"{where}.execution_identity_lock[{key!r}] must be a string")
         env_python = block["env_python"]
         import_name = block["import_name"]
-        if not isinstance(env_python, str):
-            raise RunSpecError(f"{where}.env_python must be a string")
+        if (
+            not isinstance(env_python, str)
+            or not env_python
+            or not os.path.isabs(env_python)
+            or env_python != os.path.normpath(env_python)
+        ):
+            raise RunSpecError(f"{where}.env_python must be a non-empty absolute normalized path")
         if not isinstance(import_name, str):
             raise RunSpecError(f"{where}.import_name must be a string")
         blocks[method] = WorkerBlock(

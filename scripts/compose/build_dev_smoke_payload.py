@@ -24,7 +24,9 @@ import argparse
 import hashlib
 import json
 import os
+import struct
 from dataclasses import dataclass
+from typing import Protocol, Sequence
 
 import numpy as np
 from scipy import sparse
@@ -40,6 +42,12 @@ from alive.compose.fit_role import (
 from alive.compose.response import fit_response_space
 
 _DEV_SENTINEL_PREFIX = "dev-smoke"
+
+
+class _HashLike(Protocol):
+    """Minimal structural type implemented by ``hashlib`` hash objects."""
+
+    def update(self, data: bytes, /) -> None: ...
 
 
 def _canonical_pair(a: str, b: str) -> tuple[str, str]:
@@ -170,20 +178,97 @@ def select_outcome_free_split(
     return sealed, calibration
 
 
-def _raw_counts_csr(adata) -> sparse.csr_matrix:
-    """Return a raw-count CSR from ``adata`` (``layers['counts']`` preferred).
+def _raw_counts_csr(adata, row_indices: Sequence[int]) -> sparse.csr_matrix:
+    """Read selected rows only and return their raw-count CSR matrix.
 
     Fit-role artifacts require finite, non-negative, integer-valued counts. Prefer
-    an explicit ``counts`` layer; otherwise use ``X`` when it is integer-valued.
+    an explicit ``counts`` layer; otherwise use ``X``.  The source is sliced
+    *before* CSR conversion so rows assigned to the dev-sealed roster are never
+    read or materialised by this builder.
     """
     src = adata.layers["counts"] if "counts" in adata.layers else adata.X
-    m = sparse.csr_matrix(src, dtype=np.float64)
+    idx = np.asarray(row_indices, dtype=np.int64)
+    m = sparse.csr_matrix(src[idx], dtype=np.float64)
     m.eliminate_zeros()
-    if m.data.size and np.any(m.data != np.floor(m.data)):
+    m.sort_indices()
+    if m.data.size and (
+        not np.all(np.isfinite(m.data)) or np.any(m.data < 0) or np.any(m.data != np.floor(m.data))
+    ):
         raise ValueError(
-            "expression matrix is not integer-valued; supply raw counts in layers['counts'] or X"
+            "expression matrix must contain finite, non-negative, integer-valued raw counts; "
+            "supply raw counts in layers['counts'] or X"
         )
     return m
+
+
+def _update_length_prefixed(h: _HashLike, label: bytes, value: bytes) -> None:
+    """Add one unambiguous labelled byte string to ``h``."""
+    h.update(struct.pack(">Q", len(label)))
+    h.update(label)
+    h.update(struct.pack(">Q", len(value)))
+    h.update(value)
+
+
+def _update_text_sequence(h: _HashLike, label: bytes, values: Sequence[str]) -> None:
+    """Add an ordered UTF-8 text sequence to ``h`` with length framing."""
+    h.update(struct.pack(">Q", len(label)))
+    h.update(label)
+    h.update(struct.pack(">Q", len(values)))
+    for value in values:
+        encoded = str(value).encode("utf-8")
+        h.update(struct.pack(">Q", len(encoded)))
+        h.update(encoded)
+
+
+def _allowed_source_sha256(
+    *,
+    X: sparse.csr_matrix,
+    source_row_ids: Sequence[str],
+    perturbations: Sequence[str],
+    gene_order: Sequence[str],
+) -> str:
+    """Return a path-independent digest of the rows this dev payload may read.
+
+    The digest covers canonical CSR counts plus ordered source-row IDs,
+    perturbation tokens, and gene IDs.  It intentionally excludes dev-sealed rows:
+    their expression is neither read nor part of the fit/payload source identity.
+    Equivalent allowed content therefore has the same identity at any output path,
+    while any allowed-row/count/row-ID/gene mutation changes it.
+    """
+    matrix = sparse.csr_matrix(X, dtype=np.float64, copy=True)
+    matrix.eliminate_zeros()
+    matrix.sort_indices()
+    if matrix.shape != (len(source_row_ids), len(gene_order)):
+        raise ValueError("allowed source matrix is not aligned to row/gene identity")
+    if len(perturbations) != len(source_row_ids):
+        raise ValueError("allowed perturbation roster is not aligned to source rows")
+
+    h = hashlib.sha256()
+    _update_length_prefixed(h, b"schema", b"compose_dev_smoke_allowed_source_v1")
+    _update_length_prefixed(
+        h,
+        b"shape",
+        np.asarray(matrix.shape, dtype=">u8").tobytes(order="C"),
+    )
+    _update_text_sequence(h, b"source_row_ids", source_row_ids)
+    _update_text_sequence(h, b"perturbations", perturbations)
+    _update_text_sequence(h, b"gene_order", gene_order)
+    _update_length_prefixed(
+        h,
+        b"csr_indptr",
+        np.asarray(matrix.indptr, dtype=">u8").tobytes(order="C"),
+    )
+    _update_length_prefixed(
+        h,
+        b"csr_indices",
+        np.asarray(matrix.indices, dtype=">u8").tobytes(order="C"),
+    )
+    _update_length_prefixed(
+        h,
+        b"csr_counts",
+        np.asarray(matrix.data, dtype=">u8").tobytes(order="C"),
+    )
+    return "sha256:" + h.hexdigest()
 
 
 def build_dev_smoke_payload(
@@ -235,25 +320,29 @@ def build_dev_smoke_payload(
         universe, n_sealed=n_sealed, n_calibration=n_calibration, seed=seed
     )
 
-    # The fit-role extractor fails closed on any combo that is neither sealed nor
-    # calibration, so restrict the artifact universe to in-scope tokens only:
-    # control + every single + the sealed/calibration combo tokens. Sealed combo
-    # ROWS stay present (the extractor excludes them, never reading them) but any
-    # unregistered combo is dropped up front.
-    inscope_tokens = (
+    # Build the expression matrix from ALLOWED rows directly: control + singles +
+    # calibration combos.  Dev-sealed combo IDs participate in the metadata-only
+    # split/guard, but their expression rows are never handed to ``adata.X`` /
+    # ``layers['counts']`` and never occupy an intermediate matrix.
+    allowed_tokens = (
         {control_token}
         | set(universe.single_genes)
-        | {universe.token_of_pair[p] for p in (*sealed, *calibration)}
+        | {universe.token_of_pair[p] for p in calibration}
     )
-    keep = [i for i, tok in enumerate(perts_all) if tok in inscope_tokens]
-    perts = [perts_all[i] for i in keep]
-
+    allowed_source_idx = [i for i, tok in enumerate(perts_all) if tok in allowed_tokens]
+    perts = [perts_all[i] for i in allowed_source_idx]
+    obs_names = np.asarray(adata.obs_names)
+    source_ids = [str(obs_names[i]) for i in allowed_source_idx]
     var_names = [str(v) for v in adata.var_names]
-    X_raw = _raw_counts_csr(adata)[keep]
-    raw_data_sha256 = _dev_sentinel("raw", artifact_path, str(X_raw.shape))
+    X_raw = _raw_counts_csr(adata, allowed_source_idx)
+    raw_data_sha256 = _allowed_source_sha256(
+        X=X_raw,
+        source_row_ids=source_ids,
+        perturbations=perts,
+        gene_order=var_names,
+    )
 
     # 1. fit-role artifact: control + singles + calibration combos (sealed excluded).
-    source_ids = [str(s) for s in np.asarray(adata.obs_names)[keep]]
     extractor = ComposeFitRoleExtractor(
         obs_source_row_id=source_ids,
         obs_perturbation=perts,
@@ -352,6 +441,7 @@ def build_dev_smoke_payload(
         "approved_root": approved_root,
         "work_dir": os.path.realpath(out_dir),
         "payload_sha256": payload_sha256,
+        "raw_data_sha256": raw_data_sha256,
         "artifact_path": os.path.realpath(artifact_path),
         "artifact_sha256": spec.sha256,
         "artifact_content_manifest_sha256": spec.content_manifest_sha256,
@@ -407,19 +497,25 @@ def main(argv: list[str] | None = None) -> int:
 
     import anndata as ad
 
-    adata = ad.read_h5ad(a.h5ad)
-    manifest = build_dev_smoke_payload(
-        adata,
-        out_dir=a.work_dir,
-        artifact_path=a.artifact,
-        control_token=a.control_token,
-        combo_sep=a.combo_sep,
-        n_hvg=a.n_hvg,
-        pca_dim=a.pca_dim,
-        seed=a.seed,
-        n_sealed=a.n_sealed,
-        n_calibration=a.n_calibration,
-    )
+    # Backed mode keeps the source expression matrix on disk until the builder has
+    # selected its metadata-only allowed row indices.  ``_raw_counts_csr`` then
+    # reads only those rows; dev-sealed expression is never eagerly materialised.
+    adata = ad.read_h5ad(a.h5ad, backed="r")
+    try:
+        manifest = build_dev_smoke_payload(
+            adata,
+            out_dir=a.work_dir,
+            artifact_path=a.artifact,
+            control_token=a.control_token,
+            combo_sep=a.combo_sep,
+            n_hvg=a.n_hvg,
+            pca_dim=a.pca_dim,
+            seed=a.seed,
+            n_sealed=a.n_sealed,
+            n_calibration=a.n_calibration,
+        )
+    finally:
+        adata.file.close()
     with open(a.manifest_out, "w", encoding="utf-8") as fh:
         json.dump(manifest, fh, indent=2, sort_keys=True)
     print(json.dumps(manifest, indent=2, sort_keys=True))

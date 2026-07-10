@@ -31,6 +31,7 @@ from alive.compose.fit_role import (
     generate_fit_role_artifact,
 )
 from alive.compose.response import fit_response_space, verify_response_artifact
+from alive.compose.worker_bundle import build_worker_bundle
 
 _STUB = str(Path(__file__).resolve().parents[3] / "scripts" / "baselines" / "stub_worker.py")
 _RAW_DATA_SHA256 = "raw-shared-across-artifact-and-projection"
@@ -194,6 +195,7 @@ def _backend(
         approved_artifacts_root=str(approved_root),
         expected_response_artifact_sha256=combined,
         execution_identity_lock=lock or _stub_lock(),
+        allow_local_approved_root_checkpoint_store=True,
     )
 
 
@@ -221,6 +223,51 @@ def test_operator_path_predicts_both_pairs_with_nontrivial_pair_associated_delta
     assert prov["execution_manifest"]["adapter_version"] == _STUB_ADAPTER_VERSION
     assert len(prov["execution_manifest"]["checkpoint_sha256"]) == 64
     assert len(prov["execution_manifest"]["predictions_sha256"]) == 64
+    checkpoint = Path(prov["durable_checkpoint_path"])
+    checkpoint_sha = prov["execution_manifest"]["checkpoint_sha256"]
+    assert checkpoint == approved / ".worker_checkpoints" / f"{checkpoint_sha}.pt"
+    assert checkpoint.is_file() and not checkpoint.is_symlink()
+    assert hashlib.sha256(checkpoint.read_bytes()).hexdigest() == checkpoint_sha
+    assert checkpoint.stat().st_mode & 0o222 == 0
+
+
+def test_bundle_worker_manifest_binds_outer_archive_sha256(tmp_path):
+    approved = tmp_path / "approved"
+    approved.mkdir()
+    root = Path(__file__).resolve().parents[3]
+    bundle = build_worker_bundle(
+        source_root=root,
+        entrypoint=root / "scripts/baselines/stub_worker.py",
+        output_path=approved / "stub.pyz",
+        method="stub",
+    )
+    fx = _make_fixture(str(approved / "fit_role.h5ad"))
+    backend = _backend(approved, fx["combined"])
+    backend.worker_script = bundle.path
+    backend.expected_worker_sha256 = bundle.sha256
+    backend.configure_payload(fx["payload"])
+
+    backend.predict(None, [_DOUBLE, _SINGLE], fx["response_dim"])
+
+    assert backend.provenance_manifest["execution_manifest"]["worker_sha256"] == bundle.sha256
+
+
+def test_post_predict_provenance_rejects_replaced_durable_checkpoint(tmp_path):
+    approved = tmp_path / "approved"
+    approved.mkdir()
+    fx = _make_fixture(str(approved / "fit_role.h5ad"))
+    backend = _backend(approved, fx["combined"])
+    backend.configure_payload(fx["payload"])
+    backend.predict(None, [_DOUBLE, _SINGLE], fx["response_dim"])
+    checkpoint = Path(backend._last_checkpoint_path)
+    matching_outside = tmp_path / "matching-outside.pt"
+    matching_outside.write_bytes(checkpoint.read_bytes())
+    matching_outside.chmod(0o400)
+    checkpoint.unlink()
+    checkpoint.symlink_to(matching_outside)
+
+    with pytest.raises(PayloadError, match="canonical content address"):
+        _ = backend.provenance_manifest
 
 
 def test_artifact_byte_tamper_aborts_before_predictions(tmp_path):

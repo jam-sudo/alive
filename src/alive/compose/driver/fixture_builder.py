@@ -15,9 +15,10 @@ The builder writes bounded synthetic **DATA only** — never a store object:
   audit, and the sealed-outcome DATA (synthetic sealed source ``.h5ad`` +
   ``pair_index`` + manifest + ``approved_sealed_input_attestation`` + declared
   ``audit_path``);
-* the per-method subprocess worker files (``worker_script`` = the committed
-  ``scripts/baselines/stub_worker.py``; ``worker_config`` / ``resource_manifest``
-  / ``requirements_lock`` / ``adapter_artifact`` written with the EXACT bytes the
+* the per-method subprocess worker files (``worker_script`` = a deterministic
+  execution bundle containing the committed ``scripts/baselines/stub_worker.py``
+  plus the exact ALIVE helper roster; ``worker_config`` / ``resource_manifest`` /
+  ``requirements_lock`` / ``adapter_artifact`` written with the EXACT bytes the
   stub self-reports, so their file digests equal the stub constants);
 * a fixture :class:`~alive.compose.driver.run_spec.ResolvedRunSpec` (``mode ==
   "fixture"``) pointing at all of the above with byte-matching declared digests
@@ -72,6 +73,7 @@ from alive.compose.outcome_store import FIXTURE_CORPUS_V1, FixtureCorpusAttestat
 from alive.compose.phase2a import OutcomeAccessAudit, Phase2aInputs
 from alive.compose.response import fit_response_space, verify_response_artifact
 from alive.compose.split import ROLE_NAMES, build_split_manifest
+from alive.compose.worker_bundle import build_worker_bundle
 from alive.provenance import sha256_file, sha256_json
 
 __all__ = [
@@ -94,9 +96,11 @@ PERTURBATION_COLUMN = "perturbation"
 CONTROL_TOKEN = "control"
 COMBO_SEP = "_"
 
-#: The committed reference subprocess worker (payload-v2), copied verbatim into
-#: each fixture run so it is launchable and its self-hash matches the copy.
-STUB_WORKER_PATH = Path(__file__).resolve().parents[4] / "scripts" / "baselines" / "stub_worker.py"
+_REPO_ROOT = Path(__file__).resolve().parents[4]
+
+#: The committed reference subprocess worker (payload-v2), bundled together
+#: with the exact worker-runtime helper roster for each fixture run.
+STUB_WORKER_PATH = _REPO_ROOT / "scripts" / "baselines" / "stub_worker.py"
 
 #: Committed config the fixture run identity binds ``config_digest`` to.
 _CONFIG_PATH = "configs/compose_k562_v1_phase2.yaml"
@@ -304,6 +308,7 @@ def _build_response_and_fit_role(
     response_dim: int,
     raw_data_sha256: str,
     cal_pair_ids: list[tuple[str, str]],
+    single_gene_ids: list[str],
 ) -> tuple[dict[str, Any], list[str], FitRoleArtifactSpec, str]:
     """A real response space + written fit-role ``.h5ad`` (promoted helper)."""
     rng = np.random.default_rng(4242)
@@ -322,7 +327,12 @@ def _build_response_and_fit_role(
     # calibration pair), stays bounded (|Cal| = len(cal_pair_ids) rows), and — as
     # only calibration pairs are stored — never smuggles a sealed pair into the fit.
     combo_pairs = [tuple(p) for p in cal_pair_ids]
-    n_control, n_single, n_combo = 12, 8, len(combo_pairs)
+    single_genes = list(single_gene_ids)
+    if not single_genes:
+        raise ValueError("single_gene_ids must contain the governed single-gene roster")
+    if len(single_genes) != len(set(single_genes)):
+        raise ValueError("single_gene_ids must not contain duplicates")
+    n_control, n_single, n_combo = 12, len(single_genes), len(combo_pairs)
     n_cells = n_control + n_single + n_combo
     counts = rng.integers(1, 50, size=(n_cells, n_genes)).astype(np.float64)
     X = sparse.csr_matrix(counts)
@@ -339,10 +349,9 @@ def _build_response_and_fit_role(
     control_mean = space.project(X, control_idx).mean(axis=0)
     _, _, combined = verify_response_artifact(space, control_mean)
 
-    combo_genes = [g for pair in combo_pairs for g in pair]
     rows = (
         [(f"c{i}", "control", "control") for i in range(n_control)]
-        + [(f"s{i}", "singles", combo_genes[i % len(combo_genes)]) for i in range(n_single)]
+        + [(f"s{i}", "singles", gene_id) for i, gene_id in enumerate(single_genes)]
         + [
             (f"m{i}", "combo_calibration", f"{a}{COMBO_SEP}{b}")
             for i, (a, b) in enumerate(combo_pairs)
@@ -581,6 +590,7 @@ def build_compose_fixture(tmp_root: Path) -> FixtureBundle:
         response_dim=instance["p"],
         raw_data_sha256=fit_role_raw_sha,
         cal_pair_ids=instance["cal_pairs"],
+        single_gene_ids=instance["gene_ids"],
     )
 
     # --- 3. fixed run identity + expected-hashes roster -----------------------
@@ -743,10 +753,15 @@ def build_compose_fixture(tmp_root: Path) -> FixtureBundle:
     assert set(pre_seal_paths) == set(PRE_SEAL_PATH_FIELDS)
 
     # --- 8. worker files (stub bytes) -----------------------------------------
+    workers_dir.mkdir(parents=True, exist_ok=True)
+    worker_bundle = build_worker_bundle(
+        source_root=_REPO_ROOT,
+        entrypoint=STUB_WORKER_PATH,
+        output_path=workers_dir / "stub_worker.pyz",
+        method="stub",
+    )
     worker_paths = {
-        "worker_script": _write_bytes(
-            workers_dir / "stub_worker.py", STUB_WORKER_PATH.read_bytes()
-        ),
+        "worker_script": Path(worker_bundle.path),
         "worker_config": _write_bytes(workers_dir / "worker_config.json", _STUB_CONFIG_BYTES),
         "resource_manifest": _write_bytes(
             workers_dir / "resource_manifest.json", _STUB_RESOURCE_BYTES

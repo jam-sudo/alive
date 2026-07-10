@@ -1,17 +1,18 @@
 # tests/alive/compose/test_worker_contract.py
-"""SYNTHETIC-ONLY local contract test for the real GEARS/CPA worker scaffolds.
+"""SYNTHETIC-ONLY local contract tests for the real GEARS/CPA workers.
 
 No ``gears``/``cpa`` import, no real data, no seal access. Exercises ONLY the
 frozen worker contract surface (payload -> validate_fit_role_artifact ->
 ``_fit_and_predict`` -> ``write_predictions`` envelope) with a tiny synthetic
 fit-role artifact. The two SEALED requested pairs enter the worker exclusively as
-``sealed_pair_ids`` to the leakage guard and are NEVER fit rows; the real
-model-fit body is pod-authored + import-guarded, so here it must raise
+``sealed_pair_ids`` to the leakage guard and are NEVER fit rows.  The model-fit
+bodies are import-guarded, so a host without the pinned backend must raise
 ``WorkerUnavailable``.
 """
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import sys
@@ -50,8 +51,77 @@ def _load_worker(name: str):
     path = _WORKER_PATHS[name]
     spec = importlib.util.spec_from_file_location(f"_contract_worker_{name}", path)
     module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
+
+
+def _representation(worker_name: str) -> str:
+    return "raw_pseudobulk_approximation" if worker_name == "gears" else "cell_raw_counts"
+
+
+def _configure_worker_identity(worker, worker_name: str, approved_root: str, monkeypatch) -> None:
+    """Install real byte-backed identity files matching the worker's exact config."""
+    root = Path(approved_root)
+    adapter_version = f"{worker_name}-contract-adapter-v1"
+    config = worker._registered_worker_config(adapter_version)
+    artifacts = {
+        "CONFIG": (
+            root / f"{worker_name}.worker-config.json",
+            json.dumps(config, sort_keys=True, separators=(",", ":")).encode("utf-8"),
+        ),
+        "RESOURCE": (
+            root / f"{worker_name}.resource-manifest.json",
+            json.dumps(
+                {"schema": "compose_contract_resource_manifest_v1", "method": worker_name},
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8"),
+        ),
+        "ENVIRONMENT_LOCK": (
+            root / f"{worker_name}.requirements.lock",
+            f"{worker_name}==contract-only\n".encode(),
+        ),
+        "ADAPTER": (
+            root / f"{worker_name}.adapter.bin",
+            f"{worker_name}:{adapter_version}".encode(),
+        ),
+    }
+    path_env = {
+        "CONFIG": "ALIVE_WORKER_CONFIG_PATH",
+        "RESOURCE": "ALIVE_WORKER_RESOURCE_MANIFEST_PATH",
+        "ENVIRONMENT_LOCK": "ALIVE_WORKER_REQUIREMENTS_LOCK_PATH",
+        "ADAPTER": "ALIVE_WORKER_ADAPTER_ARTIFACT_PATH",
+    }
+    digest_env = {
+        "CONFIG": "ALIVE_WORKER_CONFIG_SHA256",
+        "RESOURCE": "ALIVE_WORKER_RESOURCE_SHA256",
+        "ENVIRONMENT_LOCK": "ALIVE_WORKER_ENVIRONMENT_LOCK_SHA256",
+        "ADAPTER": "ALIVE_WORKER_ADAPTER_SHA256",
+    }
+    for field, (path, content) in artifacts.items():
+        path.write_bytes(content)
+        monkeypatch.setenv(path_env[field], str(path))
+        monkeypatch.setenv(digest_env[field], hashlib.sha256(content).hexdigest())
+    executable = Path(worker.__file__).resolve()
+    monkeypatch.setenv("ALIVE_WORKER_EXECUTABLE_PATH", str(executable))
+    monkeypatch.setenv(
+        "ALIVE_WORKER_EXECUTABLE_SHA256",
+        hashlib.sha256(executable.read_bytes()).hexdigest(),
+    )
+    payload_bytes = (root.parent / "work" / "payload.json").read_bytes()
+    monkeypatch.setenv("ALIVE_WORKER_PAYLOAD_SHA256", hashlib.sha256(payload_bytes).hexdigest())
+    monkeypatch.setenv("ALIVE_WORKER_ADAPTER_VERSION", adapter_version)
+
+
+def _synthetic_fit(preds: dict[tuple[str, str], np.ndarray]):
+    """Return a fit seam that obeys the real write-before-return checkpoint contract."""
+
+    def _fit(*_args, **kwargs):
+        Path(kwargs["checkpoint_path"]).write_bytes(b"synthetic-trained-model-state")
+        return dict(preds)
+
+    return _fit
 
 
 def _build_fit_role_artifact(tmp_path: Path):
@@ -156,13 +226,14 @@ def _argv(worker_name: str, work_dir: str, out: str, approved_root: str, represe
 
 
 @pytest.mark.parametrize("worker_name", ["gears", "cpa"])
-def test_worker_emits_placeholder_then_filled_envelope(worker_name, tmp_path, monkeypatch):
+def test_worker_emits_bound_envelope(worker_name, tmp_path, monkeypatch):
     # (a) With _fit_and_predict monkeypatched to synthetic preds, the worker
     # produces a {predictions, execution_manifest} envelope that round-trips and
-    # whose manifest has EXACTLY the 13 keys; predictions_sha256 is emitted as ""
+    # whose manifest has EXACTLY the 14 keys; predictions_sha256 is emitted as ""
     # by the worker and FILLED (non-empty 64-hex) by write_predictions.
     worker = _load_worker(worker_name)
     spec, payload, work_dir, approved_root = _setup(tmp_path)
+    _configure_worker_identity(worker, worker_name, approved_root, monkeypatch)
 
     # payload contract: control is reference data only; fit roles never include it.
     assert set(payload["allowed_roles"]) == {"singles", "combo_calibration"}
@@ -170,7 +241,7 @@ def test_worker_emits_placeholder_then_filled_envelope(worker_name, tmp_path, mo
     assert spec.role_counts["control"] >= 1
 
     preds = {("CCC", "DDD"): np.array([0.3, 0.4, 0.5])}
-    monkeypatch.setattr(worker, "_fit_and_predict", lambda *a, **k: dict(preds))
+    monkeypatch.setattr(worker, "_fit_and_predict", _synthetic_fit(preds))
 
     real_write = worker.write_predictions
     seen: dict[str, object] = {}
@@ -182,7 +253,8 @@ def test_worker_emits_placeholder_then_filled_envelope(worker_name, tmp_path, mo
     monkeypatch.setattr(worker, "write_predictions", _spy_write)
 
     out = str(tmp_path / "preds")
-    argv = _argv(worker_name, work_dir, out, approved_root, "raw_pseudobulk_approximation")
+    representation = _representation(worker_name)
+    argv = _argv(worker_name, work_dir, out, approved_root, representation)
     monkeypatch.setattr(sys, "argv", argv)
     worker.main()
 
@@ -194,10 +266,14 @@ def test_worker_emits_placeholder_then_filled_envelope(worker_name, tmp_path, mo
     assert set(envelope) == {"schema_version", "predictions", "execution_manifest"}
     manifest = envelope["execution_manifest"]
     assert set(manifest) == set(EXECUTION_MANIFEST_KEYS)
-    assert len(manifest) == 13
+    assert len(manifest) == 14
     filled = manifest["predictions_sha256"]
     assert len(filled) == 64 and all(c in "0123456789abcdef" for c in filled)
-    assert manifest["prediction_representation"] == "raw_pseudobulk_approximation"
+    assert manifest["prediction_representation"] == representation
+    assert (
+        manifest["worker_sha256"]
+        == hashlib.sha256(_WORKER_PATHS[worker_name].read_bytes()).hexdigest()
+    )
 
     got = {tuple(pair): vec for pair, vec in envelope["predictions"]}
     assert set(got) == {("CCC", "DDD")}
@@ -210,9 +286,10 @@ def test_requested_pairs_passed_as_sealed_to_guard(worker_name, tmp_path, monkey
     # payload["pair_ids"] (the requested pairs). Spy the guard to capture the kwarg.
     worker = _load_worker(worker_name)
     _spec, payload, work_dir, approved_root = _setup(tmp_path)
+    _configure_worker_identity(worker, worker_name, approved_root, monkeypatch)
 
     preds = {("CCC", "DDD"): np.array([0.3, 0.4, 0.5])}
-    monkeypatch.setattr(worker, "_fit_and_predict", lambda *a, **k: dict(preds))
+    monkeypatch.setattr(worker, "_fit_and_predict", _synthetic_fit(preds))
 
     captured: dict[str, object] = {}
 
@@ -225,7 +302,9 @@ def test_requested_pairs_passed_as_sealed_to_guard(worker_name, tmp_path, monkey
 
     out = str(tmp_path / "preds")
     monkeypatch.setattr(
-        sys, "argv", _argv(worker_name, work_dir, out, approved_root, "cell_raw_counts")
+        sys,
+        "argv",
+        _argv(worker_name, work_dir, out, approved_root, _representation(worker_name)),
     )
     worker.main()
 
@@ -244,13 +323,10 @@ def test_real_fit_body_raises_worker_unavailable_without_backend(worker_name, tm
     # (c) Without monkeypatching, the real fit path is import-guarded. gears/cpa is
     # absent on this host, so _fit_and_predict raises the clear typed
     # WorkerUnavailable (NOT a silent stub, NOT a leaking NotImplementedError).
-    # On the GPU pod the package IS installed → the fit body raises
-    # NotImplementedError instead, so skip there (the pod Norman smoke covers it).
+    # If a pinned backend is installed, the separately isolated worker logic
+    # tests cover its pre-fit contract without starting a real scientific fit.
     if importlib.util.find_spec(worker_name) is not None:
-        pytest.skip(
-            f"{worker_name} installed; real fit body raises NotImplementedError here "
-            "— covered by the pod Norman smoke, not this contract test"
-        )
+        pytest.skip(f"{worker_name} installed; do not start a real fit in a local contract test")
     worker = _load_worker(worker_name)
     _spec, payload, _work_dir, _approved_root = _setup(tmp_path)
     with pytest.raises(worker.WorkerUnavailable):
@@ -259,5 +335,5 @@ def test_real_fit_body_raises_worker_unavailable_without_backend(worker_name, tm
             payload["fit_role_artifact"],
             payload["response_projection"],
             _VAR_NAMES,
-            "cell_raw_counts",
+            _representation(worker_name),
         )

@@ -71,6 +71,7 @@ from alive.compose.driver.run_spec import (
     ResolvedRunSpec,
     WorkerBlock,
 )
+from alive.compose.worker_bundle import WorkerBundleError, validate_worker_bundle
 
 __all__ = [
     "AssemblerError",
@@ -234,6 +235,7 @@ def assemble_execution_identity_lock(
     *,
     config_representation: str,
     fixture: bool,
+    expected_worker_method: str | None = None,
 ) -> ExecutionIdentityLock:
     """Assemble a method's 6-field :class:`ExecutionIdentityLock` from real bytes.
 
@@ -256,6 +258,10 @@ def assemble_execution_identity_lock(
         ``True`` for the fixture path (``adapter_version`` from the fixture-trusted
         worker block); ``False`` for the scientific path (fails closed — no
         committed versioned adapter manifest).
+    expected_worker_method : str, optional
+        Registered method name used to validate a scientific execution bundle's
+        internal manifest. Required for scientific mode; ignored for a direct
+        fixture ``.py`` worker.
 
     Returns
     -------
@@ -320,6 +326,25 @@ def assemble_execution_identity_lock(
         worker_block.requirements_lock.sha256, actual_env, field="requirements_lock.sha256"
     )
 
+    # Scientific workers are self-contained deterministic execution bundles:
+    # their existing worker_script SHA therefore binds both the entrypoint and
+    # every ALIVE runtime helper. Fixture/local unit tests may still exercise a
+    # direct .py worker, while fixture bundles are validated whenever supplied.
+    is_bundle = worker_block.worker_script.path.endswith(".pyz")
+    if not fixture and not is_bundle:
+        raise AssemblerError("scientific worker_script must be a deterministic .pyz bundle")
+    if not fixture and expected_worker_method not in DEEP_BASELINE_METHODS:
+        raise AssemblerError("scientific worker bundle requires its registered method name")
+    if is_bundle:
+        try:
+            validate_worker_bundle(
+                worker_block.worker_script.path,
+                expected_method=expected_worker_method if not fixture else None,
+                expected_sha256=actual_worker_script,
+            )
+        except WorkerBundleError as exc:
+            raise AssemblerError(f"worker execution bundle is invalid: {exc}") from exc
+
     # 4. cross-check the declared lock digests -------------------------------
     # The declared ``adapter_sha256`` is compared to the re-hashed
     # ``adapter_artifact`` (not the worker_script) — divergence fails closed.
@@ -351,6 +376,7 @@ def build_subprocess_backend(
     name: str,
     approved_artifacts_root: str,
     expected_response_artifact_sha256: str,
+    allow_local_approved_root_checkpoint_store: bool = False,
     seed: int = 11,
 ) -> SubprocessBaselineBackend:
     """Build an **unconfigured** subprocess backend carrying the assembled lock.
@@ -373,6 +399,9 @@ def build_subprocess_backend(
         The out-of-band approved artifacts root.
     expected_response_artifact_sha256 : str
         The response-space checksum the backend is bound to.
+    allow_local_approved_root_checkpoint_store : bool, optional
+        Fixture/local-only compatibility store. Scientific assembly leaves this
+        false so the immutable approved-input root can never be mutated.
     seed : int, optional
         The base seed for the backend (default ``11``).
 
@@ -392,6 +421,14 @@ def build_subprocess_backend(
         approved_artifacts_root=approved_artifacts_root,
         expected_response_artifact_sha256=expected_response_artifact_sha256,
         execution_identity_lock=lock,
+        expected_worker_sha256=worker_block.worker_script.sha256,
+        allow_local_approved_root_checkpoint_store=allow_local_approved_root_checkpoint_store,
+        worker_identity_paths={
+            "worker_config": worker_block.worker_config.path,
+            "resource_manifest": worker_block.resource_manifest.path,
+            "requirements_lock": worker_block.requirements_lock.path,
+            "adapter_artifact": worker_block.adapter_artifact.path,
+        },
     )
 
 
@@ -455,7 +492,10 @@ def assemble_baseline_backends(
         if not isinstance(representation, str) or not representation:
             raise AssemblerError(f"no config representation registered for method {method!r}")
         lock = assemble_execution_identity_lock(
-            block, config_representation=representation, fixture=fixture
+            block,
+            config_representation=representation,
+            fixture=fixture,
+            expected_worker_method=method,
         )
         backends[method] = build_subprocess_backend(
             block,
@@ -463,6 +503,7 @@ def assemble_baseline_backends(
             name=method,
             approved_artifacts_root=root,
             expected_response_artifact_sha256=expected_response,
+            allow_local_approved_root_checkpoint_store=fixture,
             seed=seed,
         )
     return backends

@@ -432,7 +432,10 @@ def _worker_identity(spec: ResolvedRunSpec, config: ComposePhase2Config) -> dict
                 f"no config representation registered for method {method!r}"
             )
         lock = assemble_execution_identity_lock(
-            block, config_representation=representation, fixture=(spec.mode == "fixture")
+            block,
+            config_representation=representation,
+            fixture=(spec.mode == "fixture"),
+            expected_worker_method=method,
         )
         identity[method] = dataclasses.asdict(lock)
     return identity

@@ -16,6 +16,7 @@ from __future__ import annotations
 import hashlib
 import os
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -32,6 +33,7 @@ from alive.compose.driver.identity_lock import (
     build_subprocess_backend,
 )
 from alive.compose.driver.run_spec import PathSha, ResolvedRunSpec, WorkerBlock
+from alive.compose.worker_bundle import build_worker_bundle
 
 # --------------------------------------------------------------------------- #
 # Stub identity bytes — chosen so the hashed file digests equal the fixed
@@ -237,7 +239,15 @@ def test_build_subprocess_backend_carries_lock(tmp_path: Path) -> None:
     assert backend.import_name == "stub_worker"
     assert backend.approved_artifacts_root == str(tmp_path)
     assert backend.expected_response_artifact_sha256 == _h(b"resp")
+    assert backend.expected_worker_sha256 == block.worker_script.sha256
+    assert backend.allow_local_approved_root_checkpoint_store is False
     assert backend.seed == 11
+    assert backend.worker_identity_paths == {
+        "worker_config": block.worker_config.path,
+        "resource_manifest": block.resource_manifest.path,
+        "requirements_lock": block.requirements_lock.path,
+        "adapter_artifact": block.adapter_artifact.path,
+    }
     # Unconfigured: no payload bound yet (Task 7 configures it).
     assert backend._payload is None
 
@@ -286,12 +296,52 @@ def test_unregistered_representation_fails_closed(tmp_path: Path) -> None:
 
 
 def test_scientific_fails_closed_on_adapter_version(tmp_path: Path) -> None:
-    # Valid files + matching digests, so we reach the adapter_version step and
-    # fail there: no committed versioned adapter manifest exists (sub-project B).
+    # A direct source script is never a scientific execution identity even when
+    # its bytes and all other lock files match.
     block = _worker_block(tmp_path)
-    with pytest.raises(AssemblerError):
+    with pytest.raises(AssemblerError, match="deterministic .pyz bundle"):
         assemble_execution_identity_lock(
-            block, config_representation=_GEARS_REPRESENTATION, fixture=False
+            block,
+            config_representation=_GEARS_REPRESENTATION,
+            fixture=False,
+            expected_worker_method="gears",
+        )
+
+
+def _scientific_bundle_block(tmp_path: Path, *, bundle_method: str) -> WorkerBlock:
+    block = _worker_block(tmp_path)
+    repo = Path(__file__).resolve().parents[4]
+    bundle = build_worker_bundle(
+        source_root=repo,
+        entrypoint=repo / "scripts" / "baselines" / "gears_worker.py",
+        output_path=tmp_path / f"{bundle_method}.pyz",
+        method=bundle_method,
+    )
+    return replace(
+        block,
+        worker_script=PathSha(path=bundle.path, sha256=bundle.sha256),
+    )
+
+
+def test_scientific_bundle_reaches_missing_adapter_manifest_gate(tmp_path: Path) -> None:
+    block = _scientific_bundle_block(tmp_path, bundle_method="gears")
+    with pytest.raises(AssemblerError, match="committed versioned adapter manifest"):
+        assemble_execution_identity_lock(
+            block,
+            config_representation=_GEARS_REPRESENTATION,
+            fixture=False,
+            expected_worker_method="gears",
+        )
+
+
+def test_scientific_bundle_method_mismatch_fails_closed(tmp_path: Path) -> None:
+    block = _scientific_bundle_block(tmp_path, bundle_method="cpa")
+    with pytest.raises(AssemblerError, match="bundle is invalid"):
+        assemble_execution_identity_lock(
+            block,
+            config_representation=_GEARS_REPRESENTATION,
+            fixture=False,
+            expected_worker_method="gears",
         )
 
 
@@ -417,4 +467,12 @@ def test_assemble_baseline_backends_happy(tmp_path: Path) -> None:
     assert backends["cpa"].execution_identity_lock.prediction_representation == _CPA_REPRESENTATION
     assert backends["gears"].expected_response_artifact_sha256 == _h(b"resp")
     assert backends["gears"].approved_artifacts_root == str(tmp_path)
+    assert backends["gears"].allow_local_approved_root_checkpoint_store is True
+    assert backends["cpa"].allow_local_approved_root_checkpoint_store is True
     assert backends["gears"].name == "gears"
+    assert backends["gears"].worker_identity_paths == {
+        "worker_config": gblock.worker_config.path,
+        "resource_manifest": gblock.resource_manifest.path,
+        "requirements_lock": gblock.requirements_lock.path,
+        "adapter_artifact": gblock.adapter_artifact.path,
+    }

@@ -166,7 +166,14 @@ def _model_factories():
 
 
 def _response_and_fit_role(
-    tmp_path, *, response_dim, raw_data_sha256, cal_pair_ids, seed=0, tag="a"
+    tmp_path,
+    *,
+    response_dim,
+    raw_data_sha256,
+    cal_pair_ids,
+    single_gene_ids,
+    seed=0,
+    tag="a",
 ):
     """Assemble a real response space + a written fit-role artifact for a payload.
 
@@ -191,7 +198,8 @@ def _response_and_fit_role(
     n_genes = response_dim + 1
     gene_order = [f"T{i}" for i in range(n_genes)]
     combo_pairs = [tuple(p) for p in cal_pair_ids][:4]
-    n_control, n_single, n_combo = 12, 8, len(combo_pairs)
+    single_genes = list(single_gene_ids)
+    n_control, n_single, n_combo = 12, len(single_genes), len(combo_pairs)
     n_cells = n_control + n_single + n_combo
     counts = rng.integers(1, 50, size=(n_cells, n_genes)).astype(np.float64)
     X = sparse.csr_matrix(counts)
@@ -212,10 +220,9 @@ def _response_and_fit_role(
     # the payload's ``single_gene_ids`` universe (``inputs.delta_by_gene`` keys).
     # The fit-role validator rejects any `singles` token outside that universe
     # (the sealed-combo-as-single leak guard).
-    combo_genes = [g for pair in combo_pairs for g in pair]
     rows = (
         [(f"c{i}", "control", "control") for i in range(n_control)]
-        + [(f"s{i}", "singles", combo_genes[i % len(combo_genes)]) for i in range(n_single)]
+        + [(f"s{i}", "singles", gene) for i, gene in enumerate(single_genes)]
         + [(f"m{i}", "combo_calibration", f"{a}_{b}") for i, (a, b) in enumerate(combo_pairs)]
     )
     extraction = FitRoleExtraction(
@@ -260,6 +267,7 @@ def _subprocess_adapters(inputs: Phase2aInputs, store: DevelopmentOutcomeStore, 
         response_dim=inputs.response_dim,
         raw_data_sha256="subproc-shared-raw",
         cal_pair_ids=inputs.cal_pair_ids,
+        single_gene_ids=list(inputs.delta_by_gene),
     )
     # The run inputs and every backend consume the SAME independently verified
     # response artifact. Returning the aligned inputs prevents fixture tests from
@@ -290,6 +298,7 @@ def _subprocess_adapters(inputs: Phase2aInputs, store: DevelopmentOutcomeStore, 
             approved_artifacts_root=str(tmp_path),
             expected_response_artifact_sha256=combined,
             execution_identity_lock=_stub_execution_lock(representations[name]),
+            allow_local_approved_root_checkpoint_store=True,
         )
         backend.configure_payload(payload)
         adapters[name] = BaselineAdapter(name=name, backend=backend)
@@ -492,6 +501,7 @@ def test_build_subprocess_payload_is_v2_with_consistent_blocks(tmp_path):
         response_dim=inputs_base.response_dim,
         raw_data_sha256="shared_raw",
         cal_pair_ids=inputs_base.cal_pair_ids,
+        single_gene_ids=list(inputs_base.delta_by_gene),
     )
     # bind the independently verified response-artifact digest onto the inputs
     inputs = _inputs(inst, response_space_checksum=combined)
@@ -525,11 +535,13 @@ def test_build_subprocess_payload_rejects_unverified_response_artifact(tmp_path)
     # circular"; spec §2.2).
     inst = _build_instance(np.random.default_rng(77))
     store = _store(inst)
+    base_inputs = _inputs(inst)
     response_artifact, gene_order, fit_role_spec, combined = _response_and_fit_role(
         tmp_path,
-        response_dim=_inputs(inst).response_dim,
+        response_dim=base_inputs.response_dim,
         raw_data_sha256="shared_raw",
-        cal_pair_ids=_inputs(inst).cal_pair_ids,
+        cal_pair_ids=base_inputs.cal_pair_ids,
+        single_gene_ids=list(base_inputs.delta_by_gene),
     )
     inputs = _inputs(inst, response_space_checksum=combined)
     inputs = dataclasses.replace(inputs, response_space_checksum="f" * 64)
