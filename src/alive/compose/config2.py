@@ -1362,3 +1362,25 @@ def assert_scientific_mode_allowed(
             raise ScientificModeError(
                 f"scientific mode blocked: activation evidence remains BLOCKED for {requirement!r}"
             )
+
+    dependency_requirement = "gears_cpa_reproducible_dependency_lock"
+    if dependency_requirement in expected_requirements:
+        from alive.compose.activation_evidence import (
+            ActivationEvidenceError,
+            validate_dependency_lock,
+        )
+
+        try:
+            dependency_evidence = validate_dependency_lock(
+                activation_record.evidence_files[dependency_requirement]
+            )
+        except ActivationEvidenceError as exc:
+            raise ScientificModeError(
+                "scientific mode blocked: dependency/run-smoke activation evidence is incomplete "
+                f"or invalid: {exc}"
+            ) from exc
+        if dependency_evidence["run_gate"]["evidence_status"] != "COMPLETE":
+            raise ScientificModeError(
+                "scientific mode blocked: dependency/run-smoke activation evidence remains "
+                "INCOMPLETE"
+            )

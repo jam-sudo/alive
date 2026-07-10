@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 from pathlib import Path
 
 import pytest
@@ -26,6 +27,7 @@ from alive.compose.config2 import (
     assert_scientific_mode_allowed,
     load_compose_phase2_config,
 )
+from alive.provenance import sha256_json
 
 CANON = "configs/compose_k562_v1_phase2.yaml"
 _EVIDENCE_FILES = {
@@ -87,7 +89,12 @@ def _fully_activated_raw() -> dict:
     return raw
 
 
-def _activation_record_for_config(tmp_path: Path, cfg: ComposePhase2Config) -> ActivationRecord:
+def _activation_record_for_config(
+    tmp_path: Path,
+    cfg: ComposePhase2Config,
+    *,
+    complete_dependency: bool = True,
+) -> ActivationRecord:
     """Create synthetic READY evidence whose lineage matches ``cfg`` exactly."""
     files = dict(_EVIDENCE_FILES)
     for requirement in (
@@ -101,6 +108,141 @@ def _activation_record_for_config(tmp_path: Path, cfg: ComposePhase2Config) -> A
         path = tmp_path / f"{requirement}.json"
         path.write_text(json.dumps(payload, sort_keys=True, separators=(",", ":")))
         files[requirement] = str(path)
+
+    if complete_dependency:
+        evidence_root = Path("docs/activation-evidence/compose")
+        for name in (
+            "requirements.gears_env.lock",
+            "requirements.cpa_env.lock",
+            "go_resource_manifest.json",
+        ):
+            shutil.copyfile(evidence_root / name, tmp_path / name)
+        dependency = json.loads(
+            Path(files["gears_cpa_reproducible_dependency_lock"]).read_text(encoding="utf-8")
+        )
+        dependency["activation"] = "READY — synthetic unit-test evidence"
+        dependency["both_backends_run_evidence_complete"] = True
+        dependency["run_gate"]["evidence_status"] = "COMPLETE"
+        dependency["run_gate"]["seal_safety_status"] = "VERIFIED_ZERO_OVERLAP"
+        dependency["run_gate"]["missing_evidence"] = []
+        digest_fields = (
+            "norman_source_sha256",
+            "fit_role_artifact_sha256",
+            "fit_role_row_identity_sha256",
+            "smoke_script_sha256",
+            "command_log_sha256",
+            "checkpoint_sha256",
+        )
+        for index, backend in enumerate(("gears", "cpa"), start=1):
+            record = dependency["run_gate"]["required_evidence"][backend]
+            for offset, field in enumerate(digest_fields, start=index):
+                record[field] = f"{offset:064x}"
+            training_pairs = [f"{backend}:train:a", f"{backend}:train:b"]
+            sealed_pairs = [f"{backend}:sealed:a", f"{backend}:sealed:b"]
+            roster = {
+                "schema": "compose_smoke_pair_roster_v1",
+                "protocol": "COMPOSE-K562-v1",
+                "backend": backend,
+                "training_roles": ["singles", "combo_calibration"],
+                "training_pair_ids": training_pairs,
+                "sealed_pair_ids": sealed_pairs,
+            }
+            roster["manifest_checksum"] = sha256_json(roster)
+            roster_path = tmp_path / f"{backend}_pair_roster.json"
+            roster_path.write_text(
+                json.dumps(roster, sort_keys=True, separators=(",", ":")),
+                encoding="utf-8",
+            )
+            record["training_pair_roster_sha256"] = sha256_json(training_pairs)
+            record["sealed_pair_roster_sha256"] = sha256_json(sealed_pairs)
+            record["sealed_pair_overlap_count"] = 0
+            record["pair_roster_manifest_path"] = roster_path.name
+            record["pair_roster_manifest_sha256"] = hashlib.sha256(
+                roster_path.read_bytes()
+            ).hexdigest()
+            artifact_fields = {
+                "norman_source": "norman_source_sha256",
+                "fit_role_artifact": "fit_role_artifact_sha256",
+                "fit_role_row_identity": "fit_role_row_identity_sha256",
+                "smoke_script": "smoke_script_sha256",
+                "command_log": "command_log_sha256",
+                "checkpoint": "checkpoint_sha256",
+            }
+            artifact_manifest = {
+                "schema": "compose_backend_smoke_artifact_manifest_v1",
+                "protocol": "COMPOSE-K562-v1",
+                "backend": backend,
+                "artifacts": {
+                    name: {
+                        "uri": f"s3://example.invalid/compose/{backend}/{name}",
+                        "immutable_version": "synthetic-unit-test-version",
+                        "sha256": record[field],
+                    }
+                    for name, field in artifact_fields.items()
+                },
+            }
+            artifact_manifest["manifest_checksum"] = sha256_json(artifact_manifest)
+            artifact_manifest_path = tmp_path / f"{backend}_artifact_manifest.json"
+            artifact_manifest_path.write_text(
+                json.dumps(artifact_manifest, sort_keys=True, separators=(",", ":")),
+                encoding="utf-8",
+            )
+            record["artifact_manifest_path"] = artifact_manifest_path.name
+            record["artifact_manifest_sha256"] = hashlib.sha256(
+                artifact_manifest_path.read_bytes()
+            ).hexdigest()
+            record["exit_code"] = 0
+            dependency["environments"][f"{backend}_env"]["target_run_evidence_complete"] = True
+        reproducibility = dependency["environment_reproducibility"]
+        reproducibility["package_artifact_hashes_complete"] = True
+        artifact_environments = {}
+        for backend in ("gears", "cpa"):
+            artifacts = []
+            requirements_path = tmp_path / f"requirements.{backend}_env.lock"
+            for line in requirements_path.read_text(encoding="utf-8").splitlines():
+                if not line:
+                    continue
+                name, version = line.split("==", 1)
+                filename = f"{name}-{version}-py3-none-any.whl"
+                artifacts.append(
+                    {
+                        "name": name,
+                        "version": version,
+                        "filename": filename,
+                        "source_url": f"https://packages.example.invalid/{filename}",
+                        "sha256": hashlib.sha256(filename.encode()).hexdigest(),
+                    }
+                )
+            artifact_environments[f"{backend}_env"] = artifacts
+        wheelhouse = {
+            "schema": "compose_python_artifact_manifest_v1",
+            "environments": artifact_environments,
+        }
+        wheelhouse["manifest_checksum"] = sha256_json(wheelhouse)
+        wheelhouse_path = tmp_path / "wheelhouse_manifest.json"
+        wheelhouse_path.write_text(
+            json.dumps(wheelhouse, sort_keys=True, separators=(",", ":")),
+            encoding="utf-8",
+        )
+        reproducibility["wheelhouse_manifest_path"] = wheelhouse_path.name
+        reproducibility["wheelhouse_manifest_sha256"] = hashlib.sha256(
+            wheelhouse_path.read_bytes()
+        ).hexdigest()
+        reproducibility["container_image_digest"] = "sha256:" + "b" * 64
+        reproducibility["status"] = "COMPLETE"
+        go_path = tmp_path / "go_resource_manifest.json"
+        dependency["go_resource_manifest"]["sha256"] = hashlib.sha256(
+            go_path.read_bytes()
+        ).hexdigest()
+        dependency["manifest_checksum"] = sha256_json(
+            {key: value for key, value in dependency.items() if key != "manifest_checksum"}
+        )
+        dependency_path = tmp_path / "gears_cpa_dependency_lock.json"
+        dependency_path.write_text(
+            json.dumps(dependency, sort_keys=True, separators=(",", ":")),
+            encoding="utf-8",
+        )
+        files["gears_cpa_reproducible_dependency_lock"] = str(dependency_path)
     return ActivationRecord(
         owner="owner@example.org",
         approved_protocol=cfg.protocol,
@@ -734,6 +876,112 @@ def test_scientific_mode_allowed_when_fully_activated(tmp_path):
         activation_record=_activation_record_for_config(tmp_path, cfg),
         git_is_clean=True,
     )
+
+
+def test_scientific_mode_rejects_honest_but_incomplete_dependency_evidence(tmp_path):
+    cfg = load_compose_phase2_config(_write(tmp_path, _fully_activated_raw()))
+    with pytest.raises(ScientificModeError, match="run-smoke.*INCOMPLETE"):
+        assert_scientific_mode_allowed(
+            cfg,
+            fixture_mode=False,
+            activation_record=_activation_record_for_config(
+                tmp_path,
+                cfg,
+                complete_dependency=False,
+            ),
+            git_is_clean=True,
+        )
+
+
+def test_scientific_mode_recomputes_pair_roster_overlap(tmp_path):
+    cfg = load_compose_phase2_config(_write(tmp_path, _fully_activated_raw()))
+    record = _activation_record_for_config(tmp_path, cfg)
+    dependency_path = Path(record.evidence_files["gears_cpa_reproducible_dependency_lock"])
+    dependency = json.loads(dependency_path.read_text(encoding="utf-8"))
+    evidence = dependency["run_gate"]["required_evidence"]["gears"]
+    roster_path = dependency_path.parent / evidence["pair_roster_manifest_path"]
+    roster = json.loads(roster_path.read_text(encoding="utf-8"))
+    roster["sealed_pair_ids"].append(roster["training_pair_ids"][0])
+    roster["sealed_pair_ids"] = sorted(roster["sealed_pair_ids"])
+    roster["manifest_checksum"] = sha256_json(
+        {key: value for key, value in roster.items() if key != "manifest_checksum"}
+    )
+    roster_path.write_text(
+        json.dumps(roster, sort_keys=True, separators=(",", ":")),
+        encoding="utf-8",
+    )
+    evidence["sealed_pair_roster_sha256"] = sha256_json(roster["sealed_pair_ids"])
+    evidence["pair_roster_manifest_sha256"] = hashlib.sha256(roster_path.read_bytes()).hexdigest()
+    # Keep the claimed overlap at zero: the validator must independently recompute it.
+    dependency["manifest_checksum"] = sha256_json(
+        {key: value for key, value in dependency.items() if key != "manifest_checksum"}
+    )
+    dependency_path.write_text(
+        json.dumps(dependency, sort_keys=True, separators=(",", ":")),
+        encoding="utf-8",
+    )
+    evidence_hashes = dict(record.evidence_hashes)
+    evidence_hashes["gears_cpa_reproducible_dependency_lock"] = (
+        "sha256:" + hashlib.sha256(dependency_path.read_bytes()).hexdigest()
+    )
+    tampered_record = ActivationRecord(
+        owner=record.owner,
+        approved_protocol=record.approved_protocol,
+        approved_phase=record.approved_phase,
+        evidence_hashes=evidence_hashes,
+        evidence_files=record.evidence_files,
+    )
+    with pytest.raises(ScientificModeError, match="overlaps sealed pairs"):
+        assert_scientific_mode_allowed(
+            cfg,
+            fixture_mode=False,
+            activation_record=tampered_record,
+            git_is_clean=True,
+        )
+
+
+def test_scientific_mode_rejects_ephemeral_smoke_artifact_uri(tmp_path):
+    cfg = load_compose_phase2_config(_write(tmp_path, _fully_activated_raw()))
+    record = _activation_record_for_config(tmp_path, cfg)
+    dependency_path = Path(record.evidence_files["gears_cpa_reproducible_dependency_lock"])
+    dependency = json.loads(dependency_path.read_text(encoding="utf-8"))
+    evidence = dependency["run_gate"]["required_evidence"]["cpa"]
+    artifact_path = dependency_path.parent / evidence["artifact_manifest_path"]
+    artifact_manifest = json.loads(artifact_path.read_text(encoding="utf-8"))
+    artifact_manifest["artifacts"]["command_log"]["uri"] = "file:///tmp/smoke.log"
+    artifact_manifest["manifest_checksum"] = sha256_json(
+        {key: value for key, value in artifact_manifest.items() if key != "manifest_checksum"}
+    )
+    artifact_path.write_text(
+        json.dumps(artifact_manifest, sort_keys=True, separators=(",", ":")),
+        encoding="utf-8",
+    )
+    evidence["artifact_manifest_sha256"] = hashlib.sha256(artifact_path.read_bytes()).hexdigest()
+    dependency["manifest_checksum"] = sha256_json(
+        {key: value for key, value in dependency.items() if key != "manifest_checksum"}
+    )
+    dependency_path.write_text(
+        json.dumps(dependency, sort_keys=True, separators=(",", ":")),
+        encoding="utf-8",
+    )
+    evidence_hashes = dict(record.evidence_hashes)
+    evidence_hashes["gears_cpa_reproducible_dependency_lock"] = (
+        "sha256:" + hashlib.sha256(dependency_path.read_bytes()).hexdigest()
+    )
+    tampered_record = ActivationRecord(
+        owner=record.owner,
+        approved_protocol=record.approved_protocol,
+        approved_phase=record.approved_phase,
+        evidence_hashes=evidence_hashes,
+        evidence_files=record.evidence_files,
+    )
+    with pytest.raises(ScientificModeError, match="must be a durable URI"):
+        assert_scientific_mode_allowed(
+            cfg,
+            fixture_mode=False,
+            activation_record=tampered_record,
+            git_is_clean=True,
+        )
 
 
 @pytest.mark.parametrize(

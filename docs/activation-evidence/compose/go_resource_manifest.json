@@ -1,47 +1,72 @@
 {
-  "schema": "compose_go_resource_manifest_v1",
+  "schema": "compose_go_resource_manifest_v2",
   "protocol": "COMPOSE-K562-v1",
-  "purpose": "GEARS GO-graph / gene2go resources for the deep-baseline gears_worker; pre-acquired in dev-pod Phase 0 and content-pinned by SHA-256 so the sealed run never downloads at fit time.",
+  "purpose": "GEARS GO resources are acquired before fit time and content-pinned so scientific execution never downloads or silently substitutes them.",
+  "dataset": {
+    "title": "PertNet",
+    "persistent_id": "doi:10.7910/DVN/Q2ZV3E",
+    "doi_url": "https://doi.org/10.7910/DVN/Q2ZV3E",
+    "publisher": "Harvard Dataverse",
+    "license": {
+      "name": "CC0 1.0",
+      "spdx": "CC0-1.0",
+      "url": "https://creativecommons.org/publicdomain/zero/1.0/"
+    },
+    "metadata_api": "https://dataverse.harvard.edu/api/datasets/:persistentId/?persistentId=doi:10.7910/DVN/Q2ZV3E"
+  },
   "acquisition": {
-    "method": "GEARS 0.1.2 baked-in loaders (gears.pertdata.PertData.load / gears.utils.get_similarity_network), which fetch from Harvard Dataverse",
+    "method": "cell-gears==0.1.2 built-in Dataverse loaders",
     "retrieved_utc": "2026-07-09T22:38:20Z",
     "retrieved_git_sha": "a89f89e9a0252d86393464a6b61bd806eae714e1",
-    "pod": "RunPod A100 80GB PCIe (driver 550.127.05); gears_env_era (cell-gears 0.1.2)",
+    "pod": "RunPod A100 80GB PCIe; NVIDIA driver 550.127.05; gears_env_era",
     "opened_seal": false
   },
-  "license_note": "Underlying NCBI gene2go is a U.S. Government work (public domain); Gene Ontology annotations are CC BY 4.0. Files here are the GEARS project's redistributed Harvard Dataverse snapshots (dataset DOI landing page is authoritative for the redistribution license). The SHA-256 below is the immutable content identity used for reproducibility; exact dataset-DOI license text = confirm on the Dataverse page if a redistribution-license record is required.",
   "resources": [
     {
       "name": "gene2go_all.pkl",
-      "role": "gene->GO term mapping used to build the GEARS GO similarity graph",
+      "source_filename": "gene2go.pkl",
+      "role": "gene-to-GO mapping loaded by GEARS PertData",
       "url": "https://dataverse.harvard.edu/api/access/datafile/6153417",
       "dataverse_datafile_id": 6153417,
+      "dataset_version": "3.0",
+      "file_version": 1,
       "bytes": 9462558,
-      "sha256": "f145c5e84a53048d87942a417d870a4f2d8db50200b96e492b358c13aba8c771"
+      "upstream_md5": "77c9af0c61c30ea4d7a85680f4d122dc",
+      "sha256": "f145c5e84a53048d87942a417d870a4f2d8db50200b96e492b358c13aba8c771",
+      "derivation": "GEARS saves the downloaded bytes under gene2go_all.pkl; no content transform"
     },
     {
       "name": "essential_all_data_pert_genes.pkl",
-      "role": "essential perturbation-gene set for GEARS GO-graph restriction",
+      "source_filename": "essential_all_data_pert_genes.pkl",
+      "role": "essential perturbation-gene set used to restrict the GEARS perturbation graph",
       "url": "https://dataverse.harvard.edu/api/access/datafile/6934320",
       "dataverse_datafile_id": 6934320,
+      "dataset_version": "7.0",
+      "file_version": 1,
       "bytes": 558811,
-      "sha256": "46c3dfe354d8ad5c0da22c69f3d0ca451987b1a61ed9d984279b22b9565ff8d7"
+      "upstream_md5": "b7bc2a91ca513b86f27f090d963711a6",
+      "sha256": "46c3dfe354d8ad5c0da22c69f3d0ca451987b1a61ed9d984279b22b9565ff8d7",
+      "derivation": "downloaded bytes; no content transform"
     },
     {
-      "name": "go_essential_all",
-      "role": "precomputed GO-essential edge list (perturbation-gene GO similarity graph); datafile/6934319 serves a .tar.gz that GEARS extracts to a .csv",
+      "name": "go_essential_all.tar.gz",
+      "source_filename": "go_essential_all.tar.gz",
+      "role": "archive containing the precomputed GO-essential similarity edge list",
       "url": "https://dataverse.harvard.edu/api/access/datafile/6934319",
       "dataverse_datafile_id": 6934319,
-      "downloaded_artifact": {
-        "name": "go_essential_all.tar.gz",
-        "bytes": 60654049,
-        "sha256": "98a14a60e8b76f76fd172570d023a6036775f151604ec01340b3fec7d36693da"
-      },
+      "dataset_version": "7.0",
+      "file_version": 1,
+      "bytes": 60654049,
+      "upstream_md5": "b8bff0d53407f26648330d264df7fe16",
+      "sha256": "98a14a60e8b76f76fd172570d023a6036775f151604ec01340b3fec7d36693da",
+      "derivation": "downloaded archive; no content transform",
       "extracted_artifact": {
         "name": "go_essential_all/go_essential_all.csv",
         "bytes": 354733543,
-        "sha256": "99622d9215462e7bbea99a5f6c0b1e86febfef9f57226269418053484fcb3f9f"
+        "sha256": "99622d9215462e7bbea99a5f6c0b1e86febfef9f57226269418053484fcb3f9f",
+        "derivation": "tar extraction from the parent archive without content editing"
       }
     }
-  ]
+  ],
+  "manifest_checksum": "fcd48bac0d9722a6446fc5534df0a29bd4a98979cca40f8b518bbe58bb9bbd1b"
 }

@@ -30,10 +30,16 @@ Copied verbatim from the runbook (§1/§2.2/§4/§2.5), the B design spec, and `
 
 ## Open decisions to settle BEFORE Phase 1 (owner + pod)
 
-These are the B spec §7 open questions; the plan pins the contract, not these values. **Hard Phase-0 entry gate — Phase 1 MUST NOT begin until all five are recorded** (owner-supplied values + pod acquisition); this is a gate, not a preamble:
+These are the B spec §7 decisions. Decision #2 is now resolved by the committed v2
+manifest; #1, #3–#5 and the reproducibility evidence in Task 0.1 remain open. **Hard
+Phase-0 entry gate — Phase 1 MUST NOT begin until every unresolved decision and every
+Task-0 acceptance condition is recorded.** This is a gate, not a preamble:
 
 1. **GEARS published config + revision.** Exact `epoch/batch/optimizer/early-stop/seed` and the pinned `gears` package revision to record in `configs/…yaml::baselines.gears.revision` and the dependency lock. Source: GEARS paper/repo default for K562 Perturb-seq.
-2. **GEARS GO-graph / gene2go source.** Exact URL + version + license + SHA-256 to record in the resource manifest (Phase 0). Must be pre-acquired, not fetched at fit time.
+2. **GEARS GO-graph / gene2go source — RESOLVED.** The committed v2 manifest binds Harvard
+   Dataverse `doi:10.7910/DVN/Q2ZV3E`, CC0-1.0, exact datafile/dataset/file versions,
+   sizes, upstream MD5s, acquired SHA-256s, and extracted-CSV SHA-256. Phase 0 must only
+   reproduce and verify those bytes; it may not silently select another resource.
 3. **CPA (`cpa-tools`) setup.** Published/default config for combo prediction + pinned revision for `baselines.cpa.revision`.
 4. **`approximation_bias` measurement for GEARS.** `gears.prediction_representation = raw_pseudobulk_approximation` requires the pseudobulk-approximation bias to be measured and its report SHA recorded in `approximation_bias_report_sha256` (currently null = explicit activation blocker). Define how bias is quantified (design task in Phase 2). CPA is `cell_raw_counts` (exact) → its `approximation_bias_report_sha256` stays null by design.
 5. **Dev-pod provider/instance** (prior A100 pattern: RunPod A100, torch cu124 — see [[cartographer-mvp-built-merged]]).
@@ -44,9 +50,19 @@ These are the B spec §7 open questions; the plan pins the contract, not these v
 
 - `scripts/baselines/gears_worker.py` — real GEARS worker (pod-authored against the stub contract). CREATE.
 - `scripts/baselines/cpa_worker.py` — real CPA worker. CREATE.
-- `docs/activation-evidence/compose/go_resource_manifest.json` — GO-graph/gene2go license·version·URL·SHA-256. CREATE.
+- `docs/activation-evidence/compose/go_resource_manifest.json` — committed v2 GO-resource identity contract. VERIFY; MODIFY only through an owner-reviewed protocol change.
 - `docs/activation-evidence/compose/requirements.gears_env.lock` / `requirements.cpa_env.lock` — MODIFY only if the pinned revisions change vs the committed locks.
 - `docs/activation-evidence/compose/gears_cpa_dependency_lock.json` — MODIFY: pin the confirmed `gears`/`cpa` revisions.
+- `docs/activation-evidence/compose/{gears,cpa}_smoke_pair_roster.json` — CREATE in
+  Task 0.1: outcome-free sorted training/sealed pair rosters used for independent overlap
+  recomputation; schema `compose_smoke_pair_roster_v1`.
+- `docs/activation-evidence/compose/{gears,cpa}_smoke_artifacts.json` — CREATE in
+  Task 0.1: durable URI, immutable object version, and SHA-256 for the Norman source,
+  fit-role artifact, row-identity manifest, smoke script, command log, and checkpoint;
+  schema `compose_backend_smoke_artifact_manifest_v1`.
+- `docs/activation-evidence/compose/python_artifact_manifest.json` — CREATE in Task 0.1:
+  exact wheel/sdist artifact selected for every package in both requirements locks; schema
+  `compose_python_artifact_manifest_v1`.
 - `configs/compose_k562_v1_phase2.yaml` — MODIFY: fill `regimes.power_status`, `baselines.{gears,cpa}.{revision,environment_status}`, `baselines.gears.approximation_bias_report_sha256`.
 - `docs/activation-evidence/compose/real_norman_phi_rank_report.json` — REGENERATE under the finalized config.
 - `docs/activation-evidence/compose/real_norman_detectable_effect_report.json` — REGENERATE under the finalized config.
@@ -59,26 +75,67 @@ These are the B spec §7 open questions; the plan pins the contract, not these v
 
 ## Phase 0 — pod provisioning (pod, no seal)
 
-### Task 0.1: locked envs + import probe
+### Task 0.1: locked envs + auditable, seal-safe run evidence
 
-**Files:** none committed (provisioning); may MODIFY `requirements.{gears,cpa}_env.lock` if revisions change.
+**Files:** MODIFY `gears_cpa_dependency_lock.json`; may MODIFY
+`requirements.{gears,cpa}_env.lock` if revisions change. Store logs/checkpoints outside
+Git and bind their bytes by SHA-256 in the dependency lock.
 
 **Steps:**
-- [ ] Clone the current `main` (`1c46708` or later) to the A100 pod, detached checkout; `git rev-parse HEAD` recorded; `git status --porcelain` empty.
-- [ ] `uv sync --frozen` the main env from the committed lock; record instance/GPU/image/CUDA/start-time.
+- [ ] Clone the owner-approved exact SHA to the A100 pod, detached checkout; record the full
+  `git rev-parse HEAD`; require `git status --porcelain` empty.
+- [ ] `uv sync --frozen` the main env from the committed lock; record
+  instance/GPU/image **digest**/driver/CUDA/uv/start-time. A mutable image tag is not a digest.
 - [ ] Create `gears_env` and `cpa_env` fresh from `docs/activation-evidence/compose/requirements.{gears,cpa}_env.lock`; fresh-sync verify.
+- [ ] Resolve every wheel/sdist into a content-addressed wheelhouse, record filename +
+  package/version + source index + SHA-256 in a canonical manifest, verify the manifest
+  before install, and put its safe relative path + file SHA-256 in
+  `environment_reproducibility`. Its exact environment/package roster must equal both
+  requirements locks. Version-only flat
+  locks and `--index-strategy unsafe-best-match` are insufficient for release evidence.
 - [ ] Probe: `<gears_env>/python -c "import gears, torch; print(torch.cuda.is_available())"` and `<cpa_env>/python -c "import cpa, torch"`. Both import + CUDA True.
-- [ ] **RUN-smoke (NOT just import) — the committed lock only verified imports and misses runtime landmines.** In each env, run the actual published workflow on a small real-Norman slice: GEARS `pert_data.load('norman')` + a 1-epoch `train`; CPA `CPA.setup_anndata(...)` with the Norman gene-combo keys (`deg_uns_key`, no `smiles_key`, `max_comb_len=2`) + a 1-epoch `train`. **Known landmine (decision #3):** `cpa-tools==0.7.2` + the committed `numpy==1.26.4` will likely raise `AttributeError: module 'numpy' has no attribute 'int'` in `setup_anndata`'s `deg_uns_key` branch (`.astype(np.int)`, removed in numpy ≥1.24) — so this smoke, not the import probe, decides the cpa version pin. **Recommended target: `cpa-tools==0.8.5`** (earliest tagged version with the `np.int`+smiles fixes, closest to the verified 0.7.2-era stack → minimal delta; see the decision-proposals doc §3). 0.8.2 still has `np.int`; 0.8.8 works but is untagged + more dep drift.
-- [ ] **Acceptance:** both imports succeed AND both RUN-smokes complete (setup + 1-epoch fit, no crash) on real Norman. Record the resolved package revisions (for Task 2.1's dependency-lock pin). If the cpa 0.7.2 RUN-smoke fails on np.int/SMILES, either patch/adjust the env or move to a cpa 0.8.x that runs Norman, and MODIFY `requirements.cpa_env.lock` + the dependency lock accordingly; commit `fix(compose): pin confirmed gears/cpa env revisions (RUN-verified on Norman)`.
+- [x] **Compatibility diagnosis observed (not acceptance evidence):** CPA 0.7.2 failed on
+  `np.int` and CPA 0.8.5 completed an observed one-epoch smoke; GEARS required the
+  era-consistent pandas/scipy stack and then completed an observed one-epoch smoke. These
+  observations justify the current pins but did not capture immutable input rows, logs,
+  checkpoints, or sealed-pair disjointness. The dependency lock therefore remains
+  `INCOMPLETE`.
+- [ ] Build each smoke input **only** from the COMPOSE fit-role artifact. Training rows are
+  exactly `{singles, combo_calibration}`; controls are reference-only. For GEARS, construct
+  a new `PertData` dataset from that role-filtered AnnData (do not accept
+  `PertData.load('norman')` plus GEARS' own published split as release evidence). For CPA,
+  call `setup_anndata` on the same role-filtered artifact. No sealed outcome column or
+  sealed response may enter either process.
+- [ ] Before fitting, emit one committed `compose_smoke_pair_roster_v1` per backend with
+  exact training roles `['singles', 'combo_calibration']` and canonical sorted unique
+  training-pair and sealed-pair rosters; hash both;
+  compute their exact set intersection; require `sealed_pair_overlap_count == 0`. Also hash
+  the Norman source, fit-role artifact, fit-role row identity, exact smoke script, complete
+  stdout/stderr command log, and resulting checkpoint; retain each in durable storage and
+  emit a committed `compose_backend_smoke_artifact_manifest_v1` with a durable URI,
+  immutable object version, and matching SHA-256; record the exit code. A hash for a
+  discarded or unlocatable object is not evidence.
+- [ ] Populate both backends' exact fields in `run_gate.required_evidence`, set per-backend
+  completion flags, remove `missing_evidence`, and change `seal_safety_status` to
+  `VERIFIED_ZERO_OVERLAP` only after the checks above pass. Recompute `manifest_checksum`.
+- [ ] **Acceptance:**
+  `validate_dependency_lock(...)` returns `run_gate.evidence_status == "COMPLETE"`; a
+  negative test that inserts one sealed pair into the training roster fails closed; both
+  fresh environments reproduce from the verified wheelhouse; no seal was opened. Commit as
+  auditable **fit-role smoke evidence**, never as a generic "RUN-verified on Norman" claim.
 
 ### Task 0.2: GO-graph/gene2go acquisition + resource manifest
 
-**Files:** Create `docs/activation-evidence/compose/go_resource_manifest.json`.
+**Files:** Verify the committed `docs/activation-evidence/compose/go_resource_manifest.json`.
 
 **Steps:**
-- [ ] Pre-acquire the GEARS GO-graph/gene2go resource (decision #2) to pod object storage. Do NOT fetch at fit time.
-- [ ] Emit `go_resource_manifest.json` = canonical JSON `{schema, resource, url, version, license, sha256, retrieved_git_sha}`; SHA-256 over the resource bytes.
-- [ ] **Acceptance:** manifest bytes SHA recorded; the file is committed on the pod branch. `commit docs/activation-evidence/compose/go_resource_manifest.json` — `feat(compose): pin GEARS GO-graph resource manifest`.
+- [x] Exact dataset DOI, CC0-1.0 license, three Dataverse datafile IDs/versions/sizes,
+  upstream MD5s, acquired SHA-256s, and extracted-CSV SHA-256 are committed in schema v2.
+- [ ] Pre-acquire those exact bytes to pod object storage. Do NOT fetch at fit time. Verify
+  byte count, upstream MD5, and SHA-256 for every resource and the extracted CSV.
+- [ ] **Acceptance:** `validate_go_resource_manifest(...)` passes; the observed local hashes
+  equal the committed values; the dependency lock's GO-manifest file SHA matches; no
+  resource or manifest byte changes during fit.
 
 ### Task 0.3: Norman data + sequences sync + integrity
 
@@ -198,7 +255,8 @@ These are the B spec §7 open questions; the plan pins the contract, not these v
 ## Definition of Done
 
 - Real `gears_worker.py` + `cpa_worker.py` committed, each passing the local contract test + the pod outcome-free Norman smoke in its locked env, and integrating through the merged controller with `_verify_execution_manifest` accepting the manifest.
-- GO resource manifest + finalized dependency lock committed.
+- GO resource manifest + dependency lock committed, with the dependency lock validator
+  returning `COMPLETE` (zero-overlap run evidence + wheelhouse manifest + image digest).
 - `configs/compose_k562_v1_phase2.yaml` has NO remaining `*_activation_blocker`/null activation field for the active roster; `power_status`/`environment_status`/`revision`/gears `approximation_bias_report_sha256` all established; the FINAL `config_sha256` recorded.
 - Both evidence reports regenerated so every `ActivationRecord` requirement (runbook §4, 6 files) carries a non-empty hash bound to the FINAL config; no `d8c65ac4…`/`activation=BLOCKED` lineage remains.
 - Full suite + locked-env integration green; independent review passed; owner-approved exact Git SHA; runbook flipped to `READY`.

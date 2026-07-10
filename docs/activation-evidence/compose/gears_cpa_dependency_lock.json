@@ -1,13 +1,72 @@
 {
-  "activation": "BLOCKED — environment provenance + dev-pod Phase-0 Norman RUN-gate only; no seal opened, no sealed outcome read, main .venv untouched. The 1-epoch fits below are non-sealed dev smokes on real Norman used solely to RUN-verify the locked envs.",
+  "schema": "compose_gears_cpa_dependency_lock_v2",
+  "activation": "BLOCKED — runtime compatibility was observed on the dev pod, but the smoke input-row roster, sealed-pair disjointness, command log, checkpoint, package-artifact hashes, and container image digest were not captured. This evidence cannot authorize scientific mode.",
   "both_backends_import_ok": true,
-  "both_backends_run_verified_on_norman": true,
+  "both_backends_runtime_smoke_observed_on_norman": true,
+  "both_backends_run_evidence_complete": false,
   "deliverable": "gears_cpa_reproducible_dependency_lock",
   "run_gate": {
-    "summary": "Import-only verification (the prior state of this lock) missed real runtime landmines. Both backends were re-pinned and RUN-verified end-to-end (setup + 1-epoch fit) on real Norman on the A100 dev pod (opens no seal).",
-    "cpa": "cpa-tools 0.7.2 (+ pinned numpy 1.26.4) crashes in setup_anndata's deg_uns_key branch (`.astype(np.int)`; np.int removed in numpy>=1.24). Bumped to cpa-tools 0.8.5 (earliest tagged release with the np.int+smiles fixes; numpy-clean; minimal delta — `uv pip sync` of the 0.7.2 lock with only cpa-tools bumped installs the identical 115-package set). RUN-verified: setup_anndata(deg branch, max_comb_len=2) + 1-epoch GPU fit on a Norman combo slice, no crash.",
-    "gears": "The prior newest-everything pins (numpy 2.4.4 / pandas 3.0.3 / scipy 1.18.0 / anndata 0.11.3) passed import but FAILED GEARS 0.1.2 on Norman at runtime: (1) pandas 3.0 str-dtype makes obs.index.values a StringArray that anndata rejects in PertData.load; (2) scipy 1.18 sparse indexing calls .nonzero() on a pandas boolean Series in GEARS.__init__. cell-gears 0.1.2 declares NO version bounds, so the resolver took newest. Fixed by pinning the GEARS-era 2023 stack (numpy 1.26.4 + pandas 2.2.3 + scipy 1.11.4 + anndata 0.10.9), keeping torch 2.6+cu124 / PyG 2.8 for A100 CUDA 12.4. RUN-verified: PertData.load('norman') + simulation split (seed=1) + get_dataloader + model_initialize(hidden_size=64) + 1-epoch GPU train, no crash.",
-    "go_resources": "GEARS GO-graph resources pre-acquired and SHA-pinned in docs/activation-evidence/compose/go_resource_manifest.json (gene2go_all.pkl, essential_all_data_pert_genes.pkl, go_essential_all.csv)."
+    "schema": "compose_backend_run_smoke_evidence_v1",
+    "evidence_status": "INCOMPLETE",
+    "seal_safety_status": "UNVERIFIED",
+    "summary": "The pod operator observed successful 1-epoch runtime smokes after re-pinning. Those observations found real compatibility faults, but no immutable smoke manifest or role-restricted training roster was captured, so they are not release-gate evidence.",
+    "observations": {
+      "cpa": "cpa-tools 0.7.2 crashed in setup_anndata's deg_uns_key branch because it used np.int with numpy 1.26.4. cpa-tools 0.8.5 completed setup_anndata plus a 1-epoch GPU smoke on a Norman combo slice.",
+      "gears": "The newest-everything stack crashed GEARS 0.1.2 on Norman through pandas 3 string-index and scipy 1.18 sparse-index incompatibilities. The era-consistent stack completed PertData.load('norman'), simulation split seed 1, dataloader construction, model initialization, and a 1-epoch GPU smoke."
+    },
+    "required_evidence": {
+      "cpa": {
+        "norman_source_sha256": null,
+        "fit_role_artifact_sha256": null,
+        "fit_role_row_identity_sha256": null,
+        "training_pair_roster_sha256": null,
+        "sealed_pair_roster_sha256": null,
+        "sealed_pair_overlap_count": null,
+        "pair_roster_manifest_path": null,
+        "pair_roster_manifest_sha256": null,
+        "artifact_manifest_path": null,
+        "artifact_manifest_sha256": null,
+        "smoke_script_sha256": null,
+        "command_log_sha256": null,
+        "checkpoint_sha256": null,
+        "exit_code": null
+      },
+      "gears": {
+        "norman_source_sha256": null,
+        "fit_role_artifact_sha256": null,
+        "fit_role_row_identity_sha256": null,
+        "training_pair_roster_sha256": null,
+        "sealed_pair_roster_sha256": null,
+        "sealed_pair_overlap_count": null,
+        "pair_roster_manifest_path": null,
+        "pair_roster_manifest_sha256": null,
+        "artifact_manifest_path": null,
+        "artifact_manifest_sha256": null,
+        "smoke_script_sha256": null,
+        "command_log_sha256": null,
+        "checkpoint_sha256": null,
+        "exit_code": null
+      }
+    },
+    "missing_evidence": [
+      "role-restricted fit-role artifact identity",
+      "committed training/sealed pair roster manifests and recomputable zero-overlap proof",
+      "durable, immutable artifact manifests for smoke inputs, scripts, logs, and checkpoints",
+      "successful smoke exit codes",
+      "exact wheel/sdist artifact manifest and immutable container image digest"
+    ]
+  },
+  "go_resource_manifest": {
+    "path": "go_resource_manifest.json",
+    "sha256": "e9e724ebe77d55dc4c8bc9f18a832b8bcebdddc59af554c4af45ff3c2b6896cc"
+  },
+  "environment_reproducibility": {
+    "version_pins_complete": true,
+    "package_artifact_hashes_complete": false,
+    "wheelhouse_manifest_path": null,
+    "wheelhouse_manifest_sha256": null,
+    "container_image_digest": null,
+    "status": "INCOMPLETE — exact versions are pinned, but wheel/sdist hashes and the pod image digest were not captured"
   },
   "environments": {
     "cpa_env": {
@@ -54,7 +113,7 @@
         "torch_geometric": "IMPORT_FAILED: ModuleNotFoundError: No module named 'torch_geometric'"
       },
       "runtime_notes": [
-        "cpa-tools bumped 0.7.2 -> 0.8.5 (RUN-verified on Norman): 0.7.2's setup_anndata deg_uns_key branch uses `.astype(np.int)`, removed in numpy>=1.24, so 0.7.2 + the pinned numpy 1.26.4 crashes on the Norman gene-combo setup. 0.8.5 is the earliest tagged release with the np.int->int + smiles-key-guard fixes and is numpy-clean across all cpa/*.py. `uv pip sync` is an exact install, so the env == this lock (115 pkgs) with zero extra deps pulled: 0.8.5's runtime is satisfied by the 0.7.2-era transitive stack (minimal-delta).",
+        "cpa-tools bumped 0.7.2 -> 0.8.5 after a Norman runtime smoke: 0.7.2's setup_anndata deg_uns_key branch uses `.astype(np.int)`, removed in numpy>=1.24, so 0.7.2 + the pinned numpy 1.26.4 crashes on the Norman gene-combo setup. 0.8.5 completed the observed smoke. This is compatibility evidence only until the structured row-roster/log/checkpoint fields above are populated.",
         "Requires a uv-MANAGED CPython 3.10 (cpython-3.10.18): cpa-tools's numba/llvmlite pin needs Python >=3.7,<3.11, and the pod's system /usr/bin/python3.10 lacks _tkinter (cpa/_model.py has a spurious `from tkinter import N`; the managed build bundles Tcl/Tk).",
         "Lock derived by pinning the 2023-era stack cpa-tools targets: scvi-tools==0.20.3 (has parse_use_gpu_arg; newer scvi removed it and imports the removed jaxlib.xla_extension), jax/jaxlib==0.4.38 (newest <0.5 exposing jaxlib.xla_extension), anndata<0.11 (0.10.9; anndata 0.11 removed SparseDataset), numpy 1.26.4, plus seaborn>=0.13 (0.13.2; old seaborn calls the removed matplotlib.cm.register_cmap), and scanpy + requests (imported by cpa/scvi but not pulled).",
         "rdkit is the modern wheel (2026.3.3); cpa-tools declares the abandoned rdkit-pypi which double-installs the rdkit namespace and triggers a Boost.Python converter error — the lock excludes rdkit-pypi, so a fresh `uv pip sync` of the lock is clean.",
@@ -62,7 +121,8 @@
       ],
       "target_backend": "cpa",
       "target_import_ok": true,
-      "target_run_verified_on_norman": true
+      "target_runtime_smoke_observed_on_norman": true,
+      "target_run_evidence_complete": false
     },
     "gears_env": {
       "cuda": {
@@ -103,19 +163,20 @@
         "torch_geometric": "2.8.0"
       },
       "runtime_notes": [
-        "era-consistent re-pin (RUN-verified on Norman). cell-gears 0.1.2 declares NO version bounds (Requires-Dist: numpy/pandas/scipy/scikit-learn/scanpy/torch, all unbounded), so the prior lock resolved to newest-everything (numpy 2.4.4 / pandas 3.0.3 / scipy 1.18.0 / anndata 0.11.3) which passed IMPORT but crashed GEARS 0.1.2 (a 2023 library) on Norman at runtime.",
+        "Era-consistent re-pin after an observed Norman runtime smoke. cell-gears 0.1.2 declares no useful version bounds, so the prior newest-everything lock passed import but crashed at runtime. This is compatibility evidence only until the structured row-roster/log/checkpoint fields above are populated.",
         "Landmine 1 (PertData.load): pandas 3.0 makes string columns default to `str` dtype, so `adata.obs.index.values` is a pandas StringArray that anndata rejects (`IndexError: Unknown indexer <StringArray>`). Fixed by pandas<3.0 (2.2.3 -> object-dtype indices).",
         "Landmine 2 (GEARS.__init__): `adata.X[adata.obs.condition == 'ctrl']` indexes a scipy sparse matrix with a pandas boolean Series; scipy 1.18's new sparse indexing calls `idx.nonzero()` on it (removed from pandas). Fixed by scipy<1.14 (1.11.4 -> old sparse indexing; forces numpy<1.28 -> 1.26.4).",
-        "Final era stack: numpy 1.26.4 + pandas 2.2.3 + scipy 1.11.4 + anndata 0.10.9 (+ torch 2.6.0+cu124 / torch_geometric 2.8.0 kept for A100 CUDA 12.4). RUN-verified: PertData.load('norman') + prepare_split('simulation', seed=1) + get_dataloader + GEARS.model_initialize(hidden_size=64, published defaults) + 1-epoch GPU train completed on Norman, no crash.",
+        "Final era stack: numpy 1.26.4 + pandas 2.2.3 + scipy 1.11.4 + anndata 0.10.9 (+ torch 2.6.0+cu124 / torch_geometric 2.8.0 kept for A100 CUDA 12.4). The operator observed PertData.load('norman') + simulation split seed 1 + dataloader + model initialization + 1 epoch completing without a compatibility crash; COMPOSE seal-safety remains unverified because the training roster was not captured.",
         "Fresh venv (not the pod's original system-python gears_env, which was import-only-verified and pandas-mutated during diagnosis)."
       ],
       "target_backend": "gears",
       "target_import_ok": true,
-      "target_run_verified_on_norman": true
+      "target_runtime_smoke_observed_on_norman": true,
+      "target_run_evidence_complete": false
     }
   },
   "generated_at_utc": "2026-07-09T22:38:20Z",
-  "git_sha": "a89f89e",
+  "git_sha": "a89f89e9a0252d86393464a6b61bd806eae714e1",
   "host": {
     "gpu": "NVIDIA A100 80GB PCIe",
     "nvidia_driver": "550.127.05",
@@ -127,5 +188,6 @@
     "torch_pin": "torch==2.6.0 (resolves to 2.6.0+cu124 via the cu124 index)"
   },
   "isolation_rationale": "GEARS (torch-geometric) and CPA (scvi-tools/lightning) carry independent, frequently-conflicting torch-ecosystem constraints, and the activation-time guarded seam invokes each baseline as an isolated subprocess backend. Two per-baseline environments are therefore the correct unit of reproducibility; neither shares the main ALIVE .venv.",
-  "protocol": "COMPOSE-K562-v1"
+  "protocol": "COMPOSE-K562-v1",
+  "manifest_checksum": "9a9faff0dabc435f06626b2c9ac7ce1c152e1b670cece331495dc5e9e0f5fb31"
 }

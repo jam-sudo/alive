@@ -6,31 +6,31 @@
 > Nothing here changes `config_sha256` until the owner confirms and the values are written per the dev-pod
 > plan's ⚑ ordering (config finalize → new run identity → THEN regenerate evidence).
 >
-> **⚠️ SELF-CORRECTED 2026-07-09.** The first draft of this file researched external PyPI-latest packages WITHOUT
-> first consulting the repo's own committed, A100-fresh-sync-verified `docs/activation-evidence/compose/gears_cpa_dependency_lock.json`.
-> That produced two errors, now fixed: (1) CPA was proposed as `cpa-tools==0.8.8`, but the verified lock pins
-> **`cpa-tools 0.7.2`**; (2) a "#5 cpa cannot use cu124 / needs torch≤2.0.1" constraint was asserted, but the
-> verified lock runs **both** envs on **torch 2.6.0+cu124**. The committed lock — not external PyPI — is the
-> authoritative env record; this file is now anchored on it.
+> **⚠️ SELF-CORRECTED 2026-07-09.** The first draft relied on external PyPI-latest
+> metadata. Subsequent dev-pod diagnosis established that CPA 0.7.2 crashes on the Norman
+> setup under numpy 1.26.4, while CPA 0.8.5 and both cu124 environments complete observed
+> compatibility smokes. The committed v2 lock now records those candidate pins but marks
+> release evidence `INCOMPLETE`; a compatibility observation is not a seal-safe run attestation.
 
 ---
 
 ## AUTHORITATIVE ANCHOR: the committed dependency lock
 
-`docs/activation-evidence/compose/gears_cpa_dependency_lock.json` (git `79b01e0`, generated 2026-06-29 on an
-**NVIDIA A100 80GB**, `both_backends_import_ok: true`, `lock_verified_by_fresh_sync: true`) already pins both envs.
-The committed `requirements.gears_env.lock` (sha `f0a62c63…`) and `requirements.cpa_env.lock` (sha `50d26900…`)
-exist. So decisions #1/#3 (revision) and #5 (env/provider) are **largely already answered and verified** — the
-dev-pod work PROMOTES these into the config, then re-verifies on the dev pod (plan Task 0.1). External research
-below is a *cross-reference* to the published defaults, NOT the source of the pins.
+`docs/activation-evidence/compose/gears_cpa_dependency_lock.json` records a full generation SHA and the
+**NVIDIA A100 80GB** compatibility diagnosis. The committed requirements locks pin exact versions, and the
+operator observed both backends complete one-epoch smokes after resolving CPA/GEARS compatibility faults.
+However, schema v2 correctly marks the record `INCOMPLETE`: it lacks the fit-role row roster, sealed-pair
+zero-overlap proof, immutable logs/checkpoints, package artifact hashes, and container image digest. Decisions
+#1/#3 are therefore *candidate pins with compatibility evidence*, not release-verified scientific-run pins.
+External research below is a cross-reference to published defaults, not a substitute for Task 0.1 evidence.
 
 | env | package (verified) | Python | torch / CUDA | key stack |
 |---|---|---|---|---|
 | `gears_env` | **cell-gears 0.1.2** | 3.12 (system) | **2.6.0+cu124** | torch_geometric 2.8.0, numba 0.65, numpy 2.4.4 |
-| `cpa_env` | **cpa-tools 0.7.2** | 3.10 (uv-managed cpython-3.10.18) | **2.6.0+cu124** | scvi-tools 0.20.3, lightning 2.6.5, jax/jaxlib 0.4.38, anndata 0.10.9, rdkit 2026.03.3 |
+| `cpa_env` | **cpa-tools 0.8.5** | 3.10 (uv-managed cpython-3.10.18) | **2.6.0+cu124** | scvi-tools 0.20.3, lightning 2.6.5, jax/jaxlib 0.4.38, anndata 0.10.9, rdkit 2026.03.3 |
 
 Committed `cpa_env` runtime landmines (Phase 0 MUST honor — from the lock's `runtime_notes`):
-- Requires a **uv-managed** CPython 3.10 (cpa-tools 0.7.2's numba/llvmlite pin needs `>=3.7,<3.11`; the pod's system
+- Requires a **uv-managed** CPython 3.10 (the selected numba/llvmlite stack needs `>=3.7,<3.11`; the pod's system
   python3.10 lacks `_tkinter`, which `cpa/_model.py` imports).
 - **Exclude `rdkit-pypi`** (cpa-tools declares the abandoned pkg → Boost.Python converter error); use modern `rdkit`.
 - The 2023-era pin stack (`scvi-tools==0.20.3`, `jax/jaxlib==0.4.38`, `anndata<0.11`, `numpy 1.26.4`) is load-bearing.
@@ -59,29 +59,32 @@ override exists.**
   Norman-benchmark training config; if a paper-faithful run is intended, verify against the paper on the pod.
 - Source root: `https://raw.githubusercontent.com/snap-stanford/GEARS/master/gears/gears.py`.
 
-## #2 — GEARS GO-graph / gene2go source (→ `go_resource_manifest.json`)
+## #2 — GEARS GO-graph / gene2go source — RESOLVED
 
-Unchanged (env install does NOT fetch this; GEARS downloads it at data-load time — a separate Task-0.2 resource).
-Only the GO `gene2go` pickle is downloaded; the co-expression graph is computed from the training AnnData.
-- Primary: `gene2go.pkl` — `https://dataverse.harvard.edu/api/access/datafile/6153417` (Harvard Dataverse;
-  `pertdata.py:92-94`). File API: MD5 `77c9af0c61c30ea4d7a85680f4d122dc`, size `9462558`, published `2022-03-24`,
-  `restricted:false`.
-- Companion: `essential_all_data_pert_genes.pkl` — `datafile/6934320` (`pertdata.py:119`).
-- **GAPS (owner/pod):** **license = POD-VERIFY** (not in code or Dataverse file API; upstream GO generally CC BY 4.0
-  but unconfirmed for this pickle — owner resolves the manifest `license`); **GO version = POD-VERIFY** (only the
-  2022-03-24 date known); **SHA-256 = POD-VERIFY** (Dataverse gives only MD5 → compute SHA-256 over acquired bytes).
+The committed `compose_go_resource_manifest_v2` closes the former provenance gap. It
+binds Harvard Dataverse dataset **PertNet**, persistent ID `doi:10.7910/DVN/Q2ZV3E`,
+dataset license **CC0-1.0**, exact datafile IDs 6153417/6934320/6934319, dataset versions
+3.0/7.0/7.0, file versions, byte counts, upstream MD5 values, acquired SHA-256 values,
+and the extracted GO CSV SHA-256. The dependency lock binds the manifest file bytes.
 
-## #3 — CPA (cpa-tools) setup + revision — CORRECTED to 0.7.2
+This resolves *identity and license*, not fit-time acquisition: Task 0.2 must reproduce
+those exact bytes into pod object storage and recheck size + MD5 + SHA-256. Workers may
+not download or substitute a resource at fit time. The co-expression graph remains a
+derivative of the role-restricted training AnnData, not a precomputed external outcome.
 
-**Revision (→ `baselines.cpa.revision`): `cpa-tools 0.7.2`** (committed lock, verified). **NOT `0.8.8`** — that was
-the first draft's error (0.8.8 is PyPI-latest but is NOT what the repo's verified env pins). Env: Python 3.10
-uv-managed + torch 2.6.0+cu124 + scvi-tools 0.20.3 + lightning 2.6.5 + jax 0.4.38 + anndata 0.10.9 (see anchor table).
+## #3 — CPA (cpa-tools) setup + revision — compatibility candidate 0.8.5
 
-**Combo config for 0.7.2 = POD-VERIFY (not yet sourced).** The external research config (n_latent=32, doser=linear,
+**Revision candidate (→ `baselines.cpa.revision`): `cpa-tools 0.8.5`.** The dev pod
+observed `setup_anndata` plus a one-epoch GPU smoke succeed after 0.7.2 failed on
+`np.int`. Env: Python 3.10 uv-managed + torch 2.6.0+cu124 + scvi-tools 0.20.3 +
+lightning 2.6.5 + jax 0.4.38 + anndata 0.10.9. This is compatibility evidence;
+Task 0.1 must rerun on the role-restricted artifact and capture immutable evidence.
+
+**Combo config for 0.8.5 = POD-VERIFY (not yet sourced).** The external research config (n_latent=32, doser=linear,
 seed=8206, the specific trainer_params, max_epochs=2000/batch=2048) came from the **0.8.8** Norman tutorial — the
-**WRONG version** for the pinned 0.7.2 env. Do NOT use those values as-is. The 0.7.2 combo config must be read from
-the **installed 0.7.2 wheel + its contemporaneous tutorial** on the dev pod. (I can re-research the 0.7.2-era combo
-tutorial on request, but a version-matched pod read is safer.)
+wrong version for the selected 0.8.5 env. Do not use those values as-is. Read the exact
+defaults from the installed 0.8.5 wheel and its contemporaneous tutorial, then pin them
+explicitly before the seal-safe smoke.
 - Output representation (per-cell, NB raw counts → `cpa.prediction_representation = cell_raw_counts`) holds for CPA
   generally; that part of the research is version-robust.
 **"0.7.2로 해도 문제 없나?" — investigated (v0.7.2…main code diff + PyPI timeline + the committed lock):**
@@ -91,39 +94,39 @@ tutorial on request, but a version-matched pod read is safer.)
   flexibility (`covars_to_add`, `z_no_pert` latents). No combo-algorithm change. 0.7.2 is also paper-contemporaneous
   (Sep 2023, same era as the MSB-2023 paper). (Timeline caveat: 0.8.0 branched the SAME DAY as 0.7.2 — 0.8.x is the
   maintained line; 0.7.x ended at 0.7.2.)
-- **⚠️ Runtime landmine — 0.7.2 + the committed env likely CANNOT run the Norman gene-combo setup.** The 0.7.2→main
+- **⚠️ Historical runtime landmine — 0.7.2 cannot run the selected Norman setup.** The 0.7.2→main
   diff shows two fixes in `cpa/_model.py::setup_anndata` that 0.7.2 lacks: (1) `.astype(np.int)` → `.astype(int)` —
-  `np.int` was REMOVED in numpy ≥1.24, and the committed `requirements.cpa_env.lock` pins **`cpa-tools==0.7.2` +
-  `numpy==1.26.4` together**, so the `deg_uns_key` branch the Norman combo tutorial exercises would raise
+  `np.int` was removed in numpy ≥1.24; the prior lock paired `cpa-tools==0.7.2` with
+  `numpy==1.26.4`, so the `deg_uns_key` branch raised
   `AttributeError: module 'numpy' has no attribute 'int'`; (2) a `if smiles_key is not None:` guard for the
-  no-SMILES (gene) perturbation path 0.7.2 lacks. **The committed lock verified IMPORT only** (`both_backends_import_ok`),
-  NOT running `setup_anndata`/fit on Norman — so these landmines were not caught. (High confidence from the files;
-  not yet executed → RUN-verify on the dev pod.)
-- **So the cpa version is NOT actually settled by the "verified" lock.** Governance (§6 baseline: the baseline must
-  actually RUN at published strength) requires a dev-pod Phase-0 gate that **runs the Norman gene-combo
-  `setup_anndata` + a short fit end-to-end** (not just import). Whichever version passes THAT is the pin.
+  no-SMILES (gene) perturbation path 0.7.2 lacks. The pod observation confirmed the
+  failure and the current lock now pins 0.8.5.
+- **So compatibility does not by itself settle the release pin.** Governance (§6 baseline:
+  the baseline must actually run at published strength) requires a dev-pod Phase-0 gate
+  on the role-restricted COMPOSE artifact with immutable input/log/checkpoint evidence
+  and a proved-zero sealed-pair intersection.
 - **Fix timeline (verified via `cpa/_model.py` at each tag):** v0.7.2 has `np.int` + no smiles guard; **v0.8.2** still
   has `np.int` (smiles guard added); **v0.8.5** (2023-11-03, tag `7cda37e`) is the **earliest release with BOTH fixes**
   (`np.int`→`int`, smiles guard). v0.8.8 (2024-08) also has them but is untagged (pin a SHA) and 9 months of dep drift.
-- **RECOMMENDATION: pin `cpa-tools==0.8.5`** (reversed from the first draft's "keep 0.7.2"). It is the earliest TAGGED
+- **SELECTED COMPATIBILITY CANDIDATE: `cpa-tools==0.8.5`.** It is the earliest tagged
   version with both runtime fixes AND closest to the fresh-sync-verified 0.7.2-era stack (scvi 0.20.3 / jax 0.4.38 /
   anndata 0.10.9), so the env change is the **minimal delta** — bump cpa `0.7.2→0.8.5`, keep the rest of the committed
   stack, and numpy 1.26.4 now works. 0.8.8 is the fallback if the current documented Norman tutorial is preferred, at
-  the cost of more dep re-resolution. **Either way the pin is CONFIRMED by the dev-pod Phase-0 Norman RUN-gate**
-  (setup+1-epoch fit end-to-end, not import) — this cannot be finalized on the MacBook (no Norman data / GPU). 0.7.2
-  is disqualified unless it somehow passes that gate.
+  the cost of more dep re-resolution. The observed generic Norman smoke selected 0.8.5
+  as the compatibility candidate. It becomes release-verified only after the
+  fit-role-only, zero-overlap, hash-bound Task-0.1 gate passes.
 - **0.8.5 is numpy-clean EVERYWHERE (verified):** grepped ALL 9 `cpa/*.py` at tag v0.8.5 for every alias numpy 1.24
   removed (`np.int/float/bool/object/str`) → ZERO hits. So the numpy-1.26.4 override that CRASHED 0.7.2 is code-safe
   on 0.8.5.
 - **⚠️ dev-pod build instruction — do NOT naive-install.** v0.8.5's pyproject DECLARES conservative bounds
   (`numpy>=1.22.4,<1.24`, `anndata>=0.9.0,<0.10.0`, `torch>1.8.0,<=2.0.1`). A plain `pip install cpa-tools==0.8.5`
   would pull numpy `<1.24` (which HAS `np.int`) and conflict with numba 0.65 / torch 2.6. REBUILD
-  `requirements.cpa_env.lock` the SAME WAY as the committed 0.7.2 one — `uv pip sync … --index-strategy
-  unsafe-best-match` forcing **numpy 1.26.4 + anndata 0.10.9 + torch 2.6.0+cu124** — just with `cpa-tools==0.8.5`.
-  That override machinery is already proven on the 0.7.2 env; 0.8.5 being numpy-clean makes the numpy override safe.
-- **Residual to RUN-verify (why "0.8.5 = no problem" is NOT assertable without the gate):** 0.8.5's code must tolerate
-  the FORCED anndata 0.10.9 (declared bound `<0.10.0`; the 0.7.2 stack proved 0.7.2 tolerates 0.10.9, 0.8.5 is
-  adjacent but unverified) — the Phase-0 RUN-gate confirms it.
+  `requirements.cpa_env.lock` with `cpa-tools==0.8.5`, numpy 1.26.4, anndata 0.10.9,
+  and torch 2.6.0+cu124. The recorded `unsafe-best-match` reconstruction is acceptable
+  for diagnosis only; release reproduction additionally needs artifact hashes.
+- **Residual to release-verify:** 0.8.5 was observed to tolerate the forced anndata 0.10.9
+  despite its declared `<0.10.0` bound. That unsupported combination and its exact package
+  artifacts must be reconstructed and captured by the stricter Phase-0 gate.
 
 ## #4 — GEARS pseudobulk-approximation bias metric (→ `baselines.gears.approximation_bias_report_sha256`)
 
@@ -167,7 +170,7 @@ extrapolation from cpa-tools 0.8.8's declared pyproject bounds and is contradict
 committed lock runs **both envs on torch 2.6.0+cu124** on an A100 80GB, fresh-sync-verified. **The prior A100 cu124
 pattern works.** Real provisioning specifics (from the lock, not new constraints):
 - `gears_env`: system Python 3.12 + torch 2.6.0+cu124 + torch_geometric 2.8.0 + cell-gears 0.1.2.
-- `cpa_env`: uv-managed CPython 3.10 + torch 2.6.0+cu124 + the 2023-era cpa-tools 0.7.2 stack (see anchor +
+- `cpa_env`: uv-managed CPython 3.10 + torch 2.6.0+cu124 + cpa-tools 0.8.5 on the era-consistent stack (see anchor +
   runtime_notes: tkinter, rdkit-pypi exclusion, scvi/jax/anndata pins, MPLBACKEND=Agg).
 - Owner picks provider/instance; the verified reference is **RunPod A100 80GB, cu124, uv 0.9.0, driver 550.127.05**.
 
@@ -179,12 +182,12 @@ pattern works.** Real provisioning specifics (from the lock, not new constraints
 |---|---|---|---|
 | #1 | `baselines.gears.revision` (+ dep lock) | `cell-gears==0.1.2` + SHA | **committed lock (verified)**; clarify `package` (import `gears` vs pip `cell-gears`); pod-verify wheel |
 | #1 | GEARS hyperparams (worker + dep lock) | master defaults above as REFERENCE | **pod-verify against installed 0.1.2 wheel**; worker pins explicit values |
-| #2 | `go_resource_manifest.json` | url `datafile/6153417`, MD5 `77c9af0c…` | **license + GO version + SHA-256 = pod** |
+| #2 | `go_resource_manifest.json` | DOI `10.7910/DVN/Q2ZV3E`, CC0-1.0, exact 3-file roster + hashes | **resolved in v2 manifest; pod must reproduce bytes** |
 | #3 | `baselines.cpa.revision` (+ dep lock) | **`cpa-tools==0.8.5`** (recommended; NOT 0.7.2 — np.int crash) | earliest tagged w/ both fixes + minimal stack delta; **dev-pod Phase-0 RUN-gate confirms** |
-| #3 | CPA combo config (worker + dep lock) | **POD-VERIFY (version-matched)** | 0.8.8 research applies only if 0.8.x chosen; 0.7.2 config = read from 0.7.2 |
+| #3 | CPA combo config (worker + dep lock) | **POD-VERIFY (version-matched)** | read and pin exact 0.8.5 defaults; do not transplant 0.8.8 tutorial values |
 | #4 | `baselines.gears.approximation_bias_report_sha256` | Task-2.2 report SHA (metric above) | run on pod, non-sealed |
 | #4 | `baselines.cpa.approximation_bias_report_sha256` | **null** (exact representation) | none |
-| #5 | env locks / provider | 2 verified envs, both cu124 | committed lock; **owner picks provider** |
+| #5 | env locks / provider | 2 version-pinned envs, both cu124 | compatibility observed; wheelhouse/image digest missing; **owner picks provider** |
 | — | `baselines.{gears,cpa}.environment_status` | promote from verified lock, re-verify on pod | pod fresh-sync |
 | — | `regimes.power_status` | established by Task-2.1 detectable-effect report | pod (Phase 2, not a #1–5 decision) |
 

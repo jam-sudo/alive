@@ -150,6 +150,11 @@ post-seal non-COMPLETE(durable export 미완료 포함), `10` pre-seal rejection
 
 - 전체 suite 및 worker별 locked-env integration test green.
 - real fit-role artifact/worker/config/resource/env checksum manifest 완성.
+- `validate_dependency_lock`가 `run_gate.evidence_status == "COMPLETE"`를 반환해야 한다.
+  즉 두 backend 모두 fit-role row identity, training/sealed pair roster, zero-overlap,
+  smoke script/log/checkpoint/exit-code hash가 있고, 각 artifact의 durable URI와 immutable
+  object version을 담은 manifest, wheelhouse manifest SHA, immutable container image
+  digest가 있어야 한다. Import 성공이나 관찰자 서술만으로 대체할 수 없다.
 - config의 `power_status`, GEARS/CPA `revision`·`environment_status`와 실제 activation overlay의 관계를
   문서화하고, config digest가 바뀌면 새 run identity와 evidence 결속을 재생성.
 - 독립 검토자가 leakage, exact roster, response projection, pair alignment, single seal open,
