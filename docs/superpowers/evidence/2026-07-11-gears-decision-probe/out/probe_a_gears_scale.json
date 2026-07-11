@@ -1,0 +1,51 @@
+{
+  "dumped_symbols": [
+    "GEARS.__init__",
+    "GEARS.predict",
+    "PertData.__init__",
+    "PertData.new_data_process",
+    "PertData.set_pert_genes"
+  ],
+  "errors": [],
+  "gears_dist_version": "0.1.2",
+  "gears_package_dir": "/root/gears_env_era/lib/python3.12/site-packages/gears",
+  "gears_version": null,
+  "heuristics": {
+    "P1_P4_process_normalization": {
+      "log1p": false,
+      "median": false,
+      "normalize": false,
+      "sc.pp": false,
+      "size_factor": false,
+      "sum": false,
+      "total": false
+    },
+    "P2_predict_output_transform": {
+      "expm1": false,
+      "log1p": false,
+      "np.exp": true,
+      "np.log": false,
+      "torch.exp": false
+    },
+    "P3_predict_per_control_mean": {
+      ".mean(": true,
+      "300": true,
+      "batch": true,
+      "for ": true,
+      "np.mean": true
+    },
+    "note": "Authoritative source is probe_a_gears_source.txt. Apply the doc-\u00a71 decision rule by READING it: Option 1 iff predict returns log-space (P2), constructs per-control rows before np.mean over the first <=300-control batch (P3), and GEARS normalizes each cell by full-gene library to a GLOBAL constant BEFORE gene subsetting (P1/P4). Otherwise fall back to Option 2."
+  },
+  "schema": "compose_probe_a_gears_scale_v1",
+  "source_fingerprint_sha256": "f63e48d676169ba5be94ebdd4dfe96ad7834ba7273d5bfe46b65b7a5a486a57e",
+  "source_py_files": [
+    "__init__.py",
+    "data_utils.py",
+    "gears.py",
+    "inference.py",
+    "model.py",
+    "pertdata.py",
+    "utils.py",
+    "version.py"
+  ]
+}

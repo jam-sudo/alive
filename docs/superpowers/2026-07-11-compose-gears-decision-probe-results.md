@@ -150,10 +150,14 @@ not established**.
 ## 5. Evidence durability and current limitations
 
 The registered plan named `probe_a_gears_scale.json`, `probe_a_gears_source.txt`,
-`probe_b_scale_benchmark_{2000,5000}.json`, and `gpu_util.log`. None is currently present beside this MacBook
-result document, and the measurement harness is not version-controlled here. The only source fingerprint in
-this summary is truncated. Because the execution environment lived under ephemeral `/root`, loss of the pod
-may make the original run irrecoverable.
+`probe_b_scale_benchmark_{2000,5000}.json`, and `gpu_util.log`. Of these, **Probe A's
+`probe_a_gears_scale.json` + `probe_a_gears_source.txt` and the full measurement harness are now
+version-controlled** at `evidence/2026-07-11-gears-decision-probe/` (see its README; full source fingerprint
+`f63e48d676169ba5be94ebdd4dfe96ad7834ba7273d5bfe46b65b7a5a486a57e` recorded there, plus sha256 of each archived
+output). The **Probe B benchmark JSONs, all raw `bench_*`/`workers_*` logs, and `gpu_util.log` were never
+written or lived under ephemeral `/root` and are lost with the (now stopped) pod**; the timing/step-rate numbers
+in §2–§3 are coarse live-sampled estimates, not preserved raw measurements. Input-data and runtime-image hashes,
+and exact command logs, were not captured.
 
 Accordingly, this Markdown file is a human observation record, **not durable decision evidence**. It may be
 promoted only with full hashes, raw measurements, immutable harness/source, exact command/runtime identity,
