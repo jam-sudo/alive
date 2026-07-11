@@ -4,7 +4,7 @@
 > **이 문서는 아무것도 정의하지 않는다** — 세부(task)는 plan, claim은 spec, exact param은 config,
 > 시간순 audit는 git이 authoritative다(sources-of-truth: `CLAUDE.md`#sources). 상태 행이 authoritative
 > 문서와 어긋나면 **authoritative 문서가 옳다**; 이 인덱스를 갱신한다.
-> **Updated:** 2026-07-11 @ `4066bdc` (branch `main`)
+> **Updated:** 2026-07-11 @ `bae5b36` (branch `main`)
 > **갱신 트리거:** sub-project/gate **상태가 바뀔 때만**(커밋마다 아님).
 > **종결 상태:** COMPOSE seal이 정확히 한 번 열리면 이 인덱스는 **frozen/은퇴**한다. 이후 진행상황은
 > seal 결과와 post-hoc analysis가 대신한다.
@@ -31,7 +31,7 @@
 | D2 | development seed-variability (Task 1–6) | ✅ merged | `plans/2026-07-06-compose-durable-ledger-d2.md` |
 | C0 | seal-critical library fixes (7) | ✅ merged (via C merge `1c46708`) | `plans/2026-07-07-compose-c0-library-fixes.md` |
 | C | 단일 production driver | ✅ **fixture orchestration merged** (merge commit `1c46708`, 2026-07-09) — T1–T14 완료; whole-branch 2-lens 리뷰(seal-safety + correctness) → Important 2건 fix(phase2b step-5 post-seal raise → exit 30 `6761428`; 미연결 pre-seal pair-index/attestation validator를 preflight에 연결 `4deee1a`); driver 211 / compose 1106 green. **Scientific PREPARE carrier는 아직 미구현**: committed `load_run_spec_carrier`는 `mode="scientific"`을 `UnsupportedModeError`로 거부하므로 seal-run 전 별도 완료 필요 | `specs/2026-07-07-compose-production-driver-design.md`; `plans/2026-07-08-compose-c-production-driver.md` |
-| GU | outcome-free gene-universe generator (M-first · exact `N_target` · alias · fail-closed) | 🔴 needs-implementation — **design spec 작성·commit (`4066bdc`)**; loop_gate spec-review + plan 대기. 2088-vs-2000 root-cause fix; *correct* Probe B(exact-size roster) + config finalize의 선행. report mode(|M|) → freeze mode(candidate rosters) | `specs/2026-07-11-compose-gene-universe-design.md` |
+| GU | outcome-free gene-universe generator (M-first · exact `N_target` · alias · fail-closed) | 🔴 needs-implementation — **design spec `bae5b36`; loop_gate spec-review PASS** (iter1 NEEDS_IMPROVEMENT: unsound response-HVG equality → iter2 PASS 7/7, ledger `2849014` LOCAL); **plan 대기**. 2088-vs-2000 root-cause fix; *correct* Probe B(exact-size roster) + config finalize의 선행. report mode(|M|) → freeze mode(candidate rosters) | `specs/2026-07-11-compose-gene-universe-design.md` |
 | — | **pod sealed confirmatory run (opens seal once)** | ⛔ blocked — **development pod 선행 필요**(§2.2 real worker + §4 evidence 재생성 + §2.5 gate). C/C0/A/D 완료 | `runbooks/2026-07-02-compose-k562-pod-sealed-run.md` |
 
 ## Critical path to seal
