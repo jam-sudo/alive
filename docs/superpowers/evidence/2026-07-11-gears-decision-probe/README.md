@@ -1,10 +1,22 @@
-# GEARS decision-probe — archived harness + Probe A evidence (2026-07-11)
+# GEARS decision-probe — quarantined as-run archive (2026-07-11)
 
-> **Opened NO seal. Observation archive, NOT release-grade durable evidence.** This directory version-controls
-> what was recoverable from the 2026-07-11 A100 dev-pod session so the observations in
+> **QUARANTINED / NONCONFORMING — DO NOT EXECUTE OR PROMOTE.** The official one-time
+> `ComposeOutcomeStore` evaluation gateway was not consumed, and no outcome-based selection was demonstrated.
+> However, the as-run Probe B prep loaded the full source `X` before the dev sealed/calibration roster was
+> resolved, so it violated ALIVE's stronger metadata-before-expression / sealed-expression-never-materialized
+> contract. “Opened NO seal” is therefore not a valid description of Probe B's procedural boundary.
+>
+> This directory version-controls, **byte-for-byte as recovered**, what survived the 2026-07-11 A100 dev-pod
+> session so the observations in
 > `../../2026-07-11-compose-gears-decision-probe-results.md` are reproducible-in-method rather than ephemeral.
-> Per that doc's §5, promotion to durable decision evidence still requires full input/runtime hashes, raw
-> per-run measurements, and a rerun of the un-run gates — none of which this archive supplies.
+> It is a forensic observation archive, not executable tooling or durable decision evidence. A conforming rerun
+> must follow `../../runbooks/2026-07-11-compose-gears-decision-probe-rerun.md`; none of the archived harness files
+> may be copied forward or invoked.
+
+`archive_manifest.json` fixes the exact recovered `harness/` and `out/` byte roster, sizes, and SHA-256 values at
+origin commit `6d30af55ce8d97198f39040193d3aa7338c25f9b`. It deliberately excludes this explanatory README and the
+manifest itself. Any mismatch is archive corruption; the response is to report it, never regenerate or silently
+“repair” the forensic bytes.
 
 ## Run context
 
@@ -37,8 +49,17 @@ out/                           Probe A outputs (the only run outputs pulled off 
                                  (verbatim dump of cell-gears 0.1.2 predict/new_data_process/set_pert_genes/inits)
 ```
 
-The `harness/` scripts contain hardcoded pod paths and are archived to record the *method*, not as maintainable
-production tooling (they are deliberately outside `scripts/`, which forbids hardcoded paths in production source).
+The `harness/` scripts contain hardcoded pod paths and are archived to record the *as-run method*, including its
+defects. They are deliberately excluded from maintained-source formatting/linting, must remain outside `scripts/`,
+and must never be imported, copied forward, or invoked. In particular:
+
+- `harness/bench_prep.py:37` eagerly loads the full source AnnData expression matrix;
+- `harness/bench_prep.py:64-76,106` retains all measurable perturbation rows and copies their expression before
+  `harness/build_payload.py` resolves the dev sealed/calibration roster;
+- it also subsets genes before the newly registered `U_full` normalization/response boundary and implements the
+  invalid “top N, then force-add” rule that produced 2,088 rather than exactly 2,000 genes.
+
+These defects invalidate Probe B as decision evidence even though no sealed metric was calculated or inspected.
 
 ## What is / is not here
 
@@ -52,9 +73,10 @@ production tooling (they are deliberately outside `scripts/`, which forbids hard
   control-count instrumentation / inference-equivalence; Probe B 5k B1–B4; the exact mandatory-set size `|M|` and
   the 2,088-vs-2,000 gene provenance.
 
-## Re-run
+## Re-run prohibition and replacement
 
-Install `cell-gears==0.1.2` from `gears_era.lock`, then (paths as in `harness/run_decision_probe.sh` /
-`run_workers_sweep.sh`) point the scripts at a Norman `.h5ad` + the GO resource bundle. Probe A
-(`probe_gears_source.py`) needs only the gears env; Probe B and the workers sweep need the fit-role artifact built
-by `bench_prep.py` + `build_payload.py`.
+Do **not** rerun `harness/run_decision_probe.sh`, `bench_prep.py`, `build_payload.py`, or any derivative copied from
+them. The replacement run is gated on a reviewed GEARS gene-roster implementation and adapter, constructs the
+full-universe fit-role/response artifacts first, resolves roles before any expression read, and preserves raw
+logs/hashes. The authoritative execution contract is
+`../../runbooks/2026-07-11-compose-gears-decision-probe-rerun.md`.

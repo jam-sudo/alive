@@ -1,12 +1,29 @@
 # COMPOSE dev-pod — GEARS decision-probe RESULTS (2026-07-11)
 
-> **STATUS: PARTIAL MEASURED RESULTS — owner preferences recorded, scientific decisions remain
-> PROVISIONAL. Opened NO seal.** The `2026-07-10-compose-gears-decision-probe-plan.md` was only partially
-> executed on an A100 dev pod. Control + non-sealed roles only; no sealed outcome read; §4.3 guards untouched;
+> **STATUS: QUARANTINED PARTIAL OBSERVATIONS — Probe B NONCONFORMING; scientific decisions remain
+> PROVISIONAL.** The official one-time `ComposeOutcomeStore` evaluation gateway was not consumed and no
+> outcome-based selection was demonstrated. However, the as-run prep loaded all source expression before the dev
+> sealed/calibration split, violating metadata-before-expression and invalidating the stronger “sealed expression
+> never materialized / opened no seal” claim. The `2026-07-10-compose-gears-decision-probe-plan.md` was only
+> partially executed on an A100 dev pod. §4.3 production guards were not invoked by the prep path;
 > committed worker byte-unchanged (measurement harness monkeypatched `_GEARS_EPOCHS`/DataLoader in-process
-> only). The plan's raw JSON/source/log outputs are not present in the MacBook repository, Probe A's empirical
-> output-scale/equivalence checks and Probe B's 5k/resource measurements are incomplete, and nothing here is
-> sufficient to finalize config or activation evidence yet.
+> only). Probe A's recoverable source JSON/text and the full as-run harness are version-controlled, but Probe B's
+> raw JSON/log/GPU outputs were not preserved. Probe A's empirical output-scale/equivalence checks and Probe B's
+> conforming 2k/5k/resource measurements are incomplete; nothing here may finalize config or activation evidence.
+
+## -1. Compliance finding and disposition
+
+- `evidence/2026-07-11-gears-decision-probe/harness/bench_prep.py:37` used in-memory `read_h5ad`, materializing
+  all source `X` before any dev sealed/calibration identity existed.
+- Its lines 64–76 and 106 selected/copy-materialized all measurable perturbation rows. Only afterward did
+  `build_payload.py` invoke `build_dev_smoke_payload` to assign and exclude dev-sealed pairs. That exclusion was
+  too late to satisfy the non-materialization contract.
+- The same prep selected a reduced gene matrix before the full-universe normalization/response artifact and used
+  “top N, then force-add”, so it is also incompatible with the revised `U_full`/`R_gears` architecture and exact
+  `N_target` rule.
+- **Disposition:** retain the recovered bytes as forensic evidence; do not repair or rerun them in place; do not
+  cite Probe B timing for `N_target`; execute only the replacement runbook
+  `runbooks/2026-07-11-compose-gears-decision-probe-rerun.md` after its local gates pass.
 
 ## 0. Environment reality (for the next pod session)
 
@@ -129,23 +146,25 @@ not established**.
   `N_target`, provider choice, eval removal, config finalize, or activation-evidence regeneration.
 - **Required next, in order:**
 
-  1. Recover the raw probe JSON/source/harness/logs from the pod if it is still alive. Record full wheel,
-     harness, input-data, git, image/runtime, and command/log SHA-256 values. If unavailable, mark the original
-     observations non-durable and rerun the missing gates.
-  2. Compute and record the canonical mandatory set `M`, its component/overlap counts, and why the nominal 2k
-     artifact contained 2,088 genes. Do not build the production generator against an unresolved exact size.
-  3. Complete Probe A's fitted-output scale, negative-output, control-count instrumentation, exact `T_gears`,
-     and inference-equivalence checks. Freeze `compat_first_300` versus `full_registered_controls`, adapter
-     identity, negative policy/threshold, and adequacy metrics/margins.
-  4. Complete Probe B at 5k with B1–B4, or record a predeclared owner cost ceiling that mechanically excludes
-     it; then lock an exact feasible `N_target >= |M|`.
-  5. Only after steps 1–4: build the outcome-free gene-universe generator and Option-1 adapter, generate all
-     non-sealed fidelity/adequacy reports, and finalize config under a new run identity.
-  6. Treat eval removal as an independent optimization experiment. Adopt it only if the registered A/B gate
-     passes; otherwise keep upstream evaluation or register a scientifically distinct training loop.
+  1. Keep the recovered archive quarantined and immutable; it is already marked non-durable/nonconforming. Never
+     infer or reconstruct the lost Probe B logs.
+  2. The exact-size generator and full-normalize-then-subset **fit-input** adapter are implemented in the current
+     local working tree. Bind them to an exact clean Git SHA and complete independent review; do not confuse this
+     with the still Probe-A-blocked scientific output bridge.
+  3. On verified real candidate/GO/alias/fit-role/response inputs, run GU report mode to record canonical `M` and
+     component/overlap counts, then freeze digest-bound candidate rosters. The historical 2,088-gene artifact is
+     not a candidate.
+  4. Complete conforming Probe A fitted-output scale, negative-output, control-count instrumentation, exact
+     `T_gears`, determinism, and inference-equivalence gates using the replacement runbook.
+  5. Run repeated Probe B B1–B4 on the exact candidate rosters with full raw logs and identities; then let the
+     owner freeze representation/`N_target` using only preregistered behavior/resource criteria.
+  6. Treat eval removal as an independent optimization experiment. Adopt it only if its registered A/B gate
+     passes; otherwise keep upstream evaluation or register a scientifically distinct training loop. Finalize
+     config only after all upstream decisions and evidence are durable.
 - **Downstream remains unchanged:** config finalize → activation-evidence regeneration → dep-lock → §5 #6
   unshortened full-universe rerun → scientific PREPARE/release gates → separately authorized sealed run.
-- **No seal opened by any of this.**
+- **No official one-time evaluation claim was consumed.** Probe B nevertheless failed the stricter dev-sealed
+  non-materialization boundary and remains quarantined.
 
 ## 5. Evidence durability and current limitations
 

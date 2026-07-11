@@ -1,0 +1,52 @@
+{
+  "files": [
+    {
+      "bytes": 7410,
+      "path": "harness/bench_gears_timing.py",
+      "sha256": "ad4f37d98a898dbcf4253669b722c440d96957f857463f146574fafb3b35da6c"
+    },
+    {
+      "bytes": 4822,
+      "path": "harness/bench_prep.py",
+      "sha256": "56342df786739fd1041627063f26738374a4a8a1fc40412aaca7bedafe20822f"
+    },
+    {
+      "bytes": 1554,
+      "path": "harness/build_payload.py",
+      "sha256": "fc15c126895a5facdabacdfef3858c18f8ebc614c39570a566291d7e68861a91"
+    },
+    {
+      "bytes": 4594,
+      "path": "harness/probe_gears_source.py",
+      "sha256": "42f32a03437dd0e7fa4307e3e53c01ef526503aa7daeff34b259c21e637505b7"
+    },
+    {
+      "bytes": 3714,
+      "path": "harness/probe_workers.py",
+      "sha256": "2cbbd670217ba9db2a4ec66fa93ed255815691492c6508f013d89b4f0b98f19b"
+    },
+    {
+      "bytes": 3095,
+      "path": "harness/run_decision_probe.sh",
+      "sha256": "8470e9c128852efc3b0bd78005a7c006c7c30e3a3a3e5c444fc8f12d3f6dacfa"
+    },
+    {
+      "bytes": 2792,
+      "path": "harness/run_workers_sweep.sh",
+      "sha256": "77966476f85fc2bc18a32249ffcdc2587a369ef8ee2b7482803286e148df1632"
+    },
+    {
+      "bytes": 1549,
+      "path": "out/probe_a_gears_scale.json",
+      "sha256": "dadd5fc978537b13cb6b07d3e0d62910bb0b4912288bbb517cd220c17ff33ef4"
+    },
+    {
+      "bytes": 10655,
+      "path": "out/probe_a_gears_source.txt",
+      "sha256": "7fb01c2935667b987b397199e30117f3761e40f4fe120cc4e7d6a8b8c088019d"
+    }
+  ],
+  "origin_commit": "6d30af55ce8d97198f39040193d3aa7338c25f9b",
+  "schema": "compose_quarantined_probe_archive_manifest_v1",
+  "status": "NONCONFORMING_FORENSIC_ARCHIVE"
+}
