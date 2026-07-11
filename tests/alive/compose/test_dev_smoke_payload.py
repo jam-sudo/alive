@@ -187,6 +187,44 @@ def test_dev_smoke_never_accesses_selected_sealed_expression_rows(tmp_path):
     assert sealed_tokens.isdisjoint(set(artifact.obs["perturbation"].astype(str)))
 
 
+def test_dev_smoke_cli_opens_source_backed_before_expression_selection(tmp_path, monkeypatch):
+    """The maintained file entry point keeps source expression on disk until roles exist."""
+    harness = _load_harness()
+    source_path = tmp_path / "source.h5ad"
+    _synthetic_adata().write_h5ad(source_path)
+    real_read_h5ad = ad.read_h5ad
+    calls: list[tuple[Path, str | None]] = []
+
+    def _spy_read_h5ad(path, *args, **kwargs):
+        calls.append((Path(path), kwargs.get("backed")))
+        return real_read_h5ad(path, *args, **kwargs)
+
+    monkeypatch.setattr(ad, "read_h5ad", _spy_read_h5ad)
+    result = harness.main(
+        [
+            "--h5ad",
+            str(source_path),
+            "--work-dir",
+            str(tmp_path / "work"),
+            "--artifact",
+            str(tmp_path / "approved" / "fit_role.h5ad"),
+            "--manifest-out",
+            str(tmp_path / "manifest.json"),
+            "--n-hvg",
+            "8",
+            "--pca-dim",
+            "3",
+            "--n-sealed",
+            "2",
+            "--n-calibration",
+            "3",
+        ]
+    )
+
+    assert result == 0
+    assert calls[0] == (source_path, "r")
+
+
 def test_dev_smoke_sealed_expression_mutation_does_not_change_allowed_source_identity(tmp_path):
     """Changing held-out dev-sealed outcomes cannot influence the fit payload."""
     harness = _load_harness()

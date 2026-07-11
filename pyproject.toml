@@ -26,6 +26,12 @@ features = [
 
 [tool.ruff]
 line-length = 100
+extend-exclude = [
+    # Immutable as-run evidence: preserved byte-for-byte for provenance and never
+    # imported or executed by the maintained codebase. See the archive README and
+    # the 2026-07-11 probe-rerun runbook.
+    "docs/superpowers/evidence/2026-07-11-gears-decision-probe/harness",
+]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I"]
