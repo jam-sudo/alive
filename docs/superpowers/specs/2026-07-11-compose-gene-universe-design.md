@@ -43,16 +43,17 @@ The generator reads only:
 |---|---|---|
 | canonical **full `var`** order | `full_var_order_sha256` | every measured gene ID, the master order |
 | **CONTROL cells** raw counts | `control_row_identity_sha256` | control rows only; never perturbed/sealed rows |
-| `n_hvg` (response HVG count) | from resolved config | same value the response operator uses |
+| `n_hvg` (response HVG count) | from resolved config | **sizing guidance only** — NOT used to compute `M`; report mode recommends `N_target ≥ |M| + n_hvg`, freeze mode guards `N_target ≥ n_hvg` |
 | pre-split **perturbation-candidate list** | `perturbation_candidate_sha256` | source-level single/combo tokens, BEFORE role assignment; NOT `payload["pair_ids"]` |
 | pinned **`gene2go`** | `gene2go_sha256` | GO-graph node set (GEARS perturbation composability) |
 | **alias artifact** (§6) | `alias_sha256` | hand-curated, committed |
 | `N_target` | **owner-frozen; freeze mode only** | `≥ |M|`; recorded in config → new run identity |
 
-The control-variance **median library** is DERIVED by the generator from the control cells (the full-`var`
-control library-size median, `response._normalize_log1p_full` basis) and **recorded** in the artifact for
-reproducibility — it is not a separate external input. The same full-`var` control-variance basis is used for
-both the response-HVG selection (§3.3) and the fill ranking (§3.5).
+The control-variance **median library** for the fill ranking is DERIVED by the generator as the `np.median` of
+the control cells' full-`var` library sizes, then applied via `fit_role._normalize_log1p_full` (fit_role.py:1054),
+and **recorded** in the artifact for reproducibility — not a separate external input. It is used only for the
+outcome-free fill ranking (§3.5). **The generator does not compute or predict the response operator's HVG set**
+(see §3): the response operator selects its HVGs downstream, from the generated universe, unchanged.
 
 The generator MUST NOT open `ComposeOutcomeStore`, read `payload["pair_ids"]`, or read any perturbed/sealed
 expression. **Request-roster invariance:** re-running with a different requested/sealed pair roster and identical
@@ -73,12 +74,14 @@ consumption. Every step is outcome-free and request-roster-invariant.
    iff **every** canonical perturbation gene ∈ `var ∩ gene2go`. Record every exclusion with a machine reason
    (e.g. `IER5L: absent_from_gene2go`, `KIAA1804: unmapped_alias`). This set is global and fixed before role
    assignment; the requested/sealed subset never enters it.
-3. **Mandatory set `M`** = `response_hvg_genes ∪ eligible_perturbation_genes`, where
-   `response_hvg_genes` = top-`n_hvg` by **control-variance over full `var`** via `response._select_hvg` on the
-   full-`var` normalized control matrix (the exact statistic + tie-break the response operator uses). GO
-   membership is irrelevant for response-only HVGs.
-   **→ Report mode emits `|M|`, `response_hvg_sha256`, `eligibility_sha256`, the exclusion table, and the
-   component/overlap counts, and stops.**
+3. **Mandatory set `M`** = the set of canonical genes appearing in the **global eligible-perturbation set**
+   (§3.2). These are the must-include genes (GEARS fail-closes on a fit perturbation gene absent from the roster,
+   gears_worker.py:848,884). `M` does **not** include response-HVG genes: the response operator selects its HVGs
+   *from* the universe downstream, so they are trivially `⊆` universe (nothing to guarantee here), and the
+   §3.5 fill — which is **not** GO-gated — already places the high-variance genes into the universe regardless of
+   GO annotation, which is exactly the CRITICAL-1 intent (a response HVG needs no GO term).
+   **→ Report mode emits `|M|`, `eligibility_sha256`, the exclusion table, and the candidate/eligible/excluded
+   counts (`n_candidates`/`n_eligible`/`n_excluded`), and stops.**
 4. **Freeze** `N_target` (owner-supplied). If `|M| > N_target` → raise `GeneUniverseError` (owner must register a
    larger `N_target` and a new run identity). Never silently exceed `N_target` or drop a mandatory gene.
 5. **Deterministic fill:** normalize CONTROL cells to the frozen median library + `log1p`, rank all
@@ -90,13 +93,16 @@ consumption. Every step is outcome-free and request-roster-invariant.
 7. **Fail-closed consumption:** any downstream consumer (fit-role extractor, worker output) must contain exactly
    this ordered roster; any missing/extra/duplicate gene, order mismatch, or digest mismatch → `INVALID`.
 
-**Response-HVG consistency requirement (load-bearing).** `response_hvg_genes` is defined over **full `var`**, so
-the response operator's own HVG selection, when run on the generated universe, MUST reproduce the identical set.
-This holds iff the response operator selects on the same full-`var` control-variance basis. This spec therefore
-requires the response operator's HVG selection to use the full-`var` basis (reuse `_select_hvg` over full `var`,
-then subset), and adds a verification (§9) asserting equality. If the committed response operator currently
-selects over the universe subset, aligning it to the full-`var` basis is **in scope** for this contract and must
-be called out in the plan.
+**Response operator is UNCHANGED (no scientific change).** The response operator continues to select its HVGs and
+fit its frozen PCA over the fit-role `var_names` (= the generated universe), with its existing median/normalization
+basis (`response.py`). The generator neither predicts nor constrains that selection; it only guarantees the
+universe (a) contains every eligible-perturbation gene (`M`) and (b) contains the top-`(N_target − |M|)`
+control-variance genes (fill), so the response operator's HVG selection over the universe has a full-variance basis
+to draw from. **Sizing:** because the response operator picks `n_hvg` HVGs from the universe, freeze mode guards
+`N_target ≥ n_hvg`; report mode additionally recommends `N_target ≥ |M| + n_hvg` so the fill alone can cover the
+response basis. No full-`var`-vs-universe reconciliation and no cross-median equality is required — the earlier
+draft's response-HVG equality was unsound (HVG variance ranking is not invariant to the `log1p` median target) and
+is removed.
 
 ---
 
@@ -108,21 +114,21 @@ A single immutable artifact (JSON; write-once per CLAUDE.md §4.2 via `io.atomic
 gene_universe.v1:
   ordered_roster:            [canonical gene IDs, length N_target, full-var order]
   n_target:                  int
-  mandatory_size:            |M|
-  response_hvg_ids:          [...]           # the n_hvg response HVGs (⊆ ordered_roster)
-  eligible_perturbation_genes: [...]
+  mandatory_size:            |M|              # = |eligible_perturbation_genes|
+  eligible_perturbation_genes: [...]          # the genes of M
   eligibility_exclusions:    [{token, gene, reason}, ...]
   fill_count:                N_target - |M|
   normalization:             {median_library: float, transform: ["normalize_total_median","log1p"]}
   provenance:
-    full_var_order_sha256, control_row_identity_sha256, response_hvg_sha256,
+    full_var_order_sha256, control_row_identity_sha256,
     eligibility_sha256, alias_sha256, gene2go_sha256, generator_code_sha256,
     perturbation_candidate_sha256, n_hvg, n_target
   ordered_roster_sha256:     canonical digest over ordered_roster (binds fit-role var_names)
 ```
 
 Report mode emits the same object **without** `n_target`/`fill_count`/`ordered_roster` (a `mandatory_report.v1`
-with `mandatory_size`, the exclusion table, and the step-1–3 digests).
+with `mandatory_size`, `eligible_perturbation_genes`, the exclusion table, the step-1–2 digests, and the
+`n_candidates`/`n_eligible`/`n_excluded` counts).
 
 ---
 
@@ -169,17 +175,19 @@ New module `src/alive/compose/gene_universe.py`. Public API (type-hinted, NumPy-
 - `GeneUniverseError(Exception)` — fail-closed signal for all violations.
 - `AliasMap` — loaded, digest-verified alias artifact; `AliasMap.load(path, *, expected_sha256) -> AliasMap`;
   `.canonicalize(symbol) -> str` (fail-closed on collision/empty).
-- `MandatoryReport` (dataclass): `mandatory_size`, `response_hvg_ids`, `eligible_perturbation_genes`,
-  `eligibility_exclusions`, and the step-1–3 digests.
-- `compute_mandatory_report(*, full_var, control_counts, n_hvg, perturbation_candidates, gene2go, alias) ->
-  MandatoryReport` — **report mode** (steps 1–3). No `N_target`, no sealed access.
+- `MandatoryReport` (dataclass): `mandatory_size` (= `|eligible_perturbation_genes|`),
+  `eligible_perturbation_genes`, `eligibility_exclusions`, `n_candidates`, `n_eligible`, `n_excluded`, `n_hvg`,
+  `recommended_min_n_target` (= `mandatory_size + n_hvg`), and the step-1–2 digests.
+- `compute_mandatory_report(*, full_var, control_counts, perturbation_candidates, gene2go, alias, n_hvg) ->
+  MandatoryReport` — **report mode** (steps 1–3; `M` = the eligible-perturbation genes). `n_hvg` is used only for
+  the sizing recommendation, never to compute `M`. No `N_target`, no sealed access.
 - `GeneUniverseArtifact` (dataclass) — the §4 object; `.write(path)` via `atomic_write_once`.
 - `generate_gene_universe(*, <same inputs>, n_target, out_path) -> GeneUniverseArtifact` — **freeze mode** (steps
-  1–6); raises `GeneUniverseError` if `|M| > n_target`.
+  1–6); raises `GeneUniverseError` if `|M| > n_target` or `n_target < n_hvg`.
 - `assert_roster_matches(var_names, artifact) -> None` — the §7/§3.7 fail-closed consumption check.
 
-Shared helpers reused (no drift): `response._select_hvg`, `response._normalize_log1p_full` (fit_role), and
-`provenance.sha256_json` / `canonical_gene_order_sha256`. No hardcoded gene lists, thresholds, or `N_target` in
+Shared helpers reused (no drift): `response._select_hvg`, `fit_role._normalize_log1p_full` (fit_role.py:1054),
+`provenance.sha256_json`, and `fit_role.canonical_gene_order_sha256` (fit_role.py:112). No hardcoded gene lists, thresholds, or `N_target` in
 source (CLAUDE.md §7); `n_hvg`, `N_target`, and the alias path come from config/artifacts.
 
 ---
@@ -188,8 +196,11 @@ source (CLAUDE.md §7); `n_hvg`, `N_target`, and the alias path come from config
 
 - **Known-answer:** a tiny synthetic full-`var` + control matrix + candidate list with a hand-computed `M`,
   fill order, and final roster → assert exact `ordered_roster`, `mandatory_size`, `fill_count`.
-- **Response-HVG consistency:** the response operator's HVG selection over a generated universe equals the
-  generator's `response_hvg_ids` (the §3 load-bearing requirement).
+- **Downstream response-operator validity:** the response operator fits over a generated universe (selects its
+  `n_hvg` HVGs from the roster and fits its PCA) with no change to `response.py`; the selected HVGs are `⊆` roster
+  by construction.
+- **Sizing guards:** freeze mode raises when `N_target < n_hvg`; `compute_mandatory_report` reports
+  `recommended_min_n_target = |M| + n_hvg`.
 - **Alias:** injectivity holds; a many-to-one / collision / empty-name alias fails closed; a mapped symbol is
   canonicalized on every surface.
 - **Eligibility:** a candidate with a gene outside `var ∩ gene2go` is excluded with the right reason and never
@@ -211,6 +222,8 @@ source (CLAUDE.md §7); `n_hvg`, `N_target`, and the alias path come from config
   mode** once to get `|M|` and the exclusion provenance; run **freeze mode** at candidate `N_target`s (each
   `≥ |M|`, e.g. a 2k-ish and a 5k-ish size) to emit contract-correct rosters; a *correct* Probe B benchmarks
   those rosters; the owner then freezes the final `N_target` into config (new run identity).
+- Any change to the response operator (`response.py`): its HVG selection + frozen PCA run downstream over the
+  generated universe, unchanged.
 - The Option-1 published-scale GEARS adapter (separate spec/plan).
 - The GEARS per-epoch eval-noop wall-time optimization (separate experiment; determinism-gated).
 - Any change to the sealed-run seal/leakage machinery.
