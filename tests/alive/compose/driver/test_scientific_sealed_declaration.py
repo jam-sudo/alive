@@ -79,11 +79,23 @@ def test_audit_path_mismatch_rejects(tmp_path):
 
 
 def test_pair_index_row_identity_mismatch_rejects(tmp_path):
+    """Row-identity mismatch (manifest.obs_row_identity_sha256 vs attestation's
+
+    declared value) must be rejected by the equality check in
+    ``validate_pair_index_manifest_preseal`` (pair_index.py:336-341) — NOT merely
+    by the attestation's ``self_checksum`` shape-guard. The attestation's
+    ``self_checksum`` is recomputed over the tampered body so that guard passes
+    and control actually reaches the row-identity equality check; otherwise the
+    raise observed here would be the (unrelated) self-checksum mismatch and the
+    test would pass even if the row-identity check were deleted.
+    """
     bundle = build_scientific_carrier_fixture(tmp_path / "a", repo_root=tmp_path / "r")
     spec, attestation, pim = _parts(bundle)
     bad_attestation = dict(attestation)
     bad_attestation["source_row_identity_sha256"] = "1" * 64
-    with pytest.raises(RunSpecError):
+    body = {k: v for k, v in bad_attestation.items() if k != "self_checksum"}
+    bad_attestation["self_checksum"] = sha256_json(body)
+    with pytest.raises(RunSpecError, match="obs_row_identity_sha256"):
         validate_scientific_sealed_declaration(
             sealed_input=spec.scientific["sealed_input"],
             attestation=bad_attestation,
