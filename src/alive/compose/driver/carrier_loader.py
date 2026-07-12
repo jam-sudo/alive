@@ -47,7 +47,11 @@ from typing import Any, Mapping
 
 import numpy as np
 
-from alive.compose.config2 import ActivationRecord
+from alive.compose.config2 import (
+    ActivationRecord,
+    ComposePhase2Config,
+    assert_scientific_mode_allowed,
+)
 from alive.compose.driver.fixture_builder import _MODEL_CLASS_BY_NAME
 from alive.compose.driver.run_spec import (
     ResolvedRunSpec,
@@ -286,6 +290,77 @@ def load_run_spec_carrier(
         response_artifact=_load_response_artifact(spec),
         sealed_outcome=_load_sealed_outcome(spec),
     )
+
+
+# --------------------------------------------------------------------------- #
+# scientific-mode activation-record assembly (spec §2.1 / §5 step 4)
+# --------------------------------------------------------------------------- #
+
+
+def _assemble_activation_record(
+    spec: ResolvedRunSpec, config: ComposePhase2Config, *, git_is_clean: bool
+) -> ActivationRecord:
+    """Build + re-validate the owner :class:`ActivationRecord` from the scientific block.
+
+    ``owner`` is sourced from ``spec.scientific["activation_evidence"]["owner"]``;
+    ``approved_protocol`` / ``approved_phase`` from the loaded ``config`` (NOT
+    from the spec, which carries no protocol/phase field of its own);
+    ``evidence_hashes`` / ``evidence_files`` from the exact requirement roster.
+    :func:`~alive.compose.driver.run_spec.load_resolved_run_spec` (Task 2) already
+    byte-SHA-verified every roster file against its declared digest, but it is
+    config-unaware and cannot check the roster against
+    ``config.activation_requirements`` — that exactness check happens here, and
+    the assembled record is then re-validated through the real
+    :func:`~alive.compose.config2.assert_scientific_mode_allowed` guard, which
+    independently re-checks status/blockers/owner/protocol/phase/roster/
+    digest-syntax/evidence-bytes/config-bound-report-lineage before scientific
+    execution is allowed.
+
+    Parameters
+    ----------
+    spec : alive.compose.driver.run_spec.ResolvedRunSpec
+        The already-validated scientific ResolvedRunSpec.
+    config : alive.compose.config2.ComposePhase2Config
+        The loaded, validated Phase-2 config the spec's ``config`` field points at.
+    git_is_clean : bool
+        Whether the repository working tree is clean and committed; forwarded to
+        the guard unchanged (this function performs no Git I/O itself).
+
+    Returns
+    -------
+    alive.compose.config2.ActivationRecord
+        The assembled, guard-validated owner activation record.
+
+    Raises
+    ------
+    alive.compose.driver.run_spec.RunSpecError
+        If the scientific block's requirement roster does not equal
+        ``config.activation_requirements`` exactly.
+    alive.compose.config2.ScientificModeError
+        If :func:`~alive.compose.config2.assert_scientific_mode_allowed` rejects
+        the assembled record (e.g. non-clean Git state, stale config-bound
+        evidence, an unresolved activation blocker, or a digest/byte mismatch).
+    """
+    evidence = spec.scientific["activation_evidence"]
+    requirements = evidence["requirements"]
+    expected = set(config.activation_requirements)
+    if set(requirements) != expected:
+        raise RunSpecError(
+            "activation_evidence.requirements must equal config.activation_requirements exactly: "
+            f"missing={sorted(expected - set(requirements))} "
+            f"extra={sorted(set(requirements) - expected)}"
+        )
+    record = ActivationRecord(
+        owner=evidence["owner"],
+        approved_protocol=config.protocol,
+        approved_phase=config.phase,
+        evidence_hashes={
+            req: requirements[req]["sha256"] for req in config.activation_requirements
+        },
+        evidence_files={req: requirements[req]["path"] for req in config.activation_requirements},
+    )
+    assert_scientific_mode_allowed(config, activation_record=record, git_is_clean=git_is_clean)
+    return record
 
 
 # --------------------------------------------------------------------------- #
