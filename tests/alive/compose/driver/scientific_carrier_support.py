@@ -468,13 +468,11 @@ def build_scientific_carrier_fixture(root: Path, *, repo_root: Path) -> Scientif
         },
     )
 
-    # 7. worker files — gears/cpa requirements_lock pin the real revisions.
-    worker_bundle = fb.build_worker_bundle(
-        source_root=fb._REPO_ROOT,
-        entrypoint=fb.STUB_WORKER_PATH,
-        output_path=workers / "stub_worker.pyz",
-        method="stub",
-    )
+    # 7. worker files — gears/cpa requirements_lock pin the real revisions. Each method
+    # gets its OWN execution bundle (the bundle's internal manifest declares its method;
+    # ``assemble_execution_identity_lock`` validates it against the controller's per-method
+    # expectation, so a shared bundle with a mismatched method would fail closed BEFORE
+    # ever reaching the intended B ``adapter_version`` boundary — see Task 10).
     gears_lock = fb._write_bytes(
         workers / "requirements.gears.lock", b"cell-gears==0.1.2\nnumpy==1.26.4\n"
     )
@@ -484,8 +482,14 @@ def build_scientific_carrier_fixture(root: Path, *, repo_root: Path) -> Scientif
     worker_blocks: dict[str, Any] = {}
     representations = {name: rep for name, rep, _b in cfg.baseline_representations}
     for method, lock in (("gears", gears_lock), ("cpa", cpa_lock)):
+        bundle = fb.build_worker_bundle(
+            source_root=fb._REPO_ROOT,
+            entrypoint=fb.STUB_WORKER_PATH,
+            output_path=workers / f"{method}_worker.pyz",
+            method=method,
+        )
         paths = {
-            "worker_script": Path(worker_bundle.path),
+            "worker_script": Path(bundle.path),
             "worker_config": fb._write_bytes(workers / f"{method}_config.json", b"stub-config"),
             "resource_manifest": fb._write_bytes(
                 workers / f"{method}_resource.json", b"stub-resource"
@@ -493,7 +497,21 @@ def build_scientific_carrier_fixture(root: Path, *, repo_root: Path) -> Scientif
             "requirements_lock": lock,
             "adapter_artifact": fb._write_bytes(workers / f"{method}_adapter.bin", b"stub-adapter"),
         }
-        worker_blocks[method] = fb._worker_block(paths, representation=representations[method])
+        block = fb._worker_block(paths, representation=representations[method])
+        # ``_worker_block`` declares its ``execution_identity_lock`` digests from
+        # fixture_builder's own hardcoded stub bytes (the FIXTURE-mode convention);
+        # this corpus writes DIFFERENT real per-method bytes above, so the declared
+        # digests are recomputed here from the ACTUAL file contents instead of
+        # reusing the mismatched fixture constants — self-consistency, not a
+        # coincidental byte match, is what makes the corpus valid.
+        block["execution_identity_lock"] = {
+            **block["execution_identity_lock"],
+            "adapter_sha256": sha256_file(paths["adapter_artifact"]),
+            "config_sha256": sha256_file(paths["worker_config"]),
+            "resource_sha256": sha256_file(paths["resource_manifest"]),
+            "environment_lock_sha256": sha256_file(paths["requirements_lock"]),
+        }
+        worker_blocks[method] = block
 
     # 8. dependency manifest for the scientific block (== the dependency evidence lock).
     pre_seal_paths = {
