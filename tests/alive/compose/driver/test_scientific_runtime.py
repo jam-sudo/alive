@@ -60,7 +60,11 @@ def test_untracked_file_rejects(tmp_path):
 
 def test_malformed_sha_rejects(tmp_path):
     repo, _ = _repo(tmp_path)
-    with pytest.raises(ScientificRuntimeError, match="hex|sha|SHA"):
+    # Match text unique to the format-validation guard (scientific_runtime.py ~L78-81) so this
+    # test fails if that guard is removed. A generic "hex|sha|SHA" regex is also satisfied by the
+    # unrelated HEAD-mismatch fallback message further down ("runtime HEAD ... != approved_git_sha
+    # ..." -- "sha" appears in the variable name), so it gave zero regression protection.
+    with pytest.raises(ScientificRuntimeError, match="40- or 64-char lowercase hex"):
         resolve_scientific_runtime_context(
             trusted_repo_root=repo, approved_git_sha="not-a-sha", lockfile_path=repo / "README"
         )
@@ -76,6 +80,23 @@ def test_absent_git_rejects(tmp_path, monkeypatch):
 
 
 def test_wrong_repo_root_rejects(tmp_path):
+    # Pins the toplevel-mismatch guard (scientific_runtime.py ~L86-90): build a real, initialized
+    # repo (init_synthetic_repo, Task-1 support) and pass a SUBDIRECTORY of it as
+    # `trusted_repo_root`. `git rev-parse --show-toplevel` run with cwd=subdir still succeeds and
+    # returns the repo's ANCESTOR root, which != the trusted subdirectory, so the mismatch guard
+    # must fire. A plain never-git-init'd directory (see
+    # test_repo_root_not_a_git_repo_rejects below) instead trips `_git()`'s "not a git repository"
+    # exit-128 error and never reaches this guard -- that gave zero regression protection for it.
+    repo, head = _repo(tmp_path)
+    subdir = repo / "nested"
+    subdir.mkdir()
+    with pytest.raises(ScientificRuntimeError, match="git toplevel"):
+        resolve_scientific_runtime_context(
+            trusted_repo_root=subdir, approved_git_sha=head, lockfile_path=repo / "README"
+        )
+
+
+def test_repo_root_not_a_git_repo_rejects(tmp_path):
     repo, head = _repo(tmp_path)
     other = tmp_path / "not-a-repo"
     other.mkdir()
