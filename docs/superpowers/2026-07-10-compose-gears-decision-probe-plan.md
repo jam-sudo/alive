@@ -1,6 +1,15 @@
-# COMPOSE dev-pod — GEARS 0.1.2 decision-enabling probe + 2k/5k benchmark (plan)
+# COMPOSE dev-pod — GEARS 0.1.2 decision probe (superseded as-run plan)
 
-> **STATUS: PROPOSED — pod-staged, not yet run. Opens NO seal.** This plan defines two
+> **STATUS: SUPERSEDED / PARTIALLY EXECUTED / PROBE B NONCONFORMING. DO NOT RUN THIS PLAN.** The official
+> one-time `ComposeOutcomeStore` evaluation gateway was not consumed, but the archived Probe B prep materialized
+> the full source expression matrix before resolving its dev sealed/calibration roster and subset genes before
+> the registered `U_full` normalization/response boundary. Its “opens no seal” assurance and 2k timing evidence
+> are therefore invalid. The immutable as-run archive is quarantined at
+> `evidence/2026-07-11-gears-decision-probe/`; the only authorized replacement is
+> `runbooks/2026-07-11-compose-gears-decision-probe-rerun.md`. All commands and governance claims below are
+> historical context, not current instructions.
+>
+> **Original intent (historical):** This plan defined two
 > **decision-enabling** dev-pod measurements that convert the two owner-gated linchpins of
 > `2026-07-10-compose-gears-scale-and-gene-universe-recommendations.md` from "premature" to "decidable":
 > **Probe A** resolves the GEARS native-scale linchpin (Option 1 published-scale+bridge vs Option 2 named
@@ -116,7 +125,8 @@ GEARS at runtime. Set `CUBLAS_WORKSPACE_CONFIG=:4096:8` and `PYTHONHASHSEED=11` 
 seed guard in `_seed_gears_runtime`). GO manifest must be co-located with its GO files
 (`_validate_gears_resource_bundle` uses `manifest.parent` as the bundle root).
 
-Harness (staged, MacBook `scratchpad/decision_probe/`): `run_decision_probe.sh` (orchestrator) ·
+Historical harness (**quarantined; never execute or copy forward**; originally staged at MacBook
+`scratchpad/decision_probe/`): `run_decision_probe.sh` (orchestrator) ·
 `probe_gears_source.py` (Probe A) · `bench_prep.py` (control-variance roster, no cap) · `build_payload.py`
 (committed `build_dev_smoke_payload` wrapper) · `bench_gears_timing.py` (Probe B). The benchmark drives the
 **committed** `gears_worker._fit_and_predict`; it monkeypatches `_GEARS_EPOCHS` for extrapolation **in-process

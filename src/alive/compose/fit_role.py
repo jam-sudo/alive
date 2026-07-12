@@ -640,7 +640,11 @@ def generate_fit_role_artifact(
             "role": pd.Categorical(roles, categories=sorted(_ALLOWED_ROLES)),
             "perturbation": [p for _, _, p in extraction.rows],
             "source_row_id": [s for s, _, _ in extraction.rows],
-        }
+        },
+        # AnnData otherwise performs this conversion implicitly and emits one
+        # warning per artifact. Preserve the existing canonical positional obs
+        # names explicitly; scientific row identity remains source_row_id.
+        index=[str(index) for index in range(len(extraction.rows))],
     )
     var = pd.DataFrame(index=list(extraction.var_names))
     adata = ad.AnnData(X=X, obs=obs, var=var)

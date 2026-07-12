@@ -483,11 +483,54 @@ def _select_hvg(control_norm: NDArray[np.float64], n_hvg: int) -> NDArray[np.int
         Sorted, unique HVG gene indices, shape ``(n_hvg,)``.
     """
     variance = control_norm.var(axis=0)
-    # Sort by descending variance; ascending gene index breaks ties because
-    # ``np.lexsort`` is stable and we negate variance for the primary key.
-    order = np.lexsort((np.arange(variance.size), -variance))
-    chosen = order[:n_hvg]
+    chosen = rank_gene_indices_by_variance(variance)[:n_hvg]
     return np.sort(chosen).astype(np.intp)
+
+
+def rank_gene_indices_by_variance(
+    variance: NDArray[np.float64], candidate_indices: Sequence[int] | None = None
+) -> NDArray[np.intp]:
+    """Rank candidate genes by descending variance and ascending full index.
+
+    This is the shared deterministic ordering used by response-HVG selection and
+    the outcome-free GEARS roster fill. The caller computes variance on its
+    registered matrix; this helper owns the tie/order policy so the two surfaces
+    cannot drift.
+
+    Parameters
+    ----------
+    variance : numpy.ndarray
+        Finite one-dimensional variance vector over the full gene order.
+    candidate_indices : sequence of int, optional
+        Unique in-range full-gene indices eligible for ranking. Defaults to every
+        gene.
+
+    Returns
+    -------
+    numpy.ndarray
+        Candidate full-gene indices in deterministic rank order.
+
+    Raises
+    ------
+    ValueError
+        If the variance vector or candidate index roster is invalid.
+    """
+    values = np.asarray(variance, dtype=np.float64)
+    if values.ndim != 1 or not np.all(np.isfinite(values)) or np.any(values < 0):
+        raise ValueError("variance must be a finite non-negative vector")
+    if candidate_indices is None:
+        candidates = np.arange(values.size, dtype=np.intp)
+    else:
+        candidates = np.asarray(candidate_indices, dtype=np.intp)
+        if (
+            candidates.ndim != 1
+            or len(set(candidates.tolist())) != candidates.size
+            or np.any(candidates < 0)
+            or np.any(candidates >= values.size)
+        ):
+            raise ValueError("candidate_indices must be unique and in range")
+    order = np.lexsort((candidates, -values[candidates]))
+    return candidates[order].astype(np.intp, copy=False)
 
 
 def _orient_components(components: NDArray[np.float64]) -> None:

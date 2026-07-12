@@ -22,6 +22,7 @@ from alive.compose.response import (
     ResponseSpace,
     bind_response_source,
     fit_response_space,
+    rank_gene_indices_by_variance,
     verify_response_artifact,
 )
 from alive.provenance import sha256_json
@@ -379,3 +380,22 @@ def test_bind_response_source_rejects_empty_or_duplicate_genes():
         bind_response_source(gene_order=[], raw_data_sha256="r")
     with pytest.raises(ValueError):
         bind_response_source(gene_order=["G0", "G0"], raw_data_sha256="r")
+
+
+def test_rank_gene_indices_by_variance_orders_and_validates():
+    """Shared HVG/roster ordering: descending variance, ties by ascending full index."""
+    variance = np.array([0.1, 5.0, 5.0, 2.0], dtype=np.float64)
+    np.testing.assert_array_equal(rank_gene_indices_by_variance(variance), np.array([1, 2, 3, 0]))
+    # A candidate subset preserves the identical tie/order policy over that subset.
+    np.testing.assert_array_equal(
+        rank_gene_indices_by_variance(variance, candidate_indices=[3, 2, 0]),
+        np.array([2, 3, 0]),
+    )
+    # Invalid variance vectors fail closed.
+    for bad in (np.ones((2, 2)), np.array([1.0, np.nan]), np.array([1.0, -1.0])):
+        with pytest.raises(ValueError, match="finite non-negative"):
+            rank_gene_indices_by_variance(bad)
+    # Invalid candidate rosters fail closed.
+    for bad_candidates in ([0, 0], [4], [-1]):
+        with pytest.raises(ValueError, match="unique and in range"):
+            rank_gene_indices_by_variance(variance, candidate_indices=bad_candidates)

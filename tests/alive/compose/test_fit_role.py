@@ -195,9 +195,7 @@ def test_read_verified_fit_role_artifact_rejects_replaced_bytes(tmp_path):
         )
 
 
-def test_read_verified_fit_role_artifact_rejects_mutated_returned_snapshot(
-    tmp_path, monkeypatch
-):
+def test_read_verified_fit_role_artifact_rejects_mutated_returned_snapshot(tmp_path, monkeypatch):
     import anndata as ad
 
     spec = _gen(tmp_path)
