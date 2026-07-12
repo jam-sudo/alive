@@ -129,7 +129,8 @@ class RunSpecCarrier:
     sealed_outcome : Mapping
         The sealed-outcome DATA (``manifest`` / ``pair_index`` /
         ``pair_index_manifest`` / ``source_path`` / ``source_file_sha256`` /
-        ``perturbation_column`` / ``combo_sep`` + the corpus attestation triple)
+        ``perturbation_column`` / ``combo_sep``, plus the corpus attestation triple in
+        FIXTURE mode only — the scientific carrier omits it)
         a ``phase2b`` subcommand builds its sealed store FROM. No outcome bytes are
         read here (``phase2b`` opens the source ``O_NOFOLLOW`` at seal time).
     mode : str

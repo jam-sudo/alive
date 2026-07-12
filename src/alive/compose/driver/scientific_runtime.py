@@ -60,10 +60,11 @@ def _git(repo_root: Path, *args: str) -> str:
             timeout=_GIT_TIMEOUT,
         )
     except (OSError, subprocess.SubprocessError) as exc:
-        raise ScientificRuntimeError(f"git {args[0]} failed at {repo_root}: {exc}") from exc
+        raise ScientificRuntimeError(f"git {' '.join(args)} failed at {repo_root}: {exc}") from exc
     if result.returncode != 0:
         raise ScientificRuntimeError(
-            f"git {args[0]} exited {result.returncode} at {repo_root}: {result.stderr.strip()}"
+            f"git {' '.join(args)} exited {result.returncode} at {repo_root}: "
+            f"{result.stderr.strip()}"
         )
     return result.stdout
 
