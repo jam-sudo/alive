@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 
 import pytest
+import yaml
 
 from alive.compose.config2 import (
     ActivationRecord,
@@ -17,7 +18,10 @@ from alive.compose.config2 import (
 )
 from alive.compose.driver.carrier_loader import _assemble_activation_record
 from alive.compose.driver.run_spec import RunSpecError, load_resolved_run_spec
-from tests.alive.compose.driver.scientific_carrier_support import build_scientific_carrier_fixture
+from tests.alive.compose.driver.scientific_carrier_support import (
+    _CANON_CONFIG,
+    build_scientific_carrier_fixture,
+)
 
 
 def _spec_config(bundle):
@@ -147,3 +151,44 @@ def test_wrong_owner_rejects(tmp_path):
     mutated_spec = _with_evidence(spec, owner="   ")
     with pytest.raises(ScientificModeError, match="owner is empty"):
         _assemble_activation_record(mutated_spec, config, git_is_clean=True)
+
+
+def test_blocker_present_rejects(tmp_path):
+    # A config with exactly ONE unresolved activation blocker: `regimes.power_status` is left
+    # at its canonical `..._activation_blocker` value (config2.py:472-484 documents the
+    # blocker rule; ..._write_activated_config's mirror in scientific_carrier_support.py always
+    # resolves it, which is why no existing test here reaches config2.py:1323-1327's
+    # `if config.activation_blockers:` guard). Every other baseline field is resolved exactly
+    # like the fully-activated corpus config, so this is otherwise as valid as
+    # `_spec_config(bundle)`'s config.
+    #
+    # Non-tautology: this reuses `spec` from a fully-valid `bundle` unmodified — owner,
+    # requirement roster, evidence-hash syntax, and on-disk evidence-file bytes are all exactly
+    # as valid as `test_activation_record_assembles_and_validates`. `_assemble_activation_record`
+    # passes this SAME blocked config object to both `ActivationRecord` construction (so
+    # approved_protocol/approved_phase trivially match `config.protocol`/`config.phase`) and to
+    # `assert_scientific_mode_allowed`, which checks status/owner/protocol/phase/roster/
+    # digest-syntax/evidence-bytes (config2.py:1236-1321) strictly BEFORE the blocker check
+    # (config2.py:1323-1327) and only reaches the config-bound report config_sha256 lineage
+    # check (config2.py:~1350-1357) AFTER it — so this blocked config's different
+    # `config_sha256` (from the mutated YAML) is never compared to anything, and the blocker
+    # check is guaranteed to be the first (and only) guard that can fire.
+    bundle = build_scientific_carrier_fixture(tmp_path / "a", repo_root=tmp_path / "r")
+    spec, _config = _spec_config(bundle)
+
+    raw = yaml.safe_load(Path(_CANON_CONFIG).read_text(encoding="utf-8"))
+    raw["status"] = "active"
+    # raw["regimes"]["power_status"] intentionally left unresolved (canonical
+    # "unestablished_activation_blocker") — the single blocker under test.
+    raw["baselines"]["gears"]["revision"] = "cell-gears==0.1.2"
+    raw["baselines"]["gears"]["environment_status"] = "pinned_and_fresh_sync_verified"
+    raw["baselines"]["gears"]["approximation_bias_report_sha256"] = "a" * 64
+    raw["baselines"]["cpa"]["revision"] = "cpa-tools==0.8.5"
+    raw["baselines"]["cpa"]["environment_status"] = "pinned_and_fresh_sync_verified"
+    blocked_config_path = tmp_path / "blocked_config.yaml"
+    blocked_config_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+    blocked_config = load_compose_phase2_config(blocked_config_path)
+    assert blocked_config.activation_blockers == ("regimes.power_status",)
+
+    with pytest.raises(ScientificModeError, match="unresolved activation blockers"):
+        _assemble_activation_record(spec, blocked_config, git_is_clean=True)
