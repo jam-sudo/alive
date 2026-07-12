@@ -49,16 +49,22 @@ therefore LOADS the carrier from disk via
 
 1. peeks the CALLER-DECLARED ``--run-spec`` mode BEFORE any work — a missing /
    unreadable file or an unrecognised mode fails closed as
-   :class:`~alive.compose.driver.run_spec.RunSpecError`; a scientific mode fails
-   closed as :class:`UnsupportedModeError` (a ``RunSpecError`` subclass, caught by
-   the same pre-seal-rejection mapping), since scientific carrier assembly is a
-   separate PREPARE obligation (spec §0 "Out of scope");
+   :class:`~alive.compose.driver.run_spec.RunSpecError`;
 2. loads + fully validates the immutable ResolvedRunSpec (canonical bytes / schema /
    self-checksum / file SHA / path policy / every declared pre-seal byte-SHA /
    recomputed ``run_id``), so a mismatched, stale, or tampered ``--run-spec`` fails
    closed before any subcommand runs;
-3. reconstructs the carrier from the ALREADY-serialized, SHA-verified on-disk
-   stage-1 artifacts — writing NO new bytes, deriving nothing.
+3. for a ``"fixture"`` spec, reconstructs the carrier from the ALREADY-serialized,
+   SHA-verified on-disk stage-1 artifacts — writing NO new bytes, deriving nothing;
+   ``--trusted-repo-root`` must be omitted (``None``) in this mode;
+4. for a ``"scientific"`` spec (spec §5), additionally requires the out-of-band
+   ``--trusted-repo-root``, validates the nested scientific block + sealed
+   attestation, independently resolves the runtime Git/environment identity
+   against the spec's ``approved_git_sha``, and builds the owner ActivationRecord +
+   typed provenance — failing closed as
+   :class:`~alive.compose.driver.scientific_runtime.ScientificRuntimeError` or
+   :class:`~alive.compose.config2.ScientificModeError` (both mapped to exit ``10``
+   by :data:`_KNOWN_PRESEAL_REJECTIONS`).
 
 Because the loader is a pure reader (no write-once producer), this CLI can service
 each of ``phase2a`` / ``preflight`` / ``phase2b`` as an INDEPENDENT process against
@@ -68,7 +74,7 @@ impossible while the CLI rebuilt a write-once fixture per call). The corpus itse
 produced once up-front (by the test harness / e2e driver / PREPARE), never per CLI
 process.
 
-See docs/superpowers/specs/2026-07-07-compose-production-driver-design.md §1.1/§11.
+See docs/superpowers/specs/2026-07-07-compose-production-driver-design.md §1.1/§5/§11.
 """
 
 from __future__ import annotations
@@ -78,6 +84,7 @@ import sys
 from pathlib import Path
 from typing import Sequence
 
+from alive.compose.config2 import ScientificModeError
 from alive.compose.driver.carrier_loader import (
     RunSpecCarrier,
     UnsupportedModeError,
@@ -94,6 +101,7 @@ from alive.compose.driver.preflight_cmd import (
 from alive.compose.driver.recover_cmd import RecoverSubcommandError, run_recover_subcommand
 from alive.compose.driver.run_dir_state import RunDirStateError
 from alive.compose.driver.run_spec import RunSpecError
+from alive.compose.driver.scientific_runtime import ScientificRuntimeError
 from alive.compose.outcome_store import ComposeSealingError
 from alive.compose.preflight import PreflightError
 from alive.provenance import LedgerError
@@ -146,6 +154,19 @@ _KNOWN_PRESEAL_REJECTIONS: tuple[type[Exception], ...] = (
     # Spec §1.1 assigns it exit 10; without this entry it propagated uncaught
     # (traceback + exit 1) instead of the contracted single-stderr-line + 10.
     AssemblerError,
+    # ScientificModeError / ScientificRuntimeError (spec §5 scientific carrier
+    # assembly) are BOTH pre-seal, fail-closed rejections raised by
+    # ``load_run_spec_carrier``'s scientific branch — before any subcommand runs,
+    # so before any seal access. ScientificModeError is the owner-authorization
+    # guard rejection (``assert_scientific_mode_allowed``, e.g. non-clean Git
+    # state, stale config-bound evidence, an unresolved activation blocker, or a
+    # digest/byte mismatch); ScientificRuntimeError is the independent runtime
+    # Git/environment identity rejection (moved HEAD, dirty tree, or capture
+    # failure). Neither is a ``RunSpecError`` subclass, so without these entries
+    # they would propagate uncaught (traceback + exit 1) instead of the
+    # contracted single-stderr-line + exit 10.
+    ScientificModeError,
+    ScientificRuntimeError,
 )
 
 
@@ -169,6 +190,7 @@ def _build_parser() -> argparse.ArgumentParser:
         sp.add_argument("--run-spec", required=True, type=Path)
         sp.add_argument("--approved-artifacts-root", required=True, type=Path)
         sp.add_argument("--run-dir", required=True, type=Path)
+        sp.add_argument("--trusted-repo-root", type=Path, default=None)
 
     phase2a = subparsers.add_parser("phase2a")
     _add_run_spec_flags(phase2a)
@@ -191,27 +213,41 @@ def _build_parser() -> argparse.ArgumentParser:
 # --------------------------------------------------------------------------- #
 
 
-def _build_run_spec_carrier(spec_path: Path, approved_artifacts_root: Path) -> RunSpecCarrier:
+def _build_run_spec_carrier(
+    spec_path: Path, approved_artifacts_root: Path, trusted_repo_root: Path | None
+) -> RunSpecCarrier:
     """LOAD the stage-1 carrier from the ResolvedRunSpec's on-disk artifacts.
 
     Delegates to :func:`~alive.compose.driver.carrier_loader.load_run_spec_carrier`,
-    which peeks the declared ``mode`` BEFORE any work (fixture is the only committed
-    carrier path; a scientific spec fails closed with
-    :class:`~alive.compose.driver.carrier_loader.UnsupportedModeError`), then loads +
-    fully validates the ResolvedRunSpec (canonical bytes / schema / self-checksum /
-    file SHA / path policy / every declared pre-seal byte-SHA / recomputed
-    ``run_id``) and reconstructs the carrier from the already-serialized stage-1
-    artifacts. It writes NO bytes, so this CLI can now service each of the
-    ``phase2a → preflight → phase2b`` stages as an INDEPENDENT process against the
-    same approved-root (spec §11).
+    which peeks the declared ``mode`` BEFORE any work, then loads + fully validates
+    the ResolvedRunSpec (canonical bytes / schema / self-checksum / file SHA / path
+    policy / every declared pre-seal byte-SHA / recomputed ``run_id``) and
+    reconstructs the carrier from the already-serialized stage-1 artifacts. Fixture
+    mode requires ``trusted_repo_root is None``; scientific mode requires the
+    out-of-band ``trusted_repo_root`` and additionally validates the nested
+    scientific block + sealed attestation, resolves the runtime Git/environment
+    identity against ``approved_git_sha``, and builds the owner ActivationRecord +
+    typed provenance (spec §5). It writes NO bytes, so this CLI can now service each
+    of the ``phase2a → preflight → phase2b`` stages as an INDEPENDENT process against
+    the same approved-root (spec §11).
 
     Raises
     ------
     RunSpecError
-        If ``mode`` cannot be peeked / is unrecognised, if ``mode == "scientific"``
-        (:class:`UnsupportedModeError`), or if the ResolvedRunSpec fails validation.
+        If ``mode`` cannot be peeked / is unrecognised, if ``trusted_repo_root`` is
+        mismatched with the declared mode, or if the ResolvedRunSpec fails validation.
+    alive.compose.driver.scientific_runtime.ScientificRuntimeError
+        If the runtime Git/environment identity cannot be independently resolved
+        (scientific mode only).
+    alive.compose.config2.ScientificModeError
+        If the assembled ActivationRecord is rejected by the scientific-mode guard
+        (scientific mode only).
     """
-    return load_run_spec_carrier(spec_path, approved_artifacts_root=approved_artifacts_root)
+    return load_run_spec_carrier(
+        spec_path,
+        approved_artifacts_root=approved_artifacts_root,
+        trusted_repo_root=trusted_repo_root,
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -256,7 +292,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             return PRESEAL_REJECT_EXIT
 
     try:
-        carrier = _build_run_spec_carrier(args.run_spec, args.approved_artifacts_root)
+        carrier = _build_run_spec_carrier(
+            args.run_spec, args.approved_artifacts_root, args.trusted_repo_root
+        )
         if args.subcommand == "phase2a":
             return run_phase2a_subcommand(
                 carrier, approved_artifacts_root=args.approved_artifacts_root, run_dir=args.run_dir

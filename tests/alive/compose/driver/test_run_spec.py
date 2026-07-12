@@ -25,6 +25,7 @@ from alive.compose.driver.run_spec import (
     compute_execution_id,
     load_resolved_run_spec,
 )
+from tests.alive.compose.driver.scientific_carrier_support import build_scientific_carrier_fixture
 
 # ---------------------------------------------------------------------------
 # Fixture-spec builder
@@ -450,3 +451,174 @@ def test_root_not_realpath_raises(tmp_path: Path) -> None:
     spec_path.write_text(_canonical(payload), encoding="utf-8")
     with pytest.raises(RunSpecError, match="approved_artifacts_root|root"):
         load_resolved_run_spec(spec_path, approved_artifacts_root=root, mode_expected="fixture")
+
+
+# ---------------------------------------------------------------------------
+# (j) nested scientific-block schema: activation_evidence + dependency_manifest
+# ---------------------------------------------------------------------------
+#
+# Uses the Task-1 synthetic scientific corpus (a real, byte-valid ResolvedRunSpec
+# in mode="scientific") and mutates one nested field at a time, re-sealing with a
+# correct self_checksum so only the *targeted* invariant fails.
+
+
+def _load(bundle) -> ResolvedRunSpec:
+    return load_resolved_run_spec(
+        bundle.spec_path,
+        approved_artifacts_root=bundle.approved_artifacts_root,
+        mode_expected="scientific",
+    )
+
+
+def _rewrite(bundle, mutate) -> None:
+    raw = json.loads(Path(bundle.spec_path).read_bytes())
+    mutate(raw)
+    body = {k: v for k, v in raw.items() if k != "self_checksum"}
+    raw["self_checksum"] = hashlib.sha256(_canonical(body).encode("utf-8")).hexdigest()
+    Path(bundle.spec_path).write_bytes(
+        json.dumps(raw, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    )
+
+
+def test_scientific_block_loads_clean(tmp_path: Path) -> None:
+    bundle = build_scientific_carrier_fixture(tmp_path / "a", repo_root=tmp_path / "r")
+    assert _load(bundle).scientific is not None  # positive baseline
+
+
+def test_activation_evidence_empty_owner_rejects(tmp_path: Path) -> None:
+    bundle = build_scientific_carrier_fixture(tmp_path / "a", repo_root=tmp_path / "r")
+    _rewrite(bundle, lambda raw: raw["scientific"]["activation_evidence"].__setitem__("owner", ""))
+    with pytest.raises(RunSpecError, match="owner"):
+        _load(bundle)
+
+
+def test_activation_evidence_missing_owner_key_rejects(tmp_path: Path) -> None:
+    bundle = build_scientific_carrier_fixture(tmp_path / "a", repo_root=tmp_path / "r")
+    _rewrite(bundle, lambda raw: raw["scientific"]["activation_evidence"].pop("owner"))
+    with pytest.raises(RunSpecError, match="owner"):
+        _load(bundle)
+
+
+def test_activation_evidence_wrong_digest_rejects(tmp_path: Path) -> None:
+    bundle = build_scientific_carrier_fixture(tmp_path / "a", repo_root=tmp_path / "r")
+
+    def mutate(raw):
+        reqs = raw["scientific"]["activation_evidence"]["requirements"]
+        key = sorted(reqs)[0]
+        reqs[key]["sha256"] = "sha256:" + "0" * 64
+
+    _rewrite(bundle, mutate)
+    with pytest.raises(RunSpecError, match="sha256|digest"):
+        _load(bundle)
+
+
+def test_activation_evidence_relative_path_rejects(tmp_path: Path) -> None:
+    bundle = build_scientific_carrier_fixture(tmp_path / "a", repo_root=tmp_path / "r")
+
+    def mutate(raw):
+        reqs = raw["scientific"]["activation_evidence"]["requirements"]
+        key = sorted(reqs)[0]
+        reqs[key]["path"] = "relative/evidence.json"
+
+    _rewrite(bundle, mutate)
+    with pytest.raises(RunSpecError, match="absolute|escapes|path"):
+        _load(bundle)
+
+
+def test_activation_evidence_outside_root_path_rejects(tmp_path: Path) -> None:
+    bundle = build_scientific_carrier_fixture(tmp_path / "a", repo_root=tmp_path / "r")
+    outside = tmp_path / "outside_evidence.json"
+
+    def mutate(raw):
+        reqs = raw["scientific"]["activation_evidence"]["requirements"]
+        key = sorted(reqs)[0]
+        outside.write_bytes(Path(reqs[key]["path"]).read_bytes())  # same bytes, wrong location
+        reqs[key]["path"] = str(outside)
+
+    _rewrite(bundle, mutate)
+    with pytest.raises(RunSpecError, match="escapes"):
+        _load(bundle)
+
+
+def test_activation_evidence_symlink_path_rejects(tmp_path: Path) -> None:
+    bundle = build_scientific_carrier_fixture(tmp_path / "a", repo_root=tmp_path / "r")
+    link_path = bundle.approved_artifacts_root / "evidence_symlink.json"
+
+    def mutate(raw):
+        reqs = raw["scientific"]["activation_evidence"]["requirements"]
+        key = sorted(reqs)[0]
+        os.symlink(reqs[key]["path"], link_path)  # same bytes via symlink, still under root
+        reqs[key]["path"] = str(link_path)
+
+    _rewrite(bundle, mutate)
+    with pytest.raises(RunSpecError, match="symlink"):
+        _load(bundle)
+
+
+def test_activation_evidence_requirement_extra_key_rejects(tmp_path: Path) -> None:
+    bundle = build_scientific_carrier_fixture(tmp_path / "a", repo_root=tmp_path / "r")
+
+    def mutate(raw):
+        reqs = raw["scientific"]["activation_evidence"]["requirements"]
+        key = sorted(reqs)[0]
+        reqs[key]["unexpected_field"] = "x"
+
+    _rewrite(bundle, mutate)
+    with pytest.raises(RunSpecError, match="keys"):
+        _load(bundle)
+
+
+def test_activation_evidence_bad_sha_prefix_rejects(tmp_path: Path) -> None:
+    bundle = build_scientific_carrier_fixture(tmp_path / "a", repo_root=tmp_path / "r")
+
+    def mutate(raw):
+        reqs = raw["scientific"]["activation_evidence"]["requirements"]
+        key = sorted(reqs)[0]
+        reqs[key]["sha256"] = reqs[key]["sha256"].removeprefix("sha256:")  # drop the "sha256:" tag
+
+    _rewrite(bundle, mutate)
+    with pytest.raises(RunSpecError, match="sha256"):
+        _load(bundle)
+
+
+def test_dependency_manifest_malformed_sha_rejects(tmp_path: Path) -> None:
+    bundle = build_scientific_carrier_fixture(tmp_path / "a", repo_root=tmp_path / "r")
+    _rewrite(
+        bundle,
+        lambda raw: raw["scientific"]["dependency_manifest"].__setitem__("sha256", "nothex"),
+    )
+    with pytest.raises(RunSpecError, match="sha256"):
+        _load(bundle)
+
+
+def test_dependency_manifest_wrong_digest_rejects(tmp_path: Path) -> None:
+    bundle = build_scientific_carrier_fixture(tmp_path / "a", repo_root=tmp_path / "r")
+    _rewrite(
+        bundle,
+        lambda raw: raw["scientific"]["dependency_manifest"].__setitem__("sha256", "0" * 64),
+    )
+    with pytest.raises(RunSpecError, match="sha256|digest"):
+        _load(bundle)
+
+
+def test_dependency_manifest_relative_path_rejects(tmp_path: Path) -> None:
+    bundle = build_scientific_carrier_fixture(tmp_path / "a", repo_root=tmp_path / "r")
+    _rewrite(
+        bundle,
+        lambda raw: raw["scientific"]["dependency_manifest"].__setitem__(
+            "path", "relative/dep.json"
+        ),
+    )
+    with pytest.raises(RunSpecError, match="absolute|escapes|path"):
+        _load(bundle)
+
+
+def test_dependency_manifest_extra_key_rejects(tmp_path: Path) -> None:
+    bundle = build_scientific_carrier_fixture(tmp_path / "a", repo_root=tmp_path / "r")
+
+    def mutate(raw):
+        raw["scientific"]["dependency_manifest"]["unexpected_field"] = "x"
+
+    _rewrite(bundle, mutate)
+    with pytest.raises(RunSpecError, match="keys"):
+        _load(bundle)

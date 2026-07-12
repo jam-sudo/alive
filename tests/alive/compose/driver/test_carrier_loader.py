@@ -22,15 +22,17 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from alive.compose.config2 import ActivationRecord
 from alive.compose.driver.carrier_loader import (
     RunSpecCarrier,
-    UnsupportedModeError,
     load_run_spec_carrier,
 )
 from alive.compose.driver.fixture_builder import build_compose_fixture
 from alive.compose.driver.phase2a_cmd import run_phase2a_subcommand
 from alive.compose.driver.run_spec import RunSpecError
+from alive.compose.phase2b import ActivationProvenanceInputs
 from alive.compose.response import verify_response_artifact
+from alive.provenance import EnvironmentInfo
 
 
 # --------------------------------------------------------------------------- #
@@ -210,15 +212,201 @@ def test_loaded_carrier_drives_phase2a_to_zero(tmp_path: Path) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# fixture is the only committed carrier path: scientific fails closed
+# a bare scientific spec with no out-of-band trusted_repo_root fails closed
+# (spec §5; a full scientific carrier assembly is covered separately in
+# test_scientific_carrier_load.py)
 # --------------------------------------------------------------------------- #
-def test_scientific_mode_raises_unsupported(tmp_path: Path) -> None:
+def test_scientific_mode_without_trusted_repo_root_raises_runspecerror(tmp_path: Path) -> None:
     spec_path = tmp_path / "scientific_spec.json"
     spec_path.write_text(json.dumps({"mode": "scientific"}), encoding="utf-8")
-    with pytest.raises(UnsupportedModeError):
+    with pytest.raises(RunSpecError, match="trusted_repo_root"):
         load_run_spec_carrier(spec_path, approved_artifacts_root=tmp_path)
 
 
 def test_unreadable_spec_raises_runspecerror(tmp_path: Path) -> None:
     with pytest.raises(RunSpecError):
         load_run_spec_carrier(tmp_path / "does-not-exist.json", approved_artifacts_root=tmp_path)
+
+
+# --------------------------------------------------------------------------- #
+# discriminated-shape: mode + six scientific fields (§3)
+# --------------------------------------------------------------------------- #
+def test_fixture_carrier_has_scientific_fields_none(tmp_path):
+    bundle = build_compose_fixture(tmp_path)
+    carrier = load_run_spec_carrier(
+        bundle.spec_path, approved_artifacts_root=bundle.approved_artifacts_root
+    )
+    assert carrier.mode == "fixture"
+    assert carrier.activation_record is None
+    assert carrier.git_is_clean is None
+    assert carrier.environment is None
+    assert carrier.data_card_path is None
+    assert carrier.raw_asset_path is None
+    assert carrier.provenance_inputs is None
+
+
+def test_scientific_carrier_requires_all_fields(tmp_path):
+    # A carrier declaring mode="scientific" but leaving the scientific surface None fails closed.
+    from alive.compose.driver.carrier_loader import RunSpecCarrier
+
+    bundle = build_compose_fixture(tmp_path)
+    base = load_run_spec_carrier(
+        bundle.spec_path, approved_artifacts_root=bundle.approved_artifacts_root
+    )
+    with pytest.raises(ValueError, match="scientific"):
+        RunSpecCarrier(
+            spec_path=base.spec_path,
+            phase2a_inputs=base.phase2a_inputs,
+            dev_store_audit=base.dev_store_audit,
+            response_artifact=base.response_artifact,
+            sealed_outcome=base.sealed_outcome,
+            mode="scientific",  # every scientific field left None → reject
+        )
+
+
+def test_fixture_mode_rejects_populated_scientific_field(tmp_path):
+    from alive.compose.driver.carrier_loader import RunSpecCarrier
+
+    bundle = build_compose_fixture(tmp_path)
+    base = load_run_spec_carrier(
+        bundle.spec_path, approved_artifacts_root=bundle.approved_artifacts_root
+    )
+    with pytest.raises(ValueError, match="fixture"):
+        RunSpecCarrier(
+            spec_path=base.spec_path,
+            phase2a_inputs=base.phase2a_inputs,
+            dev_store_audit=base.dev_store_audit,
+            response_artifact=base.response_artifact,
+            sealed_outcome=base.sealed_outcome,
+            mode="fixture",
+            git_is_clean=True,  # a scientific field populated in fixture mode → reject
+        )
+
+
+# --------------------------------------------------------------------------- #
+# partial-miss / per-field type-check / unknown-mode negatives (§6.2)
+#
+# __post_init__ only isinstance-checks the scientific dataclasses -- it does
+# not validate their contents -- so dummy field values are sufficient to build
+# minimal VALID instances of each scientific type.
+# --------------------------------------------------------------------------- #
+def _valid_scientific_fields() -> dict[str, object]:
+    """All six scientific-mode fields populated with minimal valid values."""
+    return {
+        "activation_record": ActivationRecord(
+            owner="dummy-owner",
+            approved_protocol="COMPOSE-K562-v1",
+            approved_phase=2,
+            evidence_hashes={},
+            evidence_files={},
+        ),
+        "git_is_clean": True,
+        "environment": EnvironmentInfo(
+            python_version="3.12.3",
+            platform="dummy-platform",
+            git_commit="0" * 40,
+            lockfile_sha256="0" * 64,
+            registered_seeds=(0,),
+        ),
+        "data_card_path": Path("x"),
+        "raw_asset_path": Path("x"),
+        "provenance_inputs": ActivationProvenanceInputs(
+            processed_sha256="0" * 64,
+            feature_bank_sha256="0" * 64,
+            dependency_lock_sha256="0" * 64,
+            gears_revision="dummy",
+            cpa_revision="dummy",
+            python_version="3.12.3",
+            platform="dummy-platform",
+            device="cpu",
+            precision="fp32",
+            git_commit="0" * 40,
+        ),
+    }
+
+
+@pytest.mark.parametrize(
+    "missing_field",
+    [
+        "activation_record",
+        "git_is_clean",
+        "environment",
+        "data_card_path",
+        "raw_asset_path",
+        "provenance_inputs",
+    ],
+)
+def test_scientific_partial_miss_rejects(tmp_path, missing_field):
+    """5 of 6 scientific fields populated, 1 left None -> rejected as "missing".
+
+    Missing-ness is checked BEFORE any per-field type check (spec §3), so this
+    must fail on the "missing" guard even though every OTHER field here is
+    validly typed.
+    """
+    bundle = build_compose_fixture(tmp_path)
+    base = load_run_spec_carrier(
+        bundle.spec_path, approved_artifacts_root=bundle.approved_artifacts_root
+    )
+    fields = _valid_scientific_fields()
+    fields[missing_field] = None
+    with pytest.raises(ValueError, match="requires every scientific field"):
+        RunSpecCarrier(
+            spec_path=base.spec_path,
+            phase2a_inputs=base.phase2a_inputs,
+            dev_store_audit=base.dev_store_audit,
+            response_artifact=base.response_artifact,
+            sealed_outcome=base.sealed_outcome,
+            mode="scientific",
+            **fields,
+        )
+
+
+@pytest.mark.parametrize(
+    "field, bad_value, match",
+    [
+        ("git_is_clean", 1, "must be exactly True"),
+        ("activation_record", "x", "must be an ActivationRecord"),
+        ("environment", "x", "must be an EnvironmentInfo"),
+        ("provenance_inputs", "x", "must be ActivationProvenanceInputs"),
+        ("data_card_path", "x", "must be Path"),
+        ("raw_asset_path", "x", "must be Path"),
+    ],
+)
+def test_scientific_wrong_type_rejects(tmp_path, field, bad_value, match):
+    """All six fields non-None, only the target field wrong-typed -> rejected by
+    that field's specific type-check branch (spec §3), never by the "missing"
+    guard (which only fires on None).
+    """
+    bundle = build_compose_fixture(tmp_path)
+    base = load_run_spec_carrier(
+        bundle.spec_path, approved_artifacts_root=bundle.approved_artifacts_root
+    )
+    fields = _valid_scientific_fields()
+    fields[field] = bad_value
+    with pytest.raises(ValueError, match=match):
+        RunSpecCarrier(
+            spec_path=base.spec_path,
+            phase2a_inputs=base.phase2a_inputs,
+            dev_store_audit=base.dev_store_audit,
+            response_artifact=base.response_artifact,
+            sealed_outcome=base.sealed_outcome,
+            mode="scientific",
+            **fields,
+        )
+
+
+def test_unknown_mode_rejects(tmp_path):
+    """An unrecognised ``mode`` is rejected regardless of field population."""
+    bundle = build_compose_fixture(tmp_path)
+    base = load_run_spec_carrier(
+        bundle.spec_path, approved_artifacts_root=bundle.approved_artifacts_root
+    )
+    with pytest.raises(ValueError, match="must be 'fixture' or 'scientific'"):
+        RunSpecCarrier(
+            spec_path=base.spec_path,
+            phase2a_inputs=base.phase2a_inputs,
+            dev_store_audit=base.dev_store_audit,
+            response_artifact=base.response_artifact,
+            sealed_outcome=base.sealed_outcome,
+            mode="bogus",
+        )

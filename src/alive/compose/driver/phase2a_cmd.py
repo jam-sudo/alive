@@ -212,6 +212,7 @@ def run_phase2a_subcommand(
             bundle_path=bundle_path,
             baseline_adapters=adapters,
             oof_manifest_path=oof_manifest_path,
+            environment=run_spec.environment,
             activation_record=run_spec.activation_record,
             git_is_clean=run_spec.git_is_clean,
             data_card_path=run_spec.data_card_path,
