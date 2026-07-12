@@ -778,3 +778,71 @@ def test_report_rejects_empty_or_nonstring_gene2go_member(tmp_path):
         compute_mandatory_report(gene2go=["A", ""], **kwargs)
     with pytest.raises(GeneUniverseError, match="non-empty string gene IDs"):
         compute_mandatory_report(gene2go=["A", 123], **kwargs)
+
+
+def test_roster_write_rejects_overwrite_with_different_bytes(tmp_path):
+    """Spec §9: re-emitting over an existing artifact with *different* bytes fails closed."""
+    genes = ["A", "B", "C", "D"]
+    report = _report(tmp_path, genes=genes, hvg=["B"], candidates=["A"], gene2go={"A"})
+    counts = np.array([[10, 0, 0, 0], [10, 0, 0, 10]], dtype=np.float64)
+    artifact_path = tmp_path / "roster.json"
+    first = generate_gears_gene_roster(
+        mandatory_report=report,
+        control_counts_full=counts,
+        control_row_identity_sha256=_SHA_D,
+        generator_code_sha256=_SHA_A,
+        n_target=3,
+        out_path=artifact_path,
+    )
+    first.write(artifact_path)  # byte-identical repeat is allowed (idempotent)
+    second = generate_gears_gene_roster(
+        mandatory_report=report,
+        control_counts_full=counts,
+        control_row_identity_sha256=_SHA_D,
+        generator_code_sha256=_SHA_A,
+        n_target=4,
+    )
+    assert second.ordered_roster != first.ordered_roster
+    with pytest.raises(GeneUniverseError, match="already exists with different bytes"):
+        second.write(artifact_path)
+
+
+def test_loader_rejects_exclusion_with_reason_outside_whitelist(tmp_path):
+    """A self-consistent forgery whose exclusion reason is not whitelisted fails closed."""
+    base_path = tmp_path / "roster.json"
+    generate_gears_gene_roster(
+        mandatory_report=_report(tmp_path),
+        control_counts_full=np.ones((2, 6)),
+        control_row_identity_sha256=_SHA_D,
+        generator_code_sha256=_SHA_A,
+        n_target=6,
+        out_path=base_path,
+    )
+
+    def _bogus_reason(payload):
+        assert payload["eligibility_exclusions"], "fixture must record an exclusion"
+        payload["eligibility_exclusions"][0]["reason"] = "unmapped_alias"
+
+    forged = _reseal_roster(base_path, tmp_path / "forged.json", _bogus_reason)
+    with pytest.raises(GeneUniverseError, match="exclusions are invalid"):
+        load_gears_gene_roster(forged, expected_file_sha256=sha256_file(forged))
+
+
+def test_loader_rejects_inconsistent_size_accounting(tmp_path):
+    """A self-consistent forgery whose fill_count no longer reconciles fails closed."""
+    base_path = tmp_path / "roster.json"
+    generate_gears_gene_roster(
+        mandatory_report=_report(tmp_path),
+        control_counts_full=np.ones((2, 6)),
+        control_row_identity_sha256=_SHA_D,
+        generator_code_sha256=_SHA_A,
+        n_target=6,
+        out_path=base_path,
+    )
+    forged = _reseal_roster(
+        base_path,
+        tmp_path / "forged.json",
+        lambda payload: payload.__setitem__("fill_count", payload["fill_count"] + 1),
+    )
+    with pytest.raises(GeneUniverseError, match="size accounting is invalid"):
+        load_gears_gene_roster(forged, expected_file_sha256=sha256_file(forged))
