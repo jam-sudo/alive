@@ -87,6 +87,7 @@ _DRIVER_MODULES = frozenset(
         "recover_cmd",
         "run_dir_state",
         "run_spec",
+        "scientific_runtime",
     }
 )
 
