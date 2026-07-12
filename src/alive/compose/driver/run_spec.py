@@ -205,6 +205,7 @@ _COMMON_TOP_LEVEL_KEYS: frozenset[str] = frozenset(
 )
 
 _HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
+_PREFIXED_HEX64_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
 # ---------------------------------------------------------------------------
@@ -682,6 +683,50 @@ def _validate_mode_block(block: Any, *, mode: str, root_real: str) -> None:
     _check_lexically_under_root(
         sealed["audit_path"], root_real, field=f"{mode}.sealed_input.audit_path"
     )
+    if mode == "scientific":
+        _validate_scientific_evidence_block(block, root_real=root_real)
+
+
+def _validate_scientific_evidence_block(block: Mapping[str, Any], *, root_real: str) -> None:
+    """Validate a scientific block's nested activation_evidence + dependency_manifest (§2.1).
+
+    These are NON-sealed inputs, so the loader enforces the same approved-root FILE policy as
+    other pre-seal artifacts (absolute normalized, lexically contained, existing regular
+    non-symlink file) AND actual byte-SHA equality. The sealed SOURCE is never touched here.
+    """
+    evidence = block["activation_evidence"]
+    if not isinstance(evidence, dict) or set(evidence) != {"owner", "requirements"}:
+        raise RunSpecError(
+            "scientific.activation_evidence must have exactly {'owner', 'requirements'}"
+        )
+    owner = evidence["owner"]
+    if not isinstance(owner, str) or not owner.strip():
+        raise RunSpecError("scientific.activation_evidence.owner must be a non-empty string")
+    requirements = evidence["requirements"]
+    if not isinstance(requirements, dict) or not requirements:
+        raise RunSpecError("scientific.activation_evidence.requirements must be a non-empty object")
+    for req, entry in requirements.items():
+        where = f"scientific.activation_evidence.requirements[{req!r}]"
+        if not isinstance(entry, dict) or set(entry) != {"path", "sha256"}:
+            raise RunSpecError(f"{where}: must have exactly keys {{'path', 'sha256'}}")
+        digest = entry["sha256"]
+        if not isinstance(digest, str) or _PREFIXED_HEX64_RE.match(digest) is None:
+            raise RunSpecError(f"{where}: 'sha256' must be 'sha256:'+64 lowercase hex chars")
+        _check_path_policy(entry["path"], root_real, kind="file", field=f"{where}.path")
+        actual = sha256_file(entry["path"])
+        if actual != digest.removeprefix("sha256:"):
+            raise RunSpecError(
+                f"{where}: declared sha256 {digest} != actual file digest sha256:{actual}"
+            )
+
+    manifest = block["dependency_manifest"]
+    dep = _parse_path_sha(manifest, field="scientific.dependency_manifest")
+    _check_path_policy(dep.path, root_real, kind="file", field="scientific.dependency_manifest")
+    actual = sha256_file(dep.path)
+    if actual != dep.sha256:
+        raise RunSpecError(
+            f"scientific.dependency_manifest: declared sha256 {dep.sha256} != actual {actual}"
+        )
 
 
 # ---------------------------------------------------------------------------
