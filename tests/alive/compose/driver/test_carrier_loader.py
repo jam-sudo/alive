@@ -25,7 +25,6 @@ import pytest
 from alive.compose.config2 import ActivationRecord
 from alive.compose.driver.carrier_loader import (
     RunSpecCarrier,
-    UnsupportedModeError,
     load_run_spec_carrier,
 )
 from alive.compose.driver.fixture_builder import build_compose_fixture
@@ -213,12 +212,14 @@ def test_loaded_carrier_drives_phase2a_to_zero(tmp_path: Path) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# fixture is the only committed carrier path: scientific fails closed
+# a bare scientific spec with no out-of-band trusted_repo_root fails closed
+# (spec §5; a full scientific carrier assembly is covered separately in
+# test_scientific_carrier_load.py)
 # --------------------------------------------------------------------------- #
-def test_scientific_mode_raises_unsupported(tmp_path: Path) -> None:
+def test_scientific_mode_without_trusted_repo_root_raises_runspecerror(tmp_path: Path) -> None:
     spec_path = tmp_path / "scientific_spec.json"
     spec_path.write_text(json.dumps({"mode": "scientific"}), encoding="utf-8")
-    with pytest.raises(UnsupportedModeError):
+    with pytest.raises(RunSpecError, match="trusted_repo_root"):
         load_run_spec_carrier(spec_path, approved_artifacts_root=tmp_path)
 
 

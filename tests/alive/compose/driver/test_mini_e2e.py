@@ -461,17 +461,19 @@ def test_recover_process_on_completed_run_is_verify_only(tmp_path: Path) -> None
 
 
 # --------------------------------------------------------------------------- #
-# scientific-mode spec via the CLI → fails closed (UnsupportedModeError)
+# scientific-mode spec via the CLI with no --trusted-repo-root → fails closed
 # --------------------------------------------------------------------------- #
 def test_scientific_mode_spec_fails_closed_via_cli_with_no_store(tmp_path: Path) -> None:
-    """A ``scientific``-mode ResolvedRunSpec fails closed via the CLI (no store/seal).
+    """A ``scientific``-mode ResolvedRunSpec with no ``--trusted-repo-root`` fails closed.
 
-    The CLI has NO scientific carrier path yet: Task 11.5's loader raises
-    ``UnsupportedModeError`` (a ``RunSpecError`` subclass) for a scientific spec, so
-    the "activation-less scientific → fail closed" invariant currently MANIFESTS as
-    the CLI failing closed with the pre-seal-reject exit (10) and NO store, NO
-    terminal, NO seal. The scientific carrier is a PREPARE/future obligation
-    (spec §0 "Out of scope"); this asserts the mechanism is ``UnsupportedModeError``.
+    Scientific-mode carrier assembly (spec §5) requires the out-of-band
+    ``--trusted-repo-root`` CLI flag; omitting it (the flag's default is ``None``)
+    fails closed in ``load_run_spec_carrier`` as a ``RunSpecError`` BEFORE the spec
+    body is even loaded — so the CLI reports the pre-seal-reject exit (10) with NO
+    store, NO terminal, NO seal. A full scientific carrier assembly (with
+    ``--trusted-repo-root`` supplied) is covered by
+    ``test_scientific_carrier_load.py``, not this CLI-level fixture-mode-focused
+    suite.
     """
     corpus = tmp_path / "sci_corpus"
     run_dir = corpus / "run"
@@ -491,7 +493,8 @@ def test_scientific_mode_spec_fails_closed_via_cli_with_no_store(tmp_path: Path)
     assert result.returncode == _PRESEAL_REJECT, f"STDERR:\n{result.stderr}"
     assert result.stdout == ""
     # The fail-closed mechanism is named on stderr (T10 diagnostic convention).
-    assert "UnsupportedModeError" in result.stderr
+    assert "RunSpecError" in result.stderr
+    assert "trusted_repo_root" in result.stderr
     # No store / terminal / seal was constructed; the run dir stays empty.
     assert list(run_dir.iterdir()) == []
 
