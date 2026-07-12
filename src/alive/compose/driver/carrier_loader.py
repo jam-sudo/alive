@@ -111,6 +111,24 @@ class RunSpecCarrier:
         ``perturbation_column`` / ``combo_sep`` + the corpus attestation triple)
         a ``phase2b`` subcommand builds its sealed store FROM. No outcome bytes are
         read here (``phase2b`` opens the source ``O_NOFOLLOW`` at seal time).
+    mode : str
+        The discriminant: ``"fixture"`` or ``"scientific"``. Determines whether
+        the six scientific fields below must be all ``None`` or all populated
+        (``__post_init__`` enforces this exactly; see §3).
+    activation_record : alive.compose.config2.ActivationRecord or None
+        Owner authorization for scientific mode; ``None`` in fixture mode.
+    git_is_clean : bool or None
+        Must be exactly ``True`` in scientific mode; ``None`` in fixture mode.
+    environment : alive.provenance.EnvironmentInfo or None
+        Captured runtime environment snapshot for scientific mode; ``None`` in
+        fixture mode.
+    data_card_path : pathlib.Path or None
+        Path to the scientific run's data card; ``None`` in fixture mode.
+    raw_asset_path : pathlib.Path or None
+        Path to the scientific run's raw asset; ``None`` in fixture mode.
+    provenance_inputs : alive.compose.phase2b.ActivationProvenanceInputs or None
+        Evidence-sourced provenance digests for scientific mode; ``None`` in
+        fixture mode.
     """
 
     spec_path: Path
