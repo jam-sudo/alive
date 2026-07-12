@@ -1,230 +1,315 @@
 # COMPOSE production driver — Scientific PREPARE carrier design
 
-> **Status:** DESIGN (awaiting owner spec review) · 2026-07-11
+> **Status:** DESIGN (revised after deep review; awaiting owner approval) · 2026-07-11
 > **Protocol:** `COMPOSE-K562-v1` (ACTIVE). Opens **no** seal; the COMPOSE seal remains UNOPENED.
 > **Sub-project:** completion of driver sub-project **C**'s deferred scientific carrier path.
-> **Authoritative parents:** driver spec `specs/2026-07-07-compose-production-driver-design.md`
-> (its §0 "Out of scope" deferred exactly this); governance `CLAUDE.md` §3/§4; readiness
-> `COMPOSE-SEAL-READINESS.md` row C + critical-path step 4.
+> **Authoritative parents:** driver spec `specs/2026-07-07-compose-production-driver-design.md`;
+> governance `CLAUDE.md` §3/§4; readiness `COMPOSE-SEAL-READINESS.md` row C + critical-path
+> step 4.
 
 ---
 
 ## 0. Scope {#scope}
 
-**In scope.** Replace the `UnsupportedModeError` raised for `mode="scientific"` at
-`src/alive/compose/driver/carrier_loader.py:161-166` with a scientific branch of
-`load_run_spec_carrier` that reconstructs a `RunSpecCarrier` from an already-schema-validated
-scientific `ResolvedRunSpec`, exposing the five existing carrier fields **plus** the five
-scientific attributes the driver stages read. Add a hermetic, MacBook-runnable **scientific
-no-seal assembly test** that verifies activation / provenance / D2-report wiring and the precise
-point at which the path fails closed pending sub-project B.
+**In scope.** Replace the `UnsupportedModeError` raised for `mode="scientific"` by
+`load_run_spec_carrier` with a fail-closed scientific reconstruction path. The path:
 
-**Out of scope (deferred, with rationale in §7).**
-- Real raw-Norman → stage-1 artifact production (that is the pod PREPARE sub-project; here the
-  synthetic stage-1 corpus stands in, exactly as the fixture path already does).
-- Sub-project B's versioned `adapter_version` manifest for the real `gears`/`cpa` workers. The
-  scientific `ExecutionIdentityLock` assembly at `preflight_cmd.py:434` fails closed until B ships;
-  this design **asserts** that boundary rather than papering over it.
-- Binding GU's `ordered_roster_sha256` into the scientific `ResolvedRunSpec` schema (§7.2).
-- Any change to `load_resolved_run_spec` schema validation — it **already** validates the
-  scientific block (`run_spec.py:645-684`); only carrier *reconstruction* is missing.
+1. validates the scientific block's exact nested schema and every non-sealed evidence byte;
+2. proves the runtime repository is clean **and** at the exact `approved_git_sha`;
+3. reconstructs the existing five carrier values plus a complete scientific runtime surface;
+4. binds the scientific sealed-input declaration to the owner-approved attestation without opening
+   the source;
+5. passes the captured `EnvironmentInfo` into Phase-2a and supplies a typed
+   `ActivationProvenanceInputs` to Phase-2b; and
+6. demonstrates hermetically that the current CLI reaches and fails closed at sub-project B's
+   missing scientific adapter-version boundary, with no store, seal access, or run-produced output.
 
-**Non-negotiable invariants.** No `ComposeOutcomeStore` constructed; no AnnData / obs / X / layer
-materialization (digest-only `sha256_file`); no §4.3 code guard weakened, bypassed, or mocked; the
-fixture path stays byte-for-byte unchanged.
+This sub-project makes the **carrier and runtime identity wiring** production-capable. It does not
+claim that the real Norman stage-1 corpus or real GEARS/CPA execution environment is ready.
 
----
+**Out of scope.**
 
-## 1. Current state {#current}
+- Real raw/processed Norman → stage-1 artifact production (pod PREPARE).
+- Sub-project B's versioned `adapter_version` manifest and real `gears`/`cpa` workers.
+- A green scientific Phase-2a/D2/Phase-2b integration run. The current call graph resolves worker
+  identity before Phase-2a activation and D2; therefore this is impossible until B ships.
+- Opening or materializing the sealed source, constructing a `ComposeOutcomeStore`, or running a
+  real scientific fit.
+- Freezing the final GU roster value. Nevertheless, §7 makes the GU receipt→response gene-order
+  equality a release blocker so completion of B alone cannot make the sealed path ready.
 
-- `load_run_spec_carrier(spec_path, *, approved_artifacts_root) -> RunSpecCarrier`
-  (`carrier_loader.py:121-125`) peeks the mode and, for anything other than `"fixture"`, raises
-  `UnsupportedModeError` (`:161-166`, a `RunSpecError` subclass → CLI exit 10). Fixture mode builds
-  a **5-field** frozen `RunSpecCarrier` (`carrier_loader.py:83-118`): `spec_path`,
-  `phase2a_inputs` (`Phase2aInputs`), `dev_store_audit`, `response_artifact`, `sealed_outcome`.
-- `load_resolved_run_spec` already accepts and validates a scientific spec: mode-block exclusivity
-  and key rosters `_SCIENTIFIC_BLOCK_KEYS = {activation_evidence, dependency_manifest, device,
-  precision, sealed_input}` and `_SCIENTIFIC_SEALED_INPUT_KEYS = {source_path, expected_file_sha256,
-  snapshot_id, audit_path}` (`run_spec.py:179-190`, `:645-684`). The 14 pre-seal path fields it
-  byte-verifies are `PRE_SEAL_PATH_FIELDS` (`run_spec.py:100-115`).
-- The driver stages read **five scientific-only attributes off the carrier that the current
-  `RunSpecCarrier` does not carry**:
-  - `phase2a_cmd.py:215-218` — `run_spec.activation_record`, `run_spec.git_is_clean`,
-    `run_spec.data_card_path`, `run_spec.raw_asset_path` (direct attribute access, scientific branch
-    only; the fixture branch never reaches these lines).
-  - `phase2b_cmd.py:334-336` — `run_spec.activation_record`, `git_is_clean` (via
-    `_resolve_git_clean` → `run_spec.git_is_clean`), `getattr(run_spec, "provenance_inputs", None)`.
-  - `preflight_cmd.py:555` — `getattr(run_spec, "git_is_clean", None)` (required `True` in
-    scientific mode).
+**Non-negotiable invariants.** No `ComposeOutcomeStore` is constructed; no sealed AnnData / obs / X /
+layer is opened or materialized; no §4.3 guard is weakened, bypassed, or mocked; runtime Git state is
+measured independently in every CLI process; fixture **serialized artifacts and fixture execution
+semantics** remain unchanged.
 
 ---
 
-## 2. The scientific carrier contract {#contract}
+## 1. Current state and gaps {#current}
 
-The scientific branch returns a `RunSpecCarrier` populated with **ten** attributes: the five
-existing fields (assembled by the SAME private deserializers the fixture path uses, since the
-declared pre-seal artifacts have identical on-disk schemas), plus five scientific attributes.
-
-| attribute | type | source (all from already-SHA-verified declared artifacts) | consumer |
-|---|---|---|---|
-| `spec_path` | `Path` | the spec | all stages |
-| `phase2a_inputs` | `Phase2aInputs` | `spec.pre_seal["phase2a_inputs"].path` (`_load_phase2a_inputs`) | phase2a |
-| `dev_store_audit` | `Mapping` | `development_outcome_source`+`_manifest` (`_load_dev_store_audit`) | phase2a |
-| `response_artifact` | `Mapping` | `response_artifact` path (`_load_response_artifact`; checksum-fidelity gate retained) | phase2a/preflight/phase2b |
-| `sealed_outcome` | `Mapping` | `pair_index_manifest`+`pair_manifest`+scientific `sealed_input` (§2.1) | phase2b only |
-| `activation_record` | `ActivationRecord` | `ActivationRecord` assembled from the scientific block's `activation_evidence` (owner + requirement→evidence roster) with `approved_protocol`/`approved_phase` from `config`, validated by `assert_scientific_mode_allowed` (`config2.py:1195`) | phase2a/phase2b |
-| `git_is_clean` | `bool` | runtime git state resolved by the driver (scientific requires exactly `True`) | phase2a/phase2b/preflight |
-| `data_card_path` | `Path` | `spec.pre_seal["data_card"].path` | phase2a |
-| `raw_asset_path` | `Path` | `spec.pre_seal["raw_asset"].path` | phase2a |
-| `provenance_inputs` | `Mapping` | the CLAUDE.md §4.2 provenance bundle (§3.2) | phase2b |
-
-The five scientific attributes are added to `RunSpecCarrier` as `Optional[...] = None` fields
-(owner-approved carrier shape). The fixture path leaves them `None`; the fixture builder and the
-four fixture deserializers are unchanged, so every existing fixture test remains byte-identical.
-
-**Signature.** `load_run_spec_carrier` gains one keyword argument, `git_is_clean: bool | None =
-None`, resolved by the CLI (`_build_run_spec_carrier`, `cli.py:194-214`) from the runtime git state
-and threaded in — the loader stays a pure disk-loader with no git subprocess side-effect (`git_is_clean`
-is a runtime fact about the working tree vs `approved_git_sha`, not derivable from the spec). The
-fixture branch ignores it (carrier field stays `None`; fixture consumers hardcode `git_clean=True`).
-The scientific branch requires it to be an actual `bool` and fails closed otherwise.
-
-### 2.1 Scientific `sealed_outcome` differs from fixture {#sealed}
-
-The fixture `sealed_outcome` carries a fixture-only attestation triple (`corpus_id`,
-`source_sha256`, `builder_code_sha256`) sourced from the committed `FIXTURE_CORPUS_V1` constant
-(`carrier_loader.py:363-365`). The scientific path **must not** carry that triple: phase2b builds a
-plain `ComposeOutcomeStore` for scientific (`phase2b_cmd.py:493-498`), not the allowlisted
-`build_fixture_outcome_store`. The scientific `sealed_outcome` binds the snapshot-scoped
-`sealed_input` (`source_path`, `expected_file_sha256`, `snapshot_id`, `audit_path`) and the
-`approved_sealed_input_attestation` instead. Store construction remains phase2b's sole
-responsibility; the carrier assembles bindings only.
+- `load_run_spec_carrier` accepts only fixture mode and reconstructs five fields:
+  `spec_path`, `phase2a_inputs`, `dev_store_audit`, `response_artifact`, `sealed_outcome`.
+- `load_resolved_run_spec` validates the scientific block's top-level key roster and
+  `sealed_input`, but does **not** validate the nested `activation_evidence` or
+  `dependency_manifest` contracts.
+- Scientific consumers also require activation, runtime Git state, data paths, environment and
+  Phase-2b provenance. In particular, `run_phase2b` requires the dataclass
+  `ActivationProvenanceInputs`, not an arbitrary mapping.
+- `phase2a_cmd` currently omits `environment=` when it dispatches `run_phase2a`; this would persist
+  the fixture placeholder (`git_commit="UNKNOWN"`) into a scientific ledger and later conflict with
+  Phase-2b provenance.
+- `_assemble_adapters` runs before `run_phase2a`. Until B supplies a scientific adapter-version
+  manifest, the first full-CLI scientific failure is therefore the B identity boundary—not D2.
+- The committed fixture development audit declares `source_kind="synthetic_fixture"`; scientific
+  Phase-2a correctly requires `source_kind="audited_unsealed"`. A test must not relabel the existing
+  fixture artifact in place or claim that fixture execution is scientific evidence.
 
 ---
 
-## 3. Assembly algorithm (the scientific branch) {#assembly}
+## 2. Closed schemas and trust boundaries {#schemas}
 
-All inputs are the already-byte-verified declared artifacts from `load_resolved_run_spec`; the
-branch performs **no** new digesting of raw data beyond `sha256_file` on declared paths and
-constructs **no** store.
+### 2.1 Scientific block
 
-1. **Guard.** Confirm `mode == "scientific"`; reject if any fixture block/corpus/source-digest is
-   present (belt-and-suspenders over the schema-level mode-block exclusivity).
-2. **Five base fields.** Reuse `_load_phase2a_inputs`, `_load_dev_store_audit`,
-   `_load_response_artifact`, and a scientific `_load_sealed_outcome` variant (§2.1).
-3. **`ActivationRecord`.** Assemble and validate via `assert_scientific_mode_allowed`
-   (`config2.py:1195`), which requires (`config2.py:1250-1261`, `:1271-1337`): non-empty `owner`;
-   `approved_protocol == config.protocol`; `approved_phase == config.phase`; `evidence_hashes` keyset
-   == `config.activation_requirements` exactly; each digest `sha256:`-prefixed; each declared file's
-   bytes hash to its digest. Field sourcing: `owner`, `evidence_hashes`, and `evidence_files` come
-   from the scientific block's `activation_evidence` (which carries the `owner` plus the
-   requirement→`{path, sha256:digest}` roster — the exact sub-key names are pinned in the plan against
-   the `activation_evidence` block schema); `approved_protocol`/`approved_phase` are taken from
-   `config` (the validator re-checks equality as the guard). Fail closed on any mismatch. **Schema
-   note:** the scientific `activation_evidence` block must expose `owner`; today `run_spec.py`
-   (`:183`) validates only the scientific block's top-level keys, so the plan adds the
-   `owner`-presence check where the carrier reads it.
-4. **`git_is_clean`.** Take the `git_is_clean` kwarg (threaded from the CLI's runtime git check, §2);
-   require an actual `bool` in scientific mode and fail closed otherwise. Scientific requires exactly
-   `True` downstream (`preflight_cmd.py:544-560`, `phase2b_cmd.py:737-741`).
-5. **`data_card_path` / `raw_asset_path`.** The declared `spec.pre_seal["data_card"].path` and
-   `spec.pre_seal["raw_asset"].path`.
-6. **`provenance_inputs`.** Assemble the mapping in the exact shape `run_phase2b`'s `provenance_inputs`
-   parameter expects (`phase2b_cmd.py:336`) — its precise key names are pinned in the plan against
-   `run_phase2b`'s signature — carrying the CLAUDE.md §4.2 provenance fields already validated on the
-   spec: `config_digest`, `data_card_digest`, `raw_or_source_digest`, `sequence_mapping_digest`, the
-   seven `expected_hashes`, the scientific block's `dependency_manifest` / `device` / `precision`, and
-   `approved_git_sha`. (The runtime `execution_id` is computed downstream, not stored — `run_spec.py`
-   §2.1; the carrier supplies its inputs only.)
+The exact nested schema is:
 
----
+```text
+scientific = {
+  activation_evidence: {
+    owner: non-empty string,
+    requirements: {
+      <activation requirement>: {
+        path: absolute normalized path,
+        sha256: "sha256:<64 lowercase hex>"
+      }
+    }
+  },
+  dependency_manifest: {
+    path: absolute normalized path,
+    sha256: <64 lowercase hex>
+  },
+  device: non-empty string,
+  precision: non-empty string,
+  sealed_input: {
+    source_path: absolute normalized lexical path,
+    expected_file_sha256: <64 lowercase hex>,
+    snapshot_id: non-empty string,
+    audit_path: absolute normalized lexical path
+  }
+}
+```
 
-## 4. Scientific stage-1 test data {#fixture}
+`run_spec.py::_validate_mode_block` is expanded; nested-schema validation is no longer out of scope.
+For activation evidence and the dependency manifest it must enforce the same approved-root policy as
+other pre-seal artifacts: absolute normalized path, lexical containment, existing regular file,
+non-symlink final component, and actual byte-SHA equality. These are non-sealed inputs and may be read.
 
-Extend `src/alive/compose/driver/fixture_builder.py` (which "faithfully mirrors scientific stage-1
-assembly", `fixture_builder.py:7`) to also emit a **scientific-mode** `ResolvedRunSpec` + scientific
-block pointing at the **same synthetic stage-1 artifacts** it already builds. One synthetic corpus,
-two spec modes (DRY). The scientific variant adds: the `activation_evidence` roster (synthetic
-evidence files whose bytes hash to their declared `sha256:` digests, keyed to
-`config.activation_requirements`), a `dependency_manifest`, `device`, `precision`, a snapshot-scoped
-`sealed_input`, and an `approved_sealed_input_attestation`. This keeps the no-seal test hermetic and
-CPU-only — no Norman data, no gears/cpa env. The synthetic worker blocks are built exactly as far as
-they can go without B's versioned adapter manifest (§5).
+After loading the config, the carrier requires
+`activation_evidence.requirements.keys() == config.activation_requirements` exactly. No missing,
+extra, duplicate-after-parsing, relative, cwd-dependent, or outside-root evidence path is accepted.
+`ActivationRecord` is then constructed with:
 
----
+- `owner` from `activation_evidence.owner`;
+- `approved_protocol` / `approved_phase` from the loaded config;
+- `evidence_hashes` and `evidence_files` from the exact requirement roster.
 
-## 5. Governance & fail-closed invariants {#governance}
+`assert_scientific_mode_allowed` re-validates status, blockers, owner, protocol/phase, roster, digest
+syntax, evidence bytes and config-bound report lineage.
 
-- **No store, no materialization.** The scientific branch constructs no `ComposeOutcomeStore` and
-  reads no obs/X/layer — digest-only `sha256_file` on declared paths. Store construction stays the
-  sole responsibility of phase2b's `_build_sealed_store` (`phase2b_cmd.py:421-498`), structurally
-  asserted by `test_seal_safety_structure.py`.
-- **§4.3 guards untouched.** `outcome_store.py`, `gates.py`, `freeze.py`, `preflight.py::run_preflight`,
-  `io.atomic_write_once`, `durable.py`/`terminal.py` are not modified. `run_preflight` stays
-  structurally outcome-free.
-- **Structural fixture↔scientific separation.** The scientific path rejects the fixture attestation
-  triple and vice versa; mode-block exclusivity is enforced at the schema (`run_spec.py:452-459`)
-  and re-asserted in the branch. "mode as a mutable marker" is not treated as a security boundary
-  (driver spec §4).
-- **B fail-closed boundary — asserted, not bypassed.** The scientific `ExecutionIdentityLock`
-  assembly (`assemble_execution_identity_lock`, invoked at `preflight_cmd.py:434` via `_worker_identity`)
-  requires a versioned `adapter_version` manifest that sub-project B has not yet shipped (driver spec
-  §5/§415-417). The scientific path deliberately does **not** reuse the fixture stub adapter
-  (`_STUB_ADAPTER_VERSION`) to force a green run. The no-seal test asserts the path fails closed at
-  exactly this boundary with an explicit marker for B.
+### 2.2 Sealed-input attestation equality (no source access)
 
----
+The already-byte-verified `approved_sealed_input_attestation` is parsed before any stage dispatch.
+Pure mapping/path-string validation must prove:
 
-## 6. Testing {#testing}
+- `sealed_input.source_path == attestation.canonical_source_path`;
+- `sealed_input.expected_file_sha256 == attestation.expected_source_file_sha256`;
+- `sealed_input.snapshot_id == attestation.snapshot_id` in scientific mode;
+- `attestation.pair_index_file_sha256` equals the loader-verified pair-index file SHA;
+- pair-index source/row digests equal the attested source/row digests; and
+- `sealed_input.audit_path` equals the normalized `<run_dir>/<SEAL_AUDIT_FILENAME>` exactly.
 
-Mirror `tests/alive/compose/driver/test_carrier_loader.py` (build → load → deep-equal the consumed
-surface). New tests:
+The source path is checked lexically only at this stage: no `resolve`, `stat`, hash, AnnData parse or
+source open is permitted. Source node identity and byte integrity remain Phase-2b-after-confirmation
+work. This closes the current gap where source digest equality is checked but canonical path,
+snapshot and run-bound audit equality are not.
 
-1. **Scientific carrier assembly.** Build the scientific fixture (§4), `load_run_spec_carrier`,
-   assert all ten attributes are populated: base five deep-equal the built bundle (incl. the
-   response-space checksum-fidelity gate); `activation_record` validates and its evidence roster ==
-   `config.activation_requirements`; `git_is_clean is True`; `data_card_path`/`raw_asset_path` are
-   the declared files; `provenance_inputs` carries the §4.2 keys.
-2. **Fixture stays inert.** A fixture-mode carrier still has the five scientific attributes `None`;
-   all existing `test_carrier_loader.py` assertions unchanged.
-3. **Fail-closed negatives.** Scientific spec with a fixture block/corpus/source-digest → rejected;
-   activation evidence keyset ≠ `config.activation_requirements` → rejected; an evidence file whose
-   bytes don't match its digest → rejected; `git_is_clean=False` → rejected downstream.
-4. **No-seal assembly wiring (DoD gate 5).** A hermetic test that drives the scientific carrier
-   through activation/provenance/D2-report wiring **without opening a store**, and asserts the path
-   fails closed at the B worker-identity boundary (§5) — never reaching sealed access.
-5. **Structure.** `test_seal_safety_structure.py` still passes: no new store-construction site.
+### 2.3 Runtime Git/environment identity
 
-Full compose suite must stay green.
+The CLI resolves a frozen `ScientificRuntimeContext` for **each** independent scientific command:
 
----
+```text
+ScientificRuntimeContext {
+  repo_root: canonical trusted repository root,
+  head_sha: full 40- or 64-character lowercase hex,
+  git_is_clean: bool,
+  environment: EnvironmentInfo
+}
+```
 
-## 7. Scope decisions (owner-confirmed) {#decisions}
+The repository root is an out-of-band CLI/runtime configuration, never selected by the run spec.
+Resolution must use argv-based subprocess calls (no shell) and fail closed unless:
 
-1. **Carrier shape = Optional fields on the existing `RunSpecCarrier`** (not a separate type).
-   Matches the existing consumer contract; one type, one loader; fixture byte-unchanged.
-2. **GU `ordered_roster_sha256` — deferred.** It is not in the current `ResolvedRunSpec` schema, is a
-   B/worker-side concern, and GU's scientific output bridge is itself Probe-A-blocked. Binding it now
-   would be a premature schema change that widens the run-identity surface. Left as a B follow-up.
-3. **B boundary asserted, not stubbed.** Scope is "carrier loader + no-seal assembly test up to the
-   B boundary." No fixture stub adapter on the scientific path.
+1. `git rev-parse --show-toplevel` equals the trusted canonical repository root;
+2. `git rev-parse HEAD == spec.approved_git_sha` exactly;
+3. `git status --porcelain=v1 --untracked-files=all --ignore-submodules=none` is empty;
+4. the SHA has the exact full-hex form; and
+5. environment capture succeeds from that same repository/runtime.
+
+No `--git-is-clean` user assertion is accepted. Run artifacts must live outside the repository or in
+an already-ignored location; the clean-tree check receives no run-specific exclusion. Every command
+rechecks the state, so a change between Phase-2a, preflight and Phase-2b fails closed.
+
+The public signature becomes
+`load_run_spec_carrier(..., trusted_repo_root: Path | None = None)`. Scientific mode requires the
+out-of-band root and constructs `ScientificRuntimeContext` internally **after** loading the spec and
+config; it never accepts a caller-asserted context or clean boolean. Fixture mode requires
+`trusted_repo_root is None`, preserving its disk-only behavior and preventing ambiguous mixed-mode
+construction. The CLI adds/threads the trusted root only for scientific commands.
 
 ---
 
-## 8. Out of scope / follow-ups {#followups}
+## 3. Carrier contract {#contract}
 
-- Sub-project B: versioned `adapter_version` manifest for real `gears`/`cpa` workers → unblocks the
-  scientific `ExecutionIdentityLock` assembly and a full green scientific e2e.
-- Pod PREPARE: real raw-Norman → stage-1 artifact production.
-- GU roster binding into the scientific spec (gated on Probe A + a schema-evolution decision).
+Keep one `RunSpecCarrier` type, but make it a discriminated, construction-validated type rather than
+an arbitrary combination of optional fields. It gains `mode` plus six scientific fields:
+
+| field | fixture | scientific source / type |
+|---|---|---|
+| existing five DATA fields | required | required; same schema deserializers, scientific sealed variant |
+| `mode` | `"fixture"` | `"scientific"` |
+| `activation_record` | `None` | validated `ActivationRecord` |
+| `git_is_clean` | `None` | exactly `True`, from `ScientificRuntimeContext` |
+| `environment` | `None` | `ScientificRuntimeContext.environment` (`EnvironmentInfo`) |
+| `data_card_path` | `None` | verified `pre_seal.data_card.path` |
+| `raw_asset_path` | `None` | verified `pre_seal.raw_asset.path` |
+| `provenance_inputs` | `None` | `ActivationProvenanceInputs` |
+
+`RunSpecCarrier.__post_init__` enforces exact population by `mode`: all six scientific fields are
+`None` in fixture mode and all six have their exact runtime types in scientific mode. Use private
+mode-specific constructors so a partially populated scientific carrier cannot exist.
+
+The scientific `sealed_outcome` contains only the fields `_build_sealed_store` consumes:
+split manifest, pair index, pair-index manifest, declared source path/SHA, perturbation column and
+combo separator. It never carries the fixture corpus attestation triple. The owner attestation is
+validated by §2.2 and remains a pre-seal artifact; store construction remains Phase-2b's sole site.
 
 ---
 
-## 9. Definition of done {#dod}
+## 4. Typed provenance and Phase-2a environment plumbing {#provenance}
 
-- `load_run_spec_carrier` reconstructs a ten-attribute scientific carrier from a schema-validated
-  scientific `ResolvedRunSpec`; no `UnsupportedModeError` for well-formed scientific specs.
-- `RunSpecCarrier` gains five `Optional` scientific fields; fixture path byte-unchanged.
-- `fixture_builder.py` emits a scientific-mode spec variant over the same synthetic corpus.
-- Tests §6.1–§6.5 pass; full compose suite green; ruff clean.
-- No store constructed, no obs/X materialized, no §4.3 guard touched, no seal opened.
+The carrier constructs `ActivationProvenanceInputs` only through the existing
+`build_activation_provenance_inputs` helper:
+
+| helper argument | authoritative source |
+|---|---|
+| `processed_path` | `pre_seal.raw_asset.path` only if the validated data card identifies that exact file as the processed analysis asset |
+| `feature_bank_path` | `pre_seal.feature_bank.path` |
+| `dependency_lock_path` | `scientific.dependency_manifest.path` |
+| `gears_requirements_path` | `worker_blocks.gears.requirements_lock.path` |
+| `cpa_requirements_path` | `worker_blocks.cpa.requirements_lock.path` |
+| `environment` | `ScientificRuntimeContext.environment` |
+| `device`, `precision` | scientific block |
+
+This pins the actual dataclass fields: processed/feature/dependency digests, GEARS/CPA revisions,
+Python/platform/device/precision and Git commit. Config/data-card/raw/sequence/expected hashes do not
+belong in this object; their existing spec/ledger paths remain the single sources of truth.
+If `raw_asset` is genuinely a raw rather than processed asset in the real PREPARE output, the final
+schema must add a separately verified `processed_asset` path+SHA field; it may not silently record a
+raw-file digest as `processed_sha256`.
+
+`phase2a_cmd` must pass `environment=run_spec.environment` on the scientific call to `run_phase2a`.
+Phase-2b reconstructs the carrier in its own process and passes its typed `provenance_inputs`; the
+existing provenance validator then requires Python/platform/Git to match the Phase-2a ledger. This
+also proves that `approved_git_sha`, runtime HEAD, ledger environment and Phase-2b provenance agree.
+
+---
+
+## 5. Assembly order {#assembly}
+
+For scientific mode:
+
+1. Fully load and validate the canonical `ResolvedRunSpec` and all declared pre-seal bytes.
+2. Validate the nested scientific block (§2.1) and sealed attestation equality (§2.2).
+3. Resolve runtime context from the trusted repository root and validate it against
+   `approved_git_sha` (§2.3); no asserted context is accepted.
+4. Load the config and build/validate `ActivationRecord`.
+5. Reuse the existing phase2a/dev-store/response deserializers and the scientific sealed-data
+   deserializer. Validate deserialized schema/checksum fidelity as today.
+6. Build typed `ActivationProvenanceInputs` (§4).
+7. Construct the carrier through its scientific-only constructor; `__post_init__` rejects partial or
+   mixed-mode state.
+8. CLI stage dispatch continues unchanged except for scientific environment plumbing.
+
+This work hashes only declared non-sealed files. It does not open the sealed source or construct any
+outcome store.
+
+---
+
+## 6. Hermetic tests and honest boundary claims {#testing}
+
+Test support lives under `tests/` rather than changing the production fixture builder's fixture
+semantics. It may reuse deterministic serializers/content generators, but produces separate
+mode-specific artifacts:
+
+- the existing fixture artifact keeps `source_kind="synthetic_fixture"` byte-for-byte;
+- a scientific-carrier test artifact uses `source_kind="audited_unsealed"`, an exact scientific
+  block, and a synthetic **test-only** activated config with all activation blockers resolved;
+- config-bound activation reports embed that test config's actual SHA and protocol;
+- no test-only adapter version is admitted on the scientific identity path.
+
+Required tests:
+
+1. **Scientific schema and carrier assembly:** all fields and exact types; ActivationRecord roster;
+   typed provenance values; response checksum fidelity; environment/head agreement.
+2. **Discriminated shape:** fixture has all scientific fields `None`; scientific requires all;
+   partial/mixed construction fails.
+3. **Git identity negatives:** dirty tracked, untracked, submodule-dirty, wrong HEAD, malformed SHA,
+   wrong repo root, absent Git and user-supplied-context mismatch all reject.
+4. **Activation/dependency negatives:** missing/extra requirement, wrong digest, relative/outside-root,
+   symlink/non-regular file, malformed dependency manifest and stale config-bound report reject.
+5. **Sealed declaration negatives:** source path, source SHA, snapshot ID, pair-index SHA, row identity
+   or audit destination mismatch reject without source access.
+6. **Environment/provenance plumbing:** scientific Phase-2a receives the exact `EnvironmentInfo` and
+   never writes the `UNKNOWN` placeholder; typed Phase-2b inputs agree with the persisted ledger.
+7. **Current B boundary:** full scientific CLI assembly reaches `assemble_execution_identity_lock`,
+   fails on the absent committed scientific `adapter_version`, creates no run-produced file/store,
+   and leaves the seal/audit untouched. The test does **not** claim D2 was reached.
+8. **Structural seal safety:** the sole store-construction site and §4.3 structural tests remain
+   unchanged and green.
+
+After B ships, add a separate no-seal integration test covering scientific Phase-2a → D2 report →
+preflight binding. That future test must stop before `_build_sealed_store`; it is not a DoD item for
+this B-blocked sub-project.
+
+---
+
+## 7. Release blockers and follow-ups {#release}
+
+Completion of this carrier sub-project is **not** seal readiness. The following remain mandatory:
+
+1. B: committed versioned adapter manifest, real workers, immutable environments and integration.
+2. Pod PREPARE: real Norman stage-1 artifact production and reviewed evidence.
+3. GU: the roster's `full_var_order_sha256` must equal the response/fit-role `gene_order_sha256`
+   (both digest the full `U_full` gene order) with matching raw-data identity — this is the coherent
+   gene-order binding. The receipt's `ordered_roster_sha256` digests the `R_gears` **subset** (⊆
+   `U_full`) and must **not** be used for this check, since a subset digest can never equal the full
+   order digest. The receipt already binds `full_var_order_sha256`, `response_artifact_sha256`, and
+   `fit_artifact_content_sha256`; bind this equality into the final ResolvedRunSpec/execution identity
+   or prove it transitively via those already-bound artifact SHAs plus an explicit pre-seal verifier.
+   B may not make the scientific path seal-ready while this is absent.
+4. Independent review of the exact clean Git SHA and regenerated activation evidence.
+
+---
+
+## 8. Definition of done {#dod}
+
+- Scientific nested schemas, evidence paths and sealed-attestation equality are fail-closed.
+- Every scientific CLI process proves clean tree **and exact HEAD equality** to `approved_git_sha`.
+- The discriminated carrier cannot represent a partial/mixed scientific state.
+- Phase-2a records the real `EnvironmentInfo`; Phase-2b receives a real
+  `ActivationProvenanceInputs`, and ledger/environment equality is tested.
+- Current full CLI path fails exactly at B's missing scientific adapter version, with zero
+  run-produced artifact, zero store construction and zero sealed access; no false D2 claim is made.
+- Existing fixture serialized artifacts and execution semantics remain unchanged.
+- Focused driver tests, full Compose suite, Ruff check/format-check and structural seal-safety tests
+  pass with caches/bytecode disabled where applicable.
+- No real data access, pod/GPU work, external dependency fetch, scientific fit or seal opening occurs.
