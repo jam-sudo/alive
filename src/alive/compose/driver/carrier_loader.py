@@ -61,7 +61,10 @@ from alive.compose.driver.run_spec import (
 from alive.compose.fit_role import FitRoleArtifactSpec
 from alive.compose.outcome_store import FIXTURE_CORPUS_V1
 from alive.compose.phase2a import OutcomeAccessAudit, Phase2aInputs
-from alive.compose.phase2b import ActivationProvenanceInputs
+from alive.compose.phase2b import (
+    ActivationProvenanceInputs,
+    build_activation_provenance_inputs,
+)
 from alive.compose.response import ResponseSpace
 from alive.provenance import EnvironmentInfo, sha256_bytes
 
@@ -361,6 +364,47 @@ def _assemble_activation_record(
     )
     assert_scientific_mode_allowed(config, activation_record=record, git_is_clean=git_is_clean)
     return record
+
+
+# --------------------------------------------------------------------------- #
+# scientific-mode provenance assembly (spec §4)
+# --------------------------------------------------------------------------- #
+
+
+def _processed_asset_path(spec: ResolvedRunSpec) -> str:
+    """Return raw_asset.path ONLY if the validated data card declares it the processed asset (§4).
+
+    The final PREPARE schema must add a separately verified ``processed_asset`` field if the raw
+    asset is genuinely raw; until then this refuses to record a raw-file digest as
+    ``processed_sha256`` unless the data card binds the raw asset AS the processed analysis asset.
+    """
+    raw = spec.pre_seal["raw_asset"]
+    card = _read_json(spec.pre_seal["data_card"].path)
+    declared = card.get("processed_analysis_asset")
+    if not isinstance(declared, dict) or declared.get("sha256") != raw.sha256:
+        raise RunSpecError(
+            "data card does not identify raw_asset as the processed analysis asset; refusing to "
+            "record a raw-file digest as processed_sha256 (spec §4 requires a separate "
+            "processed_asset field for a genuinely raw asset)"
+        )
+    return raw.path
+
+
+def _assemble_provenance_inputs(
+    spec: ResolvedRunSpec, config: ComposePhase2Config, *, environment: EnvironmentInfo
+) -> ActivationProvenanceInputs:
+    """Build the typed Phase-2b provenance via the existing helper (§4 authoritative-source map)."""
+    scientific = spec.scientific
+    return build_activation_provenance_inputs(
+        processed_path=_processed_asset_path(spec),
+        feature_bank_path=spec.pre_seal["feature_bank"].path,
+        dependency_lock_path=scientific["dependency_manifest"]["path"],
+        gears_requirements_path=spec.worker_blocks["gears"].requirements_lock.path,
+        cpa_requirements_path=spec.worker_blocks["cpa"].requirements_lock.path,
+        environment=environment,
+        device=scientific["device"],
+        precision=scientific["precision"],
+    )
 
 
 # --------------------------------------------------------------------------- #
