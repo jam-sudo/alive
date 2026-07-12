@@ -338,14 +338,17 @@ def load_run_spec_carrier(
         pair_index_manifest_file_sha256=spec.pre_seal["pair_index_manifest"].sha256,
         run_dir=spec.run_dir,
     )
+    # Load the config before runtime capture so EnvironmentInfo records the exact
+    # pre-registered seed roster rather than an empty provenance placeholder.
+    config = load_compose_phase2_config(spec.pre_seal["config"].path)
     # §5.3: runtime git/environment identity (fail closed vs approved_git_sha).
     context = resolve_scientific_runtime_context(
         trusted_repo_root=Path(trusted_repo_root),
         approved_git_sha=spec.approved_git_sha,
         lockfile_path=Path(spec.scientific["dependency_manifest"]["path"]),
+        registered_seeds=config.registered_seeds,
     )
     # §5.4: config + ActivationRecord (re-validated through assert_scientific_mode_allowed).
-    config = load_compose_phase2_config(spec.pre_seal["config"].path)
     activation_record = _assemble_activation_record(spec, config, git_is_clean=context.git_is_clean)
     # §5.5-6: reuse deserializers + typed provenance.
     provenance_inputs = _assemble_provenance_inputs(spec, config, environment=context.environment)

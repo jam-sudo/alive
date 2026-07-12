@@ -13,6 +13,8 @@ from alive.compose.driver.scientific_runtime import (
 )
 from tests.alive.compose.driver.scientific_carrier_support import init_synthetic_repo
 
+_SEEDS = (11, 23, 37)
+
 
 def _repo(tmp_path: Path) -> tuple[Path, str]:
     repo = tmp_path / "repo"
@@ -23,12 +25,16 @@ def _repo(tmp_path: Path) -> tuple[Path, str]:
 def test_clean_repo_at_approved_head_resolves(tmp_path):
     repo, head = _repo(tmp_path)
     ctx = resolve_scientific_runtime_context(
-        trusted_repo_root=repo, approved_git_sha=head, lockfile_path=repo / "README"
+        trusted_repo_root=repo,
+        approved_git_sha=head,
+        lockfile_path=repo / "README",
+        registered_seeds=_SEEDS,
     )
     assert isinstance(ctx, ScientificRuntimeContext)
     assert ctx.git_is_clean is True
     assert ctx.head_sha == head
     assert ctx.environment.git_commit == head
+    assert ctx.environment.registered_seeds == _SEEDS
     assert Path(ctx.repo_root) == Path(repo).resolve()
 
 
@@ -36,7 +42,10 @@ def test_wrong_head_rejects(tmp_path):
     repo, _ = _repo(tmp_path)
     with pytest.raises(ScientificRuntimeError, match="HEAD"):
         resolve_scientific_runtime_context(
-            trusted_repo_root=repo, approved_git_sha="a" * 40, lockfile_path=repo / "README"
+            trusted_repo_root=repo,
+            approved_git_sha="a" * 40,
+            lockfile_path=repo / "README",
+            registered_seeds=_SEEDS,
         )
 
 
@@ -45,7 +54,10 @@ def test_dirty_tracked_rejects(tmp_path):
     (repo / "README").write_text("dirtied\n", encoding="utf-8")
     with pytest.raises(ScientificRuntimeError, match="clean|dirty|status"):
         resolve_scientific_runtime_context(
-            trusted_repo_root=repo, approved_git_sha=head, lockfile_path=repo / "README"
+            trusted_repo_root=repo,
+            approved_git_sha=head,
+            lockfile_path=repo / "README",
+            registered_seeds=_SEEDS,
         )
 
 
@@ -54,7 +66,10 @@ def test_untracked_file_rejects(tmp_path):
     (repo / "stray.txt").write_text("x\n", encoding="utf-8")
     with pytest.raises(ScientificRuntimeError, match="clean|dirty|status"):
         resolve_scientific_runtime_context(
-            trusted_repo_root=repo, approved_git_sha=head, lockfile_path=repo / "README"
+            trusted_repo_root=repo,
+            approved_git_sha=head,
+            lockfile_path=repo / "README",
+            registered_seeds=_SEEDS,
         )
 
 
@@ -66,7 +81,10 @@ def test_malformed_sha_rejects(tmp_path):
     # ..." -- "sha" appears in the variable name), so it gave zero regression protection.
     with pytest.raises(ScientificRuntimeError, match="40- or 64-char lowercase hex"):
         resolve_scientific_runtime_context(
-            trusted_repo_root=repo, approved_git_sha="not-a-sha", lockfile_path=repo / "README"
+            trusted_repo_root=repo,
+            approved_git_sha="not-a-sha",
+            lockfile_path=repo / "README",
+            registered_seeds=_SEEDS,
         )
 
 
@@ -75,7 +93,10 @@ def test_absent_git_rejects(tmp_path, monkeypatch):
     monkeypatch.setenv("PATH", "")
     with pytest.raises(ScientificRuntimeError):
         resolve_scientific_runtime_context(
-            trusted_repo_root=repo, approved_git_sha=head, lockfile_path=repo / "README"
+            trusted_repo_root=repo,
+            approved_git_sha=head,
+            lockfile_path=repo / "README",
+            registered_seeds=_SEEDS,
         )
 
 
@@ -92,7 +113,10 @@ def test_wrong_repo_root_rejects(tmp_path):
     subdir.mkdir()
     with pytest.raises(ScientificRuntimeError, match="git toplevel"):
         resolve_scientific_runtime_context(
-            trusted_repo_root=subdir, approved_git_sha=head, lockfile_path=repo / "README"
+            trusted_repo_root=subdir,
+            approved_git_sha=head,
+            lockfile_path=repo / "README",
+            registered_seeds=_SEEDS,
         )
 
 
@@ -102,7 +126,22 @@ def test_repo_root_not_a_git_repo_rejects(tmp_path):
     other.mkdir()
     with pytest.raises(ScientificRuntimeError):
         resolve_scientific_runtime_context(
-            trusted_repo_root=other, approved_git_sha=head, lockfile_path=repo / "README"
+            trusted_repo_root=other,
+            approved_git_sha=head,
+            lockfile_path=repo / "README",
+            registered_seeds=_SEEDS,
+        )
+
+
+@pytest.mark.parametrize("bad_seeds", [(), [], "11", (11, True), (11, 2.5)])
+def test_invalid_registered_seed_roster_rejects(tmp_path, bad_seeds):
+    repo, head = _repo(tmp_path)
+    with pytest.raises(ScientificRuntimeError, match="registered_seeds"):
+        resolve_scientific_runtime_context(
+            trusted_repo_root=repo,
+            approved_git_sha=head,
+            lockfile_path=repo / "README",
+            registered_seeds=bad_seeds,
         )
 
 

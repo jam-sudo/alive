@@ -141,7 +141,7 @@ ScientificRuntimeContext {
   repo_root: canonical trusted repository root,
   head_sha: full 40- or 64-character lowercase hex,
   git_is_clean: bool,
-  environment: EnvironmentInfo
+  environment: EnvironmentInfo  # includes config.registered_seeds exactly
 }
 ```
 
@@ -152,7 +152,8 @@ Resolution must use argv-based subprocess calls (no shell) and fail closed unles
 2. `git rev-parse HEAD == spec.approved_git_sha` exactly;
 3. `git status --porcelain=v1 --untracked-files=all --ignore-submodules=none` is empty;
 4. the SHA has the exact full-hex form; and
-5. environment capture succeeds from that same repository/runtime.
+5. environment capture succeeds from that same repository/runtime; and
+6. `environment.registered_seeds == config.registered_seeds` exactly and is non-empty.
 
 No `--git-is-clean` user assertion is accepted. Run artifacts must live outside the repository or in
 an already-ignored location; the clean-tree check receives no run-specific exclusion. Every command
@@ -220,6 +221,8 @@ raw-file digest as `processed_sha256`.
 Phase-2b reconstructs the carrier in its own process and passes its typed `provenance_inputs`; the
 existing provenance validator then requires Python/platform/Git to match the Phase-2a ledger. This
 also proves that `approved_git_sha`, runtime HEAD, ledger environment and Phase-2b provenance agree.
+The runtime resolver receives the config-validated seed roster and passes it unchanged to
+`capture_environment`; an empty placeholder roster is forbidden in scientific mode.
 
 ---
 
@@ -229,9 +232,10 @@ For scientific mode:
 
 1. Fully load and validate the canonical `ResolvedRunSpec` and all declared pre-seal bytes.
 2. Validate the nested scientific block (§2.1) and sealed attestation equality (§2.2).
-3. Resolve runtime context from the trusted repository root and validate it against
-   `approved_git_sha` (§2.3); no asserted context is accepted.
-4. Load the config and build/validate `ActivationRecord`.
+3. Load the config, then resolve the runtime context from the trusted repository root — capturing
+   `EnvironmentInfo` with the config's registered seeds — and validate it against `approved_git_sha`
+   (§2.3); no asserted context is accepted.
+4. Build and validate the `ActivationRecord` from the loaded config.
 5. Reuse the existing phase2a/dev-store/response deserializers and the scientific sealed-data
    deserializer. Validate deserialized schema/checksum fidelity as today.
 6. Build typed `ActivationProvenanceInputs` (§4).
@@ -306,7 +310,8 @@ Completion of this carrier sub-project is **not** seal readiness. The following 
 - Every scientific CLI process proves clean tree **and exact HEAD equality** to `approved_git_sha`.
 - The discriminated carrier cannot represent a partial/mixed scientific state.
 - Phase-2a records the real `EnvironmentInfo`; Phase-2b receives a real
-  `ActivationProvenanceInputs`, and ledger/environment equality is tested.
+  `ActivationProvenanceInputs`; registered seeds equal the config exactly and survive ledger
+  write/read; ledger/environment equality is tested.
 - Current full CLI path fails exactly at B's missing scientific adapter version, with zero
   run-produced artifact, zero store construction and zero sealed access; no false D2 claim is made.
 - Existing fixture serialized artifacts and execution semantics remain unchanged.

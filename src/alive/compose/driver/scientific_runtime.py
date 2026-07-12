@@ -14,6 +14,7 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -74,6 +75,7 @@ def resolve_scientific_runtime_context(
     trusted_repo_root: Path,
     approved_git_sha: str,
     lockfile_path: Path,
+    registered_seeds: Sequence[int],
 ) -> ScientificRuntimeContext:
     """Resolve + validate the runtime context, or fail closed (§2.3)."""
     if not isinstance(approved_git_sha, str) or _FULL_HEX_RE.match(approved_git_sha) is None:
@@ -83,6 +85,11 @@ def resolve_scientific_runtime_context(
     root_real = Path(os.path.realpath(str(trusted_repo_root)))
     if not root_real.is_dir():
         raise ScientificRuntimeError(f"trusted repo root is not a directory: {root_real}")
+    if isinstance(registered_seeds, (str, bytes)) or not isinstance(registered_seeds, Sequence):
+        raise ScientificRuntimeError("registered_seeds must be a non-empty sequence of integers")
+    seeds = tuple(registered_seeds)
+    if not seeds or any(type(seed) is not int for seed in seeds):
+        raise ScientificRuntimeError("registered_seeds must be a non-empty sequence of integers")
 
     toplevel = _git(root_real, "rev-parse", "--show-toplevel").strip()
     if Path(os.path.realpath(toplevel)) != root_real:
@@ -105,7 +112,7 @@ def resolve_scientific_runtime_context(
         )
 
     try:
-        environment = capture_environment(lockfile_path, (), repo_dir=root_real)
+        environment = capture_environment(lockfile_path, seeds, repo_dir=root_real)
     except OSError as exc:
         raise ScientificRuntimeError(f"environment capture failed: {exc}") from exc
     if environment.git_commit != approved_git_sha:

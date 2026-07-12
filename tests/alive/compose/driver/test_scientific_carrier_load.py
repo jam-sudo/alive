@@ -6,12 +6,12 @@ from pathlib import Path
 
 import pytest
 
-from alive.compose.config2 import ActivationRecord
+from alive.compose.config2 import ActivationRecord, load_compose_phase2_config
 from alive.compose.driver.carrier_loader import (
     RunSpecCarrier,
     load_run_spec_carrier,
 )
-from alive.compose.driver.run_spec import RunSpecError
+from alive.compose.driver.run_spec import RunSpecError, load_resolved_run_spec
 from alive.compose.phase2b import ActivationProvenanceInputs
 from alive.provenance import EnvironmentInfo
 from tests.alive.compose.driver.scientific_carrier_support import build_scientific_carrier_fixture
@@ -30,6 +30,13 @@ def test_scientific_carrier_fully_assembles(tmp_path):
     assert carrier.git_is_clean is True
     assert isinstance(carrier.environment, EnvironmentInfo)
     assert carrier.environment.git_commit == bundle.approved_git_sha
+    spec = load_resolved_run_spec(
+        bundle.spec_path,
+        approved_artifacts_root=bundle.approved_artifacts_root,
+        mode_expected="scientific",
+    )
+    config = load_compose_phase2_config(spec.pre_seal["config"].path)
+    assert carrier.environment.registered_seeds == config.registered_seeds
     assert isinstance(carrier.provenance_inputs, ActivationProvenanceInputs)
     assert Path(carrier.data_card_path).is_file()
     assert Path(carrier.raw_asset_path).is_file()

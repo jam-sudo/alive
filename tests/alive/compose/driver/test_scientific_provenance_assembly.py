@@ -22,7 +22,9 @@ def _spec_config_env(bundle):
     )
     config = load_compose_phase2_config(spec.pre_seal["config"].path)
     env = capture_environment(
-        spec.scientific["dependency_manifest"]["path"], (), repo_dir=bundle.repo_root
+        spec.scientific["dependency_manifest"]["path"],
+        config.registered_seeds,
+        repo_dir=bundle.repo_root,
     )
     return spec, config, env
 
@@ -40,6 +42,7 @@ def test_provenance_inputs_map_to_authoritative_sources(tmp_path):
     assert inputs.device == "cpu"
     assert inputs.precision == "float32"
     assert inputs.git_commit == bundle.approved_git_sha
+    assert env.registered_seeds == config.registered_seeds
 
 
 def test_data_card_not_declaring_processed_asset_rejects(tmp_path):

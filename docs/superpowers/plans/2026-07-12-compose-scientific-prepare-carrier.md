@@ -882,6 +882,7 @@ divergence. No caller-asserted clean boolean is accepted (§2.3).
 
   def resolve_scientific_runtime_context(
       *, trusted_repo_root: Path, approved_git_sha: str, lockfile_path: Path,
+      registered_seeds: Sequence[int],
   ) -> ScientificRuntimeContext: ...
   ```
 
@@ -915,12 +916,14 @@ Steps:
   def test_clean_repo_at_approved_head_resolves(tmp_path):
       repo, head = _repo(tmp_path)
       ctx = resolve_scientific_runtime_context(
-          trusted_repo_root=repo, approved_git_sha=head, lockfile_path=repo / "README"
+          trusted_repo_root=repo, approved_git_sha=head, lockfile_path=repo / "README",
+          registered_seeds=(11, 23, 37),
       )
       assert isinstance(ctx, ScientificRuntimeContext)
       assert ctx.git_is_clean is True
       assert ctx.head_sha == head
       assert ctx.environment.git_commit == head
+      assert ctx.environment.registered_seeds == (11, 23, 37)
       assert Path(ctx.repo_root) == Path(repo).resolve()
 
 
@@ -928,7 +931,8 @@ Steps:
       repo, _ = _repo(tmp_path)
       with pytest.raises(ScientificRuntimeError, match="HEAD"):
           resolve_scientific_runtime_context(
-              trusted_repo_root=repo, approved_git_sha="a" * 40, lockfile_path=repo / "README"
+              trusted_repo_root=repo, approved_git_sha="a" * 40, lockfile_path=repo / "README",
+              registered_seeds=(11, 23, 37),
           )
 
 
@@ -937,7 +941,8 @@ Steps:
       (repo / "README").write_text("dirtied\n", encoding="utf-8")
       with pytest.raises(ScientificRuntimeError, match="clean|dirty|status"):
           resolve_scientific_runtime_context(
-              trusted_repo_root=repo, approved_git_sha=head, lockfile_path=repo / "README"
+              trusted_repo_root=repo, approved_git_sha=head, lockfile_path=repo / "README",
+              registered_seeds=(11, 23, 37),
           )
 
 
@@ -946,7 +951,8 @@ Steps:
       (repo / "stray.txt").write_text("x\n", encoding="utf-8")
       with pytest.raises(ScientificRuntimeError, match="clean|dirty|status"):
           resolve_scientific_runtime_context(
-              trusted_repo_root=repo, approved_git_sha=head, lockfile_path=repo / "README"
+              trusted_repo_root=repo, approved_git_sha=head, lockfile_path=repo / "README",
+              registered_seeds=(11, 23, 37),
           )
 
 
@@ -954,7 +960,8 @@ Steps:
       repo, _ = _repo(tmp_path)
       with pytest.raises(ScientificRuntimeError, match="hex|sha|SHA"):
           resolve_scientific_runtime_context(
-              trusted_repo_root=repo, approved_git_sha="not-a-sha", lockfile_path=repo / "README"
+              trusted_repo_root=repo, approved_git_sha="not-a-sha", lockfile_path=repo / "README",
+              registered_seeds=(11, 23, 37),
           )
 
 
@@ -964,7 +971,8 @@ Steps:
       other.mkdir()
       with pytest.raises(ScientificRuntimeError):
           resolve_scientific_runtime_context(
-              trusted_repo_root=other, approved_git_sha=head, lockfile_path=repo / "README"
+              trusted_repo_root=other, approved_git_sha=head, lockfile_path=repo / "README",
+              registered_seeds=(11, 23, 37),
           )
 
 
@@ -999,6 +1007,7 @@ Steps:
   import os
   import re
   import subprocess
+  from collections.abc import Sequence
   from dataclasses import dataclass
   from pathlib import Path
 
@@ -1055,6 +1064,7 @@ Steps:
 
   def resolve_scientific_runtime_context(
       *, trusted_repo_root: Path, approved_git_sha: str, lockfile_path: Path,
+      registered_seeds: Sequence[int],
   ) -> ScientificRuntimeContext:
       """Resolve + validate the runtime context, or fail closed (§2.3)."""
       if not isinstance(approved_git_sha, str) or _FULL_HEX_RE.match(approved_git_sha) is None:
@@ -1064,6 +1074,13 @@ Steps:
       root_real = Path(os.path.realpath(str(trusted_repo_root)))
       if not root_real.is_dir():
           raise ScientificRuntimeError(f"trusted repo root is not a directory: {root_real}")
+      if isinstance(registered_seeds, (str, bytes)) or not isinstance(
+          registered_seeds, Sequence
+      ):
+          raise ScientificRuntimeError("registered_seeds must be a non-empty sequence of integers")
+      seeds = tuple(registered_seeds)
+      if not seeds or any(type(seed) is not int for seed in seeds):
+          raise ScientificRuntimeError("registered_seeds must be a non-empty sequence of integers")
 
       toplevel = _git(root_real, "rev-parse", "--show-toplevel").strip()
       if Path(os.path.realpath(toplevel)) != root_real:
@@ -1086,7 +1103,7 @@ Steps:
           )
 
       try:
-          environment = capture_environment(lockfile_path, (), repo_dir=root_real)
+          environment = capture_environment(lockfile_path, seeds, repo_dir=root_real)
       except OSError as exc:
           raise ScientificRuntimeError(f"environment capture failed: {exc}") from exc
       if environment.git_commit != approved_git_sha:
@@ -1767,7 +1784,9 @@ Steps:
       )
       config = load_compose_phase2_config(spec.pre_seal["config"].path)
       env = capture_environment(
-          spec.scientific["dependency_manifest"]["path"], (), repo_dir=bundle.repo_root
+          spec.scientific["dependency_manifest"]["path"],
+          config.registered_seeds,
+          repo_dir=bundle.repo_root,
       )
       return spec, config, env
 
@@ -2063,14 +2082,15 @@ Steps:
           pair_index_manifest_file_sha256=spec.pre_seal["pair_index_manifest"].sha256,
           run_dir=spec.run_dir,
       )
+      config = load_compose_phase2_config(spec.pre_seal["config"].path)
       # §5.3: runtime git/environment identity (fail closed vs approved_git_sha).
       context = resolve_scientific_runtime_context(
           trusted_repo_root=Path(trusted_repo_root),
           approved_git_sha=spec.approved_git_sha,
           lockfile_path=Path(spec.scientific["dependency_manifest"]["path"]),
+          registered_seeds=config.registered_seeds,
       )
       # §5.4: config + ActivationRecord (re-validated through assert_scientific_mode_allowed).
-      config = load_compose_phase2_config(spec.pre_seal["config"].path)
       activation_record = _assemble_activation_record(
           spec, config, git_is_clean=context.git_is_clean
       )
@@ -2468,5 +2488,3 @@ explicitly deferred (spec §6 "After B ships"). The `git status --ignore-submodu
 negative is covered structurally (Task 3 asserts the flag is present in `_STATUS_ARGV`) rather than by
 constructing a live dirty submodule, since a hermetic submodule fixture is disproportionate; the flag
 guarantees submodule dirt is never ignored.
-
-
