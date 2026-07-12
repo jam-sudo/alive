@@ -47,6 +47,7 @@ from typing import Any, Mapping
 
 import numpy as np
 
+from alive.compose.config2 import ActivationRecord
 from alive.compose.driver.fixture_builder import _MODEL_CLASS_BY_NAME
 from alive.compose.driver.run_spec import (
     ResolvedRunSpec,
@@ -56,8 +57,9 @@ from alive.compose.driver.run_spec import (
 from alive.compose.fit_role import FitRoleArtifactSpec
 from alive.compose.outcome_store import FIXTURE_CORPUS_V1
 from alive.compose.phase2a import OutcomeAccessAudit, Phase2aInputs
+from alive.compose.phase2b import ActivationProvenanceInputs
 from alive.compose.response import ResponseSpace
-from alive.provenance import sha256_bytes
+from alive.provenance import EnvironmentInfo, sha256_bytes
 
 __all__ = [
     "RunSpecCarrier",
@@ -116,6 +118,98 @@ class RunSpecCarrier:
     dev_store_audit: Mapping[str, Any]
     response_artifact: Mapping[str, Any]
     sealed_outcome: Mapping[str, Any]
+    mode: str = "fixture"
+    activation_record: ActivationRecord | None = None
+    git_is_clean: bool | None = None
+    environment: EnvironmentInfo | None = None
+    data_card_path: Path | None = None
+    raw_asset_path: Path | None = None
+    provenance_inputs: ActivationProvenanceInputs | None = None
+
+    _SCIENTIFIC_FIELDS = (
+        "activation_record",
+        "git_is_clean",
+        "environment",
+        "data_card_path",
+        "raw_asset_path",
+        "provenance_inputs",
+    )
+
+    def __post_init__(self) -> None:
+        """Enforce exact population by ``mode``: all-None fixture, all-typed scientific (§3)."""
+        if self.mode == "fixture":
+            populated = [f for f in self._SCIENTIFIC_FIELDS if getattr(self, f) is not None]
+            if populated:
+                raise ValueError(
+                    f"fixture carrier must leave every scientific field None; got {populated}"
+                )
+            return
+        if self.mode == "scientific":
+            missing = [f for f in self._SCIENTIFIC_FIELDS if getattr(self, f) is None]
+            if missing:
+                raise ValueError(
+                    f"scientific carrier requires every scientific field; missing {missing}"
+                )
+            if not isinstance(self.activation_record, ActivationRecord):
+                raise ValueError("scientific activation_record must be an ActivationRecord")
+            if self.git_is_clean is not True:
+                raise ValueError("scientific git_is_clean must be exactly True")
+            if not isinstance(self.environment, EnvironmentInfo):
+                raise ValueError("scientific environment must be an EnvironmentInfo")
+            if not isinstance(self.provenance_inputs, ActivationProvenanceInputs):
+                raise ValueError("scientific provenance_inputs must be ActivationProvenanceInputs")
+            if not isinstance(self.data_card_path, Path) or not isinstance(
+                self.raw_asset_path, Path
+            ):
+                raise ValueError("scientific data_card_path / raw_asset_path must be Path")
+            return
+        raise ValueError(
+            f"RunSpecCarrier.mode must be 'fixture' or 'scientific', got {self.mode!r}"
+        )
+
+    @classmethod
+    def _fixture(
+        cls, *, spec_path, phase2a_inputs, dev_store_audit, response_artifact, sealed_outcome
+    ) -> "RunSpecCarrier":
+        return cls(
+            spec_path=spec_path,
+            phase2a_inputs=phase2a_inputs,
+            dev_store_audit=dev_store_audit,
+            response_artifact=response_artifact,
+            sealed_outcome=sealed_outcome,
+            mode="fixture",
+        )
+
+    @classmethod
+    def _scientific(
+        cls,
+        *,
+        spec_path,
+        phase2a_inputs,
+        dev_store_audit,
+        response_artifact,
+        sealed_outcome,
+        activation_record,
+        git_is_clean,
+        environment,
+        data_card_path,
+        raw_asset_path,
+        provenance_inputs,
+    ) -> "RunSpecCarrier":
+        return cls(
+            spec_path=spec_path,
+            phase2a_inputs=phase2a_inputs,
+            dev_store_audit=dev_store_audit,
+            response_artifact=response_artifact,
+            sealed_outcome=sealed_outcome,
+            mode="scientific",
+            activation_record=activation_record,
+            git_is_clean=git_is_clean,
+            environment=environment,
+            data_card_path=data_card_path,
+            raw_asset_path=raw_asset_path,
+            provenance_inputs=provenance_inputs,
+        )
 
 
 def load_run_spec_carrier(
@@ -167,7 +261,7 @@ def load_run_spec_carrier(
     spec = load_resolved_run_spec(
         spec_path, approved_artifacts_root=approved_artifacts_root, mode_expected=mode
     )
-    return RunSpecCarrier(
+    return RunSpecCarrier._fixture(
         spec_path=spec_path,
         phase2a_inputs=_load_phase2a_inputs(spec),
         dev_store_audit=_load_dev_store_audit(spec),

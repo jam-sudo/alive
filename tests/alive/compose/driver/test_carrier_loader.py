@@ -222,3 +222,58 @@ def test_scientific_mode_raises_unsupported(tmp_path: Path) -> None:
 def test_unreadable_spec_raises_runspecerror(tmp_path: Path) -> None:
     with pytest.raises(RunSpecError):
         load_run_spec_carrier(tmp_path / "does-not-exist.json", approved_artifacts_root=tmp_path)
+
+
+# --------------------------------------------------------------------------- #
+# discriminated-shape: mode + six scientific fields (§3)
+# --------------------------------------------------------------------------- #
+def test_fixture_carrier_has_scientific_fields_none(tmp_path):
+    bundle = build_compose_fixture(tmp_path)
+    carrier = load_run_spec_carrier(
+        bundle.spec_path, approved_artifacts_root=bundle.approved_artifacts_root
+    )
+    assert carrier.mode == "fixture"
+    assert carrier.activation_record is None
+    assert carrier.git_is_clean is None
+    assert carrier.environment is None
+    assert carrier.data_card_path is None
+    assert carrier.raw_asset_path is None
+    assert carrier.provenance_inputs is None
+
+
+def test_scientific_carrier_requires_all_fields(tmp_path):
+    # A carrier declaring mode="scientific" but leaving the scientific surface None fails closed.
+    from alive.compose.driver.carrier_loader import RunSpecCarrier
+
+    bundle = build_compose_fixture(tmp_path)
+    base = load_run_spec_carrier(
+        bundle.spec_path, approved_artifacts_root=bundle.approved_artifacts_root
+    )
+    with pytest.raises(ValueError, match="scientific"):
+        RunSpecCarrier(
+            spec_path=base.spec_path,
+            phase2a_inputs=base.phase2a_inputs,
+            dev_store_audit=base.dev_store_audit,
+            response_artifact=base.response_artifact,
+            sealed_outcome=base.sealed_outcome,
+            mode="scientific",  # every scientific field left None → reject
+        )
+
+
+def test_fixture_mode_rejects_populated_scientific_field(tmp_path):
+    from alive.compose.driver.carrier_loader import RunSpecCarrier
+
+    bundle = build_compose_fixture(tmp_path)
+    base = load_run_spec_carrier(
+        bundle.spec_path, approved_artifacts_root=bundle.approved_artifacts_root
+    )
+    with pytest.raises(ValueError, match="fixture"):
+        RunSpecCarrier(
+            spec_path=base.spec_path,
+            phase2a_inputs=base.phase2a_inputs,
+            dev_store_audit=base.dev_store_audit,
+            response_artifact=base.response_artifact,
+            sealed_outcome=base.sealed_outcome,
+            mode="fixture",
+            git_is_clean=True,  # a scientific field populated in fixture mode → reject
+        )
