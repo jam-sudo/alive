@@ -23,10 +23,12 @@ See docs/superpowers/specs/2026-07-07-compose-production-driver-design.md
 
 from __future__ import annotations
 
+import os
 import re
 from typing import Any, Mapping
 
 from alive.compose.driver.run_spec import RunSpecError
+from alive.compose.durable import SEAL_AUDIT_FILENAME
 from alive.compose.split import ROLE_NAMES
 from alive.provenance import sha256_json
 
@@ -37,6 +39,7 @@ __all__ = [
     "ATTESTATION_SCHEMA",
     "ATTESTATION_KEYS",
     "validate_pair_index_manifest_preseal",
+    "validate_scientific_sealed_declaration",
 ]
 
 #: Exact ``schema`` discriminator every v1 pair-index manifest must carry.
@@ -335,4 +338,45 @@ def validate_pair_index_manifest_preseal(
             "pair_index_manifest.obs_row_identity_sha256 "
             f"({obs_row_identity_sha256}) != approved_sealed_input_attestation."
             f"source_row_identity_sha256 ({source_row_identity_sha256})"
+        )
+
+
+def validate_scientific_sealed_declaration(
+    *,
+    sealed_input: Mapping[str, Any],
+    attestation: Mapping[str, Any],
+    pair_index_manifest: Mapping[str, Any],
+    pair_index_manifest_file_sha256: str,
+    run_dir: str,
+) -> None:
+    """Prove the scientific sealed_input binds to the owner attestation (§2.2) — lexical only.
+
+    Reuses :func:`validate_pair_index_manifest_preseal` for the attestation shape + the
+    manifest↔attestation (pair-index file SHA, source-file SHA, row-identity) bindings, then
+    adds the sealed_input-specific equalities. The source path is checked as a STRING only: no
+    ``resolve``, ``stat``, hash, AnnData parse, or source open. Source node identity + byte
+    integrity remain Phase-2b-after-confirmation work.
+    """
+    validate_pair_index_manifest_preseal(
+        pair_index_manifest,
+        attestation=attestation,
+        pair_index_manifest_file_sha256=pair_index_manifest_file_sha256,
+    )
+    if sealed_input.get("source_path") != attestation.get("canonical_source_path"):
+        raise RunSpecError(
+            "scientific sealed_input.source_path != attestation.canonical_source_path"
+        )
+    if sealed_input.get("expected_file_sha256") != attestation.get("expected_source_file_sha256"):
+        raise RunSpecError(
+            "scientific sealed_input.expected_file_sha256 != "
+            "attestation.expected_source_file_sha256"
+        )
+    if sealed_input.get("snapshot_id") != attestation.get("snapshot_id"):
+        raise RunSpecError("scientific sealed_input.snapshot_id != attestation.snapshot_id")
+    expected_audit = os.path.normpath(os.path.join(str(run_dir), SEAL_AUDIT_FILENAME))
+    declared_audit = os.path.normpath(str(sealed_input.get("audit_path")))
+    if declared_audit != expected_audit:
+        raise RunSpecError(
+            f"scientific sealed_input.audit_path ({declared_audit}) != "
+            f"normalized <run_dir>/{SEAL_AUDIT_FILENAME} ({expected_audit})"
         )
