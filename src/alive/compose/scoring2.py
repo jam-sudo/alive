@@ -410,12 +410,14 @@ def _prediction_matrix(
 
 
 def _gi_explained_value(eps_pred: NDArray, eps_truth: NDArray) -> float:
-    """GI-explained fraction for a row subset (no ID alignment needed here).
+    """Zero-GI-reference explained fraction for an already-aligned row subset.
 
     ``eps_pred`` and ``eps_truth`` are already row-aligned by construction
     (manifest order), so this computes the registered ratio directly::
 
         1 - sum||eps_truth - eps_pred||^2 / max(sum||eps_truth||^2, 1e-12)
+
+    This registered secondary is not split-half-noise-ceiling normalized.
     """
     residual_ss = float(np.sum((eps_truth - eps_pred) ** 2))
     truth_ss = float(np.sum(eps_truth**2))

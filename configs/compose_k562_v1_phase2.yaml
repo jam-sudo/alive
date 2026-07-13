@@ -82,7 +82,7 @@ metric:
   learned_comparator_margin: 0.0
   nonfinite_or_missing_policy: invalidate_run
   secondary:
-    - gi_explained_fraction           # normalized by the split-half noise ceiling
+    - gi_explained_fraction           # 1-SSE/SST vs the zero-GI reference (not noise-ceiling normalized)
     - gi_structure_recovery           # sign/class vs known GI, > chance
   secondary_are_verdict_gates: false
 

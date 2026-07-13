@@ -136,15 +136,16 @@ _KNOWN_STATUS = frozenset({"preregistered_activation_blocked", "active"})
 _EXPECTED_SECONDARY_METRICS: dict[str, dict[str, Any]] = {
     "gi_explained_fraction": {
         "definition": (
-            "GI-explained fraction of the combination response, normalized by the "
-            "calibration-role split-half noise ceiling."
+            "Fraction of observed GI sum-of-squares explained relative to the zero-GI "
+            "reference: 1 - SSE(eps_truth, eps_pred) / max(SST(eps_truth), 1e-12)."
         ),
         "interval_method": "shared-resample max_deviation_bootstrap simultaneous 95% interval",
         "material_regression_margin": None,
         "governance_note": (
             "Descriptive-only: secondary_are_verdict_gates is false (spec §10). Reported "
-            "with effect size, simultaneous interval and the split-half noise-ceiling null; "
-            "not a verdict gate, so no material-regression margin is registered."
+            "with effect size, simultaneous interval and the explicit zero-GI reference; "
+            "it is not noise-ceiling normalized and is not a verdict gate, so no "
+            "material-regression margin is registered."
         ),
     },
     "gi_structure_recovery": {

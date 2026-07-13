@@ -251,6 +251,8 @@ def gi_explained_fraction(
 
     ``eps_truth`` is aligned to ``eps_pred`` by pair ID. ``1.0`` for perfect GI
     prediction, ``0.0`` for a zero (no-GI) prediction against nonzero truth.
+    This is a zero-GI-reference explained fraction; it is not normalized by a
+    split-half noise ceiling.
 
     Parameters
     ----------
