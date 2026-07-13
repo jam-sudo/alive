@@ -2044,3 +2044,54 @@ def test_metric_finalize_phase2b_roundtrip(tmp_path):
     assert block["bias_to_signal_ratio_R"] == gi["bias_to_signal_ratio_R"]
     assert block["bootstrap_95_interval"] == gi["bootstrap_95_interval"]["bias_to_signal_ratio_R"]
     assert block["R_star"] == gi["R_star"]
+
+
+# Fail-closed unit coverage for the seal-critical loader's numeric/interval helpers +
+# loader-level branches (final-review Minor: these leak-barrier branches were only
+# reached by the round-trip happy path). The KEY assertion is that every malformed
+# value raises the TYPED ApproximationBiasReportError — never a bare ValueError/TypeError
+# (which is exactly what float("NON_FINITE") would raise and the caller could not classify).
+def test_bias_numeric_or_sentinel_fail_closed(tmp_path):
+    from alive.compose.phase2b import _bias_numeric_or_sentinel
+
+    p = tmp_path / "r.json"
+    assert _bias_numeric_or_sentinel("NON_FINITE", path=p, field="R") == "NON_FINITE"
+    assert _bias_numeric_or_sentinel(1.5, path=p, field="R") == 1.5
+    assert _bias_numeric_or_sentinel(2, path=p, field="R") == 2.0
+    for bad in (True, False, "garbage", None, [1.0], {"x": 1}):
+        with pytest.raises(ApproximationBiasReportError, match="approximation-bias report"):
+            _bias_numeric_or_sentinel(bad, path=p, field="R")
+
+
+def test_bias_interval_or_sentinel_fail_closed(tmp_path):
+    from alive.compose.phase2b import _bias_interval_or_sentinel
+
+    p = tmp_path / "r.json"
+    assert _bias_interval_or_sentinel("NON_FINITE", path=p, field="ci") == "NON_FINITE"
+    assert _bias_interval_or_sentinel([0.1, 0.9], path=p, field="ci") == [0.1, 0.9]
+    assert _bias_interval_or_sentinel([0.1, "NON_FINITE"], path=p, field="ci") == [
+        0.1,
+        "NON_FINITE",
+    ]
+    for bad in ("garbage", [1.0], [1, 2, 3], 0.5, None, [0.1, True]):
+        with pytest.raises(ApproximationBiasReportError, match="approximation-bias report"):
+            _bias_interval_or_sentinel(bad, path=p, field="ci")
+
+
+def test_loader_fail_closed_branches(tmp_path):
+    from alive.compose.phase2b import _load_approximation_bias_fairness
+    from alive.provenance import sha256_file
+
+    # A pinned SHA but no report path.
+    with pytest.raises(ApproximationBiasReportError, match="no report path"):
+        _load_approximation_bias_fairness(report_sha256="a" * 64, report_path=None)
+    # A missing / unreadable report file.
+    with pytest.raises(ApproximationBiasReportError):
+        _load_approximation_bias_fairness(
+            report_sha256="a" * 64, report_path=tmp_path / "nope.json"
+        )
+    # A report whose content SHA matches the pin but lacks the nested gi_and_fairness block.
+    nogi = tmp_path / "nogi.json"
+    nogi.write_text('{"schema":"compose_approximation_bias_report_v1"}\n', encoding="utf-8")
+    with pytest.raises(ApproximationBiasReportError):
+        _load_approximation_bias_fairness(report_sha256=sha256_file(nogi), report_path=nogi)
