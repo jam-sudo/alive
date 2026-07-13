@@ -22,9 +22,10 @@ library entry point. This module centralises those four checks:
   an already-produced partial subset of the durable finalize artifacts is
   accepted as crash-recovery input only alongside a terminal.
 
-This module is pure directory-listing + basename-roster comparison. It opens
-no seal, constructs no outcome store, and imports no ``gears``/``cpa`` — it
-never reads file *contents*, only ``os.listdir`` of ``run_dir`` itself.
+This module is directory-listing + basename-roster comparison, with one
+recovery-only existence check for a caller-declared external scientific audit.
+It opens no seal, reads no audit contents, constructs no outcome store, and
+imports no ``gears``/``cpa``.
 
 See docs/superpowers/specs/2026-07-07-compose-production-driver-design.md §7.1
 (+ §3.1/§3.2/§3.3/§3.4 for each subcommand's installs).
@@ -197,7 +198,11 @@ def _assert_phase2b_roster(present: frozenset[str]) -> None:
     )
 
 
-def _assert_recover_roster(present: frozenset[str]) -> None:
+def _assert_recover_roster(
+    present: frozenset[str],
+    *,
+    external_audit_present: bool = False,
+) -> None:
     # Both ephemeral locks may be present regardless of state; strip them
     # before classifying the meaningful (non-lock) roster (spec §3.4/§7.1).
     core = present - _EPHEMERAL_LOCK_BASENAMES
@@ -247,7 +252,13 @@ def _assert_recover_roster(present: frozenset[str]) -> None:
     # always writes development_seed_variability.json before
     # persist_pre_access_ledger, so a legitimate post-seal crash always has
     # it too).
-    audit_present = SEAL_AUDIT_FILENAME in core
+    local_audit_present = SEAL_AUDIT_FILENAME in core
+    if local_audit_present and external_audit_present:
+        raise RunDirStateError(
+            "recover: both run-local and external durable audit claims are present; "
+            "the seal boundary is ambiguous"
+        )
+    audit_present = local_audit_present or external_audit_present
     pre_access_present = PRE_ACCESS_LEDGER_FILENAME in core
     seed_variability_present = DEVELOPMENT_SEED_VARIABILITY_FILENAME in core
     if not audit_present:
@@ -284,6 +295,7 @@ def assert_run_dir_roster(
     subcommand: str,
     *,
     phase2a_outcome: str | None = None,
+    seal_audit_path: str | Path | None = None,
 ) -> None:
     """Assert ``run_dir``'s direct-child basenames match ``subcommand``'s §7.1 roster.
 
@@ -298,6 +310,10 @@ def assert_run_dir_roster(
         Only meaningful when ``subcommand == "phase2a"``. ``None`` checks the
         ENTRY roster (nothing installed yet). ``"CONTINUE"`` or
         ``"FUTILITY_STOPPED"`` checks the POST-run roster for that outcome.
+    seal_audit_path
+        Recovery-only external audit path. Scientific runs use their canonical
+        protocol-global audit outside ``run_dir``; fixtures leave this as
+        ``None`` and use the local ``audit.jsonl`` basename.
 
     Raises
     ------
@@ -316,8 +332,14 @@ def assert_run_dir_roster(
             "phase2a_outcome is only meaningful for subcommand='phase2a', "
             f"got subcommand={subcommand!r}"
         )
+    if seal_audit_path is not None and subcommand != "recover":
+        raise RunDirStateError(
+            "seal_audit_path is only meaningful for subcommand='recover', "
+            f"got subcommand={subcommand!r}"
+        )
 
-    present = _listdir_basenames(Path(run_dir))
+    run_dir_path = Path(run_dir)
+    present = _listdir_basenames(run_dir_path)
 
     if subcommand == "phase2a":
         _assert_phase2a_roster(present, phase2a_outcome)
@@ -326,4 +348,12 @@ def assert_run_dir_roster(
     elif subcommand == "phase2b":
         _assert_phase2b_roster(present)
     else:
-        _assert_recover_roster(present)
+        external_audit_present = False
+        if seal_audit_path is not None:
+            declared_audit = Path(os.path.abspath(str(seal_audit_path)))
+            local_audit = Path(os.path.abspath(str(run_dir_path / SEAL_AUDIT_FILENAME)))
+            external_audit_present = declared_audit != local_audit and declared_audit.exists()
+        _assert_recover_roster(
+            present,
+            external_audit_present=external_audit_present,
+        )

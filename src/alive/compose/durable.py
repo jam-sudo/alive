@@ -1189,11 +1189,15 @@ def _verify_only_recover(
     )
 
 
-def _synthesize_aborted_after_seal_terminal(run_dir_resolved: Path) -> None:
+def _synthesize_aborted_after_seal_terminal(
+    run_dir_resolved: Path,
+    *,
+    audit_path: Path,
+) -> None:
     """Synthesize the missing ``ABORTED_AFTER_SEAL`` terminal for the audit=1/terminal=0 state.
 
     A hard process death AFTER the durable seal claim burns
-    ``<run_dir>/audit.jsonl`` but may land before any terminal is written, leaving a
+    the mode-specific write-once audit but may land before any terminal is written, leaving a
     consumed seal with no durable terminal record. This routes the on-disk recovery
     inputs (the persisted pre-access ledger for the two provenance identity anchors +
     run id, and the self-checksum-verified seed-variability report for the protocol —
@@ -1241,6 +1245,51 @@ def _synthesize_aborted_after_seal_terminal(run_dir_resolved: Path) -> None:
             "attributable ABORTED_AFTER_SEAL terminal (fail closed)."
         )
 
+    # The protocol-global scientific audit may live outside run_dir. Bind it to
+    # this exact run before synthesizing a terminal so an operator cannot point
+    # recovery at another protocol/run's burned claim.
+    if audit_path.is_symlink():
+        raise DurableLedgerError(
+            f"recover: seal audit {str(audit_path)!r} is a symlink; refused (fail closed)."
+        )
+    try:
+        audit_stat = audit_path.stat()
+        audit_lines = audit_path.read_text(encoding="utf-8").splitlines()
+    except OSError as exc:
+        raise DurableLedgerError(
+            f"recover: seal audit {str(audit_path)!r} is absent or unreadable: {exc}"
+        ) from exc
+    if not stat.S_ISREG(audit_stat.st_mode):
+        raise DurableLedgerError(
+            f"recover: seal audit {str(audit_path)!r} is not a regular file (fail closed)."
+        )
+    first_record: dict[str, object] | None = None
+    for line in audit_lines:
+        if not line.strip():
+            continue
+        try:
+            parsed = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise DurableLedgerError(
+                f"recover: seal audit {str(audit_path)!r} contains invalid JSON: {exc}"
+            ) from exc
+        if not isinstance(parsed, dict):
+            raise DurableLedgerError(
+                f"recover: seal audit {str(audit_path)!r} contains a non-object record."
+            )
+        first_record = parsed
+        break
+    if first_record is None:
+        raise DurableLedgerError(
+            f"recover: seal audit {str(audit_path)!r} has no durable records; "
+            "the seal was not consumed (fail closed)."
+        )
+    if first_record.get("run_id") != run_id:
+        raise DurableLedgerError(
+            f"recover: seal audit run_id {first_record.get('run_id')!r} != "
+            f"pre-access ledger run_id {run_id!r} (fail closed)."
+        )
+
     # Protocol comes from the SELF-CHECKSUM-VERIFIED seed report (RunLedger has no
     # protocol). _read_seed_report_checksum fails closed on a missing / unreadable /
     # bad-self-checksum report before we read the bound protocol value.
@@ -1263,7 +1312,7 @@ def _synthesize_aborted_after_seal_terminal(run_dir_resolved: Path) -> None:
         Phase2bTerminal.recover_aborted_after_seal(
             run_dir_resolved,
             ledger=pre_access,
-            audit_path=run_dir_resolved / SEAL_AUDIT_FILENAME,
+            audit_path=audit_path,
             protocol=protocol,
             run_id=run_id,
             pre_access_ledger_sha256=sha256_file(pre_access_path),
@@ -1280,7 +1329,11 @@ def _synthesize_aborted_after_seal_terminal(run_dir_resolved: Path) -> None:
         ) from exc
 
 
-def recover_phase2b_durable_outputs(*, run_dir: str | Path) -> DurableFinalizeResult:
+def recover_phase2b_durable_outputs(
+    *,
+    run_dir: str | Path,
+    audit_path: str | Path | None = None,
+) -> DurableFinalizeResult:
     """Idempotently recover / complete the durable publish for a run (spec §3.2).
 
     Independently scans ``run_dir`` for the single sealed terminal and branches on
@@ -1306,6 +1359,10 @@ def recover_phase2b_durable_outputs(*, run_dir: str | Path) -> DurableFinalizeRe
     run_dir : str or Path
         The run directory holding the terminal, pre-access ledger, seed report and
         (when already published) the derived files + marker.
+    audit_path : str or Path or None
+        The burned seal audit used only for ``terminal=0`` synthesis. ``None``
+        preserves the fixture/legacy ``<run_dir>/audit.jsonl`` default;
+        scientific recovery must pass its declared protocol-global audit path.
 
     Returns
     -------
@@ -1319,6 +1376,10 @@ def recover_phase2b_durable_outputs(*, run_dir: str | Path) -> DurableFinalizeRe
         cross-check failure.
     """
     run_dir_resolved = _resolve_run_dir(run_dir)
+    if audit_path is None:
+        audit_path_resolved = run_dir_resolved / SEAL_AUDIT_FILENAME
+    else:
+        audit_path_resolved = Path(os.path.abspath(str(audit_path)))
 
     # --- Task 7 (C0 #5) terminal-count branch: the audit=1 / terminal=0 post-crash
     # state has NO terminal yet — a process death after claim_sealed_access burned the
@@ -1334,7 +1395,10 @@ def recover_phase2b_durable_outputs(*, run_dir: str | Path) -> DurableFinalizeRe
             f"{sorted(terminals)!r} (fail closed)."
         )
     if not terminals:
-        _synthesize_aborted_after_seal_terminal(run_dir_resolved)
+        _synthesize_aborted_after_seal_terminal(
+            run_dir_resolved,
+            audit_path=audit_path_resolved,
+        )
 
     terminal_name = _scan_single_terminal(run_dir_resolved)
     terminal_state = _TERMINAL_FILENAME_STATE[terminal_name]

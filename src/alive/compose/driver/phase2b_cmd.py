@@ -32,12 +32,12 @@ Steps (spec §3.3 steps 0-6):
    The sealed access count is still 0;
 4. ONLY after confirmation: integrity-check the sealed source (``O_NOFOLLOW``
    regular-file fd, ``(device, inode, size, mtime_ns)`` compared around a
-   streamed hash, digest verified), check the run-bound audit destination is
-   absent/empty, run the obs-alignment validator
+   streamed hash, digest verified), check the mode-specific audit destination is
+   absent, run the obs-alignment validator
    (:func:`~alive.compose.outcome_store.validate_pair_index_against_source_obs`),
    then **construct the sealed store in THIS function only** with
-   ``audit_path = <run_dir>/audit.jsonl`` (:data:`~alive.compose.durable.SEAL_AUDIT_FILENAME`
-   — the exact path ``recover`` reconstructs to salvage a consumed seal);
+   ``audit_path = <run_dir>/audit.jsonl`` for fixtures or the canonical
+   protocol-global audit under ``approved_artifacts_root`` for scientific runs;
 5. dispatch the correct library entry point (``run_phase2b_fixture`` /
    ``run_phase2b``); the seal is opened EXACTLY once inside it;
 6. INDEPENDENTLY re-read ``phase2b_durable_commit.json`` (canonical bytes +
@@ -86,11 +86,11 @@ from alive.compose.driver.run_spec import (
     ResolvedRunSpec,
     load_resolved_run_spec,
 )
-from alive.compose.durable import (
-    COMMIT_CHECKSUM_FIELD,
-    DURABLE_COMMIT_FILENAME,
-    SEAL_AUDIT_FILENAME,
+from alive.compose.driver.seal_boundary import (
+    fixture_seal_audit_path,
+    scientific_protocol_seal_audit_path,
 )
+from alive.compose.durable import COMMIT_CHECKSUM_FIELD, DURABLE_COMMIT_FILENAME
 from alive.compose.freeze import FrozenPredictionBundle
 from alive.compose.outcome_store import (
     ComposeOutcomeStore,
@@ -140,7 +140,7 @@ class Phase2bSubcommandError(RuntimeError):
     :class:`~alive.compose.outcome_store.ComposeSealingError`. Covers a failed
     driver-lock acquisition (a concurrent phase2b/recover), a sealed-source
     integrity failure (symlink / non-regular node / identity change during
-    hashing / digest mismatch), a non-absent/non-empty run-bound audit
+    hashing / digest mismatch), an already-existing mode-specific audit
     destination, and a durable commit marker that re-reads inconsistently.
     """
 
@@ -285,14 +285,19 @@ def _run_confirmed_phase2b(
     )
 
     # Step 4: ONLY after confirmation. Integrity-check the sealed source, check the
-    # run-bound audit destination, validate the pair index against the source obs,
+    # mode-specific audit destination, validate the pair index against the source obs,
     # then construct the sealed store — the driver's SOLE construction point (§4).
+    audit_path, audit_parent = _resolve_seal_audit_destination(spec, run_dir=run_dir)
     outcome_store = _build_sealed_store(
-        spec=spec, run_dir=run_dir, sealed_outcome=sealed_outcome, pair_manifest=pair_manifest
+        spec=spec,
+        audit_path=audit_path,
+        audit_parent=audit_parent,
+        sealed_outcome=sealed_outcome,
+        pair_manifest=pair_manifest,
     )
 
     # Step 5: dispatch the correct library entry point. The seal opens EXACTLY
-    # once inside it; every consumed access burns the run-bound audit + writes a
+    # once inside it; every consumed access burns the mode-specific audit + writes a
     # terminal artifact. A RAISE from the library AFTER that consumption (the
     # abort path re-raises the boundary exception; a normal-path durable-finalize
     # failure raises DurableLedgerError) is a POST-seal failure: it is made
@@ -340,7 +345,7 @@ def _run_confirmed_phase2b(
                 seed_variability_report_checksum=sha256_file(seed_report_path),
             )
     except Exception as exc:  # noqa: BLE001 - re-raised unless the seal was consumed
-        if _seal_consumed(run_dir):
+        if _seal_consumed(audit_path):
             print(f"{type(exc).__name__}: {exc}", file=sys.stderr)
             return PHASE2B_NONCOMPLETE_EXIT
         raise
@@ -421,17 +426,18 @@ def _driver_lock(run_dir: Path) -> Iterator[None]:
 def _build_sealed_store(
     *,
     spec: ResolvedRunSpec,
-    run_dir: Path,
+    audit_path: Path,
+    audit_parent: Path,
     sealed_outcome: Mapping[str, Any],
     pair_manifest: Mapping[str, Any],
 ) -> ComposeOutcomeStore:
     """Construct the sealed outcome store — the driver's SOLE construction site (§4).
 
     Runs entirely AFTER confirmation: integrity-check the sealed source file,
-    enforce the run-bound audit destination is absent/empty, enforce each pair's
+    enforce the mode-specific audit destination is absent, enforce each pair's
     declared role against the split role names, validate the pair index against
-    the source obs labels, THEN build the store with ``audit_path =
-    <run_dir>/audit.jsonl``. Fixture mode mints a sanctioned
+    the source obs labels, THEN build the store with the already-validated audit
+    path. Fixture mode mints a sanctioned
     :class:`~alive.compose.outcome_store.FixtureOutcomeStore` via the allowlisted
     :func:`~alive.compose.outcome_store.build_fixture_outcome_store`; scientific
     mode builds a plain :class:`~alive.compose.outcome_store.ComposeOutcomeStore`.
@@ -454,11 +460,10 @@ def _build_sealed_store(
         )
     _verify_sealed_source_integrity(source_path, expected_source_sha)
 
-    # ⚑ The recover-critical audit destination: derived from the module constant,
-    # never a bare string. Check it is run-bound + absent/empty BEFORE the store
-    # is constructed — a consumed (non-empty) audit means the seal was opened.
-    audit_path = run_dir / SEAL_AUDIT_FILENAME
-    _assert_audit_destination_free(audit_path, run_dir=run_dir)
+    # ⚑ The recover-critical audit destination is resolved before construction:
+    # run-local for fixtures, protocol-global for scientific mode. Any existing
+    # node means the write-once claim is unavailable or the seal was consumed.
+    _assert_audit_destination_free(audit_path, expected_parent=audit_parent)
 
     # Enforce each pair's declared role against the registered split roles (a
     # bogus role fails closed before the seal is built).
@@ -554,39 +559,66 @@ def _verify_sealed_source_integrity(source_path: Path, expected_sha: str) -> Non
         )
 
 
-def _assert_audit_destination_free(audit_path: Path, *, run_dir: Path) -> None:
-    """Fail closed unless the run-bound audit destination is absent or empty (§3.3).
+def _resolve_seal_audit_destination(
+    spec: ResolvedRunSpec,
+    *,
+    run_dir: Path,
+) -> tuple[Path, Path]:
+    """Resolve the only permitted audit path and its canonical parent.
+
+    Fixtures retain the bounded run-local path. Scientific mode ignores the
+    caller-selected run directory and converges every run of the registered
+    protocol on one root-level, protocol-hash-derived write-once path. The
+    declaration is checked again here at the last pre-construction boundary.
+    """
+    if spec.mode == "fixture":
+        return fixture_seal_audit_path(run_dir), run_dir
+    if spec.scientific is None:  # pragma: no cover - loader schema already proves this
+        raise Phase2bSubcommandError("scientific run spec has no scientific block")
+    expected = scientific_protocol_seal_audit_path(spec.approved_artifacts_root, spec.protocol)
+    declared = Path(str(spec.scientific["sealed_input"]["audit_path"]))
+    if declared != expected:
+        raise Phase2bSubcommandError(
+            f"scientific audit declaration {str(declared)!r} != canonical "
+            f"protocol-global destination {str(expected)!r}"
+        )
+    return expected, Path(spec.approved_artifacts_root)
+
+
+def _assert_audit_destination_free(audit_path: Path, *, expected_parent: Path) -> None:
+    """Fail closed unless the canonical write-once audit destination is absent (§3.3).
 
     The audit file is the durable seal-consumption boundary; a pre-existing
-    non-empty file means the seal was (or is being) opened. It must also be a
-    direct child of ``run_dir`` and not a symlink.
+    node means the atomic write-once claim cannot be installed (and a
+    non-empty file means the seal was opened). It must be a direct child of the
+    mode-specific canonical parent and must not be a symlink.
 
     Raises
     ------
     Phase2bSubcommandError
-        If the audit destination is not run-bound, is a symlink, or already
-        carries content.
+        If the audit destination is outside its canonical parent or any node
+        already exists there.
     """
-    if audit_path.parent.resolve() != run_dir.resolve():
+    if audit_path.parent.resolve() != expected_parent.resolve():
         raise Phase2bSubcommandError(
-            f"audit destination {str(audit_path)!r} is not a direct child of run_dir "
-            f"{str(run_dir)!r}"
+            f"audit destination {str(audit_path)!r} is not a direct child of its "
+            f"canonical parent {str(expected_parent)!r}"
         )
     if audit_path.is_symlink():
         raise Phase2bSubcommandError(f"audit destination {str(audit_path)!r} is a symlink; refused")
-    if audit_path.exists() and audit_path.stat().st_size > 0:
+    if audit_path.exists():
         raise Phase2bSubcommandError(
-            f"audit destination {str(audit_path)!r} already carries content; the seal "
-            "may be opened exactly once (refusing to construct a store over a burned audit)"
+            f"audit destination {str(audit_path)!r} already exists; the atomic "
+            "write-once seal claim is unavailable (refusing to construct a store)"
         )
 
 
-def _seal_consumed(run_dir: Path) -> bool:
+def _seal_consumed(audit_path: Path) -> bool:
     """Return ``True`` once the seal's durable audit carries content (§3.3 step 5).
 
     The seal — opened EXACTLY once inside ``run_phase2b[_fixture]`` — burns the
-    run-bound ``<run_dir>/audit.jsonl`` as its durable consumption boundary, the
-    exact inverse of the emptiness :func:`_assert_audit_destination_free` requires
+    mode-specific audit path as its durable consumption boundary, the exact
+    inverse of the absence :func:`_assert_audit_destination_free` requires
     BEFORE store construction. A post-dispatch exception with a non-empty audit is
     therefore a POST-seal failure (the caller returns exit ``30`` + ``recover``
     salvages the terminal); an empty/absent audit means nothing was consumed (the
@@ -594,15 +626,14 @@ def _seal_consumed(run_dir: Path) -> bool:
 
     Parameters
     ----------
-    run_dir : Path
-        The run directory whose ``audit.jsonl`` is the seal-consumption boundary.
+    audit_path : Path
+        The already-validated audit path that is the seal-consumption boundary.
 
     Returns
     -------
     bool
-        ``True`` if ``<run_dir>/audit.jsonl`` exists and is non-empty.
+        ``True`` if the audit exists and is non-empty.
     """
-    audit_path = run_dir / SEAL_AUDIT_FILENAME
     return audit_path.exists() and audit_path.stat().st_size > 0
 
 

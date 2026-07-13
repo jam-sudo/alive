@@ -23,12 +23,11 @@ See docs/superpowers/specs/2026-07-07-compose-production-driver-design.md
 
 from __future__ import annotations
 
-import os
 import re
 from typing import Any, Mapping
 
 from alive.compose.driver.run_spec import RunSpecError
-from alive.compose.durable import SEAL_AUDIT_FILENAME
+from alive.compose.driver.seal_boundary import scientific_protocol_seal_audit_path
 from alive.compose.split import ROLE_NAMES
 from alive.provenance import sha256_json
 
@@ -347,7 +346,8 @@ def validate_scientific_sealed_declaration(
     attestation: Mapping[str, Any],
     pair_index_manifest: Mapping[str, Any],
     pair_index_manifest_file_sha256: str,
-    run_dir: str,
+    protocol: str,
+    approved_artifacts_root: str,
 ) -> None:
     """Prove the scientific sealed_input binds to the owner attestation (§2.2) — lexical only.
 
@@ -373,10 +373,13 @@ def validate_scientific_sealed_declaration(
         )
     if sealed_input.get("snapshot_id") != attestation.get("snapshot_id"):
         raise RunSpecError("scientific sealed_input.snapshot_id != attestation.snapshot_id")
-    expected_audit = os.path.normpath(os.path.join(str(run_dir), SEAL_AUDIT_FILENAME))
-    declared_audit = os.path.normpath(str(sealed_input.get("audit_path")))
-    if declared_audit != expected_audit:
+    try:
+        expected_audit = scientific_protocol_seal_audit_path(approved_artifacts_root, protocol)
+    except ValueError as exc:
+        raise RunSpecError(f"scientific protocol seal boundary is invalid: {exc}") from exc
+    declared_audit = str(sealed_input.get("audit_path"))
+    if declared_audit != str(expected_audit):
         raise RunSpecError(
             f"scientific sealed_input.audit_path ({declared_audit}) != "
-            f"normalized <run_dir>/{SEAL_AUDIT_FILENAME} ({expected_audit})"
+            f"canonical protocol-global seal audit ({expected_audit})"
         )

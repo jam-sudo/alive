@@ -88,6 +88,7 @@ _DRIVER_MODULES = frozenset(
         "run_dir_state",
         "run_spec",
         "scientific_runtime",
+        "seal_boundary",
     }
 )
 

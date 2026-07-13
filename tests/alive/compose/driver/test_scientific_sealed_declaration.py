@@ -5,12 +5,19 @@ from __future__ import annotations
 import builtins
 import json
 import os
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
 from alive.compose.driver.pair_index import validate_scientific_sealed_declaration
+from alive.compose.driver.phase2b_cmd import (
+    Phase2bSubcommandError,
+    _assert_audit_destination_free,
+    _resolve_seal_audit_destination,
+)
 from alive.compose.driver.run_spec import RunSpecError, load_resolved_run_spec
+from alive.compose.driver.seal_boundary import scientific_protocol_seal_audit_path
 from alive.provenance import sha256_json
 from tests.alive.compose.driver.scientific_carrier_support import build_scientific_carrier_fixture
 
@@ -36,7 +43,8 @@ def test_valid_declaration_passes(tmp_path):
         attestation=attestation,
         pair_index_manifest=pim,
         pair_index_manifest_file_sha256=spec.pre_seal["pair_index_manifest"].sha256,
-        run_dir=spec.run_dir,
+        protocol=spec.protocol,
+        approved_artifacts_root=spec.approved_artifacts_root,
     )  # no raise
 
 
@@ -59,7 +67,8 @@ def test_sealed_input_field_mismatch_rejects(tmp_path, key, bad):
             attestation=attestation,
             pair_index_manifest=pim,
             pair_index_manifest_file_sha256=spec.pre_seal["pair_index_manifest"].sha256,
-            run_dir=spec.run_dir,
+            protocol=spec.protocol,
+            approved_artifacts_root=spec.approved_artifacts_root,
         )
 
 
@@ -74,7 +83,8 @@ def test_audit_path_mismatch_rejects(tmp_path):
             attestation=attestation,
             pair_index_manifest=pim,
             pair_index_manifest_file_sha256=spec.pre_seal["pair_index_manifest"].sha256,
-            run_dir=spec.run_dir,
+            protocol=spec.protocol,
+            approved_artifacts_root=spec.approved_artifacts_root,
         )
 
 
@@ -101,7 +111,8 @@ def test_pair_index_row_identity_mismatch_rejects(tmp_path):
             attestation=bad_attestation,
             pair_index_manifest=pim,
             pair_index_manifest_file_sha256=spec.pre_seal["pair_index_manifest"].sha256,
-            run_dir=spec.run_dir,
+            protocol=spec.protocol,
+            approved_artifacts_root=spec.approved_artifacts_root,
         )
 
 
@@ -134,7 +145,8 @@ def test_nonexistent_source_path_still_validates_lexically(tmp_path):
         attestation=bad_attestation,
         pair_index_manifest=pim,
         pair_index_manifest_file_sha256=spec.pre_seal["pair_index_manifest"].sha256,
-        run_dir=spec.run_dir,
+        protocol=spec.protocol,
+        approved_artifacts_root=spec.approved_artifacts_root,
     )  # no raise — proves no stat/open of source_path occurred
 
 
@@ -165,5 +177,38 @@ def test_source_path_never_opened_or_statted(tmp_path, monkeypatch):
         attestation=attestation,
         pair_index_manifest=pim,
         pair_index_manifest_file_sha256=spec.pre_seal["pair_index_manifest"].sha256,
-        run_dir=spec.run_dir,
+        protocol=spec.protocol,
+        approved_artifacts_root=spec.approved_artifacts_root,
     )  # no raise, and the guards above must never trip
+
+
+def test_protocol_audit_is_independent_of_run_directory(tmp_path):
+    root = tmp_path / "approved"
+    first = scientific_protocol_seal_audit_path(root, "COMPOSE-K562-v1")
+    second = scientific_protocol_seal_audit_path(root, "COMPOSE-K562-v1")
+    assert first == second
+    assert first.parent == root.resolve()
+    assert "COMPOSE-K562-v1" not in first.name
+
+
+def test_second_run_directory_cannot_mint_a_fresh_scientific_seal(tmp_path):
+    bundle = build_scientific_carrier_fixture(tmp_path / "a", repo_root=tmp_path / "r")
+    spec, _, _ = _parts(bundle)
+    second_run_dir = bundle.approved_artifacts_root / "second-run"
+    second_run_dir.mkdir()
+    second_spec = replace(spec, run_dir=str(second_run_dir))
+
+    first_audit, first_parent = _resolve_seal_audit_destination(
+        spec,
+        run_dir=Path(spec.run_dir),
+    )
+    second_audit, second_parent = _resolve_seal_audit_destination(
+        second_spec,
+        run_dir=second_run_dir,
+    )
+    assert first_audit == second_audit
+    assert first_parent == second_parent
+
+    first_audit.write_text('{"run_id":"already-consumed"}\n', encoding="utf-8")
+    with pytest.raises(Phase2bSubcommandError, match="already exists"):
+        _assert_audit_destination_free(second_audit, expected_parent=second_parent)

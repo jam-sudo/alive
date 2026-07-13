@@ -336,7 +336,8 @@ def load_run_spec_carrier(
         attestation=attestation,
         pair_index_manifest=pair_index_manifest,
         pair_index_manifest_file_sha256=spec.pre_seal["pair_index_manifest"].sha256,
-        run_dir=spec.run_dir,
+        protocol=spec.protocol,
+        approved_artifacts_root=spec.approved_artifacts_root,
     )
     # Load the config before runtime capture so EnvironmentInfo records the exact
     # pre-registered seed roster rather than an empty provenance placeholder.

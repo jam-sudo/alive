@@ -25,6 +25,7 @@ from alive.compose.driver.run_spec import (
     compute_execution_id,
     load_resolved_run_spec,
 )
+from alive.compose.driver.seal_boundary import scientific_protocol_seal_audit_path
 from tests.alive.compose.driver.scientific_carrier_support import build_scientific_carrier_fixture
 
 # ---------------------------------------------------------------------------
@@ -171,7 +172,7 @@ def _write_spec(
                 "source_path": sealed_source["path"],
                 "expected_file_sha256": sealed_source["sha256"],
                 "snapshot_id": "snap-1",
-                "audit_path": str(run_dir / "audit.jsonl"),
+                "audit_path": str(scientific_protocol_seal_audit_path(root, "COMPOSE-K562-v1")),
             },
         }
 

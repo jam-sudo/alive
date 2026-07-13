@@ -1144,6 +1144,44 @@ def test_recover_synthesizes_aborted_from_audit_only(tmp_path: Path) -> None:
     assert sha256_json(core) == marker["commit_checksum"] == result.commit_checksum
 
 
+def test_recover_synthesizes_from_external_protocol_audit(tmp_path: Path) -> None:
+    scenario = _build_audit_only_scenario(tmp_path, audit_records=1)
+    run_dir = scenario["run_dir"]
+    external_audit = tmp_path / ".compose-protocol-seal-test.jsonl"
+    (run_dir / "audit.jsonl").replace(external_audit)
+
+    result = recover_phase2b_durable_outputs(
+        run_dir=run_dir,
+        audit_path=external_audit,
+    )
+
+    assert result.terminal_state == "ABORTED_AFTER_SEAL"
+    body = json.loads((run_dir / Phase2bTerminal.ABORTED_ARTIFACT).read_text(encoding="utf-8"))
+    assert body["run_id"] == _RUN_ID
+    assert body["sealed_access_count"] == 1
+
+
+def test_recover_external_audit_run_id_mismatch_fails_closed(tmp_path: Path) -> None:
+    scenario = _build_audit_only_scenario(tmp_path, audit_records=1)
+    run_dir = scenario["run_dir"]
+    external_audit = tmp_path / ".compose-protocol-seal-test.jsonl"
+    record = json.loads((run_dir / "audit.jsonl").read_text(encoding="utf-8"))
+    record["run_id"] = "wrong-run"
+    external_audit.write_text(
+        json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    (run_dir / "audit.jsonl").unlink()
+
+    with pytest.raises(DurableLedgerError, match="audit run_id"):
+        recover_phase2b_durable_outputs(
+            run_dir=run_dir,
+            audit_path=external_audit,
+        )
+
+    assert not (run_dir / Phase2bTerminal.ABORTED_ARTIFACT).exists()
+
+
 def test_recover_aborted_from_audit_only_is_byte_identical_idempotent(tmp_path: Path) -> None:
     """A second recover sees the now-1-terminal + marker → verify-only: the synthesized
     terminal, the final ledger and the marker are byte-identical and never rewritten."""

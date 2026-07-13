@@ -234,6 +234,13 @@ normalized regular file/directory여야 한다. Symlink, device, FIFO, `..`, roo
 test가 만든 tmp directory로 고정한다. Digest는 command-aware loader가 실제 bytes를 stream-hash해 대조하며
 선언값만 신뢰하지 않는다.
 
+Scientific `sealed_input.audit_path`는 run directory 아래가 아니다. 정확히
+`scientific_protocol_seal_audit_path(approved_artifacts_root, protocol)` — 즉 승인 root의 direct child인
+`.compose-protocol-seal-<sha256(protocol UTF-8)>.jsonl` — 이어야 한다. 따라서 같은 승인 root/protocol의
+모든 ResolvedRunSpec과 run directory가 하나의 atomic write-once claim으로 수렴한다. 승인 root는 protocol
+등록의 일부로 고정하며, seal 전 root를 바꿔야 하면 같은 protocol 이름으로 우회하지 않고 protocol revision과
+owner 재승인을 요구한다. Fixture만 `<run_dir>/audit.jsonl`을 유지한다.
+
 `approved_sealed_input_attestation`은 PREPARE/owner가 승인한 canonical source path, expected source file SHA,
 snapshot ID, source row-identity SHA와 pair-index file SHA를 담은 self-checksummed manifest다. ResolvedRunSpec의
 `sealed_input` 값은 이 attestation과 byte-for-byte 의미가 같아야 한다. 단, `phase2a`/`preflight` loader는
@@ -334,8 +341,9 @@ seal 직전(runbook §6/§7) 순서로 재검증한다.
 
 0. `run_dir/phase2b.lock`에 non-blocking OS exclusive lock(`flock`/동등물)을 획득해 phase2b/recover 동시
    실행을 막고 terminal handoff까지 유지한다. Process death가 lock을 자동 해제해야 하며 lock-file 존재
-   자체를 prior execution 증거로 해석하지 않는다. Scientific artifact root는 PREPARE가 만든
-   content-addressed **read-only mount/snapshot**이어야 한다. Driver는 mount read-only 상태와 snapshot identity를
+   자체를 prior execution 증거로 해석하지 않는다. Scientific **pre-seal input subtree**는 PREPARE가 만든
+   content-addressed read-only snapshot이어야 하고, `run_dir`와 protocol-global audit destination은 별도의
+   write-once output 영역으로 writable해야 한다(둘 다 승인 root 아래). Driver는 input snapshot identity를
    attestation/confirmation과 대조한다. 이 단계에서는 sealed source file 자체를 open/stat/hash하지 않는다.
 1. scientific이면 clean-git + `activation_evidence` roster/hash를 재검증한다.
 2. frozen bundle(`FrozenPredictionBundle.load`)과 upstream ledger(`RunLedger.read`)를 다시 읽어 Phase-2a
@@ -348,10 +356,11 @@ seal 직전(runbook §6/§7) 순서로 재검증한다.
    `(device,inode,size,mtime_ns)`를 비교하고 attestation의 expected source digest와 실제 bytes의 일치를
    검증한다. Store는 같은 immutable snapshot만 소비해야 하며, 이를 보증할 수 없으면 생성 전에 abort한다.
    이어 pair-index manifest를 source obs에 대조하고 sealed store를 **이 함수에서만** 생성한다 —
-   ResolvedRunSpec/fixture가 제공한 source + verified pair-index + manifest + audit path를 사용한다. **이때
-   store의 `audit_path`는 고정된 run-상대 경로 `<run_dir>/audit.jsonl`(`SEAL_AUDIT_FILENAME`)이어야 한다:
-   §3.4 `recover`가 live store 없이 동일 경로에서 burned audit을 독립 재구성하므로, 다른 경로로 생성하면 실제로
-   소비된 seal이 fail-closed로 복구 불능이 된다(안전하되 stuck). TG-K562 CLI(`cli.py:167,288`)와 같은 규약이다.**
+   ResolvedRunSpec/fixture가 제공한 source + verified pair-index + manifest + audit path를 사용한다. **Fixture
+   store는 `<run_dir>/audit.jsonl`을 유지하고, scientific store는 §2.2의 protocol-global audit만 사용한다.**
+   Scientific path를 caller-selected run directory에서 유도하거나 임의 declared path를 그대로 신뢰하지 않는다.
+   기존 global audit node가 하나라도 존재하면 store 생성 전에 fail-closed하며, 동시 run은 atomic write-once claim
+   중 하나만 성공할 수 있다.
    Fixture면 §4 전용 factory를, scientific이면 일반 store를 사용한다.
    **`ComposeOutcomeStore`가 import·생성되는 유일한 함수이며 phase2b에서만 도달 가능하다(§4).** fixture
    builder는 store 객체가 아니라 sealed-outcome DATA만 만든다(§6).
@@ -371,9 +380,11 @@ phase2b는 어떤 audit이든 소비할 수 있는 유일한 subcommand다.
 
 1. exactly-one terminal이 있으면 pre-access ledger, canonical seed report와 partial durable outputs를 검증하고
    byte-identical finalize를 재개한다.
-2. terminal은 없지만 exact run-bound durable audit claim이 하나 있으면, audit claim과 pre-access provenance를
+2. terminal은 없지만 exact mode-specific durable audit claim이 하나 있으면, audit claim과 pre-access provenance를
    검증해 `ABORTED_AFTER_SEAL` terminal을 write-once 생성하고 finalize한다. Audit은 §3.3이 고정한
-   `<run_dir>/audit.jsonl`에서 재구성하며, 파일이 없거나 record가 0이면 pre-access failure로 fail-closed한다.
+   path에서 재구성한다: fixture는 `<run_dir>/audit.jsonl`, scientific은 CLI
+   `--seal-audit-path`로 ResolvedRunSpec의 protocol-global path를 정확히 전달한다. 첫 audit record의 `run_id`가
+   pre-access ledger `run_id`와 다르거나 파일이 없거나 record가 0이면 fail-closed한다.
    Terminal 생성은 sanctioned `Phase2bTerminal.recover_aborted_after_seal`(ABORTED-only·seal 미개봉·burned
    audit에서 count/`seal_audit_reference` 유도·`pre_access_provenance_checksum`을 pre-access ledger의
    subset checksum에 결속)만 사용하고, `_finalize_aborted_terminal` 경로로 durable 마무리한다.
@@ -478,7 +489,7 @@ subcommand는 direct-child basename의 exact required/allowed/forbidden roster�
   성공 시 `seal_confirmation_manifest.json` 하나만 새로 설치한다.
 - `phase2b`: 위 네 artifact+confirmation required; terminal/audit/pre-access/durable 파일 forbidden;
   `phase2b.lock`은 ephemeral 허용. Confirmation 재검증 뒤에만 store를 생성한다. Audit destination은
-  run-dir roster와 별도로 absent/empty·run-bound임을 검사한다.
+  run-dir roster와 별도로 **absent**이며 mode별 canonical parent에 직접 속하는지 검사한다.
 - `recover`: `phase2b.lock`만 ephemeral 허용. exactly-one terminal 상태 또는
   `terminal=0 + exactly-one durable audit claim` 상태 중 하나여야 한다. 이미 생성된 registered summary/final
   ledger/commit marker의 부분집합은 crash-recovery 입력으로 허용하되 모든 existing byte가 intended byte와
@@ -569,9 +580,10 @@ phase2b). 이 해석을 조용히 남기지 않고 runbook에서 두 gate의 이
    marker에서 동일하게 확인됨.
 4. `phase2a → preflight → phase2b` 세 독립 process e2e가 green이고(각 process는 carrier loader로 stage-1을
    disk에서 재조립하며 in-memory carrier를 공유하지 않는다) preflight 생략은 fail-closed함. 또한
-   driver가 scientific store를 `audit_path=<run_dir>/audit.jsonl`로 생성하고, `audit=1/terminal=0` crash를
-   재현한 뒤 `recover`가 `ABORTED_AFTER_SEAL`를 합성하는 e2e가 green이며, 다른 audit 경로로 생성하면 recover가
-   복구 불능(fail-closed)임을 negative test로 고정한다.
+   driver가 fixture store는 `<run_dir>/audit.jsonl`, scientific store는 protocol-global audit로 생성한다.
+   서로 다른 두 scientific run directory가 같은 root/protocol audit에 수렴하고 두 번째 claim이 거부되는 test,
+   `audit=1/terminal=0` crash 뒤 `recover --seal-audit-path`가 `ABORTED_AFTER_SEAL`를 합성하는 test, audit↔pre-access
+   `run_id` mismatch가 fail-closed하는 negative test가 green이어야 한다.
 5. Fixture e2e와 별도로 scientific no-seal assembly test가 activation/provenance/D2 report wiring을 검증함.
 6. C의 로컬 gate에서는 **stub worker/config/resource/lock bytes**가 assembled lock과 일치하고, adapter
    manifest 부재 시 scientific assembler가 fail-closed함을 검증한다. 실제 GEARS/CPA
