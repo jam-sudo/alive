@@ -26,6 +26,7 @@ import anndata as ad
 import numpy as np
 import pandas as pd
 import pytest
+import yaml
 
 from alive.compose.fit_role import canonical_gene_order_sha256
 from alive.provenance import sha256_file
@@ -761,3 +762,108 @@ def test_canonical_json_byte_reproducible(tmp_path):
     json_1 = json.dumps(report_1, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     json_2 = json.dumps(report_2, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     assert json_1 == json_2
+
+
+# ---------------------------------------------------------------------------
+# Task 5: Probe-A admission gate -- fail-closed refusal to emit a report.
+#
+# These tests drive the real CLI entry point (`module.main(argv)`), not just
+# `_probe_a_admission` in isolation, because the anti-tautology requirement is
+# that a refused admission must leave NO output file on disk -- a property
+# only observable by exercising `main()` end-to-end with a real `--out` path.
+# ---------------------------------------------------------------------------
+
+
+def _write_main_cli_fixture(tmp_path: Path) -> dict:
+    """Write every on-disk input `main()` needs and return their paths/values.
+
+    Reuses the exact numeric roster of `_full_report_fixture` (already known
+    to assemble a real, finite, non-degenerate report via direct calls to
+    `measure_approximation_bias_v1`) but serializes `response_projection` /
+    `sealed_pair_ids` / `basis_config` to actual files, since `main()` reads
+    these from `--*` CLI paths rather than accepting in-memory objects.
+    """
+    kwargs = _full_report_fixture(tmp_path)
+
+    response_projection_path = tmp_path / "response_projection.json"
+    response_projection_path.write_text(json.dumps(kwargs["response_projection"]), encoding="utf-8")
+
+    sealed_pair_ids_path = tmp_path / "sealed_pair_ids.json"
+    sealed_pair_ids_path.write_text(json.dumps(kwargs["sealed_pair_ids"]), encoding="utf-8")
+
+    basis_config_path = tmp_path / "basis_config.yaml"
+    basis_config_path.write_text(
+        yaml.safe_dump({"seeds": {"registered_seeds": kwargs["registered_seeds"]}}),
+        encoding="utf-8",
+    )
+
+    return {
+        "fit_role_artifact": kwargs["fit_role_artifact"],
+        "response_projection": response_projection_path,
+        "sealed_pair_ids": sealed_pair_ids_path,
+        "basis_config": basis_config_path,
+        "norman_source_sha256": kwargs["norman_source_sha256"],
+        "git_commit": kwargs["git_commit"],
+        "pod_instance": kwargs["pod_instance"],
+    }
+
+
+def _write_probe_a_evidence(tmp_path: Path, status: str) -> Path:
+    path = tmp_path / "probe_a_evidence.json"
+    path.write_text(json.dumps({"status": status}), encoding="utf-8")
+    return path
+
+
+def _main_cli_argv(fixture: dict, probe_a_evidence_path: Path, out_path: Path) -> list[str]:
+    return [
+        "--probe-a-evidence",
+        str(probe_a_evidence_path),
+        "--fit-role-artifact",
+        str(fixture["fit_role_artifact"]),
+        "--response-projection",
+        str(fixture["response_projection"]),
+        "--sealed-pair-ids",
+        str(fixture["sealed_pair_ids"]),
+        "--basis-config",
+        str(fixture["basis_config"]),
+        "--norman-source-sha256",
+        fixture["norman_source_sha256"],
+        "--git-commit",
+        fixture["git_commit"],
+        "--pod-instance",
+        fixture["pod_instance"],
+        "--bootstrap-replicates",
+        "10",
+        "--out",
+        str(out_path),
+    ]
+
+
+def test_probe_a_pass_admits(tmp_path):
+    module = _load_metric_module()
+    fixture = _write_main_cli_fixture(tmp_path)
+    probe_a_evidence_path = _write_probe_a_evidence(tmp_path, "pass")
+    out_path = tmp_path / "report.json"
+
+    exit_code = module.main(_main_cli_argv(fixture, probe_a_evidence_path, out_path))
+
+    assert exit_code == 0
+    assert out_path.exists()
+    report = json.loads(out_path.read_text(encoding="utf-8"))
+    assert report["admission_status"] == "admitted"
+
+
+@pytest.mark.parametrize("status", ["missing", "failed", "quarantined"])
+def test_probe_a_missing_failed_quarantined_refuse(tmp_path, status):
+    module = _load_metric_module()
+    fixture = _write_main_cli_fixture(tmp_path)
+    probe_a_evidence_path = _write_probe_a_evidence(tmp_path, status)
+    out_path = tmp_path / "report.json"
+
+    with pytest.raises(ValueError, match="NOT_ADMISSIBLE"):
+        module.main(_main_cli_argv(fixture, probe_a_evidence_path, out_path))
+
+    # Anti-tautology: refusal must leave no promoted report on disk, not
+    # merely raise -- a gate that raised AFTER writing the file would still
+    # pass a test that only checked the exception.
+    assert not out_path.exists()

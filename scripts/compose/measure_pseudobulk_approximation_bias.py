@@ -31,6 +31,15 @@ construction). It becomes ``baselines.gears.approximation_bias_report_sha256``;
 the GPU pod runs it on real Norman, and it is unit-tested locally on synthetic
 data.
 
+Probe-A admission gate (design spec §3 "Admission prerequisite"): the CLI
+refuses to run this measurement at all -- no report is assembled or written --
+unless ``--probe-a-evidence`` names a JSON file whose ``status`` field is
+``"pass"``. A missing, failed, or quarantined Probe-A status raises
+:class:`ValueError` from :func:`_probe_a_admission`, called at the very TOP of
+:func:`main` before any other input is read. See
+``docs/superpowers/runbooks/2026-07-11-compose-gears-decision-probe-rerun.md``
+for the admission vocabulary.
+
 Bootstrap replicate-count decision (design spec §3 "Finite-sample uncertainty"):
 :func:`_bootstrap_intervals` takes an explicit ``replicates`` count from its
 caller. The CLI (wired in a later task) exposes this as a DEDICATED
@@ -45,6 +54,7 @@ here would silently conflate two distinct bootstraps under one number.
 Usage
 -----
     uv run python scripts/compose/measure_pseudobulk_approximation_bias.py \
+        --probe-a-evidence artifacts/compose/probe_a_evidence.json \
         --fit-role-artifact artifacts/compose/fit_role.h5ad \
         --response-projection artifacts/compose/response_projection.json \
         --sealed-pair-ids artifacts/compose/sealed_pair_ids.json \
@@ -91,6 +101,14 @@ _MEASURED_ROLES: frozenset[str] = frozenset({"singles", "combo_calibration"})
 
 #: The v1 report's ``schema`` literal (design spec §4).
 _SCHEMA_V1 = "compose_approximation_bias_report_v1"
+
+#: Probe-A evidence ``status`` values that refuse admission (design spec §3
+#: "Admission prerequisite" / §6 test 8). The vocabulary matches
+#: ``docs/superpowers/runbooks/2026-07-11-compose-gears-decision-probe-rerun.md``.
+#: Any status NOT ``"pass"`` and NOT in this set (including an absent
+#: ``status`` field) is fail-closed-normalized to ``"missing"`` -- an unknown
+#: state is never silently treated as passing (CLAUDE.md invariants).
+_PROBE_A_REFUSAL_STATUSES: frozenset[str] = frozenset({"missing", "failed", "quarantined"})
 
 #: Repo-relative path to the reviewed measurement-contract spec (design spec
 #: §4 ``measurement_contract_sha256`` — this file's own frozen definition of
@@ -607,6 +625,7 @@ def measure_approximation_bias_v1(
     norman_source_sha256: str | None = None,
     pod_instance: str | None = None,
     combo_sep: str = "_",
+    admission_status: str = "admitted",
 ) -> dict:
     """Assemble the FULL ``compose_approximation_bias_report_v1`` object.
 
@@ -683,6 +702,15 @@ def measure_approximation_bias_v1(
     combo_sep : str, default ``"_"``
         Separator between a combo pair id's two constituent gene tokens (the
         config's ``data.combo_sep``).
+    admission_status : str, default ``"admitted"``
+        The resolved Probe-A admission gate outcome (Task 5's
+        :func:`_probe_a_admission`, called by the CLI BEFORE this function is
+        even invoked -- a refused admission never reaches this assembler).
+        Embedded verbatim as the report's top-level ``admission_status``
+        field and therefore covered by ``self_checksum`` like every other
+        field. Defaults to ``"admitted"`` only so existing direct callers
+        (e.g. unit tests built before Task 5) that never gate admission keep
+        assembling a valid report.
 
     Returns
     -------
@@ -690,9 +718,9 @@ def measure_approximation_bias_v1(
         The full ``compose_approximation_bias_report_v1`` object (see "The v1
         report object" in the implementation plan): ``schema``,
         ``deliverable``, ``protocol``, ``seal_status``, ``method``,
-        ``strata`` (``combo_calibration`` + ``singles``), ``gi_and_fairness``
-        (point estimate + bootstrap interval), ``provenance``, and
-        ``self_checksum``.
+        ``admission_status``, ``strata`` (``combo_calibration`` + ``singles``),
+        ``gi_and_fairness`` (point estimate + bootstrap interval),
+        ``provenance``, and ``self_checksum``.
 
     Raises
     ------
@@ -784,6 +812,7 @@ def measure_approximation_bias_v1(
         "protocol": "COMPOSE-K562-v1",
         "seal_status": "unopened",
         "method": "raw_pseudobulk_approximation",
+        "admission_status": str(admission_status),
         "strata": strata,
         "gi_and_fairness": gi_and_fairness,
         "provenance": provenance,
@@ -793,8 +822,58 @@ def measure_approximation_bias_v1(
     return report
 
 
+def _probe_a_admission(evidence: Mapping) -> str:
+    """Fail-closed Probe-A admission gate (design spec §3 "Admission prerequisite").
+
+    A conforming Probe A report must establish the GEARS population vector is
+    a raw-count pseudobulk mean within the frozen tolerance BEFORE this
+    measurement may run at all: "A quarantined, missing, or failed probe
+    makes this measurement ``NOT_ADMISSIBLE``" (design spec §3). This function
+    is the mechanical gate for that prerequisite, called from the TOP of
+    :func:`main`, before any fit-role/response-projection/config file is even
+    read.
+
+    Parameters
+    ----------
+    evidence : Mapping
+        The parsed Probe-A evidence JSON (``--probe-a-evidence``); expected to
+        carry a ``status`` field.
+
+    Returns
+    -------
+    str
+        ``"admitted"`` -- the only value this function ever returns; every
+        other outcome raises.
+
+    Raises
+    ------
+    ValueError
+        ``"approximation-bias: Probe-A <status>; measurement NOT_ADMISSIBLE"``
+        when ``evidence["status"]`` is ``"failed"`` or ``"quarantined"``, or
+        when it is absent, empty, or any unrecognized value -- all of which
+        are fail-closed-normalized to ``<status> = "missing"`` (design spec
+        §6 test 8; CLAUDE.md invariants -- an unknown admission state is
+        never silently treated as passing).
+    """
+    status = evidence.get("status")
+    if status == "pass":
+        return "admitted"
+    if status not in _PROBE_A_REFUSAL_STATUSES:
+        status = "missing"
+    raise ValueError(f"approximation-bias: Probe-A {status}; measurement NOT_ADMISSIBLE")
+
+
 def main(argv: list[str] | None = None) -> int:
-    """Load inputs, assemble the full v1 report, and write it as canonical JSON.
+    """Gate on Probe-A admission, then load inputs and write the v1 report.
+
+    The FIRST thing this function does after parsing arguments is read
+    ``--probe-a-evidence`` and call :func:`_probe_a_admission` on it -- BEFORE
+    ``--fit-role-artifact``, ``--response-projection``, or any other input is
+    even opened (design spec §3 "Admission prerequisite"). A missing, failed,
+    or quarantined Probe-A status raises there and the function returns
+    control to the caller via that exception: no report is assembled, no
+    ``--out`` file is written, and (run as a script) the process exits
+    non-zero. Only a ``"pass"`` status lets execution continue past the gate.
 
     ``--basis-config`` is the bias-NULL YAML config (design spec §4): its
     ``sha256_json`` becomes ``provenance.basis_config_sha256`` and its
@@ -803,6 +882,14 @@ def main(argv: list[str] | None = None) -> int:
     lives in the separate finalization tool (a later task).
     """
     ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument(
+        "--probe-a-evidence",
+        required=True,
+        type=Path,
+        help="Probe-A evidence JSON with a status field (design spec §3 admission "
+        "prerequisite; vocabulary: "
+        "docs/superpowers/runbooks/2026-07-11-compose-gears-decision-probe-rerun.md)",
+    )
     ap.add_argument("--fit-role-artifact", required=True, type=Path)
     ap.add_argument("--response-projection", required=True, type=Path, help="§2.2 block JSON")
     ap.add_argument(
@@ -825,6 +912,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--out", required=True, type=Path)
     args = ap.parse_args(argv)
 
+    probe_a_evidence = json.loads(args.probe_a_evidence.read_text(encoding="utf-8"))
+    admission_status = _probe_a_admission(probe_a_evidence)
+
     block = json.loads(args.response_projection.read_text(encoding="utf-8"))
     sealed_pair_ids = json.loads(args.sealed_pair_ids.read_text(encoding="utf-8"))
     basis_config_raw = yaml.safe_load(args.basis_config.read_text(encoding="utf-8"))
@@ -835,6 +925,7 @@ def main(argv: list[str] | None = None) -> int:
         fit_role_artifact=str(args.fit_role_artifact),
         response_projection=block,
         sealed_pair_ids=sealed_pair_ids,
+        admission_status=admission_status,
         basis_config_sha256=basis_config_sha256,
         registered_seeds=registered_seeds,
         replicates=args.bootstrap_replicates,
