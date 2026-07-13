@@ -10,9 +10,13 @@
 
 ## 0. Purpose & scope {#purpose}
 
-The GEARS baseline emits a **pseudobulk** prediction — a single population mean in raw gene space —
-carried by `prediction_representation = raw_pseudobulk_approximation`
-(`configs/compose_k562_v1_phase2.yaml::baselines.gears`). Its config field
+The registered GEARS bridge **targets** a pseudobulk prediction — one population-level vector that
+must be proven equivalent to a raw-count mean before it can enter the response operator — and is
+declared as `prediction_representation = raw_pseudobulk_approximation`
+(`configs/compose_k562_v1_phase2.yaml::baselines.gears`). This config label is a contract, **not yet
+empirical proof of the native GEARS output scale**. Conforming Probe A in
+`docs/superpowers/runbooks/2026-07-11-compose-gears-decision-probe-rerun.md` must first establish the
+native scale, negative-output policy, and bridge equivalence within its preregistered tolerance. Its config field
 `approximation_bias_report_sha256` is `null`, which `config2.py::pseudobulk_representation_activation_blocked`
 treats as an explicit activation blocker until the pseudobulk-approximation bias is **measured** and
 its report SHA recorded.
@@ -28,13 +32,14 @@ report schema (§4); the pre-registered fairness flag (§5); known-answer tests 
 **Out of scope / non-claims.**
 - Not a bias *correction* of GEARS's predictions (§8). The report characterizes; it does not alter a
   baseline.
-- Not a new activation gate beyond "the report exists": once
+- Not a new activation gate beyond "the report exists" **after Probe A and the output bridge pass**: once
   `approximation_bias_report_sha256` is non-null the activation blocker clears regardless of the bias
   magnitude (`config2.py` §6). The bias magnitude governs *interpretation of the sealed GEARS
   comparison* (§5), not activation.
 - Not a claim about GEARS model accuracy. The floor measured here is the representation's irreducible
   contribution, present even for a perfect pseudobulk predictor.
-- The measurement is **pod-only** (needs real Norman per-cell counts); only its unit tests run locally.
+- The measurement is **pod-only** (needs real Norman per-cell counts); only its unit tests run locally. It
+  must not be promoted to activation evidence when Probe A fails or leaves the native output scale unresolved.
 
 **Governance.** This work opens no seal, constructs no `ComposeOutcomeStore`, calls no
 `evaluate_sealed_once`, and never reads a sealed pair outcome or a `control`-as-training row. It hashes
@@ -64,7 +69,9 @@ From the operator spec (`docs/superpowers/specs/2026-06-22-compose-epistasis-ope
 **Representation carried by each method.** The operator predicts δ **directly in response space** →
 no representation floor. The additive null is `δ_g + δ_h` in response space → no floor. CPA
 (`cell_raw_counts`) predicts per-cell → `z` applied per cell → no floor. **Only GEARS**
-(`raw_pseudobulk_approximation`) carries a representation floor.
+(`raw_pseudobulk_approximation`) carries this representation floor **conditional on Probe A validating
+the raw-count-mean bridge**. If Probe A establishes a different native scale, this formula is inapplicable;
+the bridge and this spec must be revised pre-seal rather than coercing that output into raw counts.
 
 ---
 
@@ -87,8 +94,8 @@ independent of the reference. It is present even if GEARS predicts the true popu
 perfectly — hence "floor". It is measured directly on **observed** non-sealed cells (no model, no
 GEARS run), reusing `fit_role.apply_response_projection`:
 
-- `δ_i`  ← `apply_response_projection(cells_raw, …, representation="raw_pseudobulk_approximation")`
-  per row, then mean over rows, minus `control_mean`.
+- `δ_i`  ← `apply_response_projection(cells_raw, …, representation="cell_raw_counts")`
+  once on the full cell matrix, then mean over rows, minus `control_mean`.
 - `δ̃_i` ← `apply_response_projection(mean_row, …, representation="raw_pseudobulk_approximation")` on the
   single population-mean row, minus `control_mean`.
 
@@ -104,6 +111,11 @@ the exact space the sealed comparison will score in.
 - **Primary:** `combo_calibration` doubles — same regime as the sealed double-unseen pairs.
 - **Secondary:** `singles` — broader characterization; also the roles from which the operator fits δ_g.
 - Reported **separately**, never pooled (regime mixing would blur the floor).
+
+**Admission prerequisite (before measurement).** A conforming Probe A report and reviewed output-bridge
+contract must establish that the GEARS population vector is a raw-count pseudobulk mean within the frozen
+tolerance. A quarantined, missing, or failed probe makes this measurement `NOT_ADMISSIBLE`; no report SHA
+may be inserted into the active config.
 
 **Inputs.**
 - Observed raw per-cell counts for each non-sealed pair (from the Norman source synced in dev-pod plan
@@ -121,8 +133,16 @@ the exact space the sealed comparison will score in.
 - Verify the projection block's `gene_order_sha256` against the cells' gene order before projecting.
 - No `ComposeOutcomeStore`, no `evaluate_sealed_once`, no sealed read.
 
-**Determinism.** Pure numpy over frozen arrays; no RNG in the arithmetic. Seeds are recorded for
-provenance only. Row order is canonicalized (sorted pair IDs) so the report is byte-reproducible.
+**Point-estimate determinism.** Pure numpy over frozen arrays; no RNG in the point arithmetic. Row order is
+canonicalized (sorted pair IDs) so the point report is byte-reproducible.
+
+**Finite-sample uncertainty.** The observed cells and calibration pairs are samples, so the fairness ratio is
+not treated as known without error. A registered two-stage bootstrap resamples calibration pairs and then
+cells within each sampled pair, using the config's registered seed roster and bootstrap replicate count. The
+report includes a percentile 95% interval for `floor_median`, `gi_signal_median`, and `R`. `fairness_flag`
+uses the point estimate; the interval is mandatory context, not a second post-hoc decision rule. Degenerate
+replicates with zero GI denominator are recorded as `NON_FINITE` and their count is reported; they are never
+silently dropped.
 
 ---
 
@@ -144,14 +164,32 @@ A single JSON object whose SHA-256 fills `baselines.gears.approximation_bias_rep
   primitive; stable when some `g_i ≈ 0`, unlike per-pair ratios).
 - `bias_to_signal_ratio_per_pair_median`: `median_i(b_i / g_i)` (secondary robustness view; not the
   flag primitive).
+- `bootstrap_95_interval`: intervals for `floor_median`, `gi_signal_median`, and
+  `bias_to_signal_ratio_R`, plus `replicates_requested`, `replicates_finite`, and
+  `replicates_non_finite`.
 - `R_star`: `0.5` (the pre-registered threshold, embedded for auditability).
 - `fairness_flag`: `"representation_confounded"` if `bias_to_signal_ratio_R ≥ R_star`, else `"clear"`.
 
 **Provenance / integrity:**
-- `config_sha256`, `git_commit`, `norman_source_sha256`, `fit_role_artifact_sha256`,
+- `measurement_contract_sha256` (this reviewed spec's file SHA), `basis_config_sha256`, `git_commit`,
+  `norman_source_sha256`, `fit_role_artifact_sha256`,
   `response_projection_sha256`, `gene_order_sha256`, `pca_dim` (`p`), `registered_seeds`,
   `sealed_pair_overlap_count` (must be `0`), `pod_instance`.
 - `self_checksum`: SHA-256 of the canonical JSON of every field above except `self_checksum`.
+
+`basis_config_sha256` is the canonical config whose
+`baselines.gears.approximation_bias_report_sha256` is still `null`. The report **must not contain the
+final config SHA**: the final config contains the report SHA, so recording that final SHA back inside the
+report would create the impossible cycle `report → final config → report`. Finalization is one-way:
+
+1. freeze and hash the bias-null basis config;
+2. measure and self-checksum the report against that basis config + this contract;
+3. hash the report and fill that SHA into a copy of the config, with **no other semantic change**;
+4. hash the resulting final config and regenerate all activation evidence against it.
+
+The finalization tool must mechanically prove that step 3 changed only
+`baselines.gears.approximation_bias_report_sha256`; otherwise it fails closed and a fresh measurement lineage
+is required.
 
 `p`, gene order and projection digests must equal the fit-role artifact's, binding the report to the
 same evaluation space and run identity.
@@ -160,27 +198,32 @@ same evaluation space and run identity.
 
 ## 5. Pre-registered fairness flag {#fairness}
 
-The measurement is on `combo_calibration` doubles; because the sealed pairs are the **same regime**
-(double-unseen combos), `bias_to_signal_ratio_R` is the honest **pre-seal proxy** for the floor that
-would apply to the sealed GEARS δ.
+The measurement is on `combo_calibration` doubles. Because sealed pairs are in the **same perturbation
+regime** (double-unseen combos), `bias_to_signal_ratio_R` is the registered **pre-seal proxy** for the floor
+that may apply to sealed GEARS δ. This is not an exchangeability proof: cell-count, expression-strength, and
+pair-composition shift between calibration and sealed roles remain explicit limitations and are summarized
+without reading sealed outcomes.
 
 **Pre-registered rule (fixed now, pre-seal; no post-hoc change — §14).**
 `R ≥ R* = 0.5` ⇒ the sealed GEARS family-comparison is declared **`representation_confounded`**.
 
-**What the flag does.** When confounded, a `GI_LEARNABLE_WIN` verdict that *relies on beating GEARS*
-may **not** be reported as a *clean* GEARS win. To claim a GEARS win under a confounded flag the
-sealed analysis must either (a) bias-correct GEARS's δ onto exact-representation footing (a separate,
-separately-reviewed method), or (b) demote the GEARS margin and headline the operator's
-primary (vs-additive) and CPA comparisons instead.
+**What the flag does.** When confounded, a computational `GI_LEARNABLE_WIN` verdict that includes beating
+GEARS may **not** be narrated as a *clean representation-matched GEARS win*. The registered exact method
+roster, simultaneous family, margins, multiplicity correction, and verdict logic remain unchanged. The flag
+adds a mandatory limitation to the scientific interpretation; it never deletes GEARS, demotes its margin, or
+substitutes a post-hoc comparator.
 
 **What the flag does NOT threaten.** The **primary** estimand `θ_{L1,additive}` (operator vs additive
 null, margin 0.05) is measured entirely in exact response space and carries **no** pseudobulk floor.
-The fairness flag therefore never blocks or weakens the primary headline; it constrains only the
-GEARS family-comparator interpretation. `R* = 0.5` means "a floor ≥ half the GI signal it must resolve
-makes the GEARS comparison untrustworthy."
+The fairness flag therefore does not change the primary estimate; it constrains only the GEARS
+family-comparator interpretation. `R* = 0.5` is a preregistered material-contamination heuristic, not a
+hypothesis test or proof that a comparison is invalid.
 
-The flag is **recorded pre-seal** in this spec and the report so it is genuinely pre-registered; the
-sealed-eval verdict machinery consumes the report's `fairness_flag` at verdict time.
+The flag is **recorded pre-seal** in this spec and the report so it is genuinely pre-registered. The current
+verdict code does **not yet consume it**. Before scientific activation, a separately tested integration must
+carry the report SHA, flag, ratio, and interval into the durable registered summary and mandatory narrative
+limitations without changing the verdict. Until that integration exists, this item remains a pre-seal
+implementation blocker; documentation must not claim it is already consumed.
 
 ---
 
@@ -195,20 +238,26 @@ a synthetic frozen projection block (no `gears`, no Norman):
 3. **Jensen direction.** For the concave `log1p` on a spread population, the population-mean projection
    over/under-shoots in the analytically-known direction ⇒ `signed_pc_bias` sign matches.
 4. **Signal ratio + flag.** Construct floor and ε so `R` straddles `R*=0.5` ⇒ `fairness_flag` flips at
-   the threshold (both branches tested).
+   the threshold (both branches tested); zero-denominator bootstrap replicates become counted
+   `NON_FINITE`, never silently disappear.
 5. **Seal-safety negatives.** A `control` or `sealed_pair_ids` pair among inputs aborts; a nonzero
    sealed overlap aborts; a projection-block `gene_order_sha256` mismatch aborts.
-6. **Self-checksum / determinism.** Re-running yields byte-identical JSON; tampering any field fails
-   `self_checksum`.
+6. **Self-checksum / determinism.** Re-running with the same registered seeds yields byte-identical JSON;
+   tampering any field fails `self_checksum`.
+7. **One-way provenance.** The report binds the bias-null `basis_config_sha256`; finalization changes only
+   the GEARS report-SHA field and proves the final config SHA does not appear inside the report.
+8. **Probe-A admission.** Missing/failed/quarantined Probe A evidence refuses report promotion.
 
 ---
 
 ## 7. File structure & integration {#files}
 
-- **CREATE** `scripts/compose/measure_pseudobulk_approximation_bias.py` — the pod measurement script:
-  reads non-sealed role cells + frozen projection block, emits `compose_approximation_bias_report_v1`.
-  Pure library calls (`fit_role.apply_response_projection`); import-light so its contract is unit-tested
-  locally.
+- **MODIFY/REPLACE** the existing legacy
+  `scripts/compose/measure_pseudobulk_approximation_bias.py` contract — it currently emits an earlier
+  aggregate-only report and is **not** an implementation of this v1 schema. The upgraded pod measurement
+  reads non-sealed role cells + frozen projection block, emits `compose_approximation_bias_report_v1`, and
+  uses `cell_raw_counts` for the exact path. Pure library calls
+  (`fit_role.apply_response_projection`); import-light so its contract is unit-tested locally.
 - **CREATE** `docs/activation-evidence/compose/real_norman_approximation_bias_report.json` — the
   regenerated report (pod, under the finalized config); its SHA fills the config field.
 - **MODIFY** `configs/compose_k562_v1_phase2.yaml::baselines.gears.approximation_bias_report_sha256`
@@ -216,8 +265,10 @@ a synthetic frozen projection block (no `gears`, no Norman):
   config-finalization-precedes-evidence ordering).
 - **CREATE** `tests/alive/compose/test_approximation_bias_metric.py` — the §6 known-answer + seal-safety
   tests (LOCAL).
-- Consumed by: the sealed-eval verdict path reads `fairness_flag` (§5). No change to `config2.py`
-  validation is required — the existing null→SHA rule already gates on the field.
+- **MODIFY** the durable summary/interpretation path to carry (not decide from) the registered
+  `fairness_flag`, ratio, interval, and report SHA (§5). This integration is required before activation.
+  The existing `config2.py` null→SHA rule remains the report-existence gate; it does not by itself prove
+  the interpretation integration is complete.
 
 ---
 
