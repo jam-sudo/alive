@@ -867,3 +867,14 @@ def test_probe_a_missing_failed_quarantined_refuse(tmp_path, status):
     # merely raise -- a gate that raised AFTER writing the file would still
     # pass a test that only checked the exception.
     assert not out_path.exists()
+
+
+@pytest.mark.parametrize("evidence", [{"status": "bogus"}, {"status": "PASS"}, {}])
+def test_probe_a_unknown_or_absent_status_fails_closed(evidence):
+    # Fail-closed normalization line: any status that is NOT the exact "pass"
+    # token -- an unrecognized string, a wrong-case "PASS", or an entirely
+    # absent `status` key -- collapses to "missing" and refuses. This exercises
+    # the normalization branch that the three explicit refusal statuses skip.
+    module = _load_metric_module()
+    with pytest.raises(ValueError, match="Probe-A missing; measurement NOT_ADMISSIBLE"):
+        module._probe_a_admission(evidence)
