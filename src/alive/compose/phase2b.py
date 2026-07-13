@@ -696,6 +696,89 @@ def _unavailable_approximation_bias_block() -> dict:
     }
 
 
+def _bias_numeric_or_sentinel(value: object, *, path: Path, field: str) -> float | str:
+    """Coerce a metric-report numeric-or-sentinel field to a finite float or the
+    verbatim :data:`_NON_FINITE_SENTINEL` string, failing closed on any other value.
+
+    ``measure_approximation_bias_v1`` legitimately emits the STRING
+    :data:`_NON_FINITE_SENTINEL` for a degenerate ``bias_to_signal_ratio_R`` (or a
+    bootstrap-interval endpoint); that string is carried through verbatim. A finite
+    number is routed through :func:`_finite_or_sentinel`. A JSON ``true``/``false``
+    (``bool``), any OTHER string, or any non-numeric type is malformed and raises the
+    TYPED :class:`ApproximationBiasReportError` — never a bare ``ValueError`` /
+    ``TypeError`` (which is exactly what ``float("NON_FINITE")`` would raise) that the
+    caller cannot classify (spec §2).
+
+    Parameters
+    ----------
+    value : object
+        The raw report value (already read from the nested ``gi_and_fairness`` block).
+    path : Path
+        The report file path (echoed into the error message).
+    field : str
+        The dotted field name (echoed into the error message).
+
+    Returns
+    -------
+    float or str
+        The finite float, or the :data:`_NON_FINITE_SENTINEL` sentinel string.
+
+    Raises
+    ------
+    ApproximationBiasReportError
+        If *value* is a ``bool``, a non-sentinel string, or any non-numeric type.
+    """
+    if isinstance(value, str):
+        if value == _NON_FINITE_SENTINEL:
+            return _NON_FINITE_SENTINEL
+        raise ApproximationBiasReportError(
+            f"pinned approximation-bias report {str(path)!r} field {field!r} is the string "
+            f"{value!r}, which is neither a number nor the {_NON_FINITE_SENTINEL!r} sentinel "
+            "(fail closed)."
+        )
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ApproximationBiasReportError(
+            f"pinned approximation-bias report {str(path)!r} field {field!r} must be a number or "
+            f"the {_NON_FINITE_SENTINEL!r} sentinel, got {value!r}."
+        )
+    return _finite_or_sentinel(value)
+
+
+def _bias_interval_or_sentinel(value: object, *, path: Path, field: str) -> list[float | str] | str:
+    """Coerce the carried ``bias_to_signal_ratio_R`` bootstrap interval to a
+    ``[lower, upper]`` pair (each endpoint numeric-or-sentinel) or the verbatim
+    :data:`_NON_FINITE_SENTINEL` string, failing closed on any other shape.
+
+    The metric emits this sub-interval as EITHER the whole-interval string
+    :data:`_NON_FINITE_SENTINEL` (zero finite bootstrap replicates) OR a two-element
+    list whose endpoints are themselves numeric-or-sentinel
+    (``measure_pseudobulk_approximation_bias.py::_interval``).
+
+    Raises
+    ------
+    ApproximationBiasReportError
+        If *value* is a non-sentinel string, or not a two-element list/tuple, or an
+        endpoint is malformed (via :func:`_bias_numeric_or_sentinel`).
+    """
+    if isinstance(value, str):
+        if value == _NON_FINITE_SENTINEL:
+            return _NON_FINITE_SENTINEL
+        raise ApproximationBiasReportError(
+            f"pinned approximation-bias report {str(path)!r} field {field!r} is the string "
+            f"{value!r}, which is neither a [lower, upper] pair nor the {_NON_FINITE_SENTINEL!r} "
+            "sentinel (fail closed)."
+        )
+    if not isinstance(value, (list, tuple)) or len(value) != 2:
+        raise ApproximationBiasReportError(
+            f"pinned approximation-bias report {str(path)!r} field {field!r} must be a "
+            f"[lower, upper] pair or the {_NON_FINITE_SENTINEL!r} sentinel, got {value!r}."
+        )
+    return [
+        _bias_numeric_or_sentinel(value[0], path=path, field=f"{field}[0]"),
+        _bias_numeric_or_sentinel(value[1], path=path, field=f"{field}[1]"),
+    ]
+
+
 def _load_approximation_bias_fairness(
     *, report_sha256: str, report_path: str | Path | None
 ) -> dict:
@@ -708,10 +791,17 @@ def _load_approximation_bias_fairness(
     — RAISES :class:`ApproximationBiasReportError`, so an UNPINNED report's fairness
     values can never leak into the registered summary (design spec §5/§7).
 
-    The carried ``bias_to_signal_ratio_R`` and each ``bootstrap_95_interval`` endpoint
-    (and ``R_star``) are routed through :func:`_finite_or_sentinel` (mirroring
-    ``gi_explained_interval``) so a degenerate report value becomes the string sentinel
-    rather than a non-finite float the terminal canonicalizer would reject.
+    The fairness fields live NESTED under ``report["gi_and_fairness"]`` exactly as
+    ``measure_approximation_bias_v1`` emits them (``fairness_flag``,
+    ``bias_to_signal_ratio_R``, ``R_star``), and the carried interval is the single
+    ``report["gi_and_fairness"]["bootstrap_95_interval"]["bias_to_signal_ratio_R"]``
+    sub-interval (a ``[lower, upper]`` pair OR the ``"NON_FINITE"`` sentinel string —
+    the whole ``bootstrap_95_interval`` is a DICT of three sub-intervals, not a bare
+    pair). The ratio, each carried interval endpoint, and ``R_star`` are routed through
+    :func:`_bias_numeric_or_sentinel` / :func:`_bias_interval_or_sentinel`: the metric's
+    verbatim ``"NON_FINITE"`` sentinel is carried through, a finite number becomes a
+    float, and a malformed value raises the typed error (never the bare ``ValueError``
+    that ``float("NON_FINITE")`` would raise).
 
     This performs only a content check + extraction on already-public activation
     evidence: it opens NO seal, constructs NO outcome store, and imports no worker.
@@ -769,36 +859,48 @@ def _load_approximation_bias_fairness(
         raise ApproximationBiasReportError(
             f"pinned approximation-bias report {str(path)!r} is not a JSON object (fail closed)."
         )
-    required_fields = ("fairness_flag", "bias_to_signal_ratio_R", "bootstrap_95_interval", "R_star")
+    gi = report.get("gi_and_fairness")
+    if not isinstance(gi, dict):
+        raise ApproximationBiasReportError(
+            f"pinned approximation-bias report {str(path)!r} is missing the required "
+            "'gi_and_fairness' object (fail closed)."
+        )
+    required_fields = ("fairness_flag", "bias_to_signal_ratio_R", "R_star", "bootstrap_95_interval")
     for field_name in required_fields:
-        if field_name not in report:
+        if field_name not in gi:
             raise ApproximationBiasReportError(
                 f"pinned approximation-bias report {str(path)!r} is missing required field "
-                f"{field_name!r} (fail closed)."
+                f"'gi_and_fairness.{field_name}' (fail closed)."
             )
-    flag = report["fairness_flag"]
+    flag = gi["fairness_flag"]
     if not isinstance(flag, str) or not flag.strip():
         raise ApproximationBiasReportError(
-            f"pinned approximation-bias report {str(path)!r} fairness_flag must be a non-empty "
-            f"string, got {flag!r}."
+            f"pinned approximation-bias report {str(path)!r} gi_and_fairness.fairness_flag must be "
+            f"a non-empty string, got {flag!r}."
         )
-    interval = report["bootstrap_95_interval"]
-    if not isinstance(interval, (list, tuple)) or len(interval) != 2:
+    bootstrap = gi["bootstrap_95_interval"]
+    if not isinstance(bootstrap, dict) or "bias_to_signal_ratio_R" not in bootstrap:
         raise ApproximationBiasReportError(
-            f"pinned approximation-bias report {str(path)!r} bootstrap_95_interval must be a "
-            f"[lower, upper] pair, got {interval!r}."
+            f"pinned approximation-bias report {str(path)!r} gi_and_fairness.bootstrap_95_interval "
+            "must be an object carrying a 'bias_to_signal_ratio_R' sub-interval (fail closed)."
         )
     return {
         "report_sha256": report_sha256,
         "fairness_flag": flag,
-        # ratio + interval endpoints (+ R*) routed through the finite sentinel so a
+        # ratio + carried interval endpoints (+ R*) are numeric OR the metric's verbatim
+        # NON_FINITE sentinel; a malformed value fails closed with the TYPED error so a
         # degenerate report value can never force a terminal-write abort (spec §2).
-        "bias_to_signal_ratio_R": _finite_or_sentinel(report["bias_to_signal_ratio_R"]),
-        "bootstrap_95_interval": [
-            _finite_or_sentinel(interval[0]),
-            _finite_or_sentinel(interval[1]),
-        ],
-        "R_star": _finite_or_sentinel(report["R_star"]),
+        "bias_to_signal_ratio_R": _bias_numeric_or_sentinel(
+            gi["bias_to_signal_ratio_R"], path=path, field="gi_and_fairness.bias_to_signal_ratio_R"
+        ),
+        "bootstrap_95_interval": _bias_interval_or_sentinel(
+            bootstrap["bias_to_signal_ratio_R"],
+            path=path,
+            field="gi_and_fairness.bootstrap_95_interval.bias_to_signal_ratio_R",
+        ),
+        "R_star": _bias_numeric_or_sentinel(
+            gi["R_star"], path=path, field="gi_and_fairness.R_star"
+        ),
     }
 
 

@@ -1772,18 +1772,36 @@ def _write_bias_report(
     bootstrap_95_interval=(0.4, 0.9),
     R_star=0.5,
 ):
-    """Write a synthetic v1 approximation-bias report; return its content SHA-256."""
+    """Write a REAL-shaped ``compose_approximation_bias_report_v1`` report and return
+    its ``sha256_file`` content SHA.
+
+    Faithful to the true on-disk contract that ``measure_approximation_bias_v1`` /
+    ``measure_pseudobulk_approximation_bias.py::main`` produce — NOT a flat,
+    newline-free stub: the fairness fields are NESTED under ``gi_and_fairness``, the
+    ``bootstrap_95_interval`` is a DICT of three sub-intervals (the loader carries only
+    the ``bias_to_signal_ratio_R`` one), and the file is the canonical JSON WITH a
+    trailing newline. So the durable loader is exercised against the real schema +
+    hashing recipe, not a stub that would hide the integration bug.
+    """
     report = {
         "schema": "compose_approximation_bias_report_v1",
-        "fairness_flag": fairness_flag,
-        "bias_to_signal_ratio_R": bias_to_signal_ratio_R,
-        "bootstrap_95_interval": list(bootstrap_95_interval),
-        "R_star": R_star,
-        # extra fields the loader ignores (present in a real report)
-        "gi_signal_median": 0.9,
-        "floor_median": 0.54,
+        "gi_and_fairness": {
+            "fairness_flag": fairness_flag,
+            "bias_to_signal_ratio_R": bias_to_signal_ratio_R,
+            "R_star": R_star,
+            "bootstrap_95_interval": {
+                "floor_median": [0.0, 0.05],
+                "gi_signal_median": [0.8, 1.0],
+                "bias_to_signal_ratio_R": list(bootstrap_95_interval),
+            },
+            # sibling fields a real report carries and the loader ignores.
+            "gi_signal_median": 0.9,
+            "floor_median": 0.54,
+        },
+        "provenance": {"basis_config_sha256": "a" * 64},
     }
-    text = json.dumps(report, sort_keys=True, separators=(",", ":"))
+    # EXACTLY as main writes it: canonical JSON + a trailing newline.
+    text = json.dumps(report, sort_keys=True, separators=(",", ":"), ensure_ascii=False) + "\n"
     Path(path).write_text(text, encoding="utf-8")
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
@@ -1871,3 +1889,158 @@ def test_null_config_field_yields_unavailable_block(tmp_path):
     assert block["bias_to_signal_ratio_R"] is None
     assert block["bootstrap_95_interval"] is None
     assert block["R_star"] is None
+
+
+# ---------------------------------------------------------------------------
+# END-TO-END: metric ↔ finalize ↔ phase2b agree on BOTH schema nesting AND the
+# on-disk-bytes hashing recipe. This is the integration seam the per-task stubs
+# papered over: it builds a REAL compose_approximation_bias_report_v1 via the
+# metric, writes it EXACTLY as production does (canonical JSON + trailing '\n'),
+# finalizes the config leaf SHA via the real finalize tool (which now pins
+# sha256_file of those bytes), and feeds that SHA + report path into the phase2b
+# durable loader — which must populate the fairness block (NOT "unavailable",
+# NOT a raise). Would have caught both Important integration bugs.
+# ---------------------------------------------------------------------------
+
+
+def _load_script_module(rel_path: str, mod_name: str):
+    """Import a ``scripts/`` module by file path (mirrors the metric/finalize tests)."""
+    import importlib.util
+
+    repo_root = Path(__file__).resolve().parents[3]
+    spec = importlib.util.spec_from_file_location(mod_name, repo_root / rel_path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _build_real_bias_report(tmp_path):
+    """Build a REAL v1 report via ``measure_approximation_bias_v1`` on a small
+    synthetic control-free fit-role artifact + identity projection block, bound to a
+    bias-NULL basis config. Writes the report EXACTLY as the metric CLI does
+    (canonical JSON + trailing newline). Returns ``(report, basis_yaml, report_path)``.
+
+    The synthetic roster mirrors the metric test's ``_full_report_fixture`` (three
+    combo pairs / six singles, identity block) — already known to yield real, finite,
+    non-degenerate ``bias_to_signal_ratio_R`` and a real bootstrap interval.
+    """
+    import anndata as ad
+    import pandas as pd
+    import yaml
+
+    from alive.compose.fit_role import canonical_gene_order_sha256
+
+    metric = _load_script_module(
+        "scripts/compose/measure_pseudobulk_approximation_bias.py", "_pb_bias_metric_e2e"
+    )
+
+    # bias-NULL basis config; its sha256_json is what the report's provenance binds.
+    basis = {
+        "protocol": "COMPOSE-K562-v1",
+        "seeds": {"registered_seeds": [11, 23, 37], "split_seed": 11},
+        "baselines": {"gears": {"approximation_bias_report_sha256": None}},
+    }
+    basis_yaml = tmp_path / "basis_config.yaml"
+    basis_yaml.write_text(yaml.safe_dump(basis, sort_keys=False), encoding="utf-8")
+    basis_sha = sha256_json(yaml.safe_load(basis_yaml.read_text(encoding="utf-8")))
+
+    genes = [f"F{i}" for i in range(1, 7)]
+    base_row = [5.0] * 6
+
+    def _spread(dims, s):
+        a = list(base_row)
+        a[dims[0]] += s
+        a[dims[1]] -= s
+        b = list(base_row)
+        b[dims[0]] -= s
+        b[dims[1]] += s
+        return a, b
+
+    p1a, p1b = _spread((0, 1), 4.0)
+    p2a, p2b = _spread((2, 3), 2.0)
+    p3a, p3b = _spread((4, 5), 1.0)
+    roles = ["singles"] * 6 + ["combo_calibration"] * 6
+    singles = ["P1", "P2", "P3", "P4", "P5", "P6"]
+    combos = ["P1_P2", "P1_P2", "P3_P4", "P3_P4", "P5_P6", "P5_P6"]
+    perts = singles + combos
+    rows = [
+        [7.0, 3.0, 5.0, 5.0, 5.0, 5.0],
+        [3.0, 7.0, 5.0, 5.0, 5.0, 5.0],
+        [5.0, 5.0, 9.0, 1.0, 5.0, 5.0],
+        [5.0, 5.0, 1.0, 9.0, 5.0, 5.0],
+        [5.0, 5.0, 5.0, 5.0, 7.0, 3.0],
+        [5.0, 5.0, 5.0, 5.0, 3.0, 7.0],
+        p1a,
+        p1b,
+        p2a,
+        p2b,
+        p3a,
+        p3b,
+    ]
+    obs = pd.DataFrame(
+        {"role": roles, "perturbation": perts}, index=[f"cell{i}" for i in range(12)]
+    )
+    adata = ad.AnnData(X=np.asarray(rows, dtype=np.float64), obs=obs, var=pd.DataFrame(index=genes))
+    artifact = tmp_path / "e2e_fit_role.h5ad"
+    adata.write_h5ad(artifact)
+    block = {
+        "median_library": 30.0,
+        "hvg_gene_ids": genes,
+        "pca_mean": [0.0] * 6,
+        "pca_components": np.eye(6).tolist(),
+        "gene_order_sha256": canonical_gene_order_sha256(genes),
+        "control_mean": [0.0] * 6,
+    }
+    report = metric.measure_approximation_bias_v1(
+        fit_role_artifact=str(artifact),
+        response_projection=block,
+        sealed_pair_ids=["ZZZ_YYY"],
+        basis_config_sha256=basis_sha,
+        registered_seeds=[11, 23, 37],
+        replicates=40,
+        git_commit="b" * 40,
+        norman_source_sha256="c" * 64,
+        pod_instance="unit-test-local",
+    )
+    report_path = tmp_path / "approximation_bias_report.json"
+    # EXACTLY as measure_pseudobulk_approximation_bias.py::main writes it.
+    canonical = json.dumps(report, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    report_path.write_text(canonical + "\n", encoding="utf-8")
+    return report, basis_yaml, report_path
+
+
+def test_metric_finalize_phase2b_roundtrip(tmp_path):
+    # Build the REAL report + finalize the config leaf via the real tool.
+    report, basis_yaml, report_path = _build_real_bias_report(tmp_path)
+    gi = report["gi_and_fairness"]
+    # Sanity: this fixture yields a genuinely populated (non-degenerate) report.
+    assert gi["fairness_flag"] in {"clear", "representation_confounded"}
+    assert isinstance(gi["bias_to_signal_ratio_R"], float)
+    assert isinstance(gi["bootstrap_95_interval"]["bias_to_signal_ratio_R"], list)
+
+    finalize = _load_script_module(
+        "scripts/compose/finalize_approximation_bias_config.py", "_finalize_bias_config_e2e"
+    )
+    final_config = finalize.finalize_bias_config(
+        basis_config_path=basis_yaml, report_path=report_path
+    )
+    pinned_sha = final_config["baselines"]["gears"]["approximation_bias_report_sha256"]
+    # The finalized leaf must be the SHA of the EXACT on-disk report bytes — the one
+    # recipe phase2b re-verifies. (Off-by-a-newline here is Important-2.)
+    assert pinned_sha == sha256_file(report_path)
+
+    # Feed the finalized SHA + report path into the phase2b durable loader.
+    base = _builder_base_kwargs(tmp_path)
+    summary = build_registered_evaluation_summary(
+        **base,
+        approximation_bias_report_sha256=pinned_sha,
+        approximation_bias_report_path=report_path,
+    )
+    block = summary["approximation_bias_fairness"]
+    # The block populates from the REAL nested report — NOT "unavailable", NOT a raise.
+    assert block["report_sha256"] == pinned_sha
+    assert block["fairness_flag"] == gi["fairness_flag"]
+    assert block["fairness_flag"] != "unavailable"
+    assert block["bias_to_signal_ratio_R"] == gi["bias_to_signal_ratio_R"]
+    assert block["bootstrap_95_interval"] == gi["bootstrap_95_interval"]["bias_to_signal_ratio_R"]
+    assert block["R_star"] == gi["R_star"]

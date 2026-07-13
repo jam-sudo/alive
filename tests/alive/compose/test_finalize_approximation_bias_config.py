@@ -19,6 +19,7 @@ constructs no outcome store.
 from __future__ import annotations
 
 import copy
+import hashlib
 import importlib.util
 import json
 from pathlib import Path
@@ -27,7 +28,7 @@ import pytest
 import yaml
 
 from alive.compose import config2
-from alive.provenance import sha256_bytes, sha256_json
+from alive.provenance import sha256_json
 
 _REPO = Path(__file__).resolve().parents[3]
 _SCRIPT = _REPO / "scripts" / "compose" / "finalize_approximation_bias_config.py"
@@ -41,12 +42,13 @@ def _load_finalize_module():
     return module
 
 
-def _canonical_report_json(report: dict) -> str:
-    """Independent reimplementation of the metric script's report canonicalization
-    recipe (``sort_keys=True``, compact separators, ``ensure_ascii=False``), so the
-    expected content SHA in these tests is computed WITHOUT calling into the tool
-    under test -- anti-tautology."""
-    return json.dumps(report, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+def _expected_report_sha(report_path: Path) -> str:
+    """The single authoritative content-SHA recipe: SHA-256 of the EXACT on-disk
+    report bytes, computed HERE via plain ``hashlib`` (not the tool's own
+    ``sha256_file``) so the expectation is independent of the code under test --
+    anti-tautology. The tool now pins ``sha256_file(report_path)``, and ``phase2b``
+    re-verifies with the same recipe, so all three agree on the raw file bytes."""
+    return hashlib.sha256(Path(report_path).read_bytes()).hexdigest()
 
 
 def _basis_dict() -> dict:
@@ -124,7 +126,7 @@ def test_finalization_changes_only_the_one_leaf(tmp_path):
     final = module.finalize_bias_config(basis_config_path=basis_yaml_path, report_path=report_path)
 
     assert final != basis
-    expected_report_sha = sha256_bytes(_canonical_report_json(report).encode("utf-8"))
+    expected_report_sha = _expected_report_sha(report_path)
     assert final["baselines"]["gears"]["approximation_bias_report_sha256"] == expected_report_sha
     # Every other leaf is untouched, verified independently of the tool's own
     # leaf-diff guard (which this test does not call at all).
@@ -307,6 +309,6 @@ def test_main_cli_writes_finalized_config(tmp_path):
     assert exit_code == 0
     assert out_path.exists()
     written = yaml.safe_load(out_path.read_text(encoding="utf-8"))
-    expected_report_sha = sha256_bytes(_canonical_report_json(report).encode("utf-8"))
+    expected_report_sha = _expected_report_sha(report_path)
     assert written["baselines"]["gears"]["approximation_bias_report_sha256"] == expected_report_sha
     assert written["baselines"]["cpa"] == basis["baselines"]["cpa"]

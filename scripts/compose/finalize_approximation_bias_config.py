@@ -57,22 +57,11 @@ from typing import Any
 
 import yaml
 
-from alive.provenance import sha256_bytes, sha256_json
+from alive.provenance import sha256_file, sha256_json
 
 #: The ONLY leaf this tool is ever permitted to change (design spec §4 / brief
 #: Task 6): ``basis["baselines"]["gears"]["approximation_bias_report_sha256"]``.
 _BIAS_LEAF_PATH: tuple[str, ...] = ("baselines", "gears", "approximation_bias_report_sha256")
-
-
-def _canonical_report_json(report: Mapping) -> str:
-    """The SAME canonical-JSON recipe the metric script's ``_canonical_json``/
-    ``_self_checksum`` use (``sort_keys=True``, compact separators,
-    ``ensure_ascii=False``) — reused here ONLY to compute the completed
-    report's own content SHA the identical way the metric script serializes
-    it, so this tool's binding SHA is always derived from the same bytes
-    recipe as the report's ``self_checksum``.
-    """
-    return json.dumps(report, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
 
 def _leaf_diff(a: Any, b: Any, path: tuple[str, ...] = ()) -> list[list[str]]:
@@ -197,9 +186,15 @@ def finalize_bias_config(*, basis_config_path: str | Path, report_path: str | Pa
     3. The report must be bound to this exact basis:
        ``report["provenance"]["basis_config_sha256"] == basis_sha``.
     4. ``final = copy.deepcopy(basis)``; set ONLY the one registered leaf to
-       ``sha256_bytes(_canonical_report_json(report).encode("utf-8"))`` — the
-       report's own content SHA, using the SAME canonical-JSON recipe the
-       metric script uses for its ``self_checksum``.
+       ``sha256_file(report_path)`` — the SHA-256 of the EXACT on-disk report
+       bytes the metric script wrote (``_canonical_json(report) + "\n"``, WITH
+       the trailing newline). This is the single authoritative content-SHA
+       recipe: the metric writes those bytes, this tool pins
+       ``sha256_file`` of them, and ``phase2b`` re-verifies the pinned config
+       SHA with the SAME ``sha256_file`` — so all three agree byte-for-byte.
+       (It is deliberately NOT the report's internal ``self_checksum``, which
+       is a different quantity — the SHA over ``report − self_checksum`` with
+       no trailing newline.)
     5. :func:`_assert_single_leaf_diff` mechanically proves nothing else
        changed.
     6. :func:`_assert_no_final_sha_leak` proves the resulting final config's
@@ -261,7 +256,11 @@ def finalize_bias_config(*, basis_config_path: str | Path, report_path: str | Pa
         )
 
     final = copy.deepcopy(basis)
-    report_content_sha = sha256_bytes(_canonical_report_json(report).encode("utf-8"))
+    # The ONE authoritative content-SHA recipe: the SHA-256 of the EXACT on-disk
+    # report bytes (canonical JSON + trailing newline, as the metric wrote them).
+    # phase2b re-verifies the pinned config SHA with this same sha256_file, so
+    # metric-writes → finalize-pins → phase2b-verifies never disagree by a byte.
+    report_content_sha = sha256_file(report_path)
     final["baselines"]["gears"]["approximation_bias_report_sha256"] = report_content_sha
 
     _assert_single_leaf_diff(basis, final)
