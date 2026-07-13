@@ -48,8 +48,12 @@ Usage
         --fit-role-artifact artifacts/compose/fit_role.h5ad \
         --response-projection artifacts/compose/response_projection.json \
         --sealed-pair-ids artifacts/compose/sealed_pair_ids.json \
-        --out artifacts/compose/approximation_bias_report.json \
-        --git-sha e5cfe05
+        --basis-config configs/compose_k562_v1_phase2.yaml \
+        --norman-source-sha256 <norman .h5ad sha256> \
+        --git-commit <repo HEAD sha> \
+        --pod-instance <pod identifier> \
+        --bootstrap-replicates 2000 \
+        --out artifacts/compose/approximation_bias_report.json
 """
 
 from __future__ import annotations
@@ -63,17 +67,16 @@ from pathlib import Path
 
 import anndata as ad
 import numpy as np
+import yaml
 from scipy import sparse
 
 from alive.compose.fit_role import apply_response_projection, canonical_gene_order_sha256
-from alive.provenance import sha256_file, sha256_json
+from alive.provenance import sha256_bytes, sha256_file, sha256_json
 
 #: Only finite floats or this string sentinel are ever embedded in the report
 #: (CLAUDE.md#invariants / #data-eval — report the degenerate value honestly,
 #: never a silent NaN; mirrors ``compose.phase2b._NON_FINITE_SENTINEL``).
 _NON_FINITE_SENTINEL = "NON_FINITE"
-
-_GROUP_KEY_SEP = "::"
 
 #: Pre-registered fairness threshold (design spec §5): ``R >= _R_STAR`` marks the
 #: sealed GEARS family-comparator interpretation ``"representation_confounded"``.
@@ -86,74 +89,26 @@ _R_STAR = 0.5
 #: but must NEVER be presented as a *measured* pair to this metric.
 _MEASURED_ROLES: frozenset[str] = frozenset({"singles", "combo_calibration"})
 
+#: The v1 report's ``schema`` literal (design spec §4).
+_SCHEMA_V1 = "compose_approximation_bias_report_v1"
+
+#: Repo-relative path to the reviewed measurement-contract spec (design spec
+#: §4 ``measurement_contract_sha256`` — this file's own frozen definition of
+#: the metric, hashed for provenance so the report is bound to the exact
+#: reviewed contract it was computed against).
+_MEASUREMENT_CONTRACT_PATH = (
+    Path(__file__).resolve().parents[2]
+    / "docs"
+    / "superpowers"
+    / "specs"
+    / "2026-07-13-compose-approximation-bias-metric-design.md"
+)
+
 
 def _finite_or_sentinel(value: float) -> float | str:
     """Return ``float(value)`` when finite, else :data:`_NON_FINITE_SENTINEL`."""
     number = float(value)
     return number if math.isfinite(number) else _NON_FINITE_SENTINEL
-
-
-def _group_bias_vectors(
-    artifact_path: str,
-    block: Mapping,
-) -> dict[str, dict[str, np.ndarray]]:
-    """Compute the per-group representation gap ``b`` and per-cell delta.
-
-    Reads ONLY the non-sealed fit-role artifact (control + singles +
-    combo_calibration rows; no sealed rows by construction) and the frozen §2.2
-    projection block. Groups the cells by ``(role, perturbation)`` and, for each
-    group, returns the aggregation gap ``b = z(mean(raw)) - mean(z(raw))`` and
-    the per-cell path delta ``mean(z(raw))``.
-
-    Parameters
-    ----------
-    artifact_path : str
-        Path to the fit-role ``.h5ad`` (obs carries ``role``/``perturbation``;
-        ``X`` is raw counts over ``var_names``).
-    block : Mapping
-        A frozen ``response_projection`` block (spec §2.2). Its
-        ``gene_order_sha256`` must match the artifact's ``var_names``.
-
-    Returns
-    -------
-    dict of str to dict
-        ``group_key -> {"b": ndarray (pca_dim,), "delta_pc": ndarray (pca_dim,)}``,
-        keyed by ``f"{role}{sep}{perturbation}"``.
-    """
-    adata = ad.read_h5ad(artifact_path)
-    roles = [str(r) for r in adata.obs["role"]]
-    perts = [str(p) for p in adata.obs["perturbation"]]
-    gene_order = [str(g) for g in adata.var_names]
-    X = sparse.csr_matrix(adata.X)
-
-    groups: dict[str, list[int]] = {}
-    for i, (role, pert) in enumerate(zip(roles, perts, strict=True)):
-        groups.setdefault(f"{role}{_GROUP_KEY_SEP}{pert}", []).append(i)
-
-    out: dict[str, dict[str, np.ndarray]] = {}
-    for key in sorted(groups):
-        raw = np.asarray(X[groups[key]].toarray(), dtype=np.float64)
-        control_mean = np.asarray(block["control_mean"], dtype=np.float64)
-        delta_pb = (
-            apply_response_projection(
-                block,
-                raw.mean(axis=0, keepdims=True),
-                gene_order,
-                representation="raw_pseudobulk_approximation",
-            )[0]
-            - control_mean
-        )
-        delta_pc = (
-            apply_response_projection(
-                block,
-                raw,
-                gene_order,
-                representation="cell_raw_counts",
-            ).mean(axis=0)
-            - control_mean
-        )
-        out[key] = {"b": delta_pb - delta_pc, "delta_pc": delta_pc}
-    return out
 
 
 def _safe_ratio(numerator: float, denominator: float) -> float:
@@ -606,73 +561,38 @@ def _bootstrap_intervals(
     }
 
 
-def measure_pseudobulk_approximation_bias(
-    artifact_path: str,
-    block: Mapping,
-    *,
-    git_sha: str,
-) -> dict:
-    """Quantify the GEARS pseudobulk-approximation bias on non-sealed roles.
+def _canonical_json(obj: Mapping) -> str:
+    """The v1 report's ONE canonical serialisation recipe (design spec §4).
+
+    ``sort_keys=True`` (dict key order never affects the bytes),
+    ``separators=(",", ":")`` (no incidental whitespace), and
+    ``ensure_ascii=False`` (non-ASCII, if any, is kept literal rather than
+    ``\\uXXXX``-escaped) — the SAME recipe used both to compute
+    :func:`_self_checksum` and to write the report file in :func:`main`, so
+    the checksum always covers exactly the bytes that get written.
+    """
+    return json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+def _self_checksum(report_without_checksum: Mapping) -> str:
+    """SHA-256 hex digest of :func:`_canonical_json` applied to *report_without_checksum*.
 
     Parameters
     ----------
-    artifact_path : str
-        Path to the non-sealed fit-role ``.h5ad``.
-    block : Mapping
-        The frozen §2.2 ``response_projection`` block.
-    git_sha : str
-        Git SHA of the run, embedded for provenance.
+    report_without_checksum : Mapping
+        The full v1 report object MINUS its own ``self_checksum`` key (design
+        spec §4: "SHA-256 of the canonical JSON of every field above except
+        ``self_checksum``"). Passing a dict that still contains
+        ``self_checksum`` would make the digest depend on itself; callers
+        (including :func:`measure_approximation_bias_v1`) always strip that
+        key first.
 
     Returns
     -------
-    dict
-        The outcome-free bias report (canonical-JSON serialisable). Carries only
-        group-level aggregates + provenance; NO sealed pair id, NO per-cell value,
-        NO raw expression.
+    str
+        Lowercase hex-encoded SHA-256 digest.
     """
-    groups = _group_bias_vectors(artifact_path, block)
-    keys = sorted(groups)
-    stacked = np.stack([groups[k]["b"] for k in keys], axis=0)  # (n_groups, pca_dim)
-    mean_b = stacked.mean(axis=0)
-    directional_l2 = float(np.linalg.norm(mean_b))
-
-    ratios: list[float] = []
-    for k in keys:
-        denom = float(np.linalg.norm(groups[k]["delta_pc"]))
-        if math.isfinite(denom) and denom > 0.0:
-            ratios.append(float(np.linalg.norm(groups[k]["b"])) / denom)
-    rel_median = _finite_or_sentinel(float(np.median(ratios))) if ratios else _NON_FINITE_SENTINEL
-    rel_max = _finite_or_sentinel(float(np.max(ratios))) if ratios else _NON_FINITE_SENTINEL
-
-    return {
-        "deliverable": "gears_pseudobulk_approximation_bias_report",
-        "protocol": "COMPOSE-K562-v1",
-        "seal_status": (
-            "NO_SEAL_OPENED — non-sealed roles only; model-independent "
-            "(frozen §2.2 projection); no model fit; no sealed outcome read"
-        ),
-        "method": (
-            "per (role, perturbation) group over non-sealed fit roles: "
-            "b = z(mean_cells(raw)) - mean_cells(z(raw)) with z = frozen §2.2 "
-            "normalize_total_median+log1p then HVG+PCA (control_mean cancels in "
-            "the difference). directional_bias_l2 = ||mean_g b|| (non-cancelling "
-            "component); relative_magnitude = ||b|| / "
-            "||mean_cells(z(raw)) - control_mean|| over "
-            "groups with non-zero per-cell delta."
-        ),
-        "git_sha": str(git_sha),
-        "gene_order_sha256": str(block["gene_order_sha256"]),
-        "pca_dim": int(len(block["control_mean"])),
-        "fit_role_artifact_sha256": sha256_file(artifact_path),
-        "response_projection_sha256": sha256_json(block),
-        "roles_measured": sorted({k.split(_GROUP_KEY_SEP, 1)[0] for k in keys}),
-        "n_groups": len(keys),
-        "group_roster": keys,
-        "directional_bias_l2": _finite_or_sentinel(directional_l2),
-        "directional_bias_per_dim": [_finite_or_sentinel(float(v)) for v in mean_b],
-        "relative_magnitude_median": rel_median,
-        "relative_magnitude_max": rel_max,
-    }
+    return sha256_bytes(_canonical_json(report_without_checksum).encode("utf-8"))
 
 
 def measure_approximation_bias_v1(
@@ -680,34 +600,52 @@ def measure_approximation_bias_v1(
     fit_role_artifact: str,
     response_projection: Mapping,
     sealed_pair_ids: Sequence[str],
+    basis_config_sha256: str | None = None,
+    registered_seeds: Sequence[int] | None = None,
+    replicates: int | None = None,
+    git_commit: str | None = None,
+    norman_source_sha256: str | None = None,
+    pod_instance: str | None = None,
+    combo_sep: str = "_",
 ) -> dict:
-    """Guards-only v1 measurement entry (design spec §3 "Seal safety (fail-closed)").
+    """Assemble the FULL ``compose_approximation_bias_report_v1`` object.
 
-    Task 3 of the COMPOSE approximation-bias v1 implementation plan
+    Task 4 of the COMPOSE approximation-bias v1 implementation plan
     (``docs/superpowers/plans/2026-07-13-compose-approximation-bias-implementation.md``):
-    this is the metric's OWN fail-closed gate, run BEFORE any projection is
-    computed for the v1 report. In order:
+    builds on Task 3's seal-safety guards (unchanged, still run FIRST and in
+    the same order) to assemble the report's ``strata``, ``gi_and_fairness``
+    (point estimate + bootstrap interval), ``provenance``, and
+    ``self_checksum`` blocks (design spec §4). In order:
 
-    (a) every measured row's ``role`` must be in ``{"singles",
-        "combo_calibration"}`` — a ``control``-role row (or any other
-        non-whitelisted role) presented as a measured input aborts. This is
-        checked against the artifact's RAW roles, never through
-        :func:`_stratify_by_role` (which silently *drops* ``control`` — the
-        right behavior for stratification, the wrong one for a seal-safety
-        gate, which must fail closed rather than fail silent);
-    (b) once (a) has passed, the measured perturbation-id roster (every row's
-        ``perturbation``) must have ZERO overlap with ``sealed_pair_ids``. The
-        overlap count is recomputed here — never trusted from an upstream
-        builder — and returned for the report;
-    (c) the artifact's gene order must match the frozen ``response_projection``
-        block's ``gene_order_sha256``, verified UP FRONT. (``apply_response_projection``
-        also re-checks this digest, but only deep inside the projection math —
-        not a clean, early, metric-owned abort.)
+    (a)-(c) Task 3's guards (measured-role whitelist, sealed-roster overlap,
+        gene-order digest) — see :func:`measure_approximation_bias_v1`'s prior
+        revision for their exact messages; UNCHANGED here so every existing
+        seal-safety negative test keeps matching the metric's OWN message
+        before any provenance field is even inspected.
+    (d) once the guards pass, every provenance input
+        (``basis_config_sha256``, ``registered_seeds``, ``replicates``,
+        ``git_commit``, ``norman_source_sha256``, ``pod_instance``) must be an
+        explicitly-resolved, non-empty value — none of them defaults to a
+        placeholder like ``"UNKNOWN"``; a missing one raises here rather than
+        silently embedding a fake value in a binding v1 report (CLAUDE.md
+        §data-eval, §invariants #1 "Protocol first"). This intentionally runs
+        AFTER the seal-safety guards so a bad roster/gene-order/role always
+        raises its own dedicated message first, never masked by a
+        missing-provenance error.
 
-    Report assembly (strata, GI/fairness, bootstrap, provenance,
-    ``self_checksum``) is Task 4's job; the Probe-A admission gate is Task 5's
-    (YAGNI here — this function performs NO projection at all; once every
-    guard passes it returns only the recomputed overlap count).
+    Only non-sealed ``{"singles", "combo_calibration"}`` cells are ever read
+    (``control`` is reference-only via ``response_projection["control_mean"]``
+    and is stratified out by :func:`_stratify_by_role`); no sealed outcome is
+    read, no seal is opened, no ``gears``/``cpa`` is imported.
+
+    ``basis_config_sha256`` is the caller-computed ``sha256_json`` of the
+    bias-NULL config (i.e. the config whose
+    ``baselines.gears.approximation_bias_report_sha256`` is still ``null``);
+    this function never computes or embeds a FINAL config SHA (design spec §4
+    "one-way provenance" — the report must not contain the SHA of a config
+    that itself contains the report's SHA, which would create an impossible
+    cycle). ``registered_seeds`` is consumed, in order, by
+    :func:`_bootstrap_intervals` and also recorded verbatim in ``provenance``.
 
     Parameters
     ----------
@@ -716,16 +654,45 @@ def measure_approximation_bias_v1(
         ``perturbation``; ``var_names`` is the full gene order).
     response_projection : Mapping
         The frozen ``response_projection`` block (spec §2.2); must carry
-        ``gene_order_sha256``.
+        ``gene_order_sha256`` and ``control_mean``.
     sealed_pair_ids : sequence of str
-        The sealed double-unseen pair-id roster (already-canonicalized combo
-        tokens, e.g. ``"GENEA_GENEB"``) — a measured row whose ``perturbation``
-        is a member aborts.
+        The sealed double-unseen pair-id roster — a measured row whose
+        ``perturbation`` is a member aborts (guard (b)).
+    basis_config_sha256 : str, optional
+        ``sha256_json`` of the bias-NULL basis config, computed by the caller
+        (e.g. the CLI's ``--basis-config``). Required once the guards pass.
+    registered_seeds : sequence of int, optional
+        The registered seed roster (the basis config's
+        ``seeds.registered_seeds``), consumed in order by
+        :func:`_bootstrap_intervals`. Required (non-empty) once the guards
+        pass.
+    replicates : int, optional
+        Total bootstrap replicate count (becomes ``replicates_requested``).
+        Required (positive) once the guards pass; deliberately never defaults
+        (see the module docstring's "Bootstrap replicate-count decision") —
+        the CLI supplies its own default of 2000 via ``--bootstrap-replicates``.
+    git_commit : str, optional
+        Git SHA of the run. Required (non-empty, never ``"UNKNOWN"``) once the
+        guards pass.
+    norman_source_sha256 : str, optional
+        SHA-256 of the source Norman ``.h5ad`` this fit-role artifact was
+        built from. Required once the guards pass.
+    pod_instance : str, optional
+        Identifier of the compute instance the measurement ran on. Required
+        once the guards pass.
+    combo_sep : str, default ``"_"``
+        Separator between a combo pair id's two constituent gene tokens (the
+        config's ``data.combo_sep``).
 
     Returns
     -------
     dict
-        ``{"sealed_pair_overlap_count": 0}`` once every guard has passed.
+        The full ``compose_approximation_bias_report_v1`` object (see "The v1
+        report object" in the implementation plan): ``schema``,
+        ``deliverable``, ``protocol``, ``seal_status``, ``method``,
+        ``strata`` (``combo_calibration`` + ``singles``), ``gi_and_fairness``
+        (point estimate + bootstrap interval), ``provenance``, and
+        ``self_checksum``.
 
     Raises
     ------
@@ -733,7 +700,9 @@ def measure_approximation_bias_v1(
         ``"approximation-bias: measured role must be singles|combo_calibration"``
         for guard (a); ``"approximation-bias: measured roster overlaps
         sealed_pair_ids"`` for guard (b); ``"approximation-bias: gene_order
-        digest mismatch"`` for guard (c).
+        digest mismatch"`` for guard (c); ``"approximation-bias: missing
+        required provenance field(s): ..."`` or a ``registered_seeds``/
+        ``replicates`` message for guard (d).
     """
     block = response_projection
     adata = ad.read_h5ad(fit_role_artifact)
@@ -751,18 +720,87 @@ def measure_approximation_bias_v1(
     if canonical_gene_order_sha256(gene_order) != str(block["gene_order_sha256"]):
         raise ValueError("approximation-bias: gene_order digest mismatch")
 
-    return {"sealed_pair_overlap_count": sealed_pair_overlap_count}
+    missing = [
+        name
+        for name, value in (
+            ("basis_config_sha256", basis_config_sha256),
+            ("git_commit", git_commit),
+            ("norman_source_sha256", norman_source_sha256),
+            ("pod_instance", pod_instance),
+        )
+        if not value
+    ]
+    if missing:
+        raise ValueError(
+            "approximation-bias: missing required provenance field(s): " + ", ".join(missing)
+        )
+    if str(git_commit) == "UNKNOWN":
+        raise ValueError("approximation-bias: git_commit must be resolved, not 'UNKNOWN'")
+    if not registered_seeds:
+        raise ValueError("approximation-bias: registered_seeds must be a non-empty sequence")
+    if replicates is None or int(replicates) <= 0:
+        raise ValueError("approximation-bias: replicates must be a positive int")
+
+    X = np.asarray(sparse.csr_matrix(adata.X).toarray(), dtype=np.float64)
+    stratified = _stratify_by_role(roles, perturbations, X)
+    combo_rows = stratified["combo_calibration"]
+    singles_rows = stratified["singles"]
+
+    strata = {
+        "combo_calibration": _stratum_bias(combo_rows, block, gene_order),
+        "singles": _stratum_bias(singles_rows, block, gene_order),
+    }
+
+    single_effects = _single_effects(singles_rows, block, gene_order)
+    gi_point = _gi_and_fairness(combo_rows, single_effects, block, gene_order, combo_sep=combo_sep)
+    bootstrap = _bootstrap_intervals(
+        combo_rows,
+        single_effects,
+        block,
+        gene_order,
+        seeds=list(registered_seeds),
+        replicates=int(replicates),
+        combo_sep=combo_sep,
+    )
+    gi_and_fairness = {**gi_point, **bootstrap}
+
+    provenance = {
+        "measurement_contract_sha256": sha256_file(_MEASUREMENT_CONTRACT_PATH),
+        "basis_config_sha256": str(basis_config_sha256),
+        "git_commit": str(git_commit),
+        "norman_source_sha256": str(norman_source_sha256),
+        "fit_role_artifact_sha256": sha256_file(fit_role_artifact),
+        "response_projection_sha256": sha256_json(block),
+        "gene_order_sha256": str(block["gene_order_sha256"]),
+        "pca_dim": int(len(block["control_mean"])),
+        "registered_seeds": [int(s) for s in registered_seeds],
+        "sealed_pair_overlap_count": sealed_pair_overlap_count,
+        "pod_instance": str(pod_instance),
+    }
+
+    report_without_checksum = {
+        "schema": _SCHEMA_V1,
+        "deliverable": "gears_pseudobulk_approximation_bias_report",
+        "protocol": "COMPOSE-K562-v1",
+        "seal_status": "unopened",
+        "method": "raw_pseudobulk_approximation",
+        "strata": strata,
+        "gi_and_fairness": gi_and_fairness,
+        "provenance": provenance,
+    }
+    report = dict(report_without_checksum)
+    report["self_checksum"] = _self_checksum(report_without_checksum)
+    return report
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Load the artifact + block, run seal-safety guards, compute the report, write canonical JSON.
+    """Load inputs, assemble the full v1 report, and write it as canonical JSON.
 
-    ``--sealed-pair-ids`` is a required JSON-list-of-str file (design spec §3);
-    :func:`measure_approximation_bias_v1`'s guards run BEFORE the legacy
-    aggregate report below is computed, and the recomputed
-    ``sealed_pair_overlap_count`` (must be ``0``) is recorded alongside it.
-    Full v1 report assembly (self_checksum, provenance, Probe-A admission)
-    lands in a later task; this CLI wiring is intentionally incremental.
+    ``--basis-config`` is the bias-NULL YAML config (design spec §4): its
+    ``sha256_json`` becomes ``provenance.basis_config_sha256`` and its
+    ``seeds.registered_seeds`` seeds :func:`_bootstrap_intervals`. This CLI
+    NEVER computes or accepts a FINAL config SHA — that binding is one-way and
+    lives in the separate finalization tool (a later task).
     """
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--fit-role-artifact", required=True, type=Path)
@@ -773,32 +811,44 @@ def main(argv: list[str] | None = None) -> int:
         type=Path,
         help="JSON list of sealed pair-id tokens (design spec §3 seal-safety guard)",
     )
+    ap.add_argument(
+        "--basis-config",
+        required=True,
+        type=Path,
+        help="bias-NULL YAML config (its sha256_json + seeds.registered_seeds are used; "
+        "NEVER the finalized config)",
+    )
+    ap.add_argument("--norman-source-sha256", required=True)
+    ap.add_argument("--git-commit", required=True)
+    ap.add_argument("--pod-instance", required=True)
+    ap.add_argument("--bootstrap-replicates", type=int, default=2000)
     ap.add_argument("--out", required=True, type=Path)
-    ap.add_argument("--git-sha", default="UNKNOWN")
     args = ap.parse_args(argv)
 
     block = json.loads(args.response_projection.read_text(encoding="utf-8"))
     sealed_pair_ids = json.loads(args.sealed_pair_ids.read_text(encoding="utf-8"))
+    basis_config_raw = yaml.safe_load(args.basis_config.read_text(encoding="utf-8"))
+    basis_config_sha256 = sha256_json(basis_config_raw)
+    registered_seeds = [int(s) for s in basis_config_raw["seeds"]["registered_seeds"]]
 
-    guard_result = measure_approximation_bias_v1(
+    report = measure_approximation_bias_v1(
         fit_role_artifact=str(args.fit_role_artifact),
         response_projection=block,
         sealed_pair_ids=sealed_pair_ids,
+        basis_config_sha256=basis_config_sha256,
+        registered_seeds=registered_seeds,
+        replicates=args.bootstrap_replicates,
+        git_commit=args.git_commit,
+        norman_source_sha256=args.norman_source_sha256,
+        pod_instance=args.pod_instance,
     )
-    report = measure_pseudobulk_approximation_bias(
-        str(args.fit_role_artifact), block, git_sha=str(args.git_sha)
-    )
-    report["sealed_pair_overlap_count"] = guard_result["sealed_pair_overlap_count"]
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
-    args.out.write_text(
-        json.dumps(report, sort_keys=True, separators=(",", ":"), ensure_ascii=False) + "\n",
-        encoding="utf-8",
-    )
+    args.out.write_text(_canonical_json(report) + "\n", encoding="utf-8")
+    gi = report["gi_and_fairness"]
     print(
-        f"wrote {args.out}: n_groups={report['n_groups']} "
-        f"directional_bias_l2={report['directional_bias_l2']} "
-        f"relative_magnitude_max={report['relative_magnitude_max']}"
+        f"wrote {args.out}: fairness_flag={gi['fairness_flag']} "
+        f"bias_to_signal_ratio_R={gi['bias_to_signal_ratio_R']}"
     )
     return 0
 

@@ -16,6 +16,7 @@ seal, imports no ``gears``/``cpa``, constructs no store.
 
 from __future__ import annotations
 
+import copy
 import importlib.util
 import json
 import math
@@ -27,9 +28,17 @@ import pandas as pd
 import pytest
 
 from alive.compose.fit_role import canonical_gene_order_sha256
+from alive.provenance import sha256_file
 
 _REPO = Path(__file__).resolve().parents[3]
 _SCRIPT = _REPO / "scripts" / "compose" / "measure_pseudobulk_approximation_bias.py"
+_SPEC_PATH = (
+    _REPO
+    / "docs"
+    / "superpowers"
+    / "specs"
+    / "2026-07-13-compose-approximation-bias-metric-design.md"
+)
 _SENTINEL = "NON_FINITE"
 
 
@@ -575,6 +584,9 @@ def test_gene_order_mismatch_aborts(tmp_path):
 
 
 def test_zero_overlap_recorded(tmp_path):
+    # Task 4: once the guards pass, the recomputed overlap count is carried
+    # into the FULL v1 report's ``provenance`` block (no longer a bare
+    # top-level key) -- same concern as Task 3, updated location.
     module = _load_metric_module()
     genes = ["G1", "G2"]
     block = _identity_block(genes, median_library=10.0, control_mean=[0.0, 0.0])
@@ -588,6 +600,164 @@ def test_zero_overlap_recorded(tmp_path):
         fit_role_artifact=artifact,
         response_projection=block,
         sealed_pair_ids=["ZZZ_YYY"],  # disjoint from the measured roster
+        basis_config_sha256="a" * 64,
+        registered_seeds=[11],
+        replicates=8,
+        git_commit="b" * 40,
+        norman_source_sha256="c" * 64,
+        pod_instance="unit-test-local",
     )
 
-    assert result["sealed_pair_overlap_count"] == 0
+    assert result["provenance"]["sealed_pair_overlap_count"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Task 4: full v1 report assembly + provenance + self_checksum.
+#
+# ``_full_report_fixture`` reuses the exact numeric roster of
+# ``_three_pair_ratio_fixture`` (Task 2 -- already known to yield real, finite,
+# non-degenerate b_i/g_i/R and a real bootstrap interval) so these tests are
+# about ASSEMBLY (schema, provenance, self_checksum), not fresh known-answer
+# numerics.
+# ---------------------------------------------------------------------------
+
+
+def _full_report_fixture(tmp_path: Path) -> dict:
+    genes = [f"F{i}" for i in range(1, 7)]  # F1..F6, p=6
+    median_library = 30.0
+
+    base = [5.0, 5.0, 5.0, 5.0, 5.0, 5.0]
+
+    def _spread(dims: tuple[int, int], s: float) -> tuple[list[float], list[float]]:
+        row = list(base)
+        row[dims[0]] += s
+        row[dims[1]] -= s
+        row_swapped = list(base)
+        row_swapped[dims[0]] -= s
+        row_swapped[dims[1]] += s
+        return row, row_swapped
+
+    pair1_a, pair1_b = _spread((0, 1), 4.0)
+    pair2_a, pair2_b = _spread((2, 3), 2.0)
+    pair3_a, pair3_b = _spread((4, 5), 1.0)
+
+    roles = ["singles"] * 6 + ["combo_calibration"] * 6
+    perturbations = [
+        "P1",
+        "P2",
+        "P3",
+        "P4",
+        "P5",
+        "P6",
+        "P1_P2",
+        "P1_P2",
+        "P3_P4",
+        "P3_P4",
+        "P5_P6",
+        "P5_P6",
+    ]
+    rows = [
+        [7.0, 3.0, 5.0, 5.0, 5.0, 5.0],
+        [3.0, 7.0, 5.0, 5.0, 5.0, 5.0],
+        [5.0, 5.0, 9.0, 1.0, 5.0, 5.0],
+        [5.0, 5.0, 1.0, 9.0, 5.0, 5.0],
+        [5.0, 5.0, 5.0, 5.0, 7.0, 3.0],
+        [5.0, 5.0, 5.0, 5.0, 3.0, 7.0],
+        pair1_a,
+        pair1_b,
+        pair2_a,
+        pair2_b,
+        pair3_a,
+        pair3_b,
+    ]
+
+    artifact = _write_hand_built_artifact(tmp_path, genes, roles, perturbations, rows)
+    block = _identity_block(genes, median_library, control_mean=[0.0] * 6)
+    return {
+        "fit_role_artifact": artifact,
+        "response_projection": block,
+        "sealed_pair_ids": ["ZZZ_YYY"],
+        "basis_config_sha256": "a" * 64,
+        "registered_seeds": [11, 23, 37],
+        "replicates": 40,
+        "git_commit": "b" * 40,
+        "norman_source_sha256": "c" * 64,
+        "pod_instance": "unit-test-local",
+    }
+
+
+def test_report_has_v1_schema_and_strata(tmp_path):
+    module = _load_metric_module()
+    kwargs = _full_report_fixture(tmp_path)
+
+    report = module.measure_approximation_bias_v1(**kwargs)
+
+    assert report["schema"] == "compose_approximation_bias_report_v1"
+    assert set(report["strata"]) == {"combo_calibration", "singles"}
+    assert report["strata"]["combo_calibration"]["n_pairs"] == 3
+    assert report["strata"]["singles"]["n_pairs"] == 6
+    assert "gi_and_fairness" in report
+    assert "provenance" in report
+    assert "self_checksum" in report
+
+    # v1 REPLACES the legacy aggregate report -- its key-set must be absent,
+    # not merely unused.
+    for legacy_key in (
+        "directional_bias_l2",
+        "directional_bias_per_dim",
+        "relative_magnitude_median",
+        "relative_magnitude_max",
+        "roles_measured",
+        "n_groups",
+        "group_roster",
+    ):
+        assert legacy_key not in report
+
+    prov = report["provenance"]
+    assert prov["sealed_pair_overlap_count"] == 0
+    assert prov["pca_dim"] == 6
+    assert prov["registered_seeds"] == [11, 23, 37]
+    assert prov["measurement_contract_sha256"] == sha256_file(_SPEC_PATH)
+    assert prov["basis_config_sha256"] == "a" * 64
+    assert prov["git_commit"] == "b" * 40
+    assert prov["norman_source_sha256"] == "c" * 64
+    assert prov["pod_instance"] == "unit-test-local"
+
+
+def test_self_checksum_detects_tampering(tmp_path):
+    module = _load_metric_module()
+    kwargs = _full_report_fixture(tmp_path)
+    report = module.measure_approximation_bias_v1(**kwargs)
+
+    # Anti-tautology: recompute over the MUTATED object (a field the checksum
+    # actually covers), not the original -- a test that merely re-hashed the
+    # untouched report would pass even if self_checksum ignored every field.
+    mutated = copy.deepcopy(report)
+    del mutated["self_checksum"]
+    assert mutated["method"] == "raw_pseudobulk_approximation"
+    mutated["method"] = "TAMPERED"
+    recomputed = module._self_checksum(mutated)
+
+    assert recomputed != report["self_checksum"]
+
+
+def test_final_config_sha_absent_from_report(tmp_path):
+    module = _load_metric_module()
+    kwargs = _full_report_fixture(tmp_path)
+    report = module.measure_approximation_bias_v1(**kwargs)
+
+    final_sha = "f" * 64  # a distinct, fabricated "final config" SHA
+    assert final_sha != kwargs["basis_config_sha256"]
+    assert final_sha not in json.dumps(report)
+
+
+def test_canonical_json_byte_reproducible(tmp_path):
+    module = _load_metric_module()
+    kwargs = _full_report_fixture(tmp_path)
+
+    report_1 = module.measure_approximation_bias_v1(**kwargs)
+    report_2 = module.measure_approximation_bias_v1(**kwargs)
+
+    json_1 = json.dumps(report_1, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    json_2 = json.dumps(report_2, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    assert json_1 == json_2
