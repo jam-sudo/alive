@@ -80,6 +80,7 @@ from alive.provenance import EnvironmentInfo, RunLedger, sha256_file, sha256_jso
 
 from alive.compose.phase2b import (  # isort: skip
     ActivationProvenanceInputs,
+    ApproximationBiasReportError,
     Phase2bError,
     Phase2bResult,
     _build_provenance,
@@ -87,6 +88,7 @@ from alive.compose.phase2b import (  # isort: skip
     _preaccess_seed_variability,
     _run_phase2b_core,
     build_activation_provenance_inputs,
+    build_registered_evaluation_summary,
     run_phase2b,
     run_phase2b_fixture,
 )
@@ -1708,3 +1710,164 @@ def test_pre_audit_failure_does_not_finalize(tmp_path, monkeypatch):
     assert kit["store"].sealed_access_count == 0
     assert _terminal_artifacts(kit["run_dir"]) == []
     assert not (kit["run_dir"] / DURABLE_COMMIT_FILENAME).exists()
+
+
+# ---------------------------------------------------------------------------
+# Task 7: verdict-invariant durable carry of the approximation-bias fairness flag
+# (design spec §5/§7). The block is BUILT inside build_registered_evaluation_summary
+# from the pinned report (SHA-verified, fail-closed) and lives in the registered
+# summary dict ONLY — never in ComposeSealedResult, so the verdict is byte-unchanged.
+# ---------------------------------------------------------------------------
+
+
+def _builder_base_kwargs(tmp_path):
+    """Real regime / verdict objects from a fixture run + the base build kwargs.
+
+    Uses genuine ``RegimeScore`` / ``ComposeSealedResult`` objects (not synthetic
+    stand-ins) so the verdict-invariance proof binds a REAL verdict checksum.
+    """
+    from alive.compose.verdict2 import ComposeIntegrityReport
+
+    kit = _make_run(tmp_path)
+    res = run_phase2b_fixture(**_fixture_kwargs(kit))
+    integrity = ComposeIntegrityReport(
+        provenance_ok=True,
+        leakage_ok=True,
+        all_metrics_finite=True,
+        sealed_access_consistent=True,
+        sealed_n=res.regime_double.sample_count,
+        minimum_sealed=1,
+    )
+    per_method_aggregate_mse = {
+        regime_name: {
+            method: float(np.mean(regime.descriptive_pair_errors[method]))
+            for method in sorted(regime.descriptive_pair_errors)
+        }
+        for regime_name, regime in (("double", res.regime_double), ("single", res.regime_single))
+    }
+    return {
+        "protocol": "COMPOSE-K562-v1",
+        "run_id": "run-task7",
+        "terminal_state": "COMPLETE",
+        "sealed_access_count": 1,
+        "regime_double": res.regime_double,
+        "regime_single": res.regime_single,
+        "per_method_aggregate_mse": per_method_aggregate_mse,
+        "final_verdict": res.sealed_verdict,
+        "integrity": integrity,
+        "family_confidence": 0.95,
+        "bootstrap_replicates": 3,
+        "bundle_checksum": "a" * 64,
+        "manifest_checksum": "b" * 64,
+        "provenance_checksum": "c" * 64,
+        "seed_variability_report_checksum": "0" * 64,
+    }
+
+
+def _write_bias_report(
+    path,
+    *,
+    fairness_flag="representation_confounded",
+    bias_to_signal_ratio_R=0.6,
+    bootstrap_95_interval=(0.4, 0.9),
+    R_star=0.5,
+):
+    """Write a synthetic v1 approximation-bias report; return its content SHA-256."""
+    report = {
+        "schema": "compose_approximation_bias_report_v1",
+        "fairness_flag": fairness_flag,
+        "bias_to_signal_ratio_R": bias_to_signal_ratio_R,
+        "bootstrap_95_interval": list(bootstrap_95_interval),
+        "R_star": R_star,
+        # extra fields the loader ignores (present in a real report)
+        "gi_signal_median": 0.9,
+        "floor_median": 0.54,
+    }
+    text = json.dumps(report, sort_keys=True, separators=(",", ":"))
+    Path(path).write_text(text, encoding="utf-8")
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def test_fairness_block_sourced_from_pinned_report(tmp_path):
+    # config SHA == report content SHA ⇒ the block carries the report's flag / ratio /
+    # interval / R_star verbatim (ratio + interval routed through the finite sentinel).
+    base = _builder_base_kwargs(tmp_path)
+    report_path = tmp_path / "bias_report.json"
+    sha = _write_bias_report(
+        report_path,
+        fairness_flag="representation_confounded",
+        bias_to_signal_ratio_R=0.6,
+        bootstrap_95_interval=(0.4, 0.9),
+        R_star=0.5,
+    )
+    summary = build_registered_evaluation_summary(
+        **base,
+        approximation_bias_report_sha256=sha,
+        approximation_bias_report_path=report_path,
+    )
+    block = summary["approximation_bias_fairness"]
+    assert block["report_sha256"] == sha
+    assert block["fairness_flag"] == "representation_confounded"
+    assert block["bias_to_signal_ratio_R"] == 0.6
+    assert block["bootstrap_95_interval"] == [0.4, 0.9]
+    assert block["R_star"] == 0.5
+
+
+def test_fairness_block_fails_closed_on_sha_mismatch(tmp_path):
+    # report content SHA != config SHA ⇒ the loader RAISES; no report value leaks in.
+    base = _builder_base_kwargs(tmp_path)
+    report_path = tmp_path / "bias_report.json"
+    real_sha = _write_bias_report(report_path, fairness_flag="clear")
+    wrong_sha = "9" * 64
+    assert wrong_sha != real_sha  # the config SHA genuinely differs from the report SHA
+    with pytest.raises(ApproximationBiasReportError, match="sha"):
+        build_registered_evaluation_summary(
+            **base,
+            approximation_bias_report_sha256=wrong_sha,
+            approximation_bias_report_path=report_path,
+        )
+
+
+def test_final_verdict_checksum_byte_unchanged(tmp_path):
+    # The block lives in the summary dict ONLY: building WITH vs WITHOUT the wiring
+    # leaves the real verdict checksum AND every non-block field byte-identical.
+    base = _builder_base_kwargs(tmp_path)
+    baseline_verdict_checksum = base["final_verdict"].checksum  # a REAL verdict checksum
+    report_path = tmp_path / "bias_report.json"
+    sha = _write_bias_report(report_path)
+
+    with_block = build_registered_evaluation_summary(
+        **base,
+        approximation_bias_report_sha256=sha,
+        approximation_bias_report_path=report_path,
+    )
+    without_block = build_registered_evaluation_summary(**base)  # defaults ⇒ unavailable
+
+    # the passed verdict's own checksum is untouched by the block.
+    assert base["final_verdict"].checksum == baseline_verdict_checksum
+    # every verdict axis / clause in the summary is byte-identical either way.
+    for key in ("sealed_axis", "method_axis", "verdict_clauses"):
+        assert sha256_json(with_block[key]) == sha256_json(without_block[key])
+    # only the fairness block differs; everything else is byte-identical.
+    assert with_block["approximation_bias_fairness"] != without_block["approximation_bias_fairness"]
+    stripped_with = {k: v for k, v in with_block.items() if k != "approximation_bias_fairness"}
+    stripped_without = {
+        k: v for k, v in without_block.items() if k != "approximation_bias_fairness"
+    }
+    assert sha256_json(stripped_with) == sha256_json(stripped_without)
+
+
+def test_null_config_field_yields_unavailable_block(tmp_path):
+    # null config field (not yet finalized) ⇒ the carry EXISTS but is honestly empty.
+    base = _builder_base_kwargs(tmp_path)
+    summary = build_registered_evaluation_summary(
+        **base,
+        approximation_bias_report_sha256=None,
+        approximation_bias_report_path=None,
+    )
+    block = summary["approximation_bias_fairness"]
+    assert block["report_sha256"] is None
+    assert block["fairness_flag"] == "unavailable"
+    assert block["bias_to_signal_ratio_R"] is None
+    assert block["bootstrap_95_interval"] is None
+    assert block["R_star"] is None

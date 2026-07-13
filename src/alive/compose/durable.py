@@ -104,6 +104,23 @@ DURABLE_COMMIT_SCHEMA = "compose_phase2b_durable_commit_v1"
 #: carrying any other schema fails closed.
 _REGISTERED_SUMMARY_SCHEMA_V1 = "compose_registered_evaluation_summary_v1"
 
+#: The Task-7 approximation-bias fairness CARRY key + its exact inner roster (design
+#: spec §5/§7). The finalizer only ASSERTS the block's PRESENCE and shape (fail closed
+#: if a summary-bearing terminal omits it) — it NEVER populates or mutates it: the block
+#: is built ONCE at phase2b BUILD time before ``registered_summary_checksum`` and copied
+#: verbatim here. Mirrored (not imported) because ``phase2b`` imports this module, so
+#: importing back would be circular; the constants are kept byte-identical by design.
+_APPROXIMATION_BIAS_FAIRNESS_KEY = "approximation_bias_fairness"
+_APPROXIMATION_BIAS_FAIRNESS_FIELDS: frozenset[str] = frozenset(
+    {
+        "report_sha256",
+        "fairness_flag",
+        "bias_to_signal_ratio_R",
+        "bootstrap_95_interval",
+        "R_star",
+    }
+)
+
 #: The marker's self-excluding checksum field (excluded from its own checksum).
 COMMIT_CHECKSUM_FIELD = "commit_checksum"
 
@@ -865,6 +882,24 @@ def finalize_phase2b_durable_outputs(
         raise DurableLedgerError(
             f"registered summary theta roster {sorted(theta_roster)!r} != the expected "
             f"5-comparator family {sorted(_EXPECTED_COMPARATOR_FAMILY)!r} (fail closed)."
+        )
+
+    # --- Task 7 (spec §5/§7): the pre-registered approximation-bias fairness CARRY must
+    # be PRESENT with its exact inner roster. This is a PRESENCE/shape assertion ONLY —
+    # the block is built ONCE at phase2b BUILD time (before registered_summary_checksum)
+    # and copied VERBATIM below; the finalizer NEVER populates or mutates it. A
+    # summary-bearing terminal that omits it (or carries a wrong-shaped block) fails
+    # closed so the verdict-invariant disclosure can never be silently dropped.
+    fairness = registered_summary.get(_APPROXIMATION_BIAS_FAIRNESS_KEY)
+    if not isinstance(fairness, dict):
+        raise DurableLedgerError(
+            f"registered summary is missing the {_APPROXIMATION_BIAS_FAIRNESS_KEY!r} carry "
+            "or it is not a JSON object (fail closed)."
+        )
+    if set(fairness) != _APPROXIMATION_BIAS_FAIRNESS_FIELDS:
+        raise DurableLedgerError(
+            f"registered summary {_APPROXIMATION_BIAS_FAIRNESS_KEY!r} roster {sorted(fairness)!r} "
+            f"!= the expected fields {sorted(_APPROXIMATION_BIAS_FAIRNESS_FIELDS)!r} (fail closed)."
         )
 
     # --- Step 2: read + verify the pre-access ledger (run id, embedded pre-access

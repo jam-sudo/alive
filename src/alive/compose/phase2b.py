@@ -49,6 +49,7 @@ only. Real execution remains blocked until the owner activation commit and every
 
 from __future__ import annotations
 
+import json
 import math
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
@@ -178,6 +179,20 @@ class Phase2bError(RuntimeError):
     misconfiguration (e.g. a malformed ``response_artifact`` or a non-fixture
     store handed to the fixture entry) explicitly. Raised only BEFORE any sealed
     access, so it never leaves a consumed seal without a terminal artifact.
+    """
+
+
+class ApproximationBiasReportError(Phase2bError):
+    """Raised when the pinned approximation-bias report fails fail-closed loading.
+
+    The registered fairness carry (design spec §5/§7) sources its report SHA from
+    ``config.baselines.gears.approximation_bias_report_sha256`` and then LOADS the
+    pinned report, verifying the report's content SHA equals that config SHA before
+    any value is extracted. A missing report file, a content SHA that disagrees with
+    the pinned config SHA, or a structurally invalid report all raise this — so an
+    UNPINNED report's fairness values can never leak into the registered summary.
+    Purely a build-time content check on already-public activation evidence: it opens
+    no seal and touches no outcome.
     """
 
 
@@ -640,6 +655,153 @@ def _finite_or_sentinel(value: float) -> float | str:
     return number if math.isfinite(number) else _NON_FINITE_SENTINEL
 
 
+#: The registered-summary key carrying the pre-registered approximation-bias fairness
+#: flag (design spec §5/§7). The block is CARRIED (not decided from) so the eventual
+#: sealed verdict can disclose it WITHOUT changing the verdict. Kept as a module
+#: constant so the phase2b builder and the durable presence assertion stay in lock-step.
+APPROXIMATION_BIAS_FAIRNESS_KEY = "approximation_bias_fairness"
+
+#: The exact key roster of the fairness block. The block is OPTIONAL/additive under the
+#: registered-summary ``_v1`` schema (no schema-version bump), so a fixed inner roster
+#: is the contract both phase2b (build) and durable (presence/shape assertion) hold.
+APPROXIMATION_BIAS_FAIRNESS_FIELDS: frozenset[str] = frozenset(
+    {
+        "report_sha256",
+        "fairness_flag",
+        "bias_to_signal_ratio_R",
+        "bootstrap_95_interval",
+        "R_star",
+    }
+)
+
+#: The honest-empty ``fairness_flag`` recorded while the config field is ``null`` (the
+#: report is not yet finalized): the CARRY exists but is honestly empty (spec §5).
+_APPROXIMATION_BIAS_UNAVAILABLE_FLAG = "unavailable"
+
+
+def _unavailable_approximation_bias_block() -> dict:
+    """The honestly-empty fairness block for a not-yet-finalized (null) config field.
+
+    Recorded when ``config.baselines.gears.approximation_bias_report_sha256`` is
+    ``null``: the carry EXISTS in the registered summary (so the durable presence
+    assertion holds) but every value is empty (spec §5). Every value is ``None`` /
+    a string, so the shared terminal canonicalizer never refuses the write.
+    """
+    return {
+        "report_sha256": None,
+        "fairness_flag": _APPROXIMATION_BIAS_UNAVAILABLE_FLAG,
+        "bias_to_signal_ratio_R": None,
+        "bootstrap_95_interval": None,
+        "R_star": None,
+    }
+
+
+def _load_approximation_bias_fairness(
+    *, report_sha256: str, report_path: str | Path | None
+) -> dict:
+    """Fail-closed load of the pinned approximation-bias report → the fairness block.
+
+    Sources the pinned SHA from ``config.baselines.gears.approximation_bias_report_sha256``
+    (the caller passes it here) and VERIFIES the pinned report file's content SHA-256
+    equals that config SHA *before* any value is read. A report whose content SHA
+    disagrees with the pinned config SHA — or a missing / unreadable / malformed report
+    — RAISES :class:`ApproximationBiasReportError`, so an UNPINNED report's fairness
+    values can never leak into the registered summary (design spec §5/§7).
+
+    The carried ``bias_to_signal_ratio_R`` and each ``bootstrap_95_interval`` endpoint
+    (and ``R_star``) are routed through :func:`_finite_or_sentinel` (mirroring
+    ``gi_explained_interval``) so a degenerate report value becomes the string sentinel
+    rather than a non-finite float the terminal canonicalizer would reject.
+
+    This performs only a content check + extraction on already-public activation
+    evidence: it opens NO seal, constructs NO outcome store, and imports no worker.
+
+    Parameters
+    ----------
+    report_sha256 : str
+        The pinned report SHA sourced from the config (non-``None`` here; the null
+        path is handled by :func:`_unavailable_approximation_bias_block`).
+    report_path : str, Path or None
+        The pinned report file. ``None`` fails closed — a pinned SHA cannot be
+        verified without the file it pins.
+
+    Returns
+    -------
+    dict
+        The populated fairness block (the exact
+        :data:`APPROXIMATION_BIAS_FAIRNESS_FIELDS` roster).
+
+    Raises
+    ------
+    ApproximationBiasReportError
+        On a missing path, an unreadable / non-JSON / non-object report, a content
+        SHA that disagrees with the pinned config SHA, or a report missing a required
+        fairness field / carrying a malformed interval.
+    """
+    if report_path is None:
+        raise ApproximationBiasReportError(
+            "a pinned approximation_bias_report_sha256 is set but no report path was "
+            "provided; the pinned report SHA cannot be verified without the file it pins "
+            "(fail closed)."
+        )
+    path = Path(report_path)
+    try:
+        content_sha = sha256_file(path)
+    except OSError as exc:
+        raise ApproximationBiasReportError(
+            f"pinned approximation-bias report {str(path)!r} is missing or unreadable: {exc}"
+        ) from exc
+    # Fail-closed SHA wall: the report's CONTENT SHA must equal the pinned config SHA
+    # BEFORE any value is extracted (an unpinned report never contributes a value).
+    if content_sha != report_sha256:
+        raise ApproximationBiasReportError(
+            f"pinned approximation-bias report {str(path)!r} content sha {content_sha!r} does "
+            f"not match the pinned config sha {report_sha256!r}; refusing to read an unpinned "
+            "report (fail closed)."
+        )
+    try:
+        report = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ApproximationBiasReportError(
+            f"pinned approximation-bias report {str(path)!r} is not readable JSON: {exc}"
+        ) from exc
+    if not isinstance(report, dict):
+        raise ApproximationBiasReportError(
+            f"pinned approximation-bias report {str(path)!r} is not a JSON object (fail closed)."
+        )
+    required_fields = ("fairness_flag", "bias_to_signal_ratio_R", "bootstrap_95_interval", "R_star")
+    for field_name in required_fields:
+        if field_name not in report:
+            raise ApproximationBiasReportError(
+                f"pinned approximation-bias report {str(path)!r} is missing required field "
+                f"{field_name!r} (fail closed)."
+            )
+    flag = report["fairness_flag"]
+    if not isinstance(flag, str) or not flag.strip():
+        raise ApproximationBiasReportError(
+            f"pinned approximation-bias report {str(path)!r} fairness_flag must be a non-empty "
+            f"string, got {flag!r}."
+        )
+    interval = report["bootstrap_95_interval"]
+    if not isinstance(interval, (list, tuple)) or len(interval) != 2:
+        raise ApproximationBiasReportError(
+            f"pinned approximation-bias report {str(path)!r} bootstrap_95_interval must be a "
+            f"[lower, upper] pair, got {interval!r}."
+        )
+    return {
+        "report_sha256": report_sha256,
+        "fairness_flag": flag,
+        # ratio + interval endpoints (+ R*) routed through the finite sentinel so a
+        # degenerate report value can never force a terminal-write abort (spec §2).
+        "bias_to_signal_ratio_R": _finite_or_sentinel(report["bias_to_signal_ratio_R"]),
+        "bootstrap_95_interval": [
+            _finite_or_sentinel(interval[0]),
+            _finite_or_sentinel(interval[1]),
+        ],
+        "R_star": _finite_or_sentinel(report["R_star"]),
+    }
+
+
 def build_registered_evaluation_summary(
     *,
     protocol: str,
@@ -657,6 +819,8 @@ def build_registered_evaluation_summary(
     manifest_checksum: str,
     provenance_checksum: str,
     seed_variability_report_checksum: str,
+    approximation_bias_report_sha256: str | None = None,
+    approximation_bias_report_path: str | Path | None = None,
 ) -> dict:
     """Build the outcome-free ``RegisteredEvaluationSummary`` ONCE (spec §2.1).
 
@@ -697,6 +861,17 @@ def build_registered_evaluation_summary(
     seed_variability_report_checksum : str
         The bundle / manifest / provenance / pre-seal seed-variability content
         checksums (regime-result + bounds checksums are read from the regimes).
+    approximation_bias_report_sha256 : str or None, optional
+        The pinned GEARS approximation-bias report SHA sourced from
+        ``config.baselines.gears.approximation_bias_report_sha256`` (design spec
+        §5/§7). ``None`` (the current, not-yet-finalized state) records the
+        honestly-empty ``"unavailable"`` fairness block; a pinned SHA triggers a
+        fail-closed load of the report (its content SHA must equal this value). The
+        block is CARRIED into the summary dict ONLY — never into the verdict — so the
+        sealed verdict is byte-unchanged whether or not the report is finalized.
+    approximation_bias_report_path : str, Path or None, optional
+        The pinned report file, verified against ``approximation_bias_report_sha256``
+        before any value is read. Ignored (and unnecessary) when the SHA is ``None``.
 
     Returns
     -------
@@ -705,6 +880,19 @@ def build_registered_evaluation_summary(
     """
     bounds = regime_double.bounds
     secondary = regime_double.secondary
+    # Task 7 (spec §5/§7): CARRY the pre-registered approximation-bias fairness flag
+    # into the registered summary dict so the eventual sealed verdict can DISCLOSE it
+    # WITHOUT changing the verdict. Built BEFORE the summary checksum (it is part of the
+    # returned dict); null config field ⇒ honestly-empty block; a pinned SHA ⇒ a
+    # fail-closed SHA-verified load. Lives in the summary dict ONLY, never in
+    # ``ComposeSealedResult`` — the verdict axes/clauses/checksum are untouched.
+    if approximation_bias_report_sha256 is None:
+        approximation_bias_fairness = _unavailable_approximation_bias_block()
+    else:
+        approximation_bias_fairness = _load_approximation_bias_fairness(
+            report_sha256=approximation_bias_report_sha256,
+            report_path=approximation_bias_report_path,
+        )
     gi_lower, gi_upper = secondary.gi_explained_interval
     return {
         "schema": "compose_registered_evaluation_summary_v1",
@@ -752,6 +940,10 @@ def build_registered_evaluation_summary(
         "regime_result_single_checksum": regime_single.checksum,
         "bounds_checksum": bounds.checksum,
         "seed_variability_report_checksum": seed_variability_report_checksum,
+        # Task 7: the pre-registered approximation-bias fairness CARRY (spec §5/§7).
+        # An OPTIONAL/additive block under the ``_v1`` schema (no version bump), living
+        # in this dict ONLY — never in the verdict.
+        APPROXIMATION_BIAS_FAIRNESS_KEY: approximation_bias_fairness,
     }
 
 
@@ -776,6 +968,7 @@ def run_phase2b(
     oof_manifest_checksum: str | None = None,
     seed_variability_report_path: str | Path | None = None,
     seed_variability_report_checksum: str | None = None,
+    approximation_bias_report_path: str | Path | None = None,
 ) -> Phase2bResult:
     """Run the SCIENTIFIC Phase-2b sealed evaluation after activation.
 
@@ -819,6 +1012,13 @@ or None, optional
         The development seed-variability report path and its verified byte SHA.
         The outcome-free pre-access gate binds + verifies this before any seal
         access; its absence fails closed on the scientific path.
+    approximation_bias_report_path : str, Path or None, optional
+        The pinned GEARS approximation-bias report file (design spec §5/§7). Its
+        content SHA is verified against the config-pinned
+        ``baselines.gears.approximation_bias_report_sha256`` before its fairness flag
+        is CARRIED (not decided from) into the registered summary — a verdict-invariant
+        disclosure. ``None`` (or a null config SHA, the current not-yet-finalized state)
+        records the honestly-empty ``"unavailable"`` fairness block.
 
     Returns
     -------
@@ -876,6 +1076,7 @@ or None, optional
         provenance_tamper=None,
         provenance_inputs=provenance_inputs,
         seed_variability=seed_variability,
+        approximation_bias_report_path=approximation_bias_report_path,
     )
 
 
@@ -938,6 +1139,7 @@ def run_phase2b_fixture(
         provenance_tamper=_tamper_provenance_after_register,
         provenance_inputs=None,
         seed_variability=None,
+        approximation_bias_report_path=None,
     )
 
 
@@ -1143,6 +1345,7 @@ def _run_phase2b_core(
     provenance_tamper: Phase2bProvenance | None,
     provenance_inputs: ActivationProvenanceInputs | None,
     seed_variability: SeedVariabilityPreflightInputs | None,
+    approximation_bias_report_path: str | Path | None = None,
 ) -> Phase2bResult:
     """The shared 12-step sealed-evaluation flow (after the public boundary).
 
@@ -1364,6 +1567,7 @@ def _run_phase2b_core(
                 provenance_tamper=provenance_tamper,
                 provenance_inputs=provenance_inputs,
                 fixture_execution=fixture_execution,
+                approximation_bias_report_path=approximation_bias_report_path,
                 result_box=result_box,
             )
         result: Phase2bResult = result_box["result"]  # type: ignore[assignment]
@@ -1426,6 +1630,7 @@ def _evaluate_inside_boundary(
     provenance_inputs: ActivationProvenanceInputs | None,
     fixture_execution: bool,
     result_box: dict[str, object],
+    approximation_bias_report_path: str | Path | None = None,
 ) -> None:
     """Steps 6-12, executed INSIDE the terminal protection boundary.
 
@@ -1600,6 +1805,16 @@ def _evaluate_inside_boundary(
         )
         terminal_state = TerminalState.INVALID
 
+    # Task 7 (spec §5/§7): source the pinned GEARS approximation-bias report SHA from the
+    # config (baseline_representations carries (name, representation, bias_sha) tuples) so
+    # the pre-registered fairness flag is CARRIED (not decided from) into the registered
+    # summary — a verdict-invariant disclosure. A null config SHA (the current
+    # not-yet-finalized state) records the honestly-empty "unavailable" block and the
+    # report path is unused; a pinned SHA triggers the fail-closed SHA-verified load.
+    approximation_bias_report_sha256 = next(
+        (bias for name, _repr, bias in config.baseline_representations if name == "gears"),
+        None,
+    )
     summary = build_registered_evaluation_summary(
         protocol=provenance.protocol,
         run_id=lock.run_id,
@@ -1616,6 +1831,8 @@ def _evaluate_inside_boundary(
         manifest_checksum=lock.manifest_checksum,
         provenance_checksum=expected_provenance_checksum,
         seed_variability_report_checksum=seed_variability_report_checksum,
+        approximation_bias_report_sha256=approximation_bias_report_sha256,
+        approximation_bias_report_path=approximation_bias_report_path,
     )
     registered_summary_checksum = sha256_json(summary)
     final_verdict_checksum = final_verdict.checksum
