@@ -485,7 +485,10 @@ def _write_hand_built_artifact(
     real builder), so a role/pair the real builder would reject survives into
     the file -- the anti-tautology fixture the task brief requires.
     """
-    obs = pd.DataFrame({"role": list(roles), "perturbation": list(perturbations)})
+    obs = pd.DataFrame(
+        {"role": list(roles), "perturbation": list(perturbations)},
+        index=[f"cell{i}" for i in range(len(roles))],
+    )
     var = pd.DataFrame(index=list(genes))
     X = np.asarray(rows, dtype=np.float64)
     adata = ad.AnnData(X=X, obs=obs, var=var)
