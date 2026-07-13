@@ -47,6 +47,7 @@ Usage
     uv run python scripts/compose/measure_pseudobulk_approximation_bias.py \
         --fit-role-artifact artifacts/compose/fit_role.h5ad \
         --response-projection artifacts/compose/response_projection.json \
+        --sealed-pair-ids artifacts/compose/sealed_pair_ids.json \
         --out artifacts/compose/approximation_bias_report.json \
         --git-sha e5cfe05
 """
@@ -64,7 +65,7 @@ import anndata as ad
 import numpy as np
 from scipy import sparse
 
-from alive.compose.fit_role import apply_response_projection
+from alive.compose.fit_role import apply_response_projection, canonical_gene_order_sha256
 from alive.provenance import sha256_file, sha256_json
 
 #: Only finite floats or this string sentinel are ever embedded in the report
@@ -77,6 +78,13 @@ _GROUP_KEY_SEP = "::"
 #: Pre-registered fairness threshold (design spec §5): ``R >= _R_STAR`` marks the
 #: sealed GEARS family-comparator interpretation ``"representation_confounded"``.
 _R_STAR = 0.5
+
+#: The v1 measurement entry's measured-role whitelist (design spec §3 "Seal
+#: safety"). Deliberately narrower than ``fit_role``'s overall allowed-role set
+#: (which also permits ``control`` as a reference-only row): ``control`` may
+#: legitimately exist in a fit-role artifact for ``control_mean`` provenance,
+#: but must NEVER be presented as a *measured* pair to this metric.
+_MEASURED_ROLES: frozenset[str] = frozenset({"singles", "combo_calibration"})
 
 
 def _finite_or_sentinel(value: float) -> float | str:
@@ -667,19 +675,120 @@ def measure_pseudobulk_approximation_bias(
     }
 
 
+def measure_approximation_bias_v1(
+    *,
+    fit_role_artifact: str,
+    response_projection: Mapping,
+    sealed_pair_ids: Sequence[str],
+) -> dict:
+    """Guards-only v1 measurement entry (design spec §3 "Seal safety (fail-closed)").
+
+    Task 3 of the COMPOSE approximation-bias v1 implementation plan
+    (``docs/superpowers/plans/2026-07-13-compose-approximation-bias-implementation.md``):
+    this is the metric's OWN fail-closed gate, run BEFORE any projection is
+    computed for the v1 report. In order:
+
+    (a) every measured row's ``role`` must be in ``{"singles",
+        "combo_calibration"}`` — a ``control``-role row (or any other
+        non-whitelisted role) presented as a measured input aborts. This is
+        checked against the artifact's RAW roles, never through
+        :func:`_stratify_by_role` (which silently *drops* ``control`` — the
+        right behavior for stratification, the wrong one for a seal-safety
+        gate, which must fail closed rather than fail silent);
+    (b) once (a) has passed, the measured perturbation-id roster (every row's
+        ``perturbation``) must have ZERO overlap with ``sealed_pair_ids``. The
+        overlap count is recomputed here — never trusted from an upstream
+        builder — and returned for the report;
+    (c) the artifact's gene order must match the frozen ``response_projection``
+        block's ``gene_order_sha256``, verified UP FRONT. (``apply_response_projection``
+        also re-checks this digest, but only deep inside the projection math —
+        not a clean, early, metric-owned abort.)
+
+    Report assembly (strata, GI/fairness, bootstrap, provenance,
+    ``self_checksum``) is Task 4's job; the Probe-A admission gate is Task 5's
+    (YAGNI here — this function performs NO projection at all; once every
+    guard passes it returns only the recomputed overlap count).
+
+    Parameters
+    ----------
+    fit_role_artifact : str
+        Path to the fit-role ``.h5ad`` (``obs`` carries ``role`` /
+        ``perturbation``; ``var_names`` is the full gene order).
+    response_projection : Mapping
+        The frozen ``response_projection`` block (spec §2.2); must carry
+        ``gene_order_sha256``.
+    sealed_pair_ids : sequence of str
+        The sealed double-unseen pair-id roster (already-canonicalized combo
+        tokens, e.g. ``"GENEA_GENEB"``) — a measured row whose ``perturbation``
+        is a member aborts.
+
+    Returns
+    -------
+    dict
+        ``{"sealed_pair_overlap_count": 0}`` once every guard has passed.
+
+    Raises
+    ------
+    ValueError
+        ``"approximation-bias: measured role must be singles|combo_calibration"``
+        for guard (a); ``"approximation-bias: measured roster overlaps
+        sealed_pair_ids"`` for guard (b); ``"approximation-bias: gene_order
+        digest mismatch"`` for guard (c).
+    """
+    block = response_projection
+    adata = ad.read_h5ad(fit_role_artifact)
+    roles = [str(r) for r in adata.obs["role"]]
+    perturbations = [str(p) for p in adata.obs["perturbation"]]
+    gene_order = [str(g) for g in adata.var_names]
+
+    if not set(roles) <= _MEASURED_ROLES:
+        raise ValueError("approximation-bias: measured role must be singles|combo_calibration")
+
+    sealed_pair_overlap_count = len(set(perturbations) & set(sealed_pair_ids))
+    if sealed_pair_overlap_count != 0:
+        raise ValueError("approximation-bias: measured roster overlaps sealed_pair_ids")
+
+    if canonical_gene_order_sha256(gene_order) != str(block["gene_order_sha256"]):
+        raise ValueError("approximation-bias: gene_order digest mismatch")
+
+    return {"sealed_pair_overlap_count": sealed_pair_overlap_count}
+
+
 def main(argv: list[str] | None = None) -> int:
-    """Load the artifact + block, compute the report, and write canonical JSON."""
+    """Load the artifact + block, run seal-safety guards, compute the report, write canonical JSON.
+
+    ``--sealed-pair-ids`` is a required JSON-list-of-str file (design spec §3);
+    :func:`measure_approximation_bias_v1`'s guards run BEFORE the legacy
+    aggregate report below is computed, and the recomputed
+    ``sealed_pair_overlap_count`` (must be ``0``) is recorded alongside it.
+    Full v1 report assembly (self_checksum, provenance, Probe-A admission)
+    lands in a later task; this CLI wiring is intentionally incremental.
+    """
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--fit-role-artifact", required=True, type=Path)
     ap.add_argument("--response-projection", required=True, type=Path, help="§2.2 block JSON")
+    ap.add_argument(
+        "--sealed-pair-ids",
+        required=True,
+        type=Path,
+        help="JSON list of sealed pair-id tokens (design spec §3 seal-safety guard)",
+    )
     ap.add_argument("--out", required=True, type=Path)
     ap.add_argument("--git-sha", default="UNKNOWN")
     args = ap.parse_args(argv)
 
     block = json.loads(args.response_projection.read_text(encoding="utf-8"))
+    sealed_pair_ids = json.loads(args.sealed_pair_ids.read_text(encoding="utf-8"))
+
+    guard_result = measure_approximation_bias_v1(
+        fit_role_artifact=str(args.fit_role_artifact),
+        response_projection=block,
+        sealed_pair_ids=sealed_pair_ids,
+    )
     report = measure_pseudobulk_approximation_bias(
         str(args.fit_role_artifact), block, git_sha=str(args.git_sha)
     )
+    report["sealed_pair_overlap_count"] = guard_result["sealed_pair_overlap_count"]
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(

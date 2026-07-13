@@ -21,7 +21,9 @@ import json
 import math
 from pathlib import Path
 
+import anndata as ad
 import numpy as np
+import pandas as pd
 import pytest
 
 from alive.compose.fit_role import canonical_gene_order_sha256
@@ -452,3 +454,137 @@ def test_point_estimate_is_rng_free():
     # The bootstrap must not mutate its inputs in place either.
     assert set(combo_pairs) == {"P1_P2", "P3_P4", "P5_P6"}
     assert set(single_effects) == {"P1", "P2", "P3", "P4", "P5", "P6"}
+
+
+# ---------------------------------------------------------------------------
+# Task 3: metric-owned seal-safety guards (role / overlap / gene-order aborts).
+#
+# ANTI-TAUTOLOGY (task brief): ``alive.compose.fit_role.extract_fit_roles``
+# ALREADY excludes sealed rows and raises ``FitRoleArtifactError`` for a
+# ``control``-role or sealed-pair member. A negative test that builds its
+# input THROUGH that builder would credit the BUILDER, not the metric's own
+# guard -- it would pass even if ``measure_approximation_bias_v1``'s guards
+# did nothing. Every fixture below therefore writes a fit-role-shaped
+# ``.h5ad`` DIRECTLY via ``anndata.AnnData`` (bypassing
+# ``ComposeFitRoleExtractor``/``extract_fit_roles`` entirely), so the
+# forbidden role/pair SURVIVES into the file the metric reads, and every
+# assertion matches the METRIC's own ``ValueError`` message.
+# ---------------------------------------------------------------------------
+
+
+def _write_hand_built_artifact(
+    tmp_path: Path,
+    genes: list[str],
+    roles: list[str],
+    perturbations: list[str],
+    rows: list[list[float]],
+) -> str:
+    """Write a fit-role-shaped ``.h5ad`` directly via ``anndata.AnnData``.
+
+    Deliberately bypasses ``ComposeFitRoleExtractor``/``extract_fit_roles`` (the
+    real builder), so a role/pair the real builder would reject survives into
+    the file -- the anti-tautology fixture the task brief requires.
+    """
+    obs = pd.DataFrame({"role": list(roles), "perturbation": list(perturbations)})
+    var = pd.DataFrame(index=list(genes))
+    X = np.asarray(rows, dtype=np.float64)
+    adata = ad.AnnData(X=X, obs=obs, var=var)
+    path = tmp_path / "hand_built_fit_role.h5ad"
+    adata.write_h5ad(path)
+    return str(path)
+
+
+def test_control_member_as_measured_pair_aborts(tmp_path):
+    module = _load_metric_module()
+    genes = ["G1", "G2"]
+    block = _identity_block(genes, median_library=10.0, control_mean=[0.0, 0.0])
+
+    roles = ["control", "singles", "combo_calibration"]
+    perturbations = ["control", "GENEA", "GENEA_GENEB"]
+    rows = [[5.0, 5.0], [3.0, 7.0], [4.0, 6.0]]
+
+    # Anti-tautology: the forbidden `control` role genuinely reaches the metric
+    # here (never filtered upstream) -- the OPPOSITE of
+    # `_stratify_by_role`, which silently DROPS `control` from its output
+    # roster (test_control_is_not_a_measured_pair, above). A seal-safety gate
+    # must fail closed on this input, not fail silent.
+    assert "control" in roles
+    assert "control" not in module._MEASURED_ROLES
+
+    artifact = _write_hand_built_artifact(tmp_path, genes, roles, perturbations, rows)
+
+    with pytest.raises(ValueError, match="measured role must be singles|combo_calibration"):
+        module.measure_approximation_bias_v1(
+            fit_role_artifact=artifact, response_projection=block, sealed_pair_ids=[]
+        )
+
+
+def test_sealed_pair_member_aborts(tmp_path):
+    module = _load_metric_module()
+    genes = ["G1", "G2"]
+    block = _identity_block(genes, median_library=10.0, control_mean=[0.0, 0.0])
+
+    # Both rows carry an allowed role (`combo_calibration`) -- guard (a) alone
+    # would not catch this; only the roster/`sealed_pair_ids` overlap check does.
+    roles = ["combo_calibration", "combo_calibration"]
+    perturbations = ["AAA_BBB", "CCC_DDD"]
+    rows = [[4.0, 6.0], [5.0, 5.0]]
+    sealed_pair_ids = ["AAA_BBB"]
+
+    # Anti-tautology: the forbidden overlap genuinely exists in the raw input.
+    assert set(perturbations) & set(sealed_pair_ids) == {"AAA_BBB"}
+
+    artifact = _write_hand_built_artifact(tmp_path, genes, roles, perturbations, rows)
+
+    with pytest.raises(ValueError, match="overlaps sealed_pair_ids") as exc_info:
+        module.measure_approximation_bias_v1(
+            fit_role_artifact=artifact,
+            response_projection=block,
+            sealed_pair_ids=sealed_pair_ids,
+        )
+    # Fail-closed BEFORE any report: the guard raises instead of returning a
+    # dict, so a nonzero `sealed_pair_overlap_count` is never reported anywhere.
+    assert "sealed_pair_overlap_count" not in str(exc_info.value)
+
+
+def test_gene_order_mismatch_aborts(tmp_path):
+    module = _load_metric_module()
+    genes = ["G1", "G2", "G3"]
+    block = _identity_block(genes, median_library=10.0, control_mean=[0.0, 0.0, 0.0])
+    # Corrupt ONLY the digest -- `pca_mean`/`pca_components`/`hvg_gene_ids` stay
+    # shape-consistent with `genes`, so a block whose arrays would otherwise
+    # project fine is what proves the guard fires up front, not as a side
+    # effect of some unrelated shape failure.
+    block["gene_order_sha256"] = "0" * 64
+
+    roles = ["singles", "combo_calibration"]
+    perturbations = ["GENEA", "GENEA_GENEB"]
+    rows = [[3.0, 7.0, 2.0], [4.0, 6.0, 2.0]]
+
+    assert canonical_gene_order_sha256(genes) != block["gene_order_sha256"]
+
+    artifact = _write_hand_built_artifact(tmp_path, genes, roles, perturbations, rows)
+
+    with pytest.raises(ValueError, match="gene_order digest mismatch"):
+        module.measure_approximation_bias_v1(
+            fit_role_artifact=artifact, response_projection=block, sealed_pair_ids=[]
+        )
+
+
+def test_zero_overlap_recorded(tmp_path):
+    module = _load_metric_module()
+    genes = ["G1", "G2"]
+    block = _identity_block(genes, median_library=10.0, control_mean=[0.0, 0.0])
+
+    roles = ["singles", "singles", "combo_calibration"]
+    perturbations = ["AAA", "BBB", "AAA_BBB"]
+    rows = [[3.0, 7.0], [4.0, 6.0], [5.0, 5.0]]
+    artifact = _write_hand_built_artifact(tmp_path, genes, roles, perturbations, rows)
+
+    result = module.measure_approximation_bias_v1(
+        fit_role_artifact=artifact,
+        response_projection=block,
+        sealed_pair_ids=["ZZZ_YYY"],  # disjoint from the measured roster
+    )
+
+    assert result["sealed_pair_overlap_count"] == 0
