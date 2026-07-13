@@ -17,6 +17,7 @@ seal, imports no ``gears``/``cpa``, constructs no store.
 from __future__ import annotations
 
 import importlib.util
+import json
 import math
 from pathlib import Path
 
@@ -286,3 +287,168 @@ def test_r_star_constant_is_one_half():
     module = _load_metric_module()
     assert module._R_STAR == 0.5
     assert math.isfinite(module._R_STAR)
+
+
+# ---------------------------------------------------------------------------
+# Task 2: two-stage bootstrap + NON_FINITE accounting + determinism.
+# ---------------------------------------------------------------------------
+
+
+def _three_pair_ratio_fixture(module):
+    """The ``bias_to_signal_ratio_R``-fixture (Test 3, re-used): three combo pairs
+    with deliberately different spread/mismatch so every pair's ``g_i`` is real and
+    nonzero -- a well-behaved (non-degenerate) bootstrap input."""
+    genes = [f"F{i}" for i in range(1, 7)]  # F1..F6, p=6
+    median_library = 30.0
+    control_mean = [0.0] * 6
+    block = _identity_block(genes, median_library, control_mean)
+
+    base = [5.0, 5.0, 5.0, 5.0, 5.0, 5.0]
+
+    def _spread(dims: tuple[int, int], s: float) -> tuple[list[float], list[float]]:
+        row = list(base)
+        row[dims[0]] += s
+        row[dims[1]] -= s
+        row_swapped = list(base)
+        row_swapped[dims[0]] -= s
+        row_swapped[dims[1]] += s
+        return row, row_swapped
+
+    pair1_a, pair1_b = _spread((0, 1), 4.0)
+    pair2_a, pair2_b = _spread((2, 3), 2.0)
+    pair3_a, pair3_b = _spread((4, 5), 1.0)
+
+    combo_pairs = {
+        "P1_P2": _cells(pair1_a, pair1_b),
+        "P3_P4": _cells(pair2_a, pair2_b),
+        "P5_P6": _cells(pair3_a, pair3_b),
+    }
+    singles_rows = {
+        "P1": _cells([7.0, 3.0, 5.0, 5.0, 5.0, 5.0]),
+        "P2": _cells([3.0, 7.0, 5.0, 5.0, 5.0, 5.0]),
+        "P3": _cells([5.0, 5.0, 9.0, 1.0, 5.0, 5.0]),
+        "P4": _cells([5.0, 5.0, 1.0, 9.0, 5.0, 5.0]),
+        "P5": _cells([5.0, 5.0, 5.0, 5.0, 7.0, 3.0]),
+        "P6": _cells([5.0, 5.0, 5.0, 5.0, 3.0, 7.0]),
+    }
+    single_effects = module._single_effects(singles_rows, block, genes)
+    return genes, block, combo_pairs, single_effects
+
+
+def test_bootstrap_determinism_byte_identical():
+    module = _load_metric_module()
+    genes, block, combo_pairs, single_effects = _three_pair_ratio_fixture(module)
+
+    result_1 = module._bootstrap_intervals(
+        combo_pairs, single_effects, block, genes, seeds=[11, 23, 37], replicates=50
+    )
+    result_2 = module._bootstrap_intervals(
+        combo_pairs, single_effects, block, genes, seeds=[11, 23, 37], replicates=50
+    )
+
+    # Byte-identical canonical-JSON serialisation across two independent calls with
+    # the same seeds/replicates -- not just "==" on the dicts.
+    json_1 = json.dumps(result_1, sort_keys=True, separators=(",", ":"))
+    json_2 = json.dumps(result_2, sort_keys=True, separators=(",", ":"))
+    assert json_1 == json_2
+
+    # Sanity: the fixture is non-degenerate (real finite replicates + a real
+    # interval), so byte-identity isn't vacuously true over all-NON_FINITE output.
+    assert result_1["replicates_finite"] > 0
+    assert result_1["replicates_finite"] + result_1["replicates_non_finite"] == 50
+    assert isinstance(result_1["bootstrap_95_interval"]["bias_to_signal_ratio_R"], list)
+
+    # A DIFFERENT seed roster must generally move the interval (proves the seeds are
+    # actually consumed, not ignored) while still summing to the requested count.
+    result_3 = module._bootstrap_intervals(
+        combo_pairs, single_effects, block, genes, seeds=[999, 1000], replicates=50
+    )
+    assert result_3["replicates_finite"] + result_3["replicates_non_finite"] == 50
+    json_3 = json.dumps(result_3, sort_keys=True, separators=(",", ":"))
+    assert json_3 != json_1
+
+
+def test_zero_gi_denominator_counted_non_finite():
+    module = _load_metric_module()
+    genes = ["F1", "F2", "F3", "F4"]
+    median_library = 20.0
+    control_mean = [0.0] * 4
+    block = _identity_block(genes, median_library, control_mean)
+
+    zero_row = [0.0, 0.0, 0.0, 0.0]
+    # Dataset B from test_fairness_flag_flips_at_r_star ("above" R_star): real,
+    # solidly nonzero GI signal (independent, hand-picked, already known-good).
+    cell_a = [40.0, 18.06, 0.2, 40.0]
+    cell_b = [0.2, 0.2, 0.74, 0.2]
+    single_g = [0.2, 10.46, 0.2, 40.0]
+    single_h = [40.0, 0.2, 18.32, 0.2]
+
+    combo_pairs = {
+        "PERTA_PERTB": _cells(zero_row),  # exact eps_i = 0 by construction below
+        "PERTC_PERTD": _cells(cell_a, cell_b),
+    }
+    singles_rows = {
+        "PERTA": _cells(zero_row),
+        "PERTB": _cells(zero_row),
+        "PERTC": _cells(single_g),
+        "PERTD": _cells(single_h),
+    }
+    single_effects = module._single_effects(singles_rows, block, genes)
+
+    # Force (not monkeypatch) a REAL degenerate zero-GI-denominator pair: PERTA,
+    # PERTB, and the PERTA_PERTB combo all use the identical all-zero raw row, and
+    # control_mean is exactly [0]*4, so z(zero_row) = [0]*4 (log1p(0) == 0) and every
+    # one of delta_g/delta_h/delta_i is exactly `0.0 - 0.0 == 0.0` (IEEE-754 exact) ->
+    # eps_i is the exact zero vector -> g_i == 0.0 exactly, not an approximation.
+    point = module._gi_and_fairness(combo_pairs, single_effects, block, genes)
+    zero_pair_g_i = next(
+        e["g_i"] for e in point["gi_signal_per_pair"] if e["pair_id"] == "PERTA_PERTB"
+    )
+    assert zero_pair_g_i == 0.0
+
+    result = module._bootstrap_intervals(
+        combo_pairs, single_effects, block, genes, seeds=[11, 23, 37], replicates=300
+    )
+
+    # Nothing silently dropped: every replicate lands in exactly one bucket.
+    assert (
+        result["replicates_finite"] + result["replicates_non_finite"]
+        == result["replicates_requested"]
+        == 300
+    )
+    # With only 2 combo pairs (one exact-zero-g_i, one real-signal) drawn with
+    # replacement, "both draws hit the zero pair" genuinely occurs across 300
+    # replicates (median([0, 0]) == 0 -> zero GI denominator -> non-finite ratio),
+    # and so does "at least one draw hits the real-signal pair" (finite ratio) --
+    # this is a REAL degenerate branch being exercised, not a contrived 100% case.
+    assert result["replicates_non_finite"] >= 1
+    assert result["replicates_finite"] >= 1
+
+
+def test_point_estimate_is_rng_free():
+    module = _load_metric_module()
+    genes, block, combo_pairs, single_effects = _three_pair_ratio_fixture(module)
+
+    stratum_before = module._stratum_bias(combo_pairs, block, genes)
+    point_before = module._gi_and_fairness(combo_pairs, single_effects, block, genes)
+
+    module._bootstrap_intervals(
+        combo_pairs, single_effects, block, genes, seeds=[11, 23, 37], replicates=25
+    )
+    module._bootstrap_intervals(
+        combo_pairs, single_effects, block, genes, seeds=[999, 1000], replicates=40
+    )
+
+    stratum_after = module._stratum_bias(combo_pairs, block, genes)
+    point_after = module._gi_and_fairness(combo_pairs, single_effects, block, genes)
+
+    # The point estimate (signed_pc_bias / per_pair via _stratum_bias, and the full
+    # _gi_and_fairness result) is byte-identical regardless of which/how many
+    # bootstrap seeds were used -- the point path never consumes an RNG.
+    assert stratum_after["per_pair"] == stratum_before["per_pair"]
+    assert stratum_after["signed_pc_bias"] == stratum_before["signed_pc_bias"]
+    assert point_after == point_before
+
+    # The bootstrap must not mutate its inputs in place either.
+    assert set(combo_pairs) == {"P1_P2", "P3_P4", "P5_P6"}
+    assert set(single_effects) == {"P1", "P2", "P3", "P4", "P5", "P6"}

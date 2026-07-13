@@ -31,6 +31,17 @@ construction). It becomes ``baselines.gears.approximation_bias_report_sha256``;
 the GPU pod runs it on real Norman, and it is unit-tested locally on synthetic
 data.
 
+Bootstrap replicate-count decision (design spec §3 "Finite-sample uncertainty"):
+:func:`_bootstrap_intervals` takes an explicit ``replicates`` count from its
+caller. The CLI (wired in a later task) exposes this as a DEDICATED
+``--bootstrap-replicates`` argument defaulting to 2000, recorded verbatim as
+the report's ``replicates_requested``. This is deliberately NOT
+``configs/compose_k562_v1_phase2.yaml::baselines.method.bootstrap_replicates``
+(10000) -- that value calibrates the SEALED evaluation-outcome bootstrap over
+held-out predictions, a different estimand computed over a different
+population than this non-sealed fit-role fairness-ratio interval. Reusing it
+here would silently conflate two distinct bootstraps under one number.
+
 Usage
 -----
     uv run python scripts/compose/measure_pseudobulk_approximation_bias.py \
@@ -413,6 +424,177 @@ def _gi_and_fairness(
         "bias_to_signal_ratio_per_pair_median": _finite_or_sentinel(per_pair_median),
         "R_star": _R_STAR,
         "fairness_flag": fairness_flag,
+    }
+
+
+def _split_bootstrap_replicates(replicates: int, n_seeds: int) -> list[int]:
+    """Deterministically split ``replicates`` total draws across ``n_seeds`` seeds.
+
+    ``base, remainder = divmod(replicates, n_seeds)``; the first ``remainder`` seeds
+    (in the caller's ``seeds`` order) get ``base + 1`` draws, the rest get ``base`` --
+    so the split depends only on ``replicates`` and the ORDER of ``seeds``, never on
+    any additional randomness, and always sums to exactly ``replicates``.
+    """
+    if n_seeds <= 0:
+        raise ValueError("_bootstrap_intervals requires at least one seed")
+    base, remainder = divmod(replicates, n_seeds)
+    return [base + 1 if i < remainder else base for i in range(n_seeds)]
+
+
+def _bootstrap_intervals(
+    combo_pairs: Mapping[str, np.ndarray],
+    single_effects: Mapping[str, np.ndarray],
+    block: Mapping,
+    gene_order: Sequence[str],
+    *,
+    seeds: Sequence[int],
+    replicates: int,
+    combo_sep: str = "_",
+) -> dict:
+    """Two-stage nonparametric bootstrap 95% interval for the GI fairness statistics.
+
+    Registered-seed, byte-reproducible finite-sample uncertainty for
+    ``floor_median``, ``gi_signal_median``, and ``bias_to_signal_ratio_R`` (design
+    spec §3 "Finite-sample uncertainty"). Each replicate: (a) resamples
+    ``combo_calibration`` pair IDs WITH REPLACEMENT (``n_pairs`` draws), then (b)
+    resamples cells WITH REPLACEMENT within each sampled pair's own observed cell
+    matrix, then recomputes the three statistics on that resampled data via
+    :func:`_gi_and_fairness` -- the SAME ratio-of-medians aggregation as the point
+    estimate, not a re-derived formula. ``single_effects`` (the additive-null
+    delta_g/delta_h baseline from :func:`_single_effects`) is held FIXED across
+    every replicate: only the ``combo_calibration`` cells are resampled, because the
+    finite-sample question this interval answers is "how much does the observed
+    combo_calibration SAMPLE (of pairs, and of cells within each pair) move the
+    fairness ratio", not "how much would the single-role delta_g/delta_h estimate
+    itself move" -- resampling singles too would conflate two different estimands
+    into one interval.
+
+    Replicate count: ``replicates`` is a DEDICATED bootstrap-interval draw count,
+    never silently taken from
+    ``configs/compose_k562_v1_phase2.yaml::baselines.method.bootstrap_replicates``
+    (10000) -- see the module docstring. The CLI wires this as
+    ``--bootstrap-replicates`` (default 2000) in a later task; this function always
+    requires an explicit ``replicates`` from its caller.
+
+    Determinism: ``seeds`` (the config's ``seeds.registered_seeds``) are consumed
+    via ``np.random.default_rng(seed)`` in the given order, each producing a fixed
+    deterministic share of ``replicates`` (:func:`_split_bootstrap_replicates`).
+    Neither ``combo_pairs`` nor ``single_effects`` is ever mutated, so
+    byte-identical inputs + ``seeds`` + ``replicates`` always yield byte-identical
+    output, and calling this function never perturbs a separately-computed point
+    estimate (the point estimate takes no RNG input at all).
+
+    A resampled pair drawn more than once within one replicate is kept as DISTINCT
+    occurrences (each with its own independently-resampled cell subsample) by
+    giving each occurrence a unique salted key
+    (``f"{gene_a}~{occurrence}{combo_sep}{gene_b}~{occurrence}"``) with a
+    correspondingly salted copy of ``single_effects`` for that occurrence's two
+    genes. This lets ONE call to :func:`_gi_and_fairness` per replicate compute
+    every occurrence's ``b_i``/``g_i`` and their ratio-of-medians aggregation
+    exactly as the point estimate would, including a duplicate pair contributing
+    independently (twice) to the replicate's median.
+
+    Parameters
+    ----------
+    combo_pairs : mapping of str to numpy.ndarray
+        ``pair_id -> raw cell matrix`` for ``combo_calibration`` (the OBSERVED
+        sample; never mutated).
+    single_effects : mapping of str to numpy.ndarray
+        ``gene_id -> delta_g``, as returned by :func:`_single_effects`; held fixed
+        across every replicate (never mutated or resampled).
+    block : Mapping
+        The frozen ``response_projection`` block (spec §2.2).
+    gene_order : sequence of str
+        The full gene-ID order of every raw matrix.
+    seeds : sequence of int
+        The registered seed roster
+        (``configs/compose_k562_v1_phase2.yaml::seeds.registered_seeds``),
+        consumed in order.
+    replicates : int
+        Total bootstrap replicate count (becomes ``replicates_requested``).
+    combo_sep : str, default ``"_"``
+        Separator between a pair id's two constituent gene tokens.
+
+    Returns
+    -------
+    dict
+        ``{"bootstrap_95_interval": {"floor_median": [lo, hi] | "NON_FINITE",
+        "gi_signal_median": [lo, hi] | "NON_FINITE",
+        "bias_to_signal_ratio_R": [lo, hi] | "NON_FINITE"},
+        "replicates_requested": int, "replicates_finite": int,
+        "replicates_non_finite": int}``. ``replicates_finite +
+        replicates_non_finite == replicates_requested`` always holds. A replicate
+        is finite iff its resampled ``bias_to_signal_ratio_R`` is a finite number
+        (a zero-GI-denominator draw makes the ratio non-finite via
+        :func:`_safe_ratio`, which requires BOTH ``floor_median`` and
+        ``gi_signal_median`` to already be finite -- so a finite ratio implies the
+        other two are finite too). A non-finite replicate is excluded from all
+        three interval computations but is always counted, never silently
+        dropped. Interval endpoints are the 2.5th/97.5th percentiles over the
+        FINITE replicates for that statistic, or the string sentinel
+        :data:`_NON_FINITE_SENTINEL` when zero replicates are finite.
+    """
+    pair_ids = sorted(combo_pairs)
+    n_pairs = len(pair_ids)
+    replicate_counts = _split_bootstrap_replicates(replicates, len(seeds))
+
+    floor_vals: list[float] = []
+    gi_vals: list[float] = []
+    ratio_vals: list[float] = []
+    replicates_finite = 0
+    replicates_non_finite = 0
+
+    for seed, n_rep in zip(seeds, replicate_counts, strict=True):
+        rng = np.random.default_rng(seed)
+        for _ in range(n_rep):
+            resampled_combo: dict[str, np.ndarray] = {}
+            resampled_singles: dict[str, np.ndarray] = dict(single_effects)
+            if n_pairs > 0:
+                drawn = rng.integers(0, n_pairs, size=n_pairs)
+                for occurrence, idx in enumerate(drawn):
+                    pair_id = pair_ids[int(idx)]
+                    gene_a, gene_b = pair_id.split(combo_sep, 1)
+                    raw = np.asarray(combo_pairs[pair_id], dtype=np.float64)
+                    n_cells = raw.shape[0]
+                    cell_idx = rng.integers(0, n_cells, size=n_cells)
+                    key_a, key_b = f"{gene_a}~{occurrence}", f"{gene_b}~{occurrence}"
+                    resampled_combo[f"{key_a}{combo_sep}{key_b}"] = raw[cell_idx, :]
+                    resampled_singles[key_a] = single_effects[gene_a]
+                    resampled_singles[key_b] = single_effects[gene_b]
+
+            if resampled_combo:
+                rep = _gi_and_fairness(
+                    resampled_combo, resampled_singles, block, gene_order, combo_sep=combo_sep
+                )
+                floor_rep = rep["floor_median"]
+                gi_rep = rep["gi_signal_median"]
+                ratio_rep = rep["bias_to_signal_ratio_R"]
+            else:
+                floor_rep = gi_rep = ratio_rep = _NON_FINITE_SENTINEL
+
+            if isinstance(ratio_rep, float) and math.isfinite(ratio_rep):
+                replicates_finite += 1
+                floor_vals.append(floor_rep)
+                gi_vals.append(gi_rep)
+                ratio_vals.append(ratio_rep)
+            else:
+                replicates_non_finite += 1
+
+    def _interval(values: list[float]) -> list[float] | str:
+        if not values:
+            return _NON_FINITE_SENTINEL
+        lo, hi = np.percentile(values, [2.5, 97.5])
+        return [_finite_or_sentinel(float(lo)), _finite_or_sentinel(float(hi))]
+
+    return {
+        "bootstrap_95_interval": {
+            "floor_median": _interval(floor_vals),
+            "gi_signal_median": _interval(gi_vals),
+            "bias_to_signal_ratio_R": _interval(ratio_vals),
+        },
+        "replicates_requested": int(replicates),
+        "replicates_finite": replicates_finite,
+        "replicates_non_finite": replicates_non_finite,
     }
 
 
