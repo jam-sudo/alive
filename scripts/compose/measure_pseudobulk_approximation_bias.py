@@ -46,7 +46,7 @@ import argparse
 import json
 import math
 import sys
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 import anndata as ad
@@ -62,6 +62,10 @@ from alive.provenance import sha256_file, sha256_json
 _NON_FINITE_SENTINEL = "NON_FINITE"
 
 _GROUP_KEY_SEP = "::"
+
+#: Pre-registered fairness threshold (design spec §5): ``R >= _R_STAR`` marks the
+#: sealed GEARS family-comparator interpretation ``"representation_confounded"``.
+_R_STAR = 0.5
 
 
 def _finite_or_sentinel(value: float) -> float | str:
@@ -131,6 +135,285 @@ def _group_bias_vectors(
         )
         out[key] = {"b": delta_pb - delta_pc, "delta_pc": delta_pc}
     return out
+
+
+def _safe_ratio(numerator: float, denominator: float) -> float:
+    """Return ``numerator / denominator``, or ``math.nan`` if that is ill-defined.
+
+    Ill-defined means either operand is non-finite or ``denominator == 0.0``
+    (a zero-GI-denominator pair is recorded as ``NON_FINITE``, never silently
+    dropped or treated as an arbitrary large ratio).
+    """
+    if math.isfinite(numerator) and math.isfinite(denominator) and denominator != 0.0:
+        return numerator / denominator
+    return math.nan
+
+
+def _stratify_by_role(
+    roles: Sequence[str],
+    perturbations: Sequence[str],
+    X: np.ndarray,
+    *,
+    control_token: str = "control",
+) -> dict[str, dict[str, np.ndarray]]:
+    """Group raw rows by fit role into per-pair / per-gene raw cell matrices.
+
+    Only rows whose role is ``"combo_calibration"`` or ``"singles"`` are kept;
+    ``control_token`` rows (and any other role) are dropped — ``control`` is
+    reference-only via the frozen projection block's ``control_mean`` and is
+    NEVER a measured pair (CLAUDE.md invariants; spec §3 "Populations"). This
+    is stratification only: the seal-safety fail-closed rejection of a
+    ``sealed_pair_ids`` member is Task 3's guard, not built here (YAGNI).
+
+    Parameters
+    ----------
+    roles : sequence of str
+        Per-row fit role (``adata.obs["role"]`` values).
+    perturbations : sequence of str
+        Per-row canonical perturbation token (``adata.obs["perturbation"]``); a
+        combo token is already byte-canonicalized as ``"{gene_a}{sep}{gene_b}"``
+        upstream (spec §3.2 / ``fit_role.py``).
+    X : numpy.ndarray
+        Raw counts, shape ``(n_rows, n_genes)``, row-aligned with ``roles``.
+
+    Returns
+    -------
+    dict of str to dict
+        ``{"combo_calibration": {pair_id: raw_matrix}, "singles": {gene_id: raw_matrix}}``.
+
+    Raises
+    ------
+    ValueError
+        If ``roles``, ``perturbations``, and ``X`` do not have matching row counts.
+    """
+    X = np.asarray(X, dtype=np.float64)
+    if len(roles) != len(perturbations) or len(roles) != X.shape[0]:
+        raise ValueError("roles, perturbations, and X must have matching row counts")
+
+    row_idx: dict[str, dict[str, list[int]]] = {"combo_calibration": {}, "singles": {}}
+    for i, (role, pert) in enumerate(zip(roles, perturbations, strict=True)):
+        if role == control_token or role not in row_idx:
+            continue
+        row_idx[role].setdefault(str(pert), []).append(i)
+
+    return {
+        stratum: {key: X[idx, :] for key, idx in keys.items()} for stratum, keys in row_idx.items()
+    }
+
+
+def _stratum_bias(
+    rows_by_pair: Mapping[str, np.ndarray],
+    block: Mapping,
+    gene_order: Sequence[str],
+) -> dict:
+    """Per-pair (or per-gene) pseudobulk-approximation bias for one stratum.
+
+    For each ``key -> raw_cell_matrix`` entry, projects the population-mean row
+    via ``"raw_pseudobulk_approximation"`` and the individual cells via
+    ``"cell_raw_counts"`` (both through the SAME frozen ``block``), and reports
+    the representation-floor bias vector ``bias_i = z(mean_cells(raw)) -
+    mean_cells(z(raw))`` (design spec §2 — ``control_mean`` cancels in this
+    difference and is not subtracted here) and ``b_i = p^-1 ||bias_i||_2^2``
+    (mean of squares).
+
+    Parameters
+    ----------
+    rows_by_pair : mapping of str to numpy.ndarray
+        ``pair_id -> raw cell matrix`` (shape ``(n_cells, n_genes)``) for one
+        stratum; the key is a gene id for the ``singles`` stratum.
+    block : Mapping
+        The frozen ``response_projection`` block (spec §2.2): ``median_library``,
+        ``hvg_gene_ids``, ``pca_mean``, ``pca_components``, ``gene_order_sha256``.
+    gene_order : sequence of str
+        The full gene-ID order of every raw matrix; must match the block's
+        ``gene_order_sha256`` (enforced by :func:`apply_response_projection`).
+
+    Returns
+    -------
+    dict
+        ``{"n_pairs": int, "per_pair": [{"pair_id", "b_i"}, ...] (sorted by
+        pair_id), "b_distribution": {"median", "mean", "max", "q90"},
+        "signed_pc_bias": [float, ...]}``. Every float leaf is finite or the
+        string sentinel :data:`_NON_FINITE_SENTINEL`.
+    """
+    pair_ids = sorted(rows_by_pair)
+    per_pair: list[dict] = []
+    bias_vectors: list[np.ndarray] = []
+    for pair_id in pair_ids:
+        raw = np.asarray(rows_by_pair[pair_id], dtype=np.float64)
+        mean_row = raw.mean(axis=0, keepdims=True)
+        z_pseudobulk = apply_response_projection(
+            block, mean_row, gene_order, representation="raw_pseudobulk_approximation"
+        )[0]
+        z_per_cell = apply_response_projection(
+            block, raw, gene_order, representation="cell_raw_counts"
+        ).mean(axis=0)
+        bias_i = z_pseudobulk - z_per_cell
+        bias_vectors.append(bias_i)
+        per_pair.append({"pair_id": pair_id, "b_i": _finite_or_sentinel(float(np.mean(bias_i**2)))})
+
+    finite_b = [entry["b_i"] for entry in per_pair if isinstance(entry["b_i"], float)]
+    if finite_b:
+        b_distribution = {
+            "median": _finite_or_sentinel(float(np.median(finite_b))),
+            "mean": _finite_or_sentinel(float(np.mean(finite_b))),
+            "max": _finite_or_sentinel(float(np.max(finite_b))),
+            "q90": _finite_or_sentinel(float(np.quantile(finite_b, 0.9))),
+        }
+    else:
+        b_distribution = dict.fromkeys(("median", "mean", "max", "q90"), _NON_FINITE_SENTINEL)
+
+    signed_pc_bias = (
+        [_finite_or_sentinel(float(v)) for v in np.mean(np.stack(bias_vectors), axis=0)]
+        if bias_vectors
+        else []
+    )
+
+    return {
+        "n_pairs": len(pair_ids),
+        "per_pair": per_pair,
+        "b_distribution": b_distribution,
+        "signed_pc_bias": signed_pc_bias,
+    }
+
+
+def _single_effects(
+    singles_rows_by_gene: Mapping[str, np.ndarray],
+    block: Mapping,
+    gene_order: Sequence[str],
+) -> dict[str, np.ndarray]:
+    """Per-gene single-perturbation truth effect (additive-null input).
+
+    ``delta_g = mean_cells(z(cells_raw)) - control_mean`` using the exact
+    per-cell representation (``"cell_raw_counts"``) — a truth response, not a
+    bias/floor measurement.
+
+    Parameters
+    ----------
+    singles_rows_by_gene : mapping of str to numpy.ndarray
+        ``gene_id -> raw cell matrix`` for the ``singles`` stratum.
+    block : Mapping
+        The frozen ``response_projection`` block (spec §2.2).
+    gene_order : sequence of str
+        The full gene-ID order of every raw matrix.
+
+    Returns
+    -------
+    dict of str to numpy.ndarray
+        ``gene_id -> delta_g``, shape ``(pca_dim,)``.
+    """
+    control_mean = np.asarray(block["control_mean"], dtype=np.float64)
+    out: dict[str, np.ndarray] = {}
+    for gene, raw in singles_rows_by_gene.items():
+        z_per_cell = apply_response_projection(
+            block, np.asarray(raw, dtype=np.float64), gene_order, representation="cell_raw_counts"
+        )
+        out[gene] = z_per_cell.mean(axis=0) - control_mean
+    return out
+
+
+def _gi_and_fairness(
+    combo_pairs: Mapping[str, np.ndarray],
+    single_effects: Mapping[str, np.ndarray],
+    block: Mapping,
+    gene_order: Sequence[str],
+    *,
+    combo_sep: str = "_",
+) -> dict:
+    """GI residual, ratio-of-medians fairness ratio, and the pre-registered flag.
+
+    Computed on ``combo_calibration`` only (design spec §4/§5). For each combo
+    pair, decomposes its ``pair_id`` into its two constituent genes on
+    ``combo_sep``, forms the additive-null residual ``eps_i = delta_i -
+    (delta_g + delta_h)`` (``delta_i`` uses the exact ``"cell_raw_counts"``
+    path; ``control_mean`` cancels), and reports ``g_i = p^-1 ||eps_i||_2^2``.
+    ``floor_median`` reuses the SAME pairs' ``b_i`` via :func:`_stratum_bias` so
+    the ratio and the reported per-pair bias are computed identically.
+    ``bias_to_signal_ratio_R`` is the **ratio of medians**
+    (``floor_median / gi_signal_median``), not the median of per-pair ratios
+    (reported separately as ``bias_to_signal_ratio_per_pair_median``, a
+    secondary robustness view) — the ratio-of-medians is the pre-registered
+    primitive that drives ``fairness_flag`` and stays stable when some ``g_i``
+    is near zero.
+
+    Parameters
+    ----------
+    combo_pairs : mapping of str to numpy.ndarray
+        ``pair_id -> raw cell matrix`` for ``combo_calibration``.
+    single_effects : mapping of str to numpy.ndarray
+        ``gene_id -> delta_g``, as returned by :func:`_single_effects`; must
+        cover every gene named by every ``combo_pairs`` key.
+    block : Mapping
+        The frozen ``response_projection`` block (spec §2.2).
+    gene_order : sequence of str
+        The full gene-ID order of every raw matrix.
+    combo_sep : str, default ``"_"``
+        Separator between a pair id's two constituent gene tokens (the
+        config's ``data.combo_sep``).
+
+    Returns
+    -------
+    dict
+        ``{"gi_signal_per_pair": [{"pair_id", "g_i"}, ...] (sorted by pair_id),
+        "gi_signal_median", "floor_median", "bias_to_signal_ratio_R",
+        "bias_to_signal_ratio_per_pair_median", "R_star", "fairness_flag"}``.
+        Every float leaf is finite or the string sentinel
+        :data:`_NON_FINITE_SENTINEL`; ``fairness_flag`` is derived from the
+        raw (pre-sentinel) ratio.
+    """
+    control_mean = np.asarray(block["control_mean"], dtype=np.float64)
+    stratum = _stratum_bias(combo_pairs, block, gene_order)
+    b_by_pair = {entry["pair_id"]: entry["b_i"] for entry in stratum["per_pair"]}
+
+    pair_ids = sorted(combo_pairs)
+    gi_per_pair: list[dict] = []
+    g_by_pair: dict[str, float] = {}
+    for pair_id in pair_ids:
+        gene_a, gene_b = pair_id.split(combo_sep, 1)
+        raw = np.asarray(combo_pairs[pair_id], dtype=np.float64)
+        delta_i = (
+            apply_response_projection(
+                block, raw, gene_order, representation="cell_raw_counts"
+            ).mean(axis=0)
+            - control_mean
+        )
+        eps_i = delta_i - (single_effects[gene_a] + single_effects[gene_b])
+        g_i = float(np.mean(eps_i**2))
+        g_by_pair[pair_id] = g_i
+        gi_per_pair.append({"pair_id": pair_id, "g_i": _finite_or_sentinel(g_i)})
+
+    finite_b = [b_by_pair[p] for p in pair_ids if isinstance(b_by_pair[p], float)]
+    finite_g = [g_by_pair[p] for p in pair_ids if math.isfinite(g_by_pair[p])]
+    floor_median = float(np.median(finite_b)) if finite_b else math.nan
+    gi_signal_median = float(np.median(finite_g)) if finite_g else math.nan
+
+    ratio_r = _safe_ratio(floor_median, gi_signal_median)
+    per_pair_ratios = [
+        _safe_ratio(b_by_pair[p], g_by_pair[p])
+        for p in pair_ids
+        if isinstance(b_by_pair[p], float) and math.isfinite(g_by_pair[p])
+    ]
+    finite_per_pair_ratios = [r for r in per_pair_ratios if math.isfinite(r)]
+    per_pair_median = (
+        float(np.median(finite_per_pair_ratios)) if finite_per_pair_ratios else math.nan
+    )
+
+    # A non-finite ratio (undetermined floor/GI-signal median) never claims
+    # confoundedness; it honestly falls back to "clear" (CLAUDE.md invariants
+    # — do not overclaim on a degenerate/undefined comparison).
+    fairness_flag = (
+        "representation_confounded" if math.isfinite(ratio_r) and ratio_r >= _R_STAR else "clear"
+    )
+
+    return {
+        "gi_signal_per_pair": gi_per_pair,
+        "gi_signal_median": _finite_or_sentinel(gi_signal_median),
+        "floor_median": _finite_or_sentinel(floor_median),
+        "bias_to_signal_ratio_R": _finite_or_sentinel(ratio_r),
+        "bias_to_signal_ratio_per_pair_median": _finite_or_sentinel(per_pair_median),
+        "R_star": _R_STAR,
+        "fairness_flag": fairness_flag,
+    }
 
 
 def measure_pseudobulk_approximation_bias(
