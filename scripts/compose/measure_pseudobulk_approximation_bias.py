@@ -84,16 +84,19 @@ import yaml
 from scipy import sparse
 
 from alive.compose.approximation_bias import (
+    APPROXIMATION_BIAS_SCHEMA,
     NON_FINITE,
     R_STAR,
+    ProbeAEvidence,
     canonical_json,
+    load_probe_a_evidence,
     measurement_contract_sha256,
+    probe_a_from_evidence,
     self_checksum,
     validate_approximation_bias_report,
-    validate_probe_a_evidence,
 )
 from alive.compose.fit_role import apply_response_projection, canonical_gene_order_sha256
-from alive.provenance import sha256_file, sha256_json
+from alive.provenance import sha256_bytes, sha256_file, sha256_json
 
 #: Only finite floats or this string sentinel are ever embedded in the report
 #: (CLAUDE.md#invariants / #data-eval — report the degenerate value honestly,
@@ -111,8 +114,8 @@ _R_STAR = R_STAR
 #: but must NEVER be presented as a *measured* pair to this metric.
 _ARTIFACT_ROLES: frozenset[str] = frozenset({"control", "singles", "combo_calibration"})
 
-#: The v1 report's ``schema`` literal (design spec §4).
-_SCHEMA_V1 = "compose_approximation_bias_report_v1"
+#: The v2 report's ``schema`` literal (design spec §4).
+_SCHEMA_V2 = APPROXIMATION_BIAS_SCHEMA
 
 
 def _finite_or_sentinel(value: float) -> float | str:
@@ -599,7 +602,7 @@ def _self_checksum(report_without_checksum: Mapping) -> str:
         spec §4: "SHA-256 of the canonical JSON of every field above except
         ``self_checksum``"). Passing a dict that still contains
         ``self_checksum`` would make the digest depend on itself; callers
-        (including :func:`measure_approximation_bias_v1`) always strip that
+        (including :func:`measure_approximation_bias_v2`) always strip that
         key first.
 
     Returns
@@ -610,7 +613,7 @@ def _self_checksum(report_without_checksum: Mapping) -> str:
     return self_checksum(report_without_checksum)
 
 
-def measure_approximation_bias_v1(
+def measure_approximation_bias_v2(
     *,
     fit_role_artifact: str,
     response_projection: Mapping,
@@ -622,9 +625,9 @@ def measure_approximation_bias_v1(
     norman_source_sha256: str | None = None,
     pod_instance: str | None = None,
     combo_sep: str = "_",
-    admission_status: str = "admitted",
+    probe_a_evidence: ProbeAEvidence | None = None,
 ) -> dict:
-    """Assemble the FULL ``compose_approximation_bias_report_v1`` object.
+    """Assemble the FULL ``compose_approximation_bias_report_v2`` object.
 
     Task 4 of the COMPOSE approximation-bias v1 implementation plan
     (``docs/superpowers/plans/2026-07-13-compose-approximation-bias-implementation.md``):
@@ -634,7 +637,7 @@ def measure_approximation_bias_v1(
     ``self_checksum`` blocks (design spec §4). In order:
 
     (a)-(c) Task 3's guards (measured-role whitelist, sealed-roster overlap,
-        gene-order digest) — see :func:`measure_approximation_bias_v1`'s prior
+        gene-order digest) — see :func:`measure_approximation_bias_v2`'s prior
         revision for their exact messages; UNCHANGED here so every existing
         seal-safety negative test keeps matching the metric's OWN message
         before any provenance field is even inspected.
@@ -699,20 +702,16 @@ def measure_approximation_bias_v1(
     combo_sep : str, default ``"_"``
         Separator between a combo pair id's two constituent gene tokens (the
         config's ``data.combo_sep``).
-    admission_status : str, default ``"admitted"``
-        The resolved Probe-A admission gate outcome (Task 5's
-        :func:`_probe_a_admission`, called by the CLI BEFORE this function is
-        even invoked -- a refused admission never reaches this assembler).
-        Embedded verbatim as the report's top-level ``admission_status``
-        field and therefore covered by ``self_checksum`` like every other
-        field. Defaults to ``"admitted"`` only so existing direct callers
-        (e.g. unit tests built before Task 5) that never gate admission keep
-        assembling a valid report.
+    probe_a_evidence : ProbeAEvidence
+        Required immutable Probe-A admission bytes. The producer revalidates
+        them even for direct API calls and binds both their exact file SHA and
+        evidence-manifest SHA into report provenance; there is no admitted
+        default or free-form status bypass.
 
     Returns
     -------
     dict
-        The full ``compose_approximation_bias_report_v1`` object (see "The v1
+        The full ``compose_approximation_bias_report_v2`` object (see "The v2
         report object" in the implementation plan): ``schema``,
         ``deliverable``, ``protocol``, ``seal_status``, ``method``,
         ``admission_status``, ``strata`` (``combo_calibration`` + ``singles``),
@@ -730,6 +729,15 @@ def measure_approximation_bias_v1(
         required provenance field(s): ..."`` or a ``registered_seeds``/
         ``replicates`` message for guard (d).
     """
+    if probe_a_evidence is None:
+        raise ValueError(
+            "approximation-bias: Probe-A evidence is required; measurement NOT_ADMISSIBLE"
+        )
+    try:
+        probe_a = probe_a_from_evidence(probe_a_evidence, expected_git_commit=git_commit)
+    except ValueError as exc:
+        raise ValueError(f"approximation-bias: {exc}") from exc
+
     block = response_projection
     adata = ad.read_h5ad(fit_role_artifact)
     roles = [str(r) for r in adata.obs["role"]]
@@ -807,17 +815,19 @@ def measure_approximation_bias_v1(
         "gene_order_sha256": str(block["gene_order_sha256"]),
         "pca_dim": int(len(block["control_mean"])),
         "registered_seeds": [int(s) for s in registered_seeds],
+        "probe_a_evidence_sha256": probe_a_evidence.content_sha256,
+        "probe_a_evidence_manifest_sha256": str(probe_a["evidence_manifest_sha256"]),
         "sealed_pair_overlap_count": sealed_pair_overlap_count,
         "pod_instance": str(pod_instance),
     }
 
     report_without_checksum = {
-        "schema": _SCHEMA_V1,
+        "schema": _SCHEMA_V2,
         "deliverable": "gears_pseudobulk_approximation_bias_report",
         "protocol": "COMPOSE-K562-v1",
         "seal_status": "unopened",
         "method": "raw_pseudobulk_approximation",
-        "admission_status": str(admission_status),
+        "admission_status": "admitted",
         "strata": strata,
         "gi_and_fairness": gi_and_fairness,
         "provenance": provenance,
@@ -836,6 +846,8 @@ def measure_approximation_bias_v1(
             "gene_order_sha256": str(block["gene_order_sha256"]),
             "pca_dim": int(len(block["control_mean"])),
             "registered_seeds": [int(seed) for seed in registered_seeds],
+            "probe_a_evidence_sha256": probe_a_evidence.content_sha256,
+            "probe_a_evidence_manifest_sha256": str(probe_a["evidence_manifest_sha256"]),
         },
     )
     return report
@@ -874,8 +886,12 @@ def _probe_a_admission(evidence: Mapping, *, expected_git_commit: str | None = N
         §6 test 8; CLAUDE.md invariants -- an unknown admission state is
         never silently treated as passing).
     """
+    # Compatibility helper for focused tests; the production assembler accepts
+    # only immutable ProbeAEvidence and revalidates it itself.
+    body = canonical_json(evidence).encode("utf-8")
+    snapshot = ProbeAEvidence(content_sha256=sha256_bytes(body), evidence_bytes=body)
     try:
-        validate_probe_a_evidence(evidence, expected_git_commit=expected_git_commit)
+        probe_a_from_evidence(snapshot, expected_git_commit=expected_git_commit)
     except ValueError as exc:
         raise ValueError(f"approximation-bias: {exc}") from exc
     return "admitted"
@@ -930,8 +946,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--out", required=True, type=Path)
     args = ap.parse_args(argv)
 
-    probe_a_evidence = json.loads(args.probe_a_evidence.read_text(encoding="utf-8"))
-    admission_status = _probe_a_admission(probe_a_evidence, expected_git_commit=args.git_commit)
+    probe_a_evidence = load_probe_a_evidence(
+        args.probe_a_evidence, expected_git_commit=args.git_commit
+    )
 
     block = json.loads(args.response_projection.read_text(encoding="utf-8"))
     sealed_pair_ids = json.loads(args.sealed_pair_ids.read_text(encoding="utf-8"))
@@ -939,11 +956,11 @@ def main(argv: list[str] | None = None) -> int:
     basis_config_sha256 = sha256_json(basis_config_raw)
     registered_seeds = [int(s) for s in basis_config_raw["seeds"]["registered_seeds"]]
 
-    report = measure_approximation_bias_v1(
+    report = measure_approximation_bias_v2(
         fit_role_artifact=str(args.fit_role_artifact),
         response_projection=block,
         sealed_pair_ids=sealed_pair_ids,
-        admission_status=admission_status,
+        probe_a_evidence=probe_a_evidence,
         basis_config_sha256=basis_config_sha256,
         registered_seeds=registered_seeds,
         replicates=args.bootstrap_replicates,

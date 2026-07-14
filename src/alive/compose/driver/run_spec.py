@@ -1,4 +1,4 @@
-"""ResolvedRunSpec v1 schema + fail-closed loader (COMPOSE production driver).
+"""ResolvedRunSpec v2 schema + fail-closed loader (COMPOSE production driver).
 
 The COMPOSE single production driver (sub-project C) drives its three normal
 subcommands (``phase2a`` / ``preflight`` / ``phase2b``) from one immutable
@@ -63,8 +63,8 @@ __all__ = [
 # Schema constants (spec §2.2)
 # ---------------------------------------------------------------------------
 
-#: Exact ``schema`` discriminator every v1 ResolvedRunSpec must carry.
-RESOLVED_RUN_SPEC_SCHEMA = "compose_resolved_run_spec_v1"
+#: Exact ``schema`` discriminator every v2 ResolvedRunSpec must carry.
+RESOLVED_RUN_SPEC_SCHEMA = "compose_resolved_run_spec_v2"
 
 #: The two recognised dispatch modes.
 _MODES = frozenset({"fixture", "scientific"})
@@ -268,7 +268,7 @@ class WorkerBlock:
 
 @dataclass(frozen=True)
 class ResolvedRunSpec:
-    """A validated, immutable ResolvedRunSpec v1 (spec §2.2).
+    """A validated, immutable ResolvedRunSpec v2 (spec §2.2).
 
     Every field mirrors the canonical JSON, except :attr:`file_sha256`, which is
     the loader-computed SHA-256 of the spec file's own bytes (used downstream to

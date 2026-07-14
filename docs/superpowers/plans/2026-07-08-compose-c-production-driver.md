@@ -50,7 +50,7 @@ Every task's requirements implicitly include these (copied from the C spec 2026-
 **Interfaces:**
 - Consumes: `alive.compose.datacard.compute_compose_run_id(config_digest, data_card_digest, raw_or_source_digest, sequence_mapping_digest) -> str`; `alive.io.sha256_file`; `sha256_json`; `alive.compose.durable._canonical_bytes` (or `json.dumps(sort_keys, separators)`).
 - Produces:
-  - `RESOLVED_RUN_SPEC_SCHEMA = "compose_resolved_run_spec_v1"`.
+  - `RESOLVED_RUN_SPEC_SCHEMA = "compose_resolved_run_spec_v2"`.
   - `RUN_PRODUCED_BASENAMES` constant dict pinning the exact values (`frozen_bundle="frozen_prediction_bundle.json"`, `oof_manifest="oof_fold_manifest.json"`, `phase2a_seed_variability_report="phase2a_development_seed_variability.json"`, `run_ledger="phase2a_run_ledger.json"`, `futility_report="phase2a_futility.json"`, `seal_confirmation_manifest="seal_confirmation_manifest.json"`).
   - `EXPECTED_HASHES_KEYS = frozenset({...7 keys...})` (`response_space_checksum, factor_checksum, manifest_checksum, environment_checksum, data_card_checksum, raw_data_checksum, sequence_mapping_checksum`).
   - `class ResolvedRunSpec` (frozen dataclass mirroring §2.2) with `.mode`, `.run_id`, `.run_dir`, `.approved_artifacts_root`, `.self_checksum`, digests, `expected_hashes`, per-method worker blocks, and the mode-specific `sealed_input`/activation/fixture blocks.

@@ -12,6 +12,7 @@ import json
 import math
 import re
 from copy import deepcopy
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -19,7 +20,7 @@ import yaml
 
 from alive.provenance import sha256_bytes, sha256_file, sha256_json
 
-APPROXIMATION_BIAS_SCHEMA = "compose_approximation_bias_report_v1"
+APPROXIMATION_BIAS_SCHEMA = "compose_approximation_bias_report_v2"
 PROBE_A_SCHEMA = "compose_gears_probe_a_admission_v1"
 PROTOCOL = "COMPOSE-K562-v1"
 REPRESENTATION = "raw_pseudobulk_approximation"
@@ -69,6 +70,8 @@ _PROVENANCE_KEYS = frozenset(
         "gene_order_sha256",
         "pca_dim",
         "registered_seeds",
+        "probe_a_evidence_sha256",
+        "probe_a_evidence_manifest_sha256",
         "sealed_pair_overlap_count",
         "pod_instance",
     }
@@ -92,6 +95,53 @@ _OUTPUT_BRIDGE_KEYS = frozenset({"representation", "verdict", "tolerance", "max_
 
 class ApproximationBiasValidationError(ValueError):
     """Raised when approximation-bias or Probe-A evidence is not trustworthy."""
+
+
+@dataclass(frozen=True)
+class ApproximationBiasEvidence:
+    """Immutable, byte-bound approximation-bias evidence carried across the seal boundary.
+
+    The scientific driver reads the file exactly once before constructing a sealed
+    store.  The library entry point revalidates these immutable bytes before any
+    access claim and carries only the extracted scalar fairness block afterward.
+    """
+
+    content_sha256: str
+    report_bytes: bytes
+
+    def __post_init__(self) -> None:
+        if _HEX64.fullmatch(self.content_sha256) is None:
+            raise ApproximationBiasValidationError(
+                "ApproximationBiasEvidence.content_sha256 must be 64 lowercase hex characters"
+            )
+        if not isinstance(self.report_bytes, bytes):
+            raise ApproximationBiasValidationError(
+                "ApproximationBiasEvidence.report_bytes must be immutable bytes"
+            )
+        if sha256_bytes(self.report_bytes) != self.content_sha256:
+            raise ApproximationBiasValidationError(
+                "ApproximationBiasEvidence bytes do not match content_sha256"
+            )
+
+
+@dataclass(frozen=True)
+class ProbeAEvidence:
+    """Immutable Probe-A admission bytes and their exact file SHA-256."""
+
+    content_sha256: str
+    evidence_bytes: bytes
+
+    def __post_init__(self) -> None:
+        if _HEX64.fullmatch(self.content_sha256) is None:
+            raise ApproximationBiasValidationError(
+                "ProbeAEvidence.content_sha256 must be 64 lowercase hex characters"
+            )
+        if not isinstance(self.evidence_bytes, bytes):
+            raise ApproximationBiasValidationError("ProbeAEvidence.evidence_bytes must be bytes")
+        if sha256_bytes(self.evidence_bytes) != self.content_sha256:
+            raise ApproximationBiasValidationError(
+                "ProbeAEvidence bytes do not match content_sha256"
+            )
 
 
 def canonical_json(obj: object) -> str:
@@ -207,6 +257,37 @@ def _interval(value: object, *, field: str) -> None:
         _fail(f"{field} lower endpoint exceeds upper endpoint")
 
 
+def _median(values: list[float]) -> float:
+    ordered = sorted(values)
+    middle = len(ordered) // 2
+    if len(ordered) % 2:
+        return ordered[middle]
+    return (ordered[middle - 1] + ordered[middle]) / 2.0
+
+
+def _linear_quantile(values: list[float], q: float) -> float:
+    """Match NumPy's default linear quantile for a non-empty finite sample."""
+    ordered = sorted(values)
+    position = (len(ordered) - 1) * q
+    lower = math.floor(position)
+    upper = math.ceil(position)
+    if lower == upper:
+        return ordered[lower]
+    weight = position - lower
+    return ordered[lower] * (1.0 - weight) + ordered[upper] * weight
+
+
+def _require_derived_metric(actual: object, expected: float | str, *, field: str) -> None:
+    """Require a reported aggregate to equal its per-pair-derived value."""
+    if expected == NON_FINITE:
+        if actual != NON_FINITE:
+            _fail(f"{field} must be {NON_FINITE!r} for an empty/non-finite source roster")
+        return
+    observed = _finite(actual, field=field)
+    if not math.isclose(observed, expected, rel_tol=1e-12, abs_tol=1e-15):
+        _fail(f"{field} is inconsistent with its per-pair source values")
+
+
 def _validate_checksum(payload: Mapping[str, Any], *, field: str = "self_checksum") -> None:
     declared = _hex64(payload.get(field), field=field)
     body = {key: value for key, value in payload.items() if key != field}
@@ -250,6 +331,41 @@ def validate_probe_a_evidence(
     _validate_checksum(obj)
 
 
+def probe_a_from_evidence(
+    evidence: ProbeAEvidence, *, expected_git_commit: str | None = None
+) -> dict[str, Any]:
+    """Revalidate an immutable Probe-A snapshot and return a fresh object."""
+    if not isinstance(evidence, ProbeAEvidence):
+        _fail("Probe-A evidence must be a ProbeAEvidence snapshot")
+    if sha256_bytes(evidence.evidence_bytes) != evidence.content_sha256:
+        _fail("Probe-A evidence bytes changed after capture")
+    try:
+        payload = json.loads(evidence.evidence_bytes)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ApproximationBiasValidationError(f"Probe-A evidence is invalid JSON: {exc}") from exc
+    if not isinstance(payload, dict):
+        _fail("Probe-A evidence must be a JSON object")
+    validate_probe_a_evidence(payload, expected_git_commit=expected_git_commit)
+    return payload
+
+
+def load_probe_a_evidence(
+    path: str | Path, *, expected_git_commit: str | None = None
+) -> ProbeAEvidence:
+    """Read Probe-A once, validate it, and retain the exact immutable bytes."""
+    try:
+        evidence_bytes = Path(path).read_bytes()
+    except OSError as exc:
+        raise ApproximationBiasValidationError(
+            f"Probe-A evidence is missing or unreadable: {exc}"
+        ) from exc
+    evidence = ProbeAEvidence(
+        content_sha256=sha256_bytes(evidence_bytes), evidence_bytes=evidence_bytes
+    )
+    probe_a_from_evidence(evidence, expected_git_commit=expected_git_commit)
+    return evidence
+
+
 def validate_approximation_bias_report(
     report: Mapping[str, Any],
     *,
@@ -259,7 +375,7 @@ def validate_approximation_bias_report(
     expected_git_commit: str | None = None,
     expected_provenance: Mapping[str, Any] | None = None,
 ) -> None:
-    """Validate the complete v1 report, including scientific interpretation coherence."""
+    """Validate the complete v2 report, including scientific interpretation coherence."""
     obj = _exact_keys(report, _TOP_KEYS, field="approximation-bias report")
     if obj["schema"] != APPROXIMATION_BIAS_SCHEMA:
         _fail(f"report schema must be {APPROXIMATION_BIAS_SCHEMA!r}")
@@ -278,6 +394,7 @@ def validate_approximation_bias_report(
         obj["strata"], frozenset({"combo_calibration", "singles"}), field="report.strata"
     )
     stratum_pair_ids: dict[str, list[str]] = {}
+    stratum_bias_values: dict[str, dict[str, float | str]] = {}
     signed_pc_lengths: dict[str, int] = {}
     for name in ("combo_calibration", "singles"):
         stratum = _exact_keys(strata[name], _STRATUM_KEYS, field=f"report.strata.{name}")
@@ -288,6 +405,7 @@ def validate_approximation_bias_report(
         if not isinstance(per_pair, list) or len(per_pair) != n_pairs:
             _fail(f"report.strata.{name}.per_pair length must equal n_pairs")
         pair_ids: list[str] = []
+        bias_by_pair: dict[str, float | str] = {}
         for index, entry in enumerate(per_pair):
             item = _exact_keys(
                 entry,
@@ -302,9 +420,11 @@ def validate_approximation_bias_report(
             )
             if value != NON_FINITE and value < 0:
                 _fail(f"report.strata.{name}.per_pair[{index}].b_i must be non-negative")
+            bias_by_pair[item["pair_id"]] = value
         if pair_ids != sorted(pair_ids) or len(set(pair_ids)) != len(pair_ids):
             _fail(f"report.strata.{name}.per_pair must have unique byte-sorted pair IDs")
         stratum_pair_ids[name] = pair_ids
+        stratum_bias_values[name] = bias_by_pair
         distribution = _exact_keys(
             stratum["b_distribution"],
             _B_DISTRIBUTION_KEYS,
@@ -314,6 +434,21 @@ def validate_approximation_bias_report(
             metric = _numeric_or_sentinel(value, field=f"report.strata.{name}.b_distribution.{key}")
             if metric != NON_FINITE and metric < 0:
                 _fail(f"report.strata.{name}.b_distribution.{key} must be non-negative")
+        finite_bias = [value for value in bias_by_pair.values() if value != NON_FINITE]
+        expected_distribution: dict[str, float | str]
+        if finite_bias:
+            expected_distribution = {
+                "median": _median(finite_bias),
+                "mean": math.fsum(finite_bias) / len(finite_bias),
+                "max": max(finite_bias),
+                "q90": _linear_quantile(finite_bias, 0.9),
+            }
+        else:
+            expected_distribution = dict.fromkeys(_B_DISTRIBUTION_KEYS, NON_FINITE)
+        for key, expected in expected_distribution.items():
+            _require_derived_metric(
+                distribution[key], expected, field=f"report.strata.{name}.b_distribution.{key}"
+            )
         if not isinstance(stratum["signed_pc_bias"], list):
             _fail(f"report.strata.{name}.signed_pc_bias must be a list")
         for index, value in enumerate(stratum["signed_pc_bias"]):
@@ -324,6 +459,7 @@ def validate_approximation_bias_report(
     if not isinstance(gi["gi_signal_per_pair"], list):
         _fail("report.gi_and_fairness.gi_signal_per_pair must be a list")
     gi_pair_ids: list[str] = []
+    gi_by_pair: dict[str, float | str] = {}
     for index, entry in enumerate(gi["gi_signal_per_pair"]):
         item = _exact_keys(
             entry,
@@ -339,6 +475,7 @@ def validate_approximation_bias_report(
         )
         if signal != NON_FINITE and signal < 0:
             _fail("GI signal magnitudes must be non-negative")
+        gi_by_pair[item["pair_id"]] = signal
     if gi_pair_ids != stratum_pair_ids["combo_calibration"]:
         _fail("GI pair roster must exactly equal the byte-sorted combo_calibration roster")
     for field in (
@@ -350,6 +487,41 @@ def validate_approximation_bias_report(
         metric = _numeric_or_sentinel(gi[field], field=f"report.gi_and_fairness.{field}")
         if metric != NON_FINITE and metric < 0:
             _fail(f"report.gi_and_fairness.{field} must be non-negative")
+
+    combo_bias = stratum_bias_values["combo_calibration"]
+    finite_floor = [value for value in combo_bias.values() if value != NON_FINITE]
+    finite_gi = [value for value in gi_by_pair.values() if value != NON_FINITE]
+    expected_floor: float | str = _median(finite_floor) if finite_floor else NON_FINITE
+    expected_gi: float | str = _median(finite_gi) if finite_gi else NON_FINITE
+    _require_derived_metric(
+        gi["floor_median"], expected_floor, field="report.gi_and_fairness.floor_median"
+    )
+    _require_derived_metric(
+        gi["gi_signal_median"], expected_gi, field="report.gi_and_fairness.gi_signal_median"
+    )
+    expected_ratio: float | str = (
+        expected_floor / expected_gi
+        if expected_floor != NON_FINITE and expected_gi != NON_FINITE and expected_gi != 0.0
+        else NON_FINITE
+    )
+    _require_derived_metric(
+        gi["bias_to_signal_ratio_R"],
+        expected_ratio,
+        field="report.gi_and_fairness.bias_to_signal_ratio_R",
+    )
+    pair_ratios = [
+        combo_bias[pair_id] / gi_by_pair[pair_id]
+        for pair_id in gi_pair_ids
+        if combo_bias[pair_id] != NON_FINITE
+        and gi_by_pair[pair_id] != NON_FINITE
+        and gi_by_pair[pair_id] != 0.0
+    ]
+    expected_pair_ratio: float | str = _median(pair_ratios) if pair_ratios else NON_FINITE
+    _require_derived_metric(
+        gi["bias_to_signal_ratio_per_pair_median"],
+        expected_pair_ratio,
+        field="report.gi_and_fairness.bias_to_signal_ratio_per_pair_median",
+    )
     r_star = _finite(gi["R_star"], field="report.gi_and_fairness.R_star")
     if r_star != R_STAR:
         _fail(f"report.gi_and_fairness.R_star must be exactly {R_STAR}")
@@ -383,6 +555,11 @@ def validate_approximation_bias_report(
         != counts["replicates_requested"]
     ):
         _fail("report bootstrap replicate accounting does not close")
+    interval_values = list(bootstrap.values())
+    if counts["replicates_finite"] == 0 and any(value != NON_FINITE for value in interval_values):
+        _fail("report bootstrap intervals must all be NON_FINITE when no replicate is finite")
+    if counts["replicates_finite"] > 0 and any(value == NON_FINITE for value in interval_values):
+        _fail("report bootstrap intervals must all be finite when finite replicates exist")
 
     provenance = _exact_keys(obj["provenance"], _PROVENANCE_KEYS, field="report.provenance")
     for field in (
@@ -392,6 +569,8 @@ def validate_approximation_bias_report(
         "fit_role_artifact_sha256",
         "response_projection_sha256",
         "gene_order_sha256",
+        "probe_a_evidence_sha256",
+        "probe_a_evidence_manifest_sha256",
     ):
         _hex64(provenance[field], field=f"report.provenance.{field}")
     if (
@@ -443,8 +622,8 @@ def validate_approximation_bias_report(
     _validate_checksum(obj)
 
 
-def load_approximation_bias_report(
-    path: str | Path,
+def report_from_evidence(
+    evidence: ApproximationBiasEvidence,
     *,
     expected_content_sha256: str | None = None,
     expected_protocol: str = PROTOCOL,
@@ -453,17 +632,21 @@ def load_approximation_bias_report(
     expected_git_commit: str | None = None,
     expected_provenance: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Read and fully validate a report, optionally binding its exact file bytes."""
-    report_path = Path(path)
+    """Revalidate an immutable evidence snapshot and return a fresh report object."""
+    if not isinstance(evidence, ApproximationBiasEvidence):
+        _fail("approximation-bias evidence must be an ApproximationBiasEvidence snapshot")
+    actual_sha = sha256_bytes(evidence.report_bytes)
+    if actual_sha != evidence.content_sha256:
+        _fail("approximation-bias evidence bytes changed after capture")
     if expected_content_sha256 is not None:
         _hex64(expected_content_sha256, field="expected report content SHA")
-        if sha256_file(report_path) != expected_content_sha256:
+        if actual_sha != expected_content_sha256:
             _fail("approximation-bias report content SHA does not match the pinned config")
     try:
-        payload = json.loads(report_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+        payload = json.loads(evidence.report_bytes)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ApproximationBiasValidationError(
-            f"approximation-bias report is missing, unreadable, or invalid JSON: {exc}"
+            f"approximation-bias evidence is invalid JSON: {exc}"
         ) from exc
     if not isinstance(payload, dict):
         _fail("approximation-bias report must be a JSON object")
@@ -476,3 +659,36 @@ def load_approximation_bias_report(
         expected_provenance=expected_provenance,
     )
     return payload
+
+
+def load_approximation_bias_report(
+    path: str | Path,
+    *,
+    expected_content_sha256: str | None = None,
+    expected_protocol: str = PROTOCOL,
+    expected_basis_config_sha256: str | None = None,
+    expected_measurement_contract_sha256: str | None = None,
+    expected_git_commit: str | None = None,
+    expected_provenance: Mapping[str, Any] | None = None,
+) -> ApproximationBiasEvidence:
+    """Read a report once and return fully validated immutable evidence bytes."""
+    report_path = Path(path)
+    try:
+        report_bytes = report_path.read_bytes()
+    except OSError as exc:
+        raise ApproximationBiasValidationError(
+            f"approximation-bias report is missing or unreadable: {exc}"
+        ) from exc
+    evidence = ApproximationBiasEvidence(
+        content_sha256=sha256_bytes(report_bytes), report_bytes=report_bytes
+    )
+    report_from_evidence(
+        evidence,
+        expected_content_sha256=expected_content_sha256,
+        expected_protocol=expected_protocol,
+        expected_basis_config_sha256=expected_basis_config_sha256,
+        expected_measurement_contract_sha256=expected_measurement_contract_sha256,
+        expected_git_commit=expected_git_commit,
+        expected_provenance=expected_provenance,
+    )
+    return evidence

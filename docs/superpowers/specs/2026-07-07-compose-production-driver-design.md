@@ -199,7 +199,7 @@ ResolvedRunSpec **안에 저장하지 않아** file-SHA 순환참조를 피하�
 
 ### 2.2 ResolvedRunSpec v1 exact schema
 
-- identity: `schema="compose_resolved_run_spec_v1"`, `mode`, `protocol`, `run_id`,
+- identity: `schema="compose_resolved_run_spec_v2"`, `mode`, `protocol`, `run_id`,
   `approved_git_sha`, `run_dir`, `approved_artifacts_root`, `self_checksum`
 - pre-seal path+file-SHA: `config`, `data_card`, `raw_asset`, `sequence_mapping`, `feature_bank`, `factor_bank`,
   `response_artifact`, `fit_role_artifact`, `phase2a_inputs`, `development_outcome_source`,
@@ -370,7 +370,7 @@ seal 직전(runbook §6/§7) 순서로 재검증한다.
    **`ComposeOutcomeStore`가 import·생성되는 유일한 함수이며 phase2b에서만 도달 가능하다(§4).** fixture
    builder는 store 객체가 아니라 sealed-outcome DATA만 만든다(§6).
 5. `run_phase2b[_fixture](run_dir=, outcome_store=, frozen_bundle=, pair_manifest=, response_artifact=,
-   config=, ledger=, approximation_bias_report_path=<pre-seal-validated path>, ...)`를 호출한다.
+   config=, ledger=, approximation_bias_report_evidence=<immutable pre-seal snapshot>, ...)`를 호출한다.
    Scientific config SHA가 non-null인데 이 path가 전달되지 않는 상태는 금지한다. 내부에서 D1/D2 §7 전체(pre-access ledger → durable audit claim →
    terminal → durable finalize + commit marker)가 이미 강제된다.
 6. Driver는 `phase2b_durable_commit.json`을 독립 재독출해 terminal/summary/final-ledger/pre-access-ledger/

@@ -72,7 +72,10 @@ def test_phase2b_resolves_the_same_preseal_validated_bias_report(tmp_path):
         spec, config, response_artifact=carrier.response_artifact
     )
 
-    assert resolved == Path(spec.scientific["approximation_bias_report"]["path"])
+    declared = spec.scientific["approximation_bias_report"]
+    assert resolved is not None
+    assert resolved.content_sha256 == declared["sha256"]
+    assert resolved.report_bytes == Path(declared["path"]).read_bytes()
 
 
 def test_scientific_carrier_rejects_missing_config_pinned_bias_report(tmp_path):

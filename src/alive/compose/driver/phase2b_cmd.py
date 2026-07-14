@@ -78,6 +78,7 @@ from typing import Any, Iterator, Mapping
 import anndata
 
 from alive.compose.approximation_bias import (
+    ApproximationBiasEvidence,
     ApproximationBiasValidationError,
     basis_config_sha256_from_final_config,
     load_approximation_bias_report,
@@ -242,7 +243,7 @@ def _run_confirmed_phase2b(
         spec_path, approved_artifacts_root=approved_artifacts_root, mode_expected=mode
     )
     config = load_compose_phase2_config(spec.pre_seal["config"].path)
-    approximation_bias_report_path = _resolve_approximation_bias_report(
+    approximation_bias_report_evidence = _resolve_approximation_bias_report(
         spec, config, response_artifact=run_spec.response_artifact
     )
     bundle = FrozenPredictionBundle.load(run_dir / RUN_PRODUCED_BASENAMES["frozen_bundle"])
@@ -353,7 +354,7 @@ def _run_confirmed_phase2b(
                 oof_manifest_checksum=bundle.dev_diagnostics["oof_fold_manifest_checksum"],
                 seed_variability_report_path=seed_report_path,
                 seed_variability_report_checksum=sha256_file(seed_report_path),
-                approximation_bias_report_path=approximation_bias_report_path,
+                approximation_bias_report_evidence=approximation_bias_report_evidence,
             )
     except Exception as exc:  # noqa: BLE001 - re-raised unless the seal was consumed
         if _seal_consumed(audit_path):
@@ -572,8 +573,8 @@ def _verify_sealed_source_integrity(source_path: Path, expected_sha: str) -> Non
 
 def _resolve_approximation_bias_report(
     spec: ResolvedRunSpec, config: Any, *, response_artifact: Mapping[str, Any]
-) -> Path | None:
-    """Validate the config-pinned report before any scientific store is built."""
+) -> ApproximationBiasEvidence | None:
+    """Capture and validate config-pinned report bytes before building a store."""
     expected_sha = next(
         (
             bias
@@ -617,7 +618,7 @@ def _resolve_approximation_bias_report(
             spec.pre_seal["config"].path,
             expected_report_sha256=expected_sha,
         )
-        load_approximation_bias_report(
+        evidence = load_approximation_bias_report(
             path,
             expected_content_sha256=expected_sha,
             expected_protocol=spec.protocol,
@@ -637,7 +638,7 @@ def _resolve_approximation_bias_report(
         raise Phase2bSubcommandError(
             f"scientific approximation-bias report failed pre-seal validation: {exc}"
         ) from exc
-    return path
+    return evidence
 
 
 def _resolve_seal_audit_destination(

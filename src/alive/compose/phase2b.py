@@ -49,7 +49,6 @@ only. Real execution remains blocked until the owner activation commit and every
 
 from __future__ import annotations
 
-import json
 import math
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
@@ -58,9 +57,10 @@ from pathlib import Path
 import numpy as np
 
 from alive.compose.approximation_bias import (
+    ApproximationBiasEvidence,
     ApproximationBiasValidationError,
     measurement_contract_sha256,
-    validate_approximation_bias_report,
+    report_from_evidence,
 )
 from alive.compose.config2 import (
     ActivationRecord,
@@ -705,7 +705,7 @@ def _bias_numeric_or_sentinel(value: object, *, path: Path, field: str) -> float
     """Coerce a metric-report numeric-or-sentinel field to a finite float or the
     verbatim :data:`_NON_FINITE_SENTINEL` string, failing closed on any other value.
 
-    ``measure_approximation_bias_v1`` legitimately emits the STRING
+    ``measure_approximation_bias_v2`` legitimately emits the STRING
     :data:`_NON_FINITE_SENTINEL` for a degenerate ``bias_to_signal_ratio_R`` (or a
     bootstrap-interval endpoint); that string is carried through verbatim. A finite
     number is routed through :func:`_finite_or_sentinel`. A JSON ``true``/``false``
@@ -785,19 +785,23 @@ def _bias_interval_or_sentinel(value: object, *, path: Path, field: str) -> list
 
 
 def _load_approximation_bias_fairness(
-    *, report_sha256: str, report_path: str | Path | None
+    *,
+    report_sha256: str,
+    report_evidence: ApproximationBiasEvidence | None,
+    expected_protocol: str = "COMPOSE-K562-v1",
+    expected_git_commit: str | None = None,
 ) -> dict:
-    """Fail-closed load of the pinned approximation-bias report → the fairness block.
+    """Validate immutable pre-seal evidence and extract the fairness block.
 
     Sources the pinned SHA from ``config.baselines.gears.approximation_bias_report_sha256``
     (the caller passes it here) and VERIFIES the pinned report file's content SHA-256
-    equals that config SHA *before* any value is read. A report whose content SHA
-    disagrees with the pinned config SHA — or a missing / unreadable / malformed report
+    equals that config SHA *before* any value is read. Evidence whose content SHA
+    disagrees with the pinned config SHA — or missing / malformed evidence
     — RAISES :class:`ApproximationBiasReportError`, so an UNPINNED report's fairness
     values can never leak into the registered summary (design spec §5/§7).
 
     The fairness fields live NESTED under ``report["gi_and_fairness"]`` exactly as
-    ``measure_approximation_bias_v1`` emits them (``fairness_flag``,
+    ``measure_approximation_bias_v2`` emits them (``fairness_flag``,
     ``bias_to_signal_ratio_R``, ``R_star``), and the carried interval is the single
     ``report["gi_and_fairness"]["bootstrap_95_interval"]["bias_to_signal_ratio_R"]``
     sub-interval (a ``[lower, upper]`` pair OR the ``"NON_FINITE"`` sentinel string —
@@ -816,9 +820,9 @@ def _load_approximation_bias_fairness(
     report_sha256 : str
         The pinned report SHA sourced from the config (non-``None`` here; the null
         path is handled by :func:`_unavailable_approximation_bias_block`).
-    report_path : str, Path or None
-        The pinned report file. ``None`` fails closed — a pinned SHA cannot be
-        verified without the file it pins.
+    report_evidence : ApproximationBiasEvidence or None
+        The immutable report snapshot captured before store construction. ``None``
+        fails closed because a pinned SHA cannot be verified without its bytes.
 
     Returns
     -------
@@ -829,74 +833,51 @@ def _load_approximation_bias_fairness(
     Raises
     ------
     ApproximationBiasReportError
-        On a missing path, an unreadable / non-JSON / non-object report, a content
+        On missing evidence, invalid JSON / non-object report bytes, a content
         SHA that disagrees with the pinned config SHA, or a report missing a required
         fairness field / carrying a malformed interval.
     """
-    if report_path is None:
+    if report_evidence is None:
         raise ApproximationBiasReportError(
-            "a pinned approximation_bias_report_sha256 is set but no report path was "
-            "provided; the pinned report SHA cannot be verified without the file it pins "
+            "a pinned approximation_bias_report_sha256 is set but no immutable report "
+            "evidence was provided; the pinned SHA cannot be verified "
             "(fail closed)."
         )
-    path = Path(report_path)
     try:
-        content_sha = sha256_file(path)
-    except OSError as exc:
-        raise ApproximationBiasReportError(
-            f"pinned approximation-bias report {str(path)!r} is missing or unreadable: {exc}"
-        ) from exc
-    # Fail-closed SHA wall: the report's CONTENT SHA must equal the pinned config SHA
-    # BEFORE any value is extracted (an unpinned report never contributes a value).
-    if content_sha != report_sha256:
-        raise ApproximationBiasReportError(
-            f"pinned approximation-bias report {str(path)!r} content sha {content_sha!r} does "
-            f"not match the pinned config sha {report_sha256!r}; refusing to read an unpinned "
-            "report (fail closed)."
-        )
-    try:
-        report = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise ApproximationBiasReportError(
-            f"pinned approximation-bias report {str(path)!r} is not readable JSON: {exc}"
-        ) from exc
-    if not isinstance(report, dict):
-        raise ApproximationBiasReportError(
-            f"pinned approximation-bias report {str(path)!r} is not a JSON object (fail closed)."
-        )
-    try:
-        validate_approximation_bias_report(
-            report,
+        report = report_from_evidence(
+            report_evidence,
+            expected_content_sha256=report_sha256,
+            expected_protocol=expected_protocol,
             expected_measurement_contract_sha256=measurement_contract_sha256(),
+            expected_git_commit=expected_git_commit,
         )
     except ApproximationBiasValidationError as exc:
         raise ApproximationBiasReportError(
-            f"pinned approximation-bias report {str(path)!r} failed its v1 integrity "
-            f"contract: {exc}"
+            f"pinned approximation-bias report failed its v2 integrity contract: {exc}"
         ) from exc
     gi = report.get("gi_and_fairness")
     if not isinstance(gi, dict):
         raise ApproximationBiasReportError(
-            f"pinned approximation-bias report {str(path)!r} is missing the required "
+            "pinned approximation-bias report is missing the required "
             "'gi_and_fairness' object (fail closed)."
         )
     required_fields = ("fairness_flag", "bias_to_signal_ratio_R", "R_star", "bootstrap_95_interval")
     for field_name in required_fields:
         if field_name not in gi:
             raise ApproximationBiasReportError(
-                f"pinned approximation-bias report {str(path)!r} is missing required field "
+                "pinned approximation-bias report is missing required field "
                 f"'gi_and_fairness.{field_name}' (fail closed)."
             )
     flag = gi["fairness_flag"]
     if not isinstance(flag, str) or not flag.strip():
         raise ApproximationBiasReportError(
-            f"pinned approximation-bias report {str(path)!r} gi_and_fairness.fairness_flag must be "
+            "pinned approximation-bias report gi_and_fairness.fairness_flag must be "
             f"a non-empty string, got {flag!r}."
         )
     bootstrap = gi["bootstrap_95_interval"]
     if not isinstance(bootstrap, dict) or "bias_to_signal_ratio_R" not in bootstrap:
         raise ApproximationBiasReportError(
-            f"pinned approximation-bias report {str(path)!r} gi_and_fairness.bootstrap_95_interval "
+            "pinned approximation-bias report gi_and_fairness.bootstrap_95_interval "
             "must be an object carrying a 'bias_to_signal_ratio_R' sub-interval (fail closed)."
         )
     return {
@@ -906,15 +887,19 @@ def _load_approximation_bias_fairness(
         # NON_FINITE sentinel; a malformed value fails closed with the TYPED error so a
         # degenerate report value can never force a terminal-write abort (spec §2).
         "bias_to_signal_ratio_R": _bias_numeric_or_sentinel(
-            gi["bias_to_signal_ratio_R"], path=path, field="gi_and_fairness.bias_to_signal_ratio_R"
+            gi["bias_to_signal_ratio_R"],
+            path=Path("<immutable-approximation-bias-evidence>"),
+            field="gi_and_fairness.bias_to_signal_ratio_R",
         ),
         "bootstrap_95_interval": _bias_interval_or_sentinel(
             bootstrap["bias_to_signal_ratio_R"],
-            path=path,
+            path=Path("<immutable-approximation-bias-evidence>"),
             field="gi_and_fairness.bootstrap_95_interval.bias_to_signal_ratio_R",
         ),
         "R_star": _bias_numeric_or_sentinel(
-            gi["R_star"], path=path, field="gi_and_fairness.R_star"
+            gi["R_star"],
+            path=Path("<immutable-approximation-bias-evidence>"),
+            field="gi_and_fairness.R_star",
         ),
     }
 
@@ -937,7 +922,7 @@ def build_registered_evaluation_summary(
     provenance_checksum: str,
     seed_variability_report_checksum: str,
     approximation_bias_report_sha256: str | None = None,
-    approximation_bias_report_path: str | Path | None = None,
+    approximation_bias_fairness: Mapping | None = None,
 ) -> dict:
     """Build the outcome-free ``RegisteredEvaluationSummary`` ONCE (spec §2.1).
 
@@ -982,13 +967,13 @@ def build_registered_evaluation_summary(
         The pinned GEARS approximation-bias report SHA sourced from
         ``config.baselines.gears.approximation_bias_report_sha256`` (design spec
         §5/§7). ``None`` (the current, not-yet-finalized state) records the
-        honestly-empty ``"unavailable"`` fairness block; a pinned SHA triggers a
-        fail-closed load of the report (its content SHA must equal this value). The
+        honestly-empty ``"unavailable"`` fairness block; a pinned SHA requires a
+        pre-seal validated immutable fairness block derived from matching bytes. The
         block is CARRIED into the summary dict ONLY — never into the verdict — so the
         sealed verdict is byte-unchanged whether or not the report is finalized.
-    approximation_bias_report_path : str, Path or None, optional
-        The pinned report file, verified against ``approximation_bias_report_sha256``
-        before any value is read. Ignored (and unnecessary) when the SHA is ``None``.
+    approximation_bias_fairness : Mapping or None, optional
+        The already-validated immutable pre-seal fairness block. No report path is
+        opened while building the post-seal summary.
 
     Returns
     -------
@@ -1001,15 +986,28 @@ def build_registered_evaluation_summary(
     # into the registered summary dict so the eventual sealed verdict can DISCLOSE it
     # WITHOUT changing the verdict. Built BEFORE the summary checksum (it is part of the
     # returned dict); null config field ⇒ honestly-empty block; a pinned SHA ⇒ a
-    # fail-closed SHA-verified load. Lives in the summary dict ONLY, never in
+    # fail-closed pre-seal evidence extraction. Lives in the summary dict ONLY, never in
     # ``ComposeSealedResult`` — the verdict axes/clauses/checksum are untouched.
     if approximation_bias_report_sha256 is None:
+        if approximation_bias_fairness is not None:
+            raise ApproximationBiasReportError(
+                "approximation-bias fairness was supplied while the config report SHA is null"
+            )
         approximation_bias_fairness = _unavailable_approximation_bias_block()
     else:
-        approximation_bias_fairness = _load_approximation_bias_fairness(
-            report_sha256=approximation_bias_report_sha256,
-            report_path=approximation_bias_report_path,
-        )
+        if not isinstance(approximation_bias_fairness, Mapping):
+            raise ApproximationBiasReportError(
+                "a pinned approximation-bias SHA requires a pre-seal validated fairness block"
+            )
+        if set(approximation_bias_fairness) != set(APPROXIMATION_BIAS_FAIRNESS_FIELDS):
+            raise ApproximationBiasReportError(
+                "pre-seal approximation-bias fairness block has an invalid key roster"
+            )
+        if approximation_bias_fairness["report_sha256"] != approximation_bias_report_sha256:
+            raise ApproximationBiasReportError(
+                "pre-seal approximation-bias fairness block does not match the config-pinned SHA"
+            )
+        approximation_bias_fairness = dict(approximation_bias_fairness)
     gi_lower, gi_upper = secondary.gi_explained_interval
     return {
         "schema": "compose_registered_evaluation_summary_v1",
@@ -1085,7 +1083,7 @@ def run_phase2b(
     oof_manifest_checksum: str | None = None,
     seed_variability_report_path: str | Path | None = None,
     seed_variability_report_checksum: str | None = None,
-    approximation_bias_report_path: str | Path | None = None,
+    approximation_bias_report_evidence: ApproximationBiasEvidence | None = None,
 ) -> Phase2bResult:
     """Run the SCIENTIFIC Phase-2b sealed evaluation after activation.
 
@@ -1129,13 +1127,14 @@ or None, optional
         The development seed-variability report path and its verified byte SHA.
         The outcome-free pre-access gate binds + verifies this before any seal
         access; its absence fails closed on the scientific path.
-    approximation_bias_report_path : str, Path or None, optional
-        The pinned GEARS approximation-bias report file (design spec §5/§7). Its
+    approximation_bias_report_evidence : ApproximationBiasEvidence or None, optional
+        Immutable GEARS approximation-bias report bytes (design spec §5/§7). Their
         content SHA is verified against the config-pinned
         ``baselines.gears.approximation_bias_report_sha256`` before its fairness flag
         is CARRIED (not decided from) into the registered summary — a verdict-invariant
         disclosure. ``None`` (or a null config SHA, the current not-yet-finalized state)
-        records the honestly-empty ``"unavailable"`` fairness block.
+        records the honestly-empty ``"unavailable"`` fairness block. Validation
+        and scalar extraction happen here before any terminal/store access.
 
     Returns
     -------
@@ -1180,6 +1179,27 @@ or None, optional
         activation_record=activation_record,
         git_is_clean=git_is_clean,
     )
+    bias_sha = next(
+        (
+            bias
+            for name, _representation, bias in config.baseline_representations
+            if name == "gears"
+        ),
+        None,
+    )
+    if bias_sha is None:
+        if approximation_bias_report_evidence is not None:
+            raise ApproximationBiasReportError(
+                "approximation-bias evidence was supplied while the config report SHA is null"
+            )
+        approximation_bias_fairness = None
+    else:
+        approximation_bias_fairness = _load_approximation_bias_fairness(
+            report_sha256=bias_sha,
+            report_evidence=approximation_bias_report_evidence,
+            expected_protocol=config.protocol,
+            expected_git_commit=(provenance_inputs.git_commit if provenance_inputs else None),
+        )
     return _run_phase2b_core(
         run_dir=run_dir,
         outcome_store=outcome_store,
@@ -1193,7 +1213,7 @@ or None, optional
         provenance_tamper=None,
         provenance_inputs=provenance_inputs,
         seed_variability=seed_variability,
-        approximation_bias_report_path=approximation_bias_report_path,
+        approximation_bias_fairness=approximation_bias_fairness,
     )
 
 
@@ -1256,7 +1276,7 @@ def run_phase2b_fixture(
         provenance_tamper=_tamper_provenance_after_register,
         provenance_inputs=None,
         seed_variability=None,
-        approximation_bias_report_path=None,
+        approximation_bias_fairness=None,
     )
 
 
@@ -1462,7 +1482,7 @@ def _run_phase2b_core(
     provenance_tamper: Phase2bProvenance | None,
     provenance_inputs: ActivationProvenanceInputs | None,
     seed_variability: SeedVariabilityPreflightInputs | None,
-    approximation_bias_report_path: str | Path | None = None,
+    approximation_bias_fairness: Mapping | None = None,
 ) -> Phase2bResult:
     """The shared 12-step sealed-evaluation flow (after the public boundary).
 
@@ -1684,7 +1704,7 @@ def _run_phase2b_core(
                 provenance_tamper=provenance_tamper,
                 provenance_inputs=provenance_inputs,
                 fixture_execution=fixture_execution,
-                approximation_bias_report_path=approximation_bias_report_path,
+                approximation_bias_fairness=approximation_bias_fairness,
                 result_box=result_box,
             )
         result: Phase2bResult = result_box["result"]  # type: ignore[assignment]
@@ -1747,7 +1767,7 @@ def _evaluate_inside_boundary(
     provenance_inputs: ActivationProvenanceInputs | None,
     fixture_execution: bool,
     result_box: dict[str, object],
-    approximation_bias_report_path: str | Path | None = None,
+    approximation_bias_fairness: Mapping | None = None,
 ) -> None:
     """Steps 6-12, executed INSIDE the terminal protection boundary.
 
@@ -1949,7 +1969,7 @@ def _evaluate_inside_boundary(
         provenance_checksum=expected_provenance_checksum,
         seed_variability_report_checksum=seed_variability_report_checksum,
         approximation_bias_report_sha256=approximation_bias_report_sha256,
-        approximation_bias_report_path=approximation_bias_report_path,
+        approximation_bias_fairness=approximation_bias_fairness,
     )
     registered_summary_checksum = sha256_json(summary)
     final_verdict_checksum = final_verdict.checksum

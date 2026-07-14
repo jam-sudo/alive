@@ -154,7 +154,7 @@ not a second post-hoc decision rule. Degenerate replicates with zero GI denomina
 
 ---
 
-## 4. Report schema `compose_approximation_bias_report_v1` {#report}
+## 4. Report schema `compose_approximation_bias_report_v2` {#report}
 
 A single JSON object whose SHA-256 fills `baselines.gears.approximation_bias_report_sha256`.
 
@@ -185,14 +185,24 @@ A single JSON object whose SHA-256 fills `baselines.gears.approximation_bias_rep
 - `measurement_contract_sha256` (this reviewed spec's file SHA), `basis_config_sha256`, `git_commit`,
   `norman_source_sha256`, `fit_role_artifact_sha256`,
   `response_projection_sha256`, `gene_order_sha256`, `pca_dim` (`p`), `registered_seeds`,
+  `probe_a_evidence_sha256` (exact immutable Probe-A file bytes),
+  `probe_a_evidence_manifest_sha256` (the independently reviewed manifest named inside Probe-A),
   `sealed_pair_overlap_count` (must be `0`), `pod_instance`.
 - `self_checksum`: SHA-256 of the canonical JSON of every field above except `self_checksum`.
 
 Every producer and consumer uses the same exact-schema validator. It requires exact top-level and nested
 key rosters; unique byte-sorted pair IDs; exact equality between the combo-calibration and GI pair rosters;
 non-negative squared-error/signal magnitudes; signed-PC vector dimension consistency; closed bootstrap
-accounting; flag/ratio coherence; zero sealed overlap; all content/provenance digests; and the canonical
-`self_checksum`. A merely non-empty flag or a bare partial JSON object is not admissible evidence.
+accounting; exact recomputation of every distribution, median, and ratio from the per-pair values;
+flag/ratio coherence; zero sealed overlap; all content/provenance digests; and the canonical
+`self_checksum`. Empty or wholly non-finite source rosters require `NON_FINITE` derived aggregates.
+A merely non-empty flag, a freshly checksummed inconsistent aggregate, or a bare partial JSON object is
+not admissible evidence.
+
+Probe-A admission is not a CLI-only convention. The report producer requires an immutable
+`ProbeAEvidence` byte snapshot even for direct library calls, revalidates its checksum, protocol, Git
+commit, representation, tolerance and verdict, and binds both Probe-A digests above. There is no default
+`"admitted"` argument that a direct caller can select.
 
 `basis_config_sha256` is the canonical config whose
 `baselines.gears.approximation_bias_report_sha256` is still `null`. The report **must not contain the
@@ -214,7 +224,10 @@ Before runtime identity capture and again before any sealed-store construction, 
 the declaration SHA equals the config-pinned SHA and the file bytes; the full report validates; the report's
 `git_commit` equals `approved_git_sha`; the measurement-contract SHA equals this file; and
 `basis_config_sha256` equals the independently reconstructed config obtained by changing only the final
-report-SHA leaf back to null. Any mismatch is a pre-seal rejection and consumes no seal.
+report-SHA leaf back to null. The final driver read returns an immutable byte-bound snapshot rather than a
+mutable path. `run_phase2b` revalidates and extracts the scalar fairness carry from that snapshot before
+any store access, and the post-seal summary builder performs no report I/O. Any mismatch is a pre-seal
+rejection and consumes no seal.
 
 `p`, gene order and projection digests must equal the verified fit-role/response artifacts, binding the
 report to the same evaluation space and run identity. The report's Norman-source SHA, fit-role file SHA,
@@ -285,7 +298,7 @@ a synthetic frozen projection block (no `gears`, no Norman):
 - **MODIFY/REPLACE** the existing legacy
   `scripts/compose/measure_pseudobulk_approximation_bias.py` contract — it currently emits an earlier
   aggregate-only report and is **not** an implementation of this v1 schema. The upgraded pod measurement
-  reads non-sealed role cells + frozen projection block, emits `compose_approximation_bias_report_v1`, and
+  reads non-sealed role cells + frozen projection block, emits `compose_approximation_bias_report_v2`, and
   uses `cell_raw_counts` for the exact path. Pure library calls
   (`fit_role.apply_response_projection`); import-light so its contract is unit-tested locally.
 - **CREATE** `docs/activation-evidence/compose/real_norman_approximation_bias_report.json` — the

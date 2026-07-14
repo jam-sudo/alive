@@ -41,8 +41,13 @@ import pytest
 
 from alive.compose.approximation_bias import (
     APPROXIMATION_BIAS_SCHEMA,
+    PROBE_A_SCHEMA,
     PROTOCOL,
     REPRESENTATION,
+    ApproximationBiasEvidence,
+    ProbeAEvidence,
+    canonical_json,
+    load_approximation_bias_report,
     measurement_contract_sha256,
     self_checksum,
 )
@@ -83,7 +88,7 @@ from alive.compose.seed_variability import (
 from alive.compose.split import build_split_manifest
 from alive.compose.terminal import Phase2bTerminal, TerminalState
 from alive.compose.verdict2 import MethodAxis, SealedAxis
-from alive.provenance import EnvironmentInfo, RunLedger, sha256_file, sha256_json
+from alive.provenance import EnvironmentInfo, RunLedger, sha256_bytes, sha256_file, sha256_json
 
 from alive.compose.phase2b import (  # isort: skip
     ActivationProvenanceInputs,
@@ -92,6 +97,7 @@ from alive.compose.phase2b import (  # isort: skip
     Phase2bResult,
     _build_provenance,
     _is_fixture_store,
+    _load_approximation_bias_fairness,
     _preaccess_seed_variability,
     _run_phase2b_core,
     build_activation_provenance_inputs,
@@ -1216,6 +1222,48 @@ def test_scientific_entry_rejects_fixture_store(tmp_path):
     assert kit["store"].sealed_access_count == 0
 
 
+def test_scientific_entry_requires_pinned_bias_evidence_before_seal(tmp_path, monkeypatch):
+    """The public library entry cannot bypass the driver's pre-seal report carrier."""
+    kit = _make_run(tmp_path, fixture_store=False)
+    pinned_sha = "a" * 64
+    cfg = dataclasses.replace(
+        kit["cfg"],
+        power_status="established",
+        baseline_activation_statuses=tuple(
+            (name, revision or "pinned-revision", "pinned")
+            for name, revision, _status in kit["cfg"].baseline_activation_statuses
+        ),
+        baseline_representations=tuple(
+            (name, representation, pinned_sha if name == "gears" else bias)
+            for name, representation, bias in kit["cfg"].baseline_representations
+        ),
+    )
+    assert cfg.pseudobulk_representation_activation_blocked is False
+    # Isolate the evidence boundary after activation: the production activation guard
+    # has its own exhaustive suite, while the canonical config is intentionally still
+    # blocked until pod evidence exists.
+    monkeypatch.setattr(
+        "alive.compose.phase2b.assert_scientific_mode_allowed",
+        lambda *_args, **_kwargs: None,
+    )
+
+    with pytest.raises(ApproximationBiasReportError, match="no immutable report"):
+        run_phase2b(
+            run_dir=kit["run_dir"],
+            outcome_store=kit["store"],
+            frozen_bundle=kit["bundle"],
+            pair_manifest=kit["manifest"],
+            response_artifact=kit["response_artifact"],
+            config=cfg,
+            ledger=kit["ledger"],
+            activation_record=_activation_record(kit["cfg"]),
+            git_is_clean=True,
+            approximation_bias_report_evidence=None,
+        )
+    assert kit["store"].sealed_access_count == 0
+    assert _terminal_artifacts(kit["run_dir"]) == []
+
+
 # ===========================================================================
 # C0 #4: dedicated FixtureOutcomeStore type + corpus allowlist (retire marker)
 # ===========================================================================
@@ -1779,10 +1827,10 @@ def _write_bias_report(
     bootstrap_95_interval=(0.4, 0.9),
     R_star=0.5,
 ):
-    """Write a REAL-shaped ``compose_approximation_bias_report_v1`` report and return
+    """Write a REAL-shaped ``compose_approximation_bias_report_v2`` report and return
     its ``sha256_file`` content SHA.
 
-    Faithful to the true on-disk contract that ``measure_approximation_bias_v1`` /
+    Faithful to the true on-disk contract that ``measure_approximation_bias_v2`` /
     ``measure_pseudobulk_approximation_bias.py::main`` produce — NOT a flat,
     newline-free stub: the fairness fields are NESTED under ``gi_and_fairness``, the
     ``bootstrap_95_interval`` is a DICT of three sub-intervals (the loader carries only
@@ -1790,10 +1838,27 @@ def _write_bias_report(
     trailing newline. So the durable loader is exercised against the real schema +
     hashing recipe, not a stub that would hide the integration bug.
     """
+    combo_floor = 0.9 * bias_to_signal_ratio_R
+    combo_stratum = {
+        "n_pairs": 1,
+        "per_pair": [{"pair_id": "A_B", "b_i": combo_floor}],
+        "b_distribution": {
+            "median": combo_floor,
+            "mean": combo_floor,
+            "max": combo_floor,
+            "q90": combo_floor,
+        },
+        "signed_pc_bias": [0.0, 0.0],
+    }
     empty_stratum = {
         "n_pairs": 0,
         "per_pair": [],
-        "b_distribution": {"median": 0.0, "mean": 0.0, "max": 0.0, "q90": 0.0},
+        "b_distribution": {
+            "median": "NON_FINITE",
+            "mean": "NON_FINITE",
+            "max": "NON_FINITE",
+            "q90": "NON_FINITE",
+        },
         "signed_pc_bias": [],
     }
     body = {
@@ -1803,9 +1868,9 @@ def _write_bias_report(
         "seal_status": "unopened",
         "method": REPRESENTATION,
         "admission_status": "admitted",
-        "strata": {"combo_calibration": empty_stratum, "singles": empty_stratum},
+        "strata": {"combo_calibration": combo_stratum, "singles": empty_stratum},
         "gi_and_fairness": {
-            "gi_signal_per_pair": [],
+            "gi_signal_per_pair": [{"pair_id": "A_B", "g_i": 0.9}],
             "fairness_flag": fairness_flag,
             "bias_to_signal_ratio_R": bias_to_signal_ratio_R,
             "R_star": R_star,
@@ -1816,7 +1881,7 @@ def _write_bias_report(
             },
             # sibling fields a real report carries and the loader ignores.
             "gi_signal_median": 0.9,
-            "floor_median": 0.54,
+            "floor_median": combo_floor,
             "bias_to_signal_ratio_per_pair_median": bias_to_signal_ratio_R,
             "replicates_requested": 10,
             "replicates_finite": 10,
@@ -1832,6 +1897,8 @@ def _write_bias_report(
             "gene_order_sha256": "4" * 64,
             "pca_dim": 2,
             "registered_seeds": [11, 23, 37],
+            "probe_a_evidence_sha256": "5" * 64,
+            "probe_a_evidence_manifest_sha256": "6" * 64,
             "sealed_pair_overlap_count": 0,
             "pod_instance": "unit-test",
         },
@@ -1855,10 +1922,16 @@ def test_fairness_block_sourced_from_pinned_report(tmp_path):
         bootstrap_95_interval=(0.4, 0.9),
         R_star=0.5,
     )
+    evidence = load_approximation_bias_report(
+        report_path,
+        expected_content_sha256=sha,
+        expected_measurement_contract_sha256=measurement_contract_sha256(),
+    )
+    fairness = _load_approximation_bias_fairness(report_sha256=sha, report_evidence=evidence)
     summary = build_registered_evaluation_summary(
         **base,
         approximation_bias_report_sha256=sha,
-        approximation_bias_report_path=report_path,
+        approximation_bias_fairness=fairness,
     )
     block = summary["approximation_bias_fairness"]
     assert block["report_sha256"] == sha
@@ -1870,16 +1943,16 @@ def test_fairness_block_sourced_from_pinned_report(tmp_path):
 
 def test_fairness_block_fails_closed_on_sha_mismatch(tmp_path):
     # report content SHA != config SHA ⇒ the loader RAISES; no report value leaks in.
-    base = _builder_base_kwargs(tmp_path)
     report_path = tmp_path / "bias_report.json"
-    real_sha = _write_bias_report(report_path, fairness_flag="clear")
+    real_sha = _write_bias_report(report_path, fairness_flag="clear", bias_to_signal_ratio_R=0.4)
     wrong_sha = "9" * 64
     assert wrong_sha != real_sha  # the config SHA genuinely differs from the report SHA
-    with pytest.raises(ApproximationBiasReportError, match="sha"):
-        build_registered_evaluation_summary(
-            **base,
-            approximation_bias_report_sha256=wrong_sha,
-            approximation_bias_report_path=report_path,
+    with pytest.raises(ApproximationBiasReportError, match="SHA"):
+        _load_approximation_bias_fairness(
+            report_sha256=wrong_sha,
+            report_evidence=ApproximationBiasEvidence(
+                content_sha256=real_sha, report_bytes=report_path.read_bytes()
+            ),
         )
 
 
@@ -1890,11 +1963,13 @@ def test_final_verdict_checksum_byte_unchanged(tmp_path):
     baseline_verdict_checksum = base["final_verdict"].checksum  # a REAL verdict checksum
     report_path = tmp_path / "bias_report.json"
     sha = _write_bias_report(report_path)
+    evidence = load_approximation_bias_report(report_path, expected_content_sha256=sha)
+    fairness = _load_approximation_bias_fairness(report_sha256=sha, report_evidence=evidence)
 
     with_block = build_registered_evaluation_summary(
         **base,
         approximation_bias_report_sha256=sha,
-        approximation_bias_report_path=report_path,
+        approximation_bias_fairness=fairness,
     )
     without_block = build_registered_evaluation_summary(**base)  # defaults ⇒ unavailable
 
@@ -1918,7 +1993,6 @@ def test_null_config_field_yields_unavailable_block(tmp_path):
     summary = build_registered_evaluation_summary(
         **base,
         approximation_bias_report_sha256=None,
-        approximation_bias_report_path=None,
     )
     block = summary["approximation_bias_fairness"]
     assert block["report_sha256"] is None
@@ -1931,11 +2005,11 @@ def test_null_config_field_yields_unavailable_block(tmp_path):
 # ---------------------------------------------------------------------------
 # END-TO-END: metric ↔ finalize ↔ phase2b agree on BOTH schema nesting AND the
 # on-disk-bytes hashing recipe. This is the integration seam the per-task stubs
-# papered over: it builds a REAL compose_approximation_bias_report_v1 via the
+# papered over: it builds a REAL compose_approximation_bias_report_v2 via the
 # metric, writes it EXACTLY as production does (canonical JSON + trailing '\n'),
 # finalizes the config leaf SHA via the real finalize tool (which now pins
 # sha256_file of those bytes), and feeds that SHA + report path into the phase2b
-# durable loader — which must populate the fairness block (NOT "unavailable",
+# immutable evidence loader — which must populate the fairness block (NOT "unavailable",
 # NOT a raise). Would have caught both Important integration bugs.
 # ---------------------------------------------------------------------------
 
@@ -1951,8 +2025,28 @@ def _load_script_module(rel_path: str, mod_name: str):
     return module
 
 
+def _probe_a_evidence_snapshot() -> ProbeAEvidence:
+    """Return a valid immutable Probe-A snapshot for direct producer tests."""
+    body = {
+        "schema": PROBE_A_SCHEMA,
+        "protocol": PROTOCOL,
+        "status": "pass",
+        "git_commit": "b" * 40,
+        "evidence_manifest_sha256": "d" * 64,
+        "output_bridge": {
+            "representation": REPRESENTATION,
+            "verdict": "pass",
+            "tolerance": 1e-6,
+            "max_abs_error": 0.0,
+        },
+    }
+    payload = {**body, "self_checksum": self_checksum(body)}
+    encoded = canonical_json(payload).encode("utf-8")
+    return ProbeAEvidence(content_sha256=sha256_bytes(encoded), evidence_bytes=encoded)
+
+
 def _build_real_bias_report(tmp_path):
-    """Build a REAL v1 report via ``measure_approximation_bias_v1`` on a small
+    """Build a REAL v2 report via ``measure_approximation_bias_v2`` on a small
     synthetic control-free fit-role artifact + identity projection block, bound to a
     bias-NULL basis config. Writes the report EXACTLY as the metric CLI does
     (canonical JSON + trailing newline). Returns ``(report, basis_yaml, report_path)``.
@@ -2028,7 +2122,7 @@ def _build_real_bias_report(tmp_path):
         "gene_order_sha256": canonical_gene_order_sha256(genes),
         "control_mean": [0.0] * 6,
     }
-    report = metric.measure_approximation_bias_v1(
+    report = metric.measure_approximation_bias_v2(
         fit_role_artifact=str(artifact),
         response_projection=block,
         sealed_pair_ids=["ZZZ_YYY"],
@@ -2038,6 +2132,7 @@ def _build_real_bias_report(tmp_path):
         git_commit="b" * 40,
         norman_source_sha256="c" * 64,
         pod_instance="unit-test-local",
+        probe_a_evidence=_probe_a_evidence_snapshot(),
     )
     report_path = tmp_path / "approximation_bias_report.json"
     # EXACTLY as measure_pseudobulk_approximation_bias.py::main writes it.
@@ -2066,12 +2161,24 @@ def test_metric_finalize_phase2b_roundtrip(tmp_path):
     # recipe phase2b re-verifies. (Off-by-a-newline here is Important-2.)
     assert pinned_sha == sha256_file(report_path)
 
-    # Feed the finalized SHA + report path into the phase2b durable loader.
+    # Feed the finalized SHA + immutable report evidence into the phase2b loader.
     base = _builder_base_kwargs(tmp_path)
+    evidence = load_approximation_bias_report(
+        report_path,
+        expected_content_sha256=pinned_sha,
+        expected_basis_config_sha256=report["provenance"]["basis_config_sha256"],
+        expected_measurement_contract_sha256=measurement_contract_sha256(),
+        expected_git_commit="b" * 40,
+    )
+    fairness = _load_approximation_bias_fairness(
+        report_sha256=pinned_sha,
+        report_evidence=evidence,
+        expected_git_commit="b" * 40,
+    )
     summary = build_registered_evaluation_summary(
         **base,
         approximation_bias_report_sha256=pinned_sha,
-        approximation_bias_report_path=report_path,
+        approximation_bias_fairness=fairness,
     )
     block = summary["approximation_bias_fairness"]
     # The block populates from the REAL nested report — NOT "unavailable", NOT a raise.
@@ -2116,19 +2223,16 @@ def test_bias_interval_or_sentinel_fail_closed(tmp_path):
 
 
 def test_loader_fail_closed_branches(tmp_path):
-    from alive.compose.phase2b import _load_approximation_bias_fairness
-    from alive.provenance import sha256_file
-
-    # A pinned SHA but no report path.
-    with pytest.raises(ApproximationBiasReportError, match="no report path"):
-        _load_approximation_bias_fairness(report_sha256="a" * 64, report_path=None)
-    # A missing / unreadable report file.
+    # A pinned SHA but no immutable report evidence.
+    with pytest.raises(ApproximationBiasReportError, match="no immutable report"):
+        _load_approximation_bias_fairness(report_sha256="a" * 64, report_evidence=None)
+    # A report whose content SHA matches the pin but lacks the nested gi_and_fairness block.
+    nogi_bytes = b'{"schema":"compose_approximation_bias_report_v2"}\n'
+    nogi_sha = sha256_bytes(nogi_bytes)
     with pytest.raises(ApproximationBiasReportError):
         _load_approximation_bias_fairness(
-            report_sha256="a" * 64, report_path=tmp_path / "nope.json"
+            report_sha256=nogi_sha,
+            report_evidence=ApproximationBiasEvidence(
+                content_sha256=nogi_sha, report_bytes=nogi_bytes
+            ),
         )
-    # A report whose content SHA matches the pin but lacks the nested gi_and_fairness block.
-    nogi = tmp_path / "nogi.json"
-    nogi.write_text('{"schema":"compose_approximation_bias_report_v1"}\n', encoding="utf-8")
-    with pytest.raises(ApproximationBiasReportError):
-        _load_approximation_bias_fairness(report_sha256=sha256_file(nogi), report_path=nogi)

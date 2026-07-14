@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Implement the LOCAL, seal-safe parts of the COMPOSE #4 approximation-bias design (`docs/superpowers/specs/2026-07-13-compose-approximation-bias-metric-design.md`): upgrade the measurement script to `compose_approximation_bias_report_v1`, add its known-answer/seal-safety tests, a one-way config finalization tool, the verdict-invariant durable fairness carry, and the committed Phase-1-entry gate-decision record.
+**Goal:** Implement the LOCAL, seal-safe parts of the COMPOSE #4 approximation-bias design (`docs/superpowers/specs/2026-07-13-compose-approximation-bias-metric-design.md`): upgrade the measurement script to `compose_approximation_bias_report_v2`, add its known-answer/seal-safety tests, a one-way config finalization tool, the verdict-invariant durable fairness carry, and the committed Phase-1-entry gate-decision record.
 
 **Architecture:** A pure-numpy, model-free measurement (`scripts/compose/measure_pseudobulk_approximation_bias.py`) reuses `fit_role.apply_response_projection` BYTE-UNCHANGED to compute the representation-floor bias on observed non-sealed `{singles, combo_calibration}` cells, emits a stratified v1 report with a pre-registered fairness flag, and a separate finalization tool binds the report SHA one-way into config. A phase2b build-time summary block carries the fairness values into the durable registered summary WITHOUT touching the verdict. Everything here opens no seal and runs on the MacBook against synthetic fixtures; the real measurement is pod-only and out of scope.
 
@@ -30,7 +30,7 @@ Every task's requirements implicitly include this section. Values are verbatim f
 
 ## File Structure
 
-- `scripts/compose/measure_pseudobulk_approximation_bias.py` — MODIFY/REPLACE: legacy aggregate report → `compose_approximation_bias_report_v1` (Tasks 1–5).
+- `scripts/compose/measure_pseudobulk_approximation_bias.py` — MODIFY/REPLACE: legacy aggregate report → `compose_approximation_bias_report_v2` (Tasks 1–5).
 - `scripts/compose/finalize_approximation_bias_config.py` — CREATE: one-way finalization tool (Task 6).
 - `tests/alive/compose/test_approximation_bias_metric.py` — CREATE: §6 known-answer + seal-safety + provenance tests (Tasks 1–6).
 - `tests/alive/compose/test_pseudobulk_approximation_bias.py` — RETIRE/REPLACE the legacy test whose key-set + control-in-roster assertions contradict v1 (Task 4).
@@ -41,18 +41,18 @@ Every task's requirements implicitly include this section. Values are verbatim f
 
 ---
 
-## The v1 report object (authoritative shape — referenced by Tasks 1–7)
+## The v2 report object (authoritative shape — referenced by Tasks 1–7)
 
-`compose_approximation_bias_report_v1` is one canonical-JSON object (`json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False)` + trailing `\n`). A stratum block appears for `combo_calibration` and `singles`; the GI/fairness/bootstrap blocks are `combo_calibration`-only.
+`compose_approximation_bias_report_v2` is one canonical-JSON object (`json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False)` + trailing `\n`). A stratum block appears for `combo_calibration` and `singles`; the GI/fairness/bootstrap blocks are `combo_calibration`-only.
 
 ```text
 {
-  "schema": "compose_approximation_bias_report_v1",
+  "schema": "compose_approximation_bias_report_v2",
   "deliverable": "gears_pseudobulk_approximation_bias_report",
   "protocol": "COMPOSE-K562-v1",
   "seal_status": "unopened",
   "method": "raw_pseudobulk_approximation",
-  "admission_status": "admitted" | "not_admissible",     # Task 5
+  "admission_status": "admitted",                         # only after immutable Probe-A validation
   "strata": {
     "combo_calibration": {                                # Task 1
       "n_pairs": int,
@@ -89,6 +89,8 @@ Every task's requirements implicitly include this section. Values are verbatim f
     "gene_order_sha256": str,
     "pca_dim": int,                                       # p
     "registered_seeds": [int, ...],
+    "probe_a_evidence_sha256": str,                       # exact immutable Probe-A bytes
+    "probe_a_evidence_manifest_sha256": str,              # manifest digest carried by Probe-A
     "sealed_pair_overlap_count": 0,
     "pod_instance": str
   },
@@ -158,7 +160,7 @@ git commit -F <msg>   # feat(compose): approximation-bias v1 point-estimate core
 - Test: `tests/alive/compose/test_approximation_bias_metric.py`
 
 **Interfaces:**
-- Produces: the v1 measurement entry `measure_approximation_bias_v1(*, fit_role_artifact, response_projection, sealed_pair_ids, ...)` gains explicit `sealed_pair_ids: Sequence[str]`. Guards run BEFORE any projection: (a) artifact roles must be a subset of `{control, singles, combo_calibration}`, while only `{singles, combo_calibration}` enter measured rosters; (b) recompute `sealed_pair_overlap_count = len(measured_ids & set(sealed_pair_ids))`, assert `== 0` else `ValueError("approximation-bias: measured roster overlaps sealed_pair_ids")`; (c) assert `canonical_gene_order_sha256(gene_order) == block["gene_order_sha256"]` up front else `ValueError("approximation-bias: gene_order digest mismatch")`.
+- Produces: the v2 measurement entry `measure_approximation_bias_v2(*, fit_role_artifact, response_projection, sealed_pair_ids, probe_a_evidence, ...)` requires explicit `sealed_pair_ids: Sequence[str]` and immutable Probe-A evidence. Guards run BEFORE any projection: (a) artifact roles must be a subset of `{control, singles, combo_calibration}`, while only `{singles, combo_calibration}` enter measured rosters; (b) recompute `sealed_pair_overlap_count = len(measured_ids & set(sealed_pair_ids))`, assert `== 0` else `ValueError("approximation-bias: measured roster overlaps sealed_pair_ids")`; (c) assert `canonical_gene_order_sha256(gene_order) == block["gene_order_sha256"]` up front else `ValueError("approximation-bias: gene_order digest mismatch")`.
 
 - [ ] **Step 1: Write failing tests** (ANTI-TAUTOLOGY — bypass `extract_fit_roles`; build the roster/AnnData by hand so the forbidden pair survives to the metric):
   - `test_control_is_reference_only`: a hand-built authoritative roster containing control rows succeeds, while control appears in neither stratum nor the GI roster; an unknown role still fails at the metric boundary.
@@ -172,7 +174,7 @@ git commit -F <msg>   # feat(compose): approximation-bias v1 point-estimate core
 
 ---
 
-## Task 4: Report v1 assembly + provenance + self_checksum (retire legacy)
+## Task 4: Report v2 assembly + provenance + self_checksum (retire legacy)
 
 **Files:**
 - Modify: `scripts/compose/measure_pseudobulk_approximation_bias.py`
@@ -180,10 +182,10 @@ git commit -F <msg>   # feat(compose): approximation-bias v1 point-estimate core
 - Test: `tests/alive/compose/test_approximation_bias_metric.py`
 
 **Interfaces:**
-- Produces: `measure_approximation_bias_v1(...) -> dict` returns the FULL v1 object (see "The v1 report object"). `self_checksum = sha256(canonical_json(obj_without_self_checksum))`. Provenance fields per the schema; `git_commit` has no `"UNKNOWN"` default (raise if unresolved). `measurement_contract_sha256 = sha256_file(<2026-07-13 spec path>)`. `basis_config_sha256` is a caller-supplied arg (the bias-NULL config's `sha256_json`); the FINAL config SHA must never be embedded.
+- Produces: `measure_approximation_bias_v2(...) -> dict` returns the FULL v2 object (see "The v2 report object"). `self_checksum = sha256(canonical_json(obj_without_self_checksum))`. Provenance fields per the schema; `git_commit` has no `"UNKNOWN"` default (raise if unresolved). `measurement_contract_sha256 = sha256_file(<2026-07-13 spec path>)`. `basis_config_sha256` is a caller-supplied arg (the bias-NULL config's `sha256_json`); the FINAL config SHA must never be embedded.
 
 - [ ] **Step 1: Write failing tests**
-  - `test_report_has_v1_schema_and_strata`: top-level `schema == "compose_approximation_bias_report_v1"`; both strata present; legacy keys (`directional_bias_l2`, `relative_magnitude_*`) ABSENT.
+  - `test_report_has_v2_schema_and_strata`: top-level `schema == "compose_approximation_bias_report_v2"`; both strata present; legacy keys (`directional_bias_l2`, `relative_magnitude_*`) ABSENT.
   - `test_self_checksum_detects_tampering`: mutate a covered field, recompute `self_checksum` over the MUTATED object, assert it differs from the stored value (mutate a covered field, not an excluded one).
   - `test_final_config_sha_absent_from_report`: given a `basis_config_sha256` and a distinct fabricated `final_sha`, assert `final_sha` does not appear anywhere in `json.dumps(report)`.
   - `test_canonical_json_byte_reproducible`: re-run with same inputs+seeds ⇒ byte-identical serialization.
@@ -245,8 +247,8 @@ git commit -F <msg>   # feat(compose): approximation-bias v1 point-estimate core
 - Test: `tests/alive/compose/test_phase2b.py`, `tests/alive/compose/test_durable.py`
 
 **Interfaces:**
-- Consumes: `config.baselines.gears.approximation_bias_report_sha256` (may be null pre-finalization) + the pinned report file.
-- Produces: an `approximation_bias_fairness` block `{report_sha256, fairness_flag, bias_to_signal_ratio_R, bootstrap_95_interval, R_star}` inside the dict returned by `build_registered_evaluation_summary`, populated from NEW kwargs at the call site. A NEW fail-closed loader verifies the pinned report's content SHA equals the config SHA before extracting values (an unpinned report's values must not leak in). Ratio/interval endpoints route through `_finite_or_sentinel` (mirror `gi_explained_interval`). When the config field is null (not yet finalized), the block records `{report_sha256: null, fairness_flag: "unavailable", ...}` — the CARRY exists but is honestly empty. Decide additive-under-`_v1` (no schema-version bump) since only an OPTIONAL block is added; if a bump is required, edit BOTH the `phase2b.py` literal and the `durable.py` constant identically.
+- Consumes: `config.baselines.gears.approximation_bias_report_sha256` (may be null pre-finalization) + an immutable report byte snapshot captured before sealed-store construction.
+- Produces: an `approximation_bias_fairness` block `{report_sha256, fairness_flag, bias_to_signal_ratio_R, bootstrap_95_interval, R_star}` inside the dict returned by `build_registered_evaluation_summary`, populated from NEW kwargs at the call site. A NEW fail-closed pre-seal loader verifies the snapshot SHA and full v2 contract before extracting values (an unpinned report's values must not leak in); the post-seal summary builder performs no report I/O. Ratio/interval endpoints route through `_finite_or_sentinel` (mirror `gi_explained_interval`). When the config field is null (not yet finalized), the block records `{report_sha256: null, fairness_flag: "unavailable", ...}` — the CARRY exists but is honestly empty. Decide additive-under-`_v1` (no schema-version bump) since only an OPTIONAL block is added; if a bump is required, edit BOTH the `phase2b.py` literal and the `durable.py` constant identically.
 
 - [ ] **Step 1: Write failing tests** (existing synthetic phase2b/durable harnesses; no seal, no store):
   - `test_fairness_block_sourced_from_pinned_report`: config SHA == report content SHA ⇒ block carries the report's flag/ratio/interval.

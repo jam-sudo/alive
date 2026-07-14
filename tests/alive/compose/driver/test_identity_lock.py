@@ -171,7 +171,7 @@ def _minimal_run_spec(
 ) -> ResolvedRunSpec:
     z = "0" * 64
     return ResolvedRunSpec(
-        schema="compose_resolved_run_spec_v1",
+        schema="compose_resolved_run_spec_v2",
         mode=mode,
         protocol="COMPOSE-K562-v1",
         run_id="run",

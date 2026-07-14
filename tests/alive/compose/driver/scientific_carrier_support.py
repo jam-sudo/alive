@@ -138,6 +138,8 @@ def _write_activated_config(stage1: Path, *, approved_git_sha: str) -> tuple[Any
             "gene_order_sha256": "4" * 64,
             "pca_dim": 1,
             "registered_seeds": list(raw["seeds"]["registered_seeds"]),
+            "probe_a_evidence_sha256": "5" * 64,
+            "probe_a_evidence_manifest_sha256": "6" * 64,
             "sealed_pair_overlap_count": 0,
             "pod_instance": "synthetic-test",
         },

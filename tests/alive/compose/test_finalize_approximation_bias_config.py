@@ -3,7 +3,7 @@
 ``docs/superpowers/specs/2026-07-13-compose-approximation-bias-metric-design.md``):
 the LOCAL one-way tool
 (``scripts/compose/finalize_approximation_bias_config.py``) that binds a
-completed ``compose_approximation_bias_report_v1`` report's content SHA into
+completed ``compose_approximation_bias_report_v2`` report's content SHA into
 the bias-NULL Phase-2 config, while MECHANICALLY proving it changed exactly
 one leaf (``baselines.gears.approximation_bias_report_sha256``) and nothing
 else, and that the resulting finalized config's own SHA never leaks back into
@@ -101,7 +101,7 @@ def _write_report_json(tmp_path: Path, report: dict, *, name: str = "report.json
 
 
 def _bound_report(basis_sha: str) -> dict:
-    """A complete, integrity-valid v1 report bound to ``basis_sha``."""
+    """A complete, integrity-valid v2 report bound to ``basis_sha``."""
     empty_stratum = {
         "n_pairs": 0,
         "per_pair": [],
@@ -118,20 +118,20 @@ def _bound_report(basis_sha: str) -> dict:
         "strata": {"combo_calibration": empty_stratum, "singles": empty_stratum},
         "gi_and_fairness": {
             "gi_signal_per_pair": [],
-            "gi_signal_median": 0.4,
-            "floor_median": 0.048,
-            "bias_to_signal_ratio_R": 0.12,
-            "bias_to_signal_ratio_per_pair_median": 0.12,
+            "gi_signal_median": NON_FINITE,
+            "floor_median": NON_FINITE,
+            "bias_to_signal_ratio_R": NON_FINITE,
+            "bias_to_signal_ratio_per_pair_median": NON_FINITE,
             "R_star": 0.5,
-            "fairness_flag": "clear",
+            "fairness_flag": "indeterminate",
             "bootstrap_95_interval": {
-                "floor_median": [0.03, 0.06],
-                "gi_signal_median": [0.3, 0.5],
-                "bias_to_signal_ratio_R": [0.08, 0.18],
+                "floor_median": NON_FINITE,
+                "gi_signal_median": NON_FINITE,
+                "bias_to_signal_ratio_R": NON_FINITE,
             },
             "replicates_requested": 10,
-            "replicates_finite": 10,
-            "replicates_non_finite": 0,
+            "replicates_finite": 0,
+            "replicates_non_finite": 10,
         },
         "provenance": {
             "measurement_contract_sha256": measurement_contract_sha256(),
@@ -143,6 +143,8 @@ def _bound_report(basis_sha: str) -> dict:
             "gene_order_sha256": "4" * 64,
             "pca_dim": 2,
             "registered_seeds": [11, 23, 37],
+            "probe_a_evidence_sha256": "5" * 64,
+            "probe_a_evidence_manifest_sha256": "6" * 64,
             "sealed_pair_overlap_count": 0,
             "pod_instance": "unit-test-local",
         },

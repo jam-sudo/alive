@@ -33,11 +33,13 @@ from alive.compose.approximation_bias import (
     PROTOCOL,
     REPRESENTATION,
     ApproximationBiasValidationError,
+    ProbeAEvidence,
+    canonical_json,
     self_checksum,
     validate_approximation_bias_report,
 )
 from alive.compose.fit_role import canonical_gene_order_sha256
-from alive.provenance import sha256_file
+from alive.provenance import sha256_bytes, sha256_file
 
 _REPO = Path(__file__).resolve().parents[3]
 _SCRIPT = _REPO / "scripts" / "compose" / "measure_pseudobulk_approximation_bias.py"
@@ -77,6 +79,27 @@ def _identity_block(genes: list[str], median_library: float, control_mean: list[
 def _cells(*rows: list[float]) -> np.ndarray:
     """Stack raw per-cell count rows into a ``(n_cells, n_genes)`` matrix."""
     return np.array(rows, dtype=np.float64)
+
+
+def _probe_a_snapshot(*, git_commit: str = "b" * 40) -> ProbeAEvidence:
+    body = {
+        "schema": PROBE_A_SCHEMA,
+        "protocol": PROTOCOL,
+        "status": "pass",
+        "git_commit": git_commit,
+        "evidence_manifest_sha256": "d" * 64,
+        "output_bridge": {
+            "representation": REPRESENTATION,
+            "verdict": "pass",
+            "tolerance": 1e-6,
+            "max_abs_error": 1e-8,
+        },
+    }
+    payload = {**body, "self_checksum": self_checksum(body)}
+    evidence_bytes = (canonical_json(payload) + "\n").encode("utf-8")
+    return ProbeAEvidence(
+        content_sha256=sha256_bytes(evidence_bytes), evidence_bytes=evidence_bytes
+    )
 
 
 def _z_by_hand(row: np.ndarray, median_library: float) -> np.ndarray:
@@ -514,7 +537,7 @@ def test_point_estimate_is_rng_free():
 # ALREADY excludes sealed rows and raises ``FitRoleArtifactError`` for a
 # ``control``-role or sealed-pair member. A negative test that builds its
 # input THROUGH that builder would credit the BUILDER, not the metric's own
-# guard -- it would pass even if ``measure_approximation_bias_v1``'s guards
+# guard -- it would pass even if ``measure_approximation_bias_v2``'s guards
 # did nothing. Every fixture below therefore writes a fit-role-shaped
 # ``.h5ad`` DIRECTLY via ``anndata.AnnData`` (bypassing
 # ``ComposeFitRoleExtractor``/``extract_fit_roles`` entirely), so the
@@ -565,7 +588,7 @@ def test_control_reference_rows_are_accepted_but_not_measured(tmp_path):
 
     artifact = _write_hand_built_artifact(tmp_path, genes, roles, perturbations, rows)
 
-    report = module.measure_approximation_bias_v1(
+    report = module.measure_approximation_bias_v2(
         fit_role_artifact=artifact,
         response_projection=block,
         sealed_pair_ids=[],
@@ -575,6 +598,7 @@ def test_control_reference_rows_are_accepted_but_not_measured(tmp_path):
         git_commit="b" * 40,
         norman_source_sha256="c" * 64,
         pod_instance="unit-test",
+        probe_a_evidence=_probe_a_snapshot(),
     )
     assert {entry["pair_id"] for entry in report["strata"]["singles"]["per_pair"]} == {
         "GENEA",
@@ -601,10 +625,11 @@ def test_sealed_pair_member_aborts(tmp_path):
     artifact = _write_hand_built_artifact(tmp_path, genes, roles, perturbations, rows)
 
     with pytest.raises(ValueError, match="overlaps sealed_pair_ids") as exc_info:
-        module.measure_approximation_bias_v1(
+        module.measure_approximation_bias_v2(
             fit_role_artifact=artifact,
             response_projection=block,
             sealed_pair_ids=sealed_pair_ids,
+            probe_a_evidence=_probe_a_snapshot(),
         )
     # Fail-closed BEFORE any report: the guard raises instead of returning a
     # dict, so a nonzero `sealed_pair_overlap_count` is never reported anywhere.
@@ -630,8 +655,11 @@ def test_gene_order_mismatch_aborts(tmp_path):
     artifact = _write_hand_built_artifact(tmp_path, genes, roles, perturbations, rows)
 
     with pytest.raises(ValueError, match="gene_order digest mismatch"):
-        module.measure_approximation_bias_v1(
-            fit_role_artifact=artifact, response_projection=block, sealed_pair_ids=[]
+        module.measure_approximation_bias_v2(
+            fit_role_artifact=artifact,
+            response_projection=block,
+            sealed_pair_ids=[],
+            probe_a_evidence=_probe_a_snapshot(),
         )
 
 
@@ -648,7 +676,7 @@ def test_zero_overlap_recorded(tmp_path):
     rows = [[3.0, 7.0], [4.0, 6.0], [5.0, 5.0]]
     artifact = _write_hand_built_artifact(tmp_path, genes, roles, perturbations, rows)
 
-    result = module.measure_approximation_bias_v1(
+    result = module.measure_approximation_bias_v2(
         fit_role_artifact=artifact,
         response_projection=block,
         sealed_pair_ids=["ZZZ_YYY"],  # disjoint from the measured roster
@@ -658,6 +686,7 @@ def test_zero_overlap_recorded(tmp_path):
         git_commit="b" * 40,
         norman_source_sha256="c" * 64,
         pod_instance="unit-test-local",
+        probe_a_evidence=_probe_a_snapshot(),
     )
 
     assert result["provenance"]["sealed_pair_overlap_count"] == 0
@@ -735,16 +764,17 @@ def _full_report_fixture(tmp_path: Path) -> dict:
         "git_commit": "b" * 40,
         "norman_source_sha256": "c" * 64,
         "pod_instance": "unit-test-local",
+        "probe_a_evidence": _probe_a_snapshot(),
     }
 
 
-def test_report_has_v1_schema_and_strata(tmp_path):
+def test_report_has_v2_schema_and_strata(tmp_path):
     module = _load_metric_module()
     kwargs = _full_report_fixture(tmp_path)
 
-    report = module.measure_approximation_bias_v1(**kwargs)
+    report = module.measure_approximation_bias_v2(**kwargs)
 
-    assert report["schema"] == "compose_approximation_bias_report_v1"
+    assert report["schema"] == "compose_approximation_bias_report_v2"
     assert set(report["strata"]) == {"combo_calibration", "singles"}
     assert report["strata"]["combo_calibration"]["n_pairs"] == 3
     assert report["strata"]["singles"]["n_pairs"] == 6
@@ -773,13 +803,15 @@ def test_report_has_v1_schema_and_strata(tmp_path):
     assert prov["basis_config_sha256"] == "a" * 64
     assert prov["git_commit"] == "b" * 40
     assert prov["norman_source_sha256"] == "c" * 64
+    assert prov["probe_a_evidence_sha256"] == kwargs["probe_a_evidence"].content_sha256
+    assert prov["probe_a_evidence_manifest_sha256"] == "d" * 64
     assert prov["pod_instance"] == "unit-test-local"
 
 
 def test_report_validator_binds_basis_and_approved_commit(tmp_path):
     module = _load_metric_module()
     kwargs = _full_report_fixture(tmp_path)
-    report = module.measure_approximation_bias_v1(**kwargs)
+    report = module.measure_approximation_bias_v2(**kwargs)
 
     validate_approximation_bias_report(
         report,
@@ -800,10 +832,52 @@ def test_report_validator_binds_basis_and_approved_commit(tmp_path):
         )
 
 
+def test_direct_producer_requires_probe_a_evidence(tmp_path):
+    """Direct API use cannot bypass the Probe-A admission boundary."""
+    module = _load_metric_module()
+    kwargs = _full_report_fixture(tmp_path)
+    kwargs["probe_a_evidence"] = None
+
+    with pytest.raises(ValueError, match="Probe-A evidence is required.*NOT_ADMISSIBLE"):
+        module.measure_approximation_bias_v2(**kwargs)
+
+
+@pytest.mark.parametrize(
+    ("mutate", "field"),
+    [
+        (
+            lambda report: report["strata"]["combo_calibration"]["b_distribution"].__setitem__(
+                "median",
+                report["strata"]["combo_calibration"]["b_distribution"]["median"] + 1.0,
+            ),
+            "b_distribution.median",
+        ),
+        (
+            lambda report: report["gi_and_fairness"].__setitem__(
+                "floor_median", report["gi_and_fairness"]["floor_median"] + 1.0
+            ),
+            "floor_median",
+        ),
+    ],
+)
+def test_report_validator_recomputes_derived_aggregates(tmp_path, mutate, field):
+    """A fresh self-checksum cannot legitimize aggregates that contradict pair data."""
+    module = _load_metric_module()
+    report = module.measure_approximation_bias_v2(**_full_report_fixture(tmp_path))
+    mutated = copy.deepcopy(report)
+    mutate(mutated)
+    body = {key: value for key, value in mutated.items() if key != "self_checksum"}
+    mutated["self_checksum"] = self_checksum(body)
+
+    with pytest.raises(ApproximationBiasValidationError, match="inconsistent") as exc_info:
+        validate_approximation_bias_report(mutated)
+    assert field in str(exc_info.value)
+
+
 def test_self_checksum_detects_tampering(tmp_path):
     module = _load_metric_module()
     kwargs = _full_report_fixture(tmp_path)
-    report = module.measure_approximation_bias_v1(**kwargs)
+    report = module.measure_approximation_bias_v2(**kwargs)
 
     # Anti-tautology: recompute over the MUTATED object (a field the checksum
     # actually covers), not the original -- a test that merely re-hashed the
@@ -820,7 +894,7 @@ def test_self_checksum_detects_tampering(tmp_path):
 def test_final_config_sha_absent_from_report(tmp_path):
     module = _load_metric_module()
     kwargs = _full_report_fixture(tmp_path)
-    report = module.measure_approximation_bias_v1(**kwargs)
+    report = module.measure_approximation_bias_v2(**kwargs)
 
     final_sha = "f" * 64  # a distinct, fabricated "final config" SHA
     assert final_sha != kwargs["basis_config_sha256"]
@@ -831,8 +905,8 @@ def test_canonical_json_byte_reproducible(tmp_path):
     module = _load_metric_module()
     kwargs = _full_report_fixture(tmp_path)
 
-    report_1 = module.measure_approximation_bias_v1(**kwargs)
-    report_2 = module.measure_approximation_bias_v1(**kwargs)
+    report_1 = module.measure_approximation_bias_v2(**kwargs)
+    report_2 = module.measure_approximation_bias_v2(**kwargs)
 
     json_1 = json.dumps(report_1, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     json_2 = json.dumps(report_2, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
@@ -854,7 +928,7 @@ def _write_main_cli_fixture(tmp_path: Path) -> dict:
 
     Reuses the exact numeric roster of `_full_report_fixture` (already known
     to assemble a real, finite, non-degenerate report via direct calls to
-    `measure_approximation_bias_v1`) but serializes `response_projection` /
+    `measure_approximation_bias_v2`) but serializes `response_projection` /
     `sealed_pair_ids` / `basis_config` to actual files, since `main()` reads
     these from `--*` CLI paths rather than accepting in-memory objects.
     """
