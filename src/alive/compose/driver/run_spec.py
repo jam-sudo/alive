@@ -41,6 +41,7 @@ from types import MappingProxyType
 from typing import Any, Mapping
 
 from alive.compose.datacard import compute_compose_run_id
+from alive.compose.driver.seal_boundary import scientific_protocol_seal_audit_path
 from alive.provenance import sha256_file, sha256_json
 
 __all__ = [
@@ -539,6 +540,19 @@ def load_resolved_run_spec(
     # 15. mode-block schema + sealed_input lexical safety -----------------
     mode_block = payload[mode_block_key]
     _validate_mode_block(mode_block, mode=mode, root_real=root_real)
+    if mode == "scientific":
+        try:
+            expected_audit = scientific_protocol_seal_audit_path(
+                root_real, _require_str(payload, "protocol", where="identity")
+            )
+        except ValueError as exc:
+            raise RunSpecError(f"scientific protocol seal boundary is invalid: {exc}") from exc
+        declared_audit = mode_block["sealed_input"]["audit_path"]
+        if declared_audit != str(expected_audit):
+            raise RunSpecError(
+                f"scientific.sealed_input.audit_path {declared_audit!r} != canonical "
+                f"protocol-global seal audit {str(expected_audit)!r}"
+            )
 
     # 16. recomputed run_id == declared -----------------------------------
     digests = {

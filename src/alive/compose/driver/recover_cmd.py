@@ -2,7 +2,7 @@
 
 The recovery subcommand and a THIN wrapper over the C0 library entry point
 :func:`~alive.compose.durable.recover_phase2b_durable_outputs`. It salvages a run
-whose seal was ALREADY consumed (the burned ``<run_dir>/audit.jsonl`` exists) but
+whose seal was ALREADY consumed (the mode-specific burned audit exists) but
 whose durable terminal / commit marker was not fully published, covering the three
 library-owned states:
 
@@ -98,7 +98,11 @@ class RecoverSubcommandError(RuntimeError):
 # --------------------------------------------------------------------------- #
 
 
-def run_recover_subcommand(*, run_dir: str | Path) -> int:
+def run_recover_subcommand(
+    *,
+    run_dir: str | Path,
+    seal_audit_path: str | Path | None = None,
+) -> int:
     """Recover / verify the durable Phase-2b publish for ``run_dir`` (spec §3.4).
 
     Acquires the shared ``run_dir/phase2b.lock``, asserts the ``recover`` roster,
@@ -117,6 +121,10 @@ def run_recover_subcommand(*, run_dir: str | Path) -> int:
         exactly one of the two disjoint recovery states (a single terminal, or
         ``terminal=0`` with a burned audit claim + its causally-prior pre-access
         provenance + seed-variability report).
+    seal_audit_path : str or Path or None
+        Recovery-only audit override. Scientific runs must pass the canonical
+        protocol-global path declared by their ResolvedRunSpec; fixtures keep
+        the default local ``<run_dir>/audit.jsonl``.
 
     Returns
     -------
@@ -141,13 +149,20 @@ def run_recover_subcommand(*, run_dir: str | Path) -> int:
     # subcommand uses, then assert the recover roster (a structural precondition
     # that fails closed by RAISING). Both run BEFORE the library recovery.
     with _recover_lock(run_dir):
-        assert_run_dir_roster(run_dir, "recover")
+        assert_run_dir_roster(
+            run_dir,
+            "recover",
+            seal_audit_path=seal_audit_path,
+        )
 
         # Step 1: hand off to the library. It owns ALL recovery / synthesis logic
         # (verify-only, idempotent re-publish, or ABORTED_AFTER_SEAL synthesis); the
         # wrapper never re-implements it and never touches the outcome store or seal.
         try:
-            result = recover_phase2b_durable_outputs(run_dir=run_dir)
+            result = recover_phase2b_durable_outputs(
+                run_dir=run_dir,
+                audit_path=seal_audit_path,
+            )
         except DurableLedgerError as exc:
             # POST-seal fail-closed (e.g. a burned audit with 0 records, an invalid
             # pre-access provenance, a divergent partial durable byte). recover opens

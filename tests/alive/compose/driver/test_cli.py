@@ -258,7 +258,8 @@ def test_missing_required_flag_raises_systemexit_two() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# recover: argparse wiring dispatches with only --run-dir (no run-spec flags)
+# recover: argparse wiring dispatches without run-spec flags; scientific recovery
+# may additionally name its protocol-global seal audit.
 # --------------------------------------------------------------------------- #
 def test_recover_dispatches_with_run_dir_only_and_maps_library_result(
     tmp_path: Path, capsys: pytest.CaptureFixture
@@ -276,6 +277,26 @@ def test_recover_dispatches_with_run_dir_only_and_maps_library_result(
     captured = capsys.readouterr()
     assert captured.out == ""
     assert "recover: RunDirStateError:" in captured.err
+
+
+def test_recover_accepts_external_seal_audit_path(tmp_path, capsys) -> None:
+    empty_run_dir = tmp_path / "empty"
+    empty_run_dir.mkdir()
+    audit_path = tmp_path / ".compose-protocol-seal-test.jsonl"
+    audit_path.write_text("{}\n", encoding="utf-8")
+
+    rc = main(
+        [
+            "recover",
+            "--run-dir",
+            str(empty_run_dir),
+            "--seal-audit-path",
+            str(audit_path),
+        ]
+    )
+
+    assert rc == 10
+    assert "recover: RunDirStateError:" in capsys.readouterr().err
 
 
 # --------------------------------------------------------------------------- #

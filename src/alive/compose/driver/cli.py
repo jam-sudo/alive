@@ -18,7 +18,7 @@ Four subcommands (spec §1.1)::
     preflight  --run-spec PATH --approved-artifacts-root PATH --run-dir PATH
     phase2b    --run-spec PATH --approved-artifacts-root PATH --run-dir PATH \\
                --confirm-seal TOKEN
-    recover    --run-dir PATH
+    recover    --run-dir PATH [--seal-audit-path PATH]
 
 Exit-code contract (spec §1.1): ``0`` = the requested stage succeeded; ``10`` =
 a pre-seal validation rejection (no seal consumed); ``20`` = ``phase2a``
@@ -204,6 +204,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     recover = subparsers.add_parser("recover")
     recover.add_argument("--run-dir", required=True, type=Path)
+    recover.add_argument("--seal-audit-path", type=Path, default=None)
 
     return parser
 
@@ -286,7 +287,10 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if args.subcommand == "recover":
         try:
-            return run_recover_subcommand(run_dir=args.run_dir)
+            return run_recover_subcommand(
+                run_dir=args.run_dir,
+                seal_audit_path=args.seal_audit_path,
+            )
         except _KNOWN_PRESEAL_REJECTIONS as exc:
             _report_preseal_rejection("recover", exc)
             return PRESEAL_REJECT_EXIT

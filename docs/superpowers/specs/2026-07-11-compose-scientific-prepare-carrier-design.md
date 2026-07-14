@@ -1,6 +1,6 @@
 # COMPOSE production driver — Scientific PREPARE carrier design
 
-> **Status:** DESIGN (revised after deep review; awaiting owner approval) · 2026-07-11
+> **Status:** IMPLEMENTED + MERGED on `main` (carrier B-boundary); scientific activation remains BLOCKED · 2026-07-13
 > **Protocol:** `COMPOSE-K562-v1` (ACTIVE). Opens **no** seal; the COMPOSE seal remains UNOPENED.
 > **Sub-project:** completion of driver sub-project **C**'s deferred scientific carrier path.
 > **Authoritative parents:** driver spec `specs/2026-07-07-compose-production-driver-design.md`;
@@ -125,12 +125,14 @@ Pure mapping/path-string validation must prove:
 - `sealed_input.snapshot_id == attestation.snapshot_id` in scientific mode;
 - `attestation.pair_index_file_sha256` equals the loader-verified pair-index file SHA;
 - pair-index source/row digests equal the attested source/row digests; and
-- `sealed_input.audit_path` equals the normalized `<run_dir>/<SEAL_AUDIT_FILENAME>` exactly.
+- `sealed_input.audit_path` equals the canonical protocol-global path
+  `.compose-protocol-seal-<sha256(protocol UTF-8)>.jsonl` directly under the approved artifacts root.
 
 The source path is checked lexically only at this stage: no `resolve`, `stat`, hash, AnnData parse or
 source open is permitted. Source node identity and byte integrity remain Phase-2b-after-confirmation
 work. This closes the current gap where source digest equality is checked but canonical path,
-snapshot and run-bound audit equality are not.
+snapshot and protocol-global audit equality are not. This prevents a new run directory from minting a fresh
+scientific seal boundary for the same registered protocol; fixtures retain their run-local audit.
 
 ### 2.3 Runtime Git/environment identity
 

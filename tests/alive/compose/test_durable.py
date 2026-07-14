@@ -140,6 +140,16 @@ def _registered_summary(state: str = "COMPLETE") -> dict:
         "regime_result_single_checksum": "e" * 64,
         "bounds_checksum": "f" * 64,
         "seed_variability_report_checksum": "0" * 64,
+        # Task 7: the pre-registered approximation-bias fairness carry (§5/§7). Carried
+        # verbatim (not decided from) into the durable summary; here the null-config
+        # (not-yet-finalized) shape — the honestly-empty "unavailable" block.
+        "approximation_bias_fairness": {
+            "report_sha256": None,
+            "fairness_flag": "unavailable",
+            "bias_to_signal_ratio_R": None,
+            "bootstrap_95_interval": None,
+            "R_star": None,
+        },
     }
 
 
@@ -659,6 +669,35 @@ def test_finalizer_rejects_bad_theta_roster(tmp_path: Path) -> None:
         _finalize(scenario)
 
 
+def test_durable_fails_closed_when_block_absent(tmp_path: Path) -> None:
+    """Task 7: a summary lacking the approximation_bias_fairness carry fails closed.
+
+    The finalizer NEVER populates or mutates the block — a summary-bearing terminal
+    that omits it is refused (the full checksum cascade is rebuilt so only the new
+    presence/shape assertion fires)."""
+    scenario = _build_scenario(tmp_path)
+    summary = _registered_summary()
+    del summary["approximation_bias_fairness"]
+    _install_doctored_terminal(scenario["terminal_path"], summary=summary)
+    with pytest.raises(DurableLedgerError, match="approximation_bias_fairness"):
+        _finalize(scenario)
+
+
+def test_durable_copy_verbatim_still_holds(tmp_path: Path) -> None:
+    """Task 7: with the fairness block present, the durable copy stays byte-verbatim.
+
+    The published registered summary carries the block, equals the terminal's summary
+    byte-for-byte, and ``sha256_json(summary) == registered_summary_checksum`` holds
+    end-to-end (durable copies, never mutates)."""
+    scenario = _build_scenario(tmp_path)
+    result = _finalize(scenario)
+    terminal_body = json.loads(scenario["terminal_path"].read_text(encoding="utf-8"))
+    published = json.loads(result.registered_summary_path.read_text(encoding="utf-8"))
+    assert "approximation_bias_fairness" in published
+    assert published == terminal_body["registered_summary"]
+    assert sha256_json(published) == terminal_body["registered_summary_checksum"]
+
+
 # ---------------------------------------------------------------------------
 # Part A: install_or_verify_exact (spec §3.2).
 # ---------------------------------------------------------------------------
@@ -1142,6 +1181,44 @@ def test_recover_synthesizes_aborted_from_audit_only(tmp_path: Path) -> None:
     assert marker["seed_variability"]["sha256"] == _file_sha(scenario["seed_path"])
     core = {k: v for k, v in marker.items() if k != "commit_checksum"}
     assert sha256_json(core) == marker["commit_checksum"] == result.commit_checksum
+
+
+def test_recover_synthesizes_from_external_protocol_audit(tmp_path: Path) -> None:
+    scenario = _build_audit_only_scenario(tmp_path, audit_records=1)
+    run_dir = scenario["run_dir"]
+    external_audit = tmp_path / ".compose-protocol-seal-test.jsonl"
+    (run_dir / "audit.jsonl").replace(external_audit)
+
+    result = recover_phase2b_durable_outputs(
+        run_dir=run_dir,
+        audit_path=external_audit,
+    )
+
+    assert result.terminal_state == "ABORTED_AFTER_SEAL"
+    body = json.loads((run_dir / Phase2bTerminal.ABORTED_ARTIFACT).read_text(encoding="utf-8"))
+    assert body["run_id"] == _RUN_ID
+    assert body["sealed_access_count"] == 1
+
+
+def test_recover_external_audit_run_id_mismatch_fails_closed(tmp_path: Path) -> None:
+    scenario = _build_audit_only_scenario(tmp_path, audit_records=1)
+    run_dir = scenario["run_dir"]
+    external_audit = tmp_path / ".compose-protocol-seal-test.jsonl"
+    record = json.loads((run_dir / "audit.jsonl").read_text(encoding="utf-8"))
+    record["run_id"] = "wrong-run"
+    external_audit.write_text(
+        json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    (run_dir / "audit.jsonl").unlink()
+
+    with pytest.raises(DurableLedgerError, match="audit run_id"):
+        recover_phase2b_durable_outputs(
+            run_dir=run_dir,
+            audit_path=external_audit,
+        )
+
+    assert not (run_dir / Phase2bTerminal.ABORTED_ARTIFACT).exists()
 
 
 def test_recover_aborted_from_audit_only_is_byte_identical_idempotent(tmp_path: Path) -> None:

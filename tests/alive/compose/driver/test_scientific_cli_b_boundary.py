@@ -46,10 +46,10 @@ def test_no_run_produced_artifact_no_seal_no_audit(tmp_path):
     bundle = build_scientific_carrier_fixture(tmp_path / "a", repo_root=tmp_path / "r")
     rc = cli.main(_argv(bundle))
     assert rc == cli.PRESEAL_REJECT_EXIT
-    # run_dir holds NO run-produced artifact and NO audit.jsonl (the seal never opened).
+    # run_dir holds no output and the protocol-global audit is absent (seal unopened).
     present = sorted(p.name for p in Path(bundle.run_dir).iterdir())
     assert present == []
-    assert not (Path(bundle.run_dir) / "audit.jsonl").exists()
+    assert not bundle.audit_path.exists()
     assert not (Path(bundle.run_dir) / "seal_confirmation_manifest.json").exists()
 
 

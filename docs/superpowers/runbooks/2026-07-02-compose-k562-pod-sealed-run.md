@@ -1,16 +1,15 @@
 # COMPOSE-K562-v1 — A100 Pod Sealed-Run Runbook
 
 > **문서 역할:** COMPOSE-K562-v1의 일회성 sealed evaluation을 위한 운영 계약.
-> **개정일:** 2026-07-02
+> **개정일:** 2026-07-13
 > **현재 실행 상태:** **BLOCKED — §2의 pre-seal release blocker가 모두 해결·검토·commit되기 전에는 실행 금지.**
-> **코드 기준점:** `main` `21ddf1c`(2026-07-09). §2.1 fit-role artifact(A1)+payload-v2(A2), §2.4 durable
+> **코드 기준점:** `main` `2bbc2e8`(2026-07-12). §2.1 fit-role artifact(A1)+payload-v2(A2), §2.4 durable
 > final-ledger+seed-variability(D1/D2), 그리고 §2.3 단일 production driver(sub-project C, `phase2a`/
 > `preflight`/`phase2b --confirm-seal`/`recover`)가 모두 **main에 병합됐다**(C = merge commit `1c46708`;
 > whole-branch 2-lens 리뷰 + Important 2건 fix 후, driver 211 / compose 1106 green). Local dev-pod
-> prep scaffold는 `21ddf1c`에 병합됐지만 실제 fit body는 아직 pod-authored 상태다. **남은 blocker:
-> scientific ResolvedRunSpec/PREPARE carrier assembly(현재 committed carrier loader는
-> `mode="scientific"`을 fail-closed 거부), §2.2 real GEARS/CPA worker(+GO graph·pinned env),
-> §4 activation-evidence를 active config(`a4700194…`)로
+> scientific ResolvedRunSpec/PREPARE carrier assembly까지 main에 병합됐지만 실제 fit body와 activation
+> evidence는 아직 미완료다. **남은 blocker: §2.2 real GEARS/CPA worker(+GO graph·pinned env), conforming
+> Probe A와 reviewed output bridge, approximation-bias v1 report/integration, §4 activation-evidence를 finalized active config로
 > 재생성 + null requirement 확립, §2.5 release gate(worker locked-env green + owner의 exact Git SHA 승인).**
 > 이들이 별도 development pod에서 해결·검토·commit되기 전에는 runbook은 계속 BLOCKED다.
 > **상위 계약:** COMPOSE spec §7/§10.5–§10.6, deep-baseline design §1/§7,
@@ -88,7 +87,8 @@ committed driver를 제공한다. Python REPL이나 수동 객체 조립은 허�
 `scripts/run_compose_k562_phase2.py`는 네 subcommand를 노출한다: `phase2a`, `preflight`, `phase2b`,
 `recover`. `phase2a`/`preflight`/`phase2b`는 `--run-spec PATH --approved-artifacts-root PATH
 --run-dir PATH`를 받고, `phase2b`는 추가로 `--confirm-seal <confirmation_checksum>`을 받는다.
-`recover`는 `--run-dir PATH`만 받는다. **실행 순서는 canonical `phase2a → preflight → phase2b`다**
+`recover`는 `--run-dir PATH`와 scientific일 때 필수인 `--seal-audit-path PATH`를 받는다. **실행 순서는
+canonical `phase2a → preflight → phase2b`다**
 (`preflight`는 phase2a가 만든 frozen bundle을 `futility_status=='CONTINUE'`일 때만 검증하므로 phase2a
 뒤에 실행된다):
 
@@ -98,11 +98,16 @@ python scripts/run_compose_k562_phase2.py preflight  --run-spec RUN_SPEC --appro
 python scripts/run_compose_k562_phase2.py phase2b    --run-spec RUN_SPEC --approved-artifacts-root ARTIFACTS_ROOT --run-dir RUN_DIR --confirm-seal <confirmation_checksum>
 ```
 
-`recover`는 seal이 이미 소비된(burned `<run_dir>/audit.jsonl` 존재) run의 crash-recovery 전용 경로다:
+`recover`는 seal이 이미 소비된 run의 crash-recovery 전용 경로다. Fixture audit은
+`<run_dir>/audit.jsonl`; scientific audit은 ResolvedRunSpec에 고정된 protocol-global path다:
 
 ```text
-python scripts/run_compose_k562_phase2.py recover --run-dir RUN_DIR
+python scripts/run_compose_k562_phase2.py recover --run-dir RUN_DIR --seal-audit-path SCIENTIFIC_PROTOCOL_AUDIT
 ```
+
+`SCIENTIFIC_PROTOCOL_AUDIT`은 임의로 재구성하거나 새 위치로 바꾸지 않는다. 실행에 사용한 canonical
+ResolvedRunSpec의 `scientific.sealed_input.audit_path` 값을 그대로 사용하며, 그 값은 승인 root 아래
+`.compose-protocol-seal-<sha256(protocol UTF-8)>.jsonl`과 loader가 정확히 대조한다.
 
 ⚑ `--confirm-seal`에 넣는 값은 **`<run_id>`가 아니다.** `preflight`가 성공 시 `<run_dir>/
 seal_confirmation_manifest.json`을 write-once로 설치하며, 그 manifest의 `confirmation_checksum`
@@ -208,16 +213,18 @@ builder가 생성한 digest/revision 및 `environment.python_version/platform/gi
 
 **Activation evidence lineage 주의 (2026-07-06).** 현재 committed `real_norman_phi_rank_report.json`·
 `real_norman_detectable_effect_report.json`은 canonical `config_sha256=d8c65ac4…`, `activation=BLOCKED`,
-git `79b01e0`/`82a9c83`를 내장한 **pre-activation development snapshot**이다. 현재 active config의
-authoritative canonical digest는 `config_sha256 = sha256_json(raw) = a4700194…`
-(`load_compose_phase2_config`, config2.py)로 evidence값(`d8c65ac4…`)과 다르다 — activation flip
+git `79b01e0`/`82a9c83`를 내장한 **pre-activation development snapshot**이다. 최종 실행 config의
+authoritative canonical digest는 `load_compose_phase2_config`가 최종 bytes에서 다시 계산한다.
+approximation-bias report SHA finalization(null→값)이 config raw bytes를 바꿔 과거 `a4700194…`도 실행
+digest로 재사용하지 않는다. (GI secondary 정의 정정은 config2 코드 상수·YAML 주석만 바꾸므로
+`config_sha256 = sha256_json(raw)`에는 영향이 없다.) 기존 evidence값(`d8c65ac4…`)은 activation flip
 (`d507a09`) 이후에도 config parsed 구조가 A2 task 5(`42d71ce`: gears/cpa에 `prediction_representation`·
 `approximation_bias_report_sha256` 추가)에서 바뀌어 canonical digest가 재차 이동했다. (raw file-bytes sha는
 canonical `config_sha256`과 다른 값이니 lineage 비교에는 쓰지 않는다.) Scientific guard는 evidence 파일
 *bytes*를 recorded hash에 대조한 뒤 두 config-bound Norman report의 내부 `protocol`·`config_sha256`·
 `activation`도 파싱한다. 따라서 old-config 또는 `activation=BLOCKED` evidence는 런타임에서 fail-closed된다.
 §2.5의 "config digest가 바뀌면 evidence 결속 재생성" 규칙은 **이미 발효**됐다:
-pod에서 real Norman data로 두 evidence를 현재 active config(`a4700194…`) 하에 **재생성**하고, 아직 null인
+pod에서 real Norman data로 두 evidence를 **최종 active config** 하에 재생성하고, 아직 null인
 requirement(config `power_status`, GEARS/CPA `environment_status`, GEARS `approximation_bias_report_sha256`)를
 실데이터로 확립해 모든 ActivationRecord requirement가 active run identity에 결속된 non-empty evidence hash를
 갖도록 한다. rank/power/bias는 어차피 pod-only Norman data가 필요하므로 재생성은 자연스러운 pod 단계다.
@@ -287,15 +294,16 @@ production driver가 내부적으로 다음 순서를 강제해야 한다.
 
 ### 7.1 Crash recovery — `recover` subcommand
 
-`phase2b` 실행 중 프로세스가 죽어 seal은 소비됐지만(`<run_dir>/audit.jsonl` 존재) durable terminal/commit
-marker가 미완결일 수 있다. 이 경우 upstream stage를 재실행하지 않고 `recover --run-dir RUN_DIR`만
+`phase2b` 실행 중 프로세스가 죽어 seal은 소비됐지만(protocol-global audit 존재) durable terminal/commit
+marker가 미완결일 수 있다. 이 경우 upstream stage를 재실행하지 않고
+`recover --run-dir RUN_DIR --seal-audit-path SCIENTIFIC_PROTOCOL_AUDIT`만
 실행한다. `recover`는 새 seal을 열지 않으며 기존 audit로부터 다음만 수행한다.
 
 - terminal과 durable commit marker(`phase2b_durable_commit.json`)가 이미 있으면 재검증만 하고 아무것도
   다시 쓰지 않는다.
 - terminal은 있으나 marker가 없으면 byte-identical 재파생으로 marker만 write-once 설치한다(divergence는
   fail-closed).
-- `audit.jsonl`은 있으나 terminal이 없는 crash 상태(`audit=1 / terminal=0`)면 `ABORTED_AFTER_SEAL`
+- mode-specific audit은 있으나 terminal이 없는 crash 상태(`audit=1 / terminal=0`)면 `ABORTED_AFTER_SEAL`
   terminal을 합성해 기록한다.
 
 `recover`가 `phase2b_durable_commit.json` 존재+검증까지 확인해 COMPLETE로 판정하면 exit 0, 그 외

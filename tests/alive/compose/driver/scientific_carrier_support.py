@@ -294,13 +294,15 @@ def _build_activation_evidence(
 def build_scientific_carrier_fixture(root: Path, *, repo_root: Path) -> ScientificCarrierBundle:
     import numpy as np
 
+    from alive.compose.driver.seal_boundary import scientific_protocol_seal_audit_path
+
     root = Path(os.path.realpath(str(root)))
     stage1 = root / "stage1"
     workers = root / "workers"
     run_dir = root / "run"
     for d in (stage1, workers, run_dir):
         d.mkdir(parents=True, exist_ok=True)
-    audit_path = run_dir / "audit.jsonl"
+    audit_path = scientific_protocol_seal_audit_path(root, fb.PROTOCOL)
 
     approved_git_sha = init_synthetic_repo(repo_root)
     cfg, config_path, config_sha = _write_activated_config(stage1)

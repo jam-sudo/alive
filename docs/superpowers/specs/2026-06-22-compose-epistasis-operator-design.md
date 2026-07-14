@@ -235,8 +235,11 @@ cross-validation으로 선택하되, **OOF fold는 sealed와 동일한 gene-disj
 쌍별 $\hat\delta_{gh}$의 응답공간 MSE를 primitive로 둔다. confirmatory estimand는 additive 대비
 **paired relative error reduction**
 $1-\overline e_{L1}/\overline e_{\mathrm{additive}}$이며, perturbation pair를 resampling unit으로
-bootstrap한다. additive가 큰 효과를 이미 잡으므로 이 대비는 비가산 개선을 겨냥한다. GI
-부분공간 오차와 noise-ceiling(§2.4)으로 정규화한 "설명한 GI 분산 비율"은 2차로 보고한다.
+bootstrap한다. additive가 큰 효과를 이미 잡으므로 이 대비는 비가산 개선을 겨냥한다. 2차
+`gi_explained_fraction`은 zero-GI 예측을 기준으로 한
+$1-\mathrm{SSE}(\epsilon,\hat\epsilon)/\max(\mathrm{SST}(\epsilon),10^{-12})$이며,
+split-half noise ceiling으로 정규화하지 않는다. §2.4 noise ceiling은 별도 측정 신뢰도 진단으로
+병기하며 이 2차 지표나 verdict의 분모로 사용하지 않는다.
 
 ### 4.3 Scientific event 위계 (CARTOGRAPHER 교훈 반영)
 

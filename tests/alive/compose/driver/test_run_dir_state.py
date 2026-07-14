@@ -306,6 +306,36 @@ def test_recover_terminal_zero_with_audit_claim_passes(tmp_path: Path) -> None:
     assert_run_dir_roster(run_dir, "recover")
 
 
+def test_recover_terminal_zero_with_external_protocol_audit_passes(tmp_path: Path) -> None:
+    run_dir = _rundir(tmp_path)
+    _touch(
+        run_dir,
+        *_PHASE2A_FOUR,
+        _CONFIRMATION_MANIFEST,
+        DEVELOPMENT_SEED_VARIABILITY_FILENAME,
+        PRE_ACCESS_LEDGER_FILENAME,
+    )
+    audit_path = tmp_path / ".compose-protocol-seal-test.jsonl"
+    audit_path.write_text("{}\n", encoding="utf-8")
+    assert_run_dir_roster(run_dir, "recover", seal_audit_path=audit_path)
+
+
+def test_recover_rejects_ambiguous_local_and_external_audits(tmp_path: Path) -> None:
+    run_dir = _rundir(tmp_path)
+    _touch(
+        run_dir,
+        *_PHASE2A_FOUR,
+        _CONFIRMATION_MANIFEST,
+        DEVELOPMENT_SEED_VARIABILITY_FILENAME,
+        SEAL_AUDIT_FILENAME,
+        PRE_ACCESS_LEDGER_FILENAME,
+    )
+    audit_path = tmp_path / ".compose-protocol-seal-test.jsonl"
+    audit_path.write_text("{}\n", encoding="utf-8")
+    with pytest.raises(RunDirStateError, match="ambiguous"):
+        assert_run_dir_roster(run_dir, "recover", seal_audit_path=audit_path)
+
+
 def test_recover_terminal_zero_missing_seed_variability_raises(tmp_path: Path) -> None:
     # Proves the new state-2 requirement: audit claim + pre-access ledger
     # present, no terminal, but the causally-prior seed-variability report is

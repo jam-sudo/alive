@@ -1,0 +1,880 @@
+# tests/alive/compose/test_approximation_bias_metric.py
+"""Known-answer tests for the approximation-bias v1 point-estimate core.
+
+Task 1 of the COMPOSE approximation-bias v1 implementation plan (design spec
+``docs/superpowers/specs/2026-07-13-compose-approximation-bias-metric-design.md``):
+stratify + per-pair bias ``b_i`` + GI residual ``g_i`` + the ratio-of-medians
+``bias_to_signal_ratio_R`` + the pre-registered ``fairness_flag``.
+
+Every fixture here is a HAND-BUILT identity ``response_projection`` block
+(``pca_mean = 0``, ``pca_components = I`` over an all-HVG gene set) so
+``z(x) = log1p(normalize(x))`` exactly, and every expected value is
+independently hand-computed (or derived analytically) in this file rather than
+by calling the metric under test — anti-tautology per the task brief. Opens no
+seal, imports no ``gears``/``cpa``, constructs no store.
+"""
+
+from __future__ import annotations
+
+import copy
+import importlib.util
+import json
+import math
+from pathlib import Path
+
+import anndata as ad
+import numpy as np
+import pandas as pd
+import pytest
+import yaml
+
+from alive.compose.fit_role import canonical_gene_order_sha256
+from alive.provenance import sha256_file
+
+_REPO = Path(__file__).resolve().parents[3]
+_SCRIPT = _REPO / "scripts" / "compose" / "measure_pseudobulk_approximation_bias.py"
+_SPEC_PATH = (
+    _REPO
+    / "docs"
+    / "superpowers"
+    / "specs"
+    / "2026-07-13-compose-approximation-bias-metric-design.md"
+)
+_SENTINEL = "NON_FINITE"
+
+
+def _load_metric_module():
+    """Import the metric script by path (mirrors the legacy metric test)."""
+    spec = importlib.util.spec_from_file_location("_pb_bias_metric_v1", _SCRIPT)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _identity_block(genes: list[str], median_library: float, control_mean: list[float]) -> dict:
+    """A frozen ``response_projection`` block whose z-transform is exactly
+    ``log1p(normalize(x, median_library))``: HVG = every gene, ``pca_mean`` is
+    zero, and ``pca_components`` is the identity matrix (no rotation)."""
+    n = len(genes)
+    return {
+        "median_library": float(median_library),
+        "hvg_gene_ids": list(genes),
+        "pca_mean": [0.0] * n,
+        "pca_components": np.eye(n).tolist(),
+        "gene_order_sha256": canonical_gene_order_sha256(genes),
+        "control_mean": [float(v) for v in control_mean],
+    }
+
+
+def _cells(*rows: list[float]) -> np.ndarray:
+    """Stack raw per-cell count rows into a ``(n_cells, n_genes)`` matrix."""
+    return np.array(rows, dtype=np.float64)
+
+
+def _z_by_hand(row: np.ndarray, median_library: float) -> np.ndarray:
+    """Independent reference implementation of the identity-block transform.
+
+    Reimplements ``normalize_total_median + log1p`` directly (NOT by calling
+    into the metric module or ``fit_role.apply_response_projection``) so
+    known-answer assertions are not circular.
+    """
+    row = np.asarray(row, dtype=np.float64)
+    lib = row.sum(axis=-1, keepdims=True)
+    safe = np.where(lib > 0, lib, 1.0)
+    return np.log1p(row * (median_library / safe))
+
+
+# ---------------------------------------------------------------------------
+# Test 1: degenerate identical cells -> exact zero floor.
+# ---------------------------------------------------------------------------
+
+
+def test_degenerate_identical_cells_zero_floor():
+    module = _load_metric_module()
+    genes = ["G1", "G2", "G3"]
+    block = _identity_block(genes, median_library=15.0, control_mean=[0.0, 0.0, 0.0])
+
+    # >=2 IDENTICAL cells (not the trivial 1-cell case): mean(z) == z(mean)
+    # exactly, since averaging 2 bit-identical rows is exact in IEEE-754
+    # (doubling then halving never rounds).
+    identical_row = [3.0, 7.0, 2.0]
+    raw = _cells(identical_row, identical_row)
+
+    result = module._stratum_bias({"PERTX_PERTY": raw}, block, genes)
+
+    assert result["n_pairs"] == 1
+    assert result["per_pair"] == [{"pair_id": "PERTX_PERTY", "b_i": 0.0}]
+    assert result["b_distribution"]["median"] == 0.0
+    assert result["b_distribution"]["max"] == 0.0
+
+
+# ---------------------------------------------------------------------------
+# Test 2: analytic 2-cell case matches an independent by-hand computation.
+# ---------------------------------------------------------------------------
+
+
+def test_analytic_two_cell_bias_matches_by_hand():
+    module = _load_metric_module()
+    genes = ["G1", "G2"]
+    median_library = 10.0
+    block = _identity_block(genes, median_library, control_mean=[0.0, 0.0])
+
+    cell1 = [2.0, 8.0]
+    cell2 = [6.0, 4.0]
+    raw = _cells(cell1, cell2)
+
+    z_mean_by_hand = _z_by_hand(np.array([4.0, 6.0]), median_library)  # z(mean(cells))
+    mean_z_by_hand = 0.5 * (
+        _z_by_hand(np.array(cell1), median_library) + _z_by_hand(np.array(cell2), median_library)
+    )
+    bias_by_hand = z_mean_by_hand - mean_z_by_hand
+    b_i_by_hand = float(np.mean(bias_by_hand**2))
+
+    result = module._stratum_bias({"PAIRX_PAIRY": raw}, block, genes)
+
+    assert result["per_pair"][0]["pair_id"] == "PAIRX_PAIRY"
+    assert result["per_pair"][0]["b_i"] == pytest.approx(b_i_by_hand, abs=1e-12)
+    # Sanity: the Jensen gap on this spread population is not degenerate.
+    assert b_i_by_hand > 0.0
+
+
+# ---------------------------------------------------------------------------
+# Test 3: bias_to_signal_ratio_R is the ratio of medians, not the median of
+# per-pair ratios.
+# ---------------------------------------------------------------------------
+
+
+def test_bias_to_signal_ratio_is_ratio_of_medians():
+    module = _load_metric_module()
+    genes = [f"F{i}" for i in range(1, 7)]  # F1..F6, p=6
+    median_library = 30.0
+    control_mean = [0.0] * 6
+    block = _identity_block(genes, median_library, control_mean)
+
+    base = [5.0, 5.0, 5.0, 5.0, 5.0, 5.0]
+
+    def _spread(dims: tuple[int, int], s: float) -> tuple[list[float], list[float]]:
+        row = list(base)
+        row[dims[0]] += s
+        row[dims[1]] -= s
+        row_swapped = list(base)
+        row_swapped[dims[0]] -= s
+        row_swapped[dims[1]] += s
+        return row, row_swapped
+
+    # Three combo pairs with deliberately DIFFERENT spread (-> different b_i)
+    # and deliberately DIFFERENT single-vs-combo mismatch (-> different g_i),
+    # anti-correlated so ratio-of-medians != median-of-per-pair-ratios.
+    pair1_a, pair1_b = _spread((0, 1), 4.0)
+    pair2_a, pair2_b = _spread((2, 3), 2.0)
+    pair3_a, pair3_b = _spread((4, 5), 1.0)
+
+    combo_pairs = {
+        "P1_P2": _cells(pair1_a, pair1_b),
+        "P3_P4": _cells(pair2_a, pair2_b),
+        "P5_P6": _cells(pair3_a, pair3_b),
+    }
+    singles_rows = {
+        "P1": _cells([7.0, 3.0, 5.0, 5.0, 5.0, 5.0]),
+        "P2": _cells([3.0, 7.0, 5.0, 5.0, 5.0, 5.0]),
+        "P3": _cells([5.0, 5.0, 9.0, 1.0, 5.0, 5.0]),
+        "P4": _cells([5.0, 5.0, 1.0, 9.0, 5.0, 5.0]),
+        "P5": _cells([5.0, 5.0, 5.0, 5.0, 7.0, 3.0]),
+        "P6": _cells([5.0, 5.0, 5.0, 5.0, 3.0, 7.0]),
+    }
+
+    single_effects = module._single_effects(singles_rows, block, genes)
+    result = module._gi_and_fairness(combo_pairs, single_effects, block, genes, combo_sep="_")
+
+    b_values = [
+        entry["b_i"] for entry in module._stratum_bias(combo_pairs, block, genes)["per_pair"]
+    ]
+    g_values = [entry["g_i"] for entry in result["gi_signal_per_pair"]]
+    assert all(isinstance(v, float) for v in b_values + g_values)
+
+    ratio_of_medians = float(np.median(b_values)) / float(np.median(g_values))
+    median_of_per_pair_ratios = float(np.median([b / g for b, g in zip(b_values, g_values)]))
+
+    # The two aggregation methods must genuinely differ for this fixture,
+    # otherwise the test would not discriminate between them.
+    assert ratio_of_medians != pytest.approx(median_of_per_pair_ratios, rel=1e-6)
+
+    assert result["bias_to_signal_ratio_R"] == pytest.approx(ratio_of_medians, rel=1e-12)
+    assert result["bias_to_signal_ratio_R"] != pytest.approx(median_of_per_pair_ratios, rel=1e-6)
+    assert result["bias_to_signal_ratio_per_pair_median"] == pytest.approx(
+        median_of_per_pair_ratios, rel=1e-12
+    )
+
+
+# ---------------------------------------------------------------------------
+# Test 4: fairness_flag flips at R_star = 0.5, from real floor+eps arithmetic.
+# ---------------------------------------------------------------------------
+
+
+def _fairness_dataset(cell_a, cell_b, single_g, single_h):
+    genes = ["F1", "F2", "F3", "F4"]
+    median_library = 20.0
+    block = _identity_block(genes, median_library, control_mean=[0.0] * 4)
+    combo_pairs = {"GENEA_GENEB": _cells(cell_a, cell_b)}
+    singles_rows = {"GENEA": _cells(single_g), "GENEB": _cells(single_h)}
+    return genes, block, combo_pairs, singles_rows
+
+
+def test_fairness_flag_flips_at_r_star():
+    module = _load_metric_module()
+
+    # Dataset A: real floor+eps arithmetic gives R just BELOW 0.5 -> "clear".
+    genes, block, combo_pairs, singles_rows = _fairness_dataset(
+        cell_a=[40.0, 21.02, 40.0, 9.38],
+        cell_b=[0.2, 0.2, 0.2, 3.49],
+        single_g=[40.0, 8.45, 0.2, 0.2],
+        single_h=[0.2, 0.2, 25.22, 34.59],
+    )
+    single_effects = module._single_effects(singles_rows, block, genes)
+    result_below = module._gi_and_fairness(combo_pairs, single_effects, block, genes)
+    assert result_below["bias_to_signal_ratio_R"] < module._R_STAR
+    assert result_below["fairness_flag"] == "clear"
+
+    # Dataset B: real floor+eps arithmetic gives R just ABOVE 0.5 ->
+    # "representation_confounded".
+    genes, block, combo_pairs, singles_rows = _fairness_dataset(
+        cell_a=[40.0, 18.06, 0.2, 40.0],
+        cell_b=[0.2, 0.2, 0.74, 0.2],
+        single_g=[0.2, 10.46, 0.2, 40.0],
+        single_h=[40.0, 0.2, 18.32, 0.2],
+    )
+    single_effects = module._single_effects(singles_rows, block, genes)
+    result_above = module._gi_and_fairness(combo_pairs, single_effects, block, genes)
+    assert result_above["bias_to_signal_ratio_R"] >= module._R_STAR
+    assert result_above["fairness_flag"] == "representation_confounded"
+
+    # Sanity: both R's are close to the threshold (a real "just below/above"
+    # straddle, not an arbitrarily wide margin).
+    assert 0.4 < result_below["bias_to_signal_ratio_R"] < 0.5
+    assert 0.5 <= result_above["bias_to_signal_ratio_R"] < 0.6
+
+
+# ---------------------------------------------------------------------------
+# Test 5: control is reference-only -- never a measured pair in any stratum.
+# ---------------------------------------------------------------------------
+
+
+def test_control_is_not_a_measured_pair():
+    module = _load_metric_module()
+    genes = ["G1", "G2"]
+    block = _identity_block(genes, median_library=10.0, control_mean=[0.0, 0.0])
+
+    roles = ["control", "control", "singles", "singles", "combo_calibration", "combo_calibration"]
+    perturbations = ["control", "control", "GENEA", "GENEB", "GENEA_GENEB", "GENEA_GENEB"]
+    X = _cells(
+        [1.0, 9.0],  # control
+        [2.0, 8.0],  # control
+        [3.0, 7.0],  # GENEA single
+        [4.0, 6.0],  # GENEB single
+        [5.0, 5.0],  # GENEA_GENEB combo cell 1
+        [6.0, 4.0],  # GENEA_GENEB combo cell 2
+    )
+
+    strata = module._stratify_by_role(roles, perturbations, X)
+
+    assert "control" not in strata["combo_calibration"]
+    assert "control" not in strata["singles"]
+    assert set(strata["singles"]) == {"GENEA", "GENEB"}
+    assert set(strata["combo_calibration"]) == {"GENEA_GENEB"}
+
+    combo_result = module._stratum_bias(strata["combo_calibration"], block, genes)
+    singles_result = module._stratum_bias(strata["singles"], block, genes)
+    all_pair_ids = {e["pair_id"] for e in combo_result["per_pair"]} | {
+        e["pair_id"] for e in singles_result["per_pair"]
+    }
+    assert "control" not in all_pair_ids
+
+
+# ---------------------------------------------------------------------------
+# Extra coverage: R_STAR module constant is exactly 0.5 (auditability).
+# ---------------------------------------------------------------------------
+
+
+def test_r_star_constant_is_one_half():
+    module = _load_metric_module()
+    assert module._R_STAR == 0.5
+    assert math.isfinite(module._R_STAR)
+
+
+# ---------------------------------------------------------------------------
+# Task 2: two-stage bootstrap + NON_FINITE accounting + determinism.
+# ---------------------------------------------------------------------------
+
+
+def _three_pair_ratio_fixture(module):
+    """The ``bias_to_signal_ratio_R``-fixture (Test 3, re-used): three combo pairs
+    with deliberately different spread/mismatch so every pair's ``g_i`` is real and
+    nonzero -- a well-behaved (non-degenerate) bootstrap input."""
+    genes = [f"F{i}" for i in range(1, 7)]  # F1..F6, p=6
+    median_library = 30.0
+    control_mean = [0.0] * 6
+    block = _identity_block(genes, median_library, control_mean)
+
+    base = [5.0, 5.0, 5.0, 5.0, 5.0, 5.0]
+
+    def _spread(dims: tuple[int, int], s: float) -> tuple[list[float], list[float]]:
+        row = list(base)
+        row[dims[0]] += s
+        row[dims[1]] -= s
+        row_swapped = list(base)
+        row_swapped[dims[0]] -= s
+        row_swapped[dims[1]] += s
+        return row, row_swapped
+
+    pair1_a, pair1_b = _spread((0, 1), 4.0)
+    pair2_a, pair2_b = _spread((2, 3), 2.0)
+    pair3_a, pair3_b = _spread((4, 5), 1.0)
+
+    combo_pairs = {
+        "P1_P2": _cells(pair1_a, pair1_b),
+        "P3_P4": _cells(pair2_a, pair2_b),
+        "P5_P6": _cells(pair3_a, pair3_b),
+    }
+    singles_rows = {
+        "P1": _cells([7.0, 3.0, 5.0, 5.0, 5.0, 5.0]),
+        "P2": _cells([3.0, 7.0, 5.0, 5.0, 5.0, 5.0]),
+        "P3": _cells([5.0, 5.0, 9.0, 1.0, 5.0, 5.0]),
+        "P4": _cells([5.0, 5.0, 1.0, 9.0, 5.0, 5.0]),
+        "P5": _cells([5.0, 5.0, 5.0, 5.0, 7.0, 3.0]),
+        "P6": _cells([5.0, 5.0, 5.0, 5.0, 3.0, 7.0]),
+    }
+    single_effects = module._single_effects(singles_rows, block, genes)
+    return genes, block, combo_pairs, single_effects
+
+
+def test_bootstrap_determinism_byte_identical():
+    module = _load_metric_module()
+    genes, block, combo_pairs, single_effects = _three_pair_ratio_fixture(module)
+
+    result_1 = module._bootstrap_intervals(
+        combo_pairs, single_effects, block, genes, seeds=[11, 23, 37], replicates=50
+    )
+    result_2 = module._bootstrap_intervals(
+        combo_pairs, single_effects, block, genes, seeds=[11, 23, 37], replicates=50
+    )
+
+    # Byte-identical canonical-JSON serialisation across two independent calls with
+    # the same seeds/replicates -- not just "==" on the dicts.
+    json_1 = json.dumps(result_1, sort_keys=True, separators=(",", ":"))
+    json_2 = json.dumps(result_2, sort_keys=True, separators=(",", ":"))
+    assert json_1 == json_2
+
+    # Sanity: the fixture is non-degenerate (real finite replicates + a real
+    # interval), so byte-identity isn't vacuously true over all-NON_FINITE output.
+    assert result_1["replicates_finite"] > 0
+    assert result_1["replicates_finite"] + result_1["replicates_non_finite"] == 50
+    assert isinstance(result_1["bootstrap_95_interval"]["bias_to_signal_ratio_R"], list)
+
+    # A DIFFERENT seed roster must generally move the interval (proves the seeds are
+    # actually consumed, not ignored) while still summing to the requested count.
+    result_3 = module._bootstrap_intervals(
+        combo_pairs, single_effects, block, genes, seeds=[999, 1000], replicates=50
+    )
+    assert result_3["replicates_finite"] + result_3["replicates_non_finite"] == 50
+    json_3 = json.dumps(result_3, sort_keys=True, separators=(",", ":"))
+    assert json_3 != json_1
+
+
+def test_zero_gi_denominator_counted_non_finite():
+    module = _load_metric_module()
+    genes = ["F1", "F2", "F3", "F4"]
+    median_library = 20.0
+    control_mean = [0.0] * 4
+    block = _identity_block(genes, median_library, control_mean)
+
+    zero_row = [0.0, 0.0, 0.0, 0.0]
+    # Dataset B from test_fairness_flag_flips_at_r_star ("above" R_star): real,
+    # solidly nonzero GI signal (independent, hand-picked, already known-good).
+    cell_a = [40.0, 18.06, 0.2, 40.0]
+    cell_b = [0.2, 0.2, 0.74, 0.2]
+    single_g = [0.2, 10.46, 0.2, 40.0]
+    single_h = [40.0, 0.2, 18.32, 0.2]
+
+    combo_pairs = {
+        "PERTA_PERTB": _cells(zero_row),  # exact eps_i = 0 by construction below
+        "PERTC_PERTD": _cells(cell_a, cell_b),
+    }
+    singles_rows = {
+        "PERTA": _cells(zero_row),
+        "PERTB": _cells(zero_row),
+        "PERTC": _cells(single_g),
+        "PERTD": _cells(single_h),
+    }
+    single_effects = module._single_effects(singles_rows, block, genes)
+
+    # Force (not monkeypatch) a REAL degenerate zero-GI-denominator pair: PERTA,
+    # PERTB, and the PERTA_PERTB combo all use the identical all-zero raw row, and
+    # control_mean is exactly [0]*4, so z(zero_row) = [0]*4 (log1p(0) == 0) and every
+    # one of delta_g/delta_h/delta_i is exactly `0.0 - 0.0 == 0.0` (IEEE-754 exact) ->
+    # eps_i is the exact zero vector -> g_i == 0.0 exactly, not an approximation.
+    point = module._gi_and_fairness(combo_pairs, single_effects, block, genes)
+    zero_pair_g_i = next(
+        e["g_i"] for e in point["gi_signal_per_pair"] if e["pair_id"] == "PERTA_PERTB"
+    )
+    assert zero_pair_g_i == 0.0
+
+    result = module._bootstrap_intervals(
+        combo_pairs, single_effects, block, genes, seeds=[11, 23, 37], replicates=300
+    )
+
+    # Nothing silently dropped: every replicate lands in exactly one bucket.
+    assert (
+        result["replicates_finite"] + result["replicates_non_finite"]
+        == result["replicates_requested"]
+        == 300
+    )
+    # With only 2 combo pairs (one exact-zero-g_i, one real-signal) drawn with
+    # replacement, "both draws hit the zero pair" genuinely occurs across 300
+    # replicates (median([0, 0]) == 0 -> zero GI denominator -> non-finite ratio),
+    # and so does "at least one draw hits the real-signal pair" (finite ratio) --
+    # this is a REAL degenerate branch being exercised, not a contrived 100% case.
+    assert result["replicates_non_finite"] >= 1
+    assert result["replicates_finite"] >= 1
+
+
+def test_point_estimate_is_rng_free():
+    module = _load_metric_module()
+    genes, block, combo_pairs, single_effects = _three_pair_ratio_fixture(module)
+
+    stratum_before = module._stratum_bias(combo_pairs, block, genes)
+    point_before = module._gi_and_fairness(combo_pairs, single_effects, block, genes)
+
+    module._bootstrap_intervals(
+        combo_pairs, single_effects, block, genes, seeds=[11, 23, 37], replicates=25
+    )
+    module._bootstrap_intervals(
+        combo_pairs, single_effects, block, genes, seeds=[999, 1000], replicates=40
+    )
+
+    stratum_after = module._stratum_bias(combo_pairs, block, genes)
+    point_after = module._gi_and_fairness(combo_pairs, single_effects, block, genes)
+
+    # The point estimate (signed_pc_bias / per_pair via _stratum_bias, and the full
+    # _gi_and_fairness result) is byte-identical regardless of which/how many
+    # bootstrap seeds were used -- the point path never consumes an RNG.
+    assert stratum_after["per_pair"] == stratum_before["per_pair"]
+    assert stratum_after["signed_pc_bias"] == stratum_before["signed_pc_bias"]
+    assert point_after == point_before
+
+    # The bootstrap must not mutate its inputs in place either.
+    assert set(combo_pairs) == {"P1_P2", "P3_P4", "P5_P6"}
+    assert set(single_effects) == {"P1", "P2", "P3", "P4", "P5", "P6"}
+
+
+# ---------------------------------------------------------------------------
+# Task 3: metric-owned seal-safety guards (role / overlap / gene-order aborts).
+#
+# ANTI-TAUTOLOGY (task brief): ``alive.compose.fit_role.extract_fit_roles``
+# ALREADY excludes sealed rows and raises ``FitRoleArtifactError`` for a
+# ``control``-role or sealed-pair member. A negative test that builds its
+# input THROUGH that builder would credit the BUILDER, not the metric's own
+# guard -- it would pass even if ``measure_approximation_bias_v1``'s guards
+# did nothing. Every fixture below therefore writes a fit-role-shaped
+# ``.h5ad`` DIRECTLY via ``anndata.AnnData`` (bypassing
+# ``ComposeFitRoleExtractor``/``extract_fit_roles`` entirely), so the
+# forbidden role/pair SURVIVES into the file the metric reads, and every
+# assertion matches the METRIC's own ``ValueError`` message.
+# ---------------------------------------------------------------------------
+
+
+def _write_hand_built_artifact(
+    tmp_path: Path,
+    genes: list[str],
+    roles: list[str],
+    perturbations: list[str],
+    rows: list[list[float]],
+) -> str:
+    """Write a fit-role-shaped ``.h5ad`` directly via ``anndata.AnnData``.
+
+    Deliberately bypasses ``ComposeFitRoleExtractor``/``extract_fit_roles`` (the
+    real builder), so a role/pair the real builder would reject survives into
+    the file -- the anti-tautology fixture the task brief requires.
+    """
+    obs = pd.DataFrame(
+        {"role": list(roles), "perturbation": list(perturbations)},
+        index=[f"cell{i}" for i in range(len(roles))],
+    )
+    var = pd.DataFrame(index=list(genes))
+    X = np.asarray(rows, dtype=np.float64)
+    adata = ad.AnnData(X=X, obs=obs, var=var)
+    path = tmp_path / "hand_built_fit_role.h5ad"
+    adata.write_h5ad(path)
+    return str(path)
+
+
+def test_control_member_as_measured_pair_aborts(tmp_path):
+    module = _load_metric_module()
+    genes = ["G1", "G2"]
+    block = _identity_block(genes, median_library=10.0, control_mean=[0.0, 0.0])
+
+    roles = ["control", "singles", "combo_calibration"]
+    perturbations = ["control", "GENEA", "GENEA_GENEB"]
+    rows = [[5.0, 5.0], [3.0, 7.0], [4.0, 6.0]]
+
+    # Anti-tautology: the forbidden `control` role genuinely reaches the metric
+    # here (never filtered upstream) -- the OPPOSITE of
+    # `_stratify_by_role`, which silently DROPS `control` from its output
+    # roster (test_control_is_not_a_measured_pair, above). A seal-safety gate
+    # must fail closed on this input, not fail silent.
+    assert "control" in roles
+    assert "control" not in module._MEASURED_ROLES
+
+    artifact = _write_hand_built_artifact(tmp_path, genes, roles, perturbations, rows)
+
+    with pytest.raises(ValueError, match="measured role must be singles|combo_calibration"):
+        module.measure_approximation_bias_v1(
+            fit_role_artifact=artifact, response_projection=block, sealed_pair_ids=[]
+        )
+
+
+def test_sealed_pair_member_aborts(tmp_path):
+    module = _load_metric_module()
+    genes = ["G1", "G2"]
+    block = _identity_block(genes, median_library=10.0, control_mean=[0.0, 0.0])
+
+    # Both rows carry an allowed role (`combo_calibration`) -- guard (a) alone
+    # would not catch this; only the roster/`sealed_pair_ids` overlap check does.
+    roles = ["combo_calibration", "combo_calibration"]
+    perturbations = ["AAA_BBB", "CCC_DDD"]
+    rows = [[4.0, 6.0], [5.0, 5.0]]
+    sealed_pair_ids = ["AAA_BBB"]
+
+    # Anti-tautology: the forbidden overlap genuinely exists in the raw input.
+    assert set(perturbations) & set(sealed_pair_ids) == {"AAA_BBB"}
+
+    artifact = _write_hand_built_artifact(tmp_path, genes, roles, perturbations, rows)
+
+    with pytest.raises(ValueError, match="overlaps sealed_pair_ids") as exc_info:
+        module.measure_approximation_bias_v1(
+            fit_role_artifact=artifact,
+            response_projection=block,
+            sealed_pair_ids=sealed_pair_ids,
+        )
+    # Fail-closed BEFORE any report: the guard raises instead of returning a
+    # dict, so a nonzero `sealed_pair_overlap_count` is never reported anywhere.
+    assert "sealed_pair_overlap_count" not in str(exc_info.value)
+
+
+def test_gene_order_mismatch_aborts(tmp_path):
+    module = _load_metric_module()
+    genes = ["G1", "G2", "G3"]
+    block = _identity_block(genes, median_library=10.0, control_mean=[0.0, 0.0, 0.0])
+    # Corrupt ONLY the digest -- `pca_mean`/`pca_components`/`hvg_gene_ids` stay
+    # shape-consistent with `genes`, so a block whose arrays would otherwise
+    # project fine is what proves the guard fires up front, not as a side
+    # effect of some unrelated shape failure.
+    block["gene_order_sha256"] = "0" * 64
+
+    roles = ["singles", "combo_calibration"]
+    perturbations = ["GENEA", "GENEA_GENEB"]
+    rows = [[3.0, 7.0, 2.0], [4.0, 6.0, 2.0]]
+
+    assert canonical_gene_order_sha256(genes) != block["gene_order_sha256"]
+
+    artifact = _write_hand_built_artifact(tmp_path, genes, roles, perturbations, rows)
+
+    with pytest.raises(ValueError, match="gene_order digest mismatch"):
+        module.measure_approximation_bias_v1(
+            fit_role_artifact=artifact, response_projection=block, sealed_pair_ids=[]
+        )
+
+
+def test_zero_overlap_recorded(tmp_path):
+    # Task 4: once the guards pass, the recomputed overlap count is carried
+    # into the FULL v1 report's ``provenance`` block (no longer a bare
+    # top-level key) -- same concern as Task 3, updated location.
+    module = _load_metric_module()
+    genes = ["G1", "G2"]
+    block = _identity_block(genes, median_library=10.0, control_mean=[0.0, 0.0])
+
+    roles = ["singles", "singles", "combo_calibration"]
+    perturbations = ["AAA", "BBB", "AAA_BBB"]
+    rows = [[3.0, 7.0], [4.0, 6.0], [5.0, 5.0]]
+    artifact = _write_hand_built_artifact(tmp_path, genes, roles, perturbations, rows)
+
+    result = module.measure_approximation_bias_v1(
+        fit_role_artifact=artifact,
+        response_projection=block,
+        sealed_pair_ids=["ZZZ_YYY"],  # disjoint from the measured roster
+        basis_config_sha256="a" * 64,
+        registered_seeds=[11],
+        replicates=8,
+        git_commit="b" * 40,
+        norman_source_sha256="c" * 64,
+        pod_instance="unit-test-local",
+    )
+
+    assert result["provenance"]["sealed_pair_overlap_count"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Task 4: full v1 report assembly + provenance + self_checksum.
+#
+# ``_full_report_fixture`` reuses the exact numeric roster of
+# ``_three_pair_ratio_fixture`` (Task 2 -- already known to yield real, finite,
+# non-degenerate b_i/g_i/R and a real bootstrap interval) so these tests are
+# about ASSEMBLY (schema, provenance, self_checksum), not fresh known-answer
+# numerics.
+# ---------------------------------------------------------------------------
+
+
+def _full_report_fixture(tmp_path: Path) -> dict:
+    genes = [f"F{i}" for i in range(1, 7)]  # F1..F6, p=6
+    median_library = 30.0
+
+    base = [5.0, 5.0, 5.0, 5.0, 5.0, 5.0]
+
+    def _spread(dims: tuple[int, int], s: float) -> tuple[list[float], list[float]]:
+        row = list(base)
+        row[dims[0]] += s
+        row[dims[1]] -= s
+        row_swapped = list(base)
+        row_swapped[dims[0]] -= s
+        row_swapped[dims[1]] += s
+        return row, row_swapped
+
+    pair1_a, pair1_b = _spread((0, 1), 4.0)
+    pair2_a, pair2_b = _spread((2, 3), 2.0)
+    pair3_a, pair3_b = _spread((4, 5), 1.0)
+
+    roles = ["singles"] * 6 + ["combo_calibration"] * 6
+    perturbations = [
+        "P1",
+        "P2",
+        "P3",
+        "P4",
+        "P5",
+        "P6",
+        "P1_P2",
+        "P1_P2",
+        "P3_P4",
+        "P3_P4",
+        "P5_P6",
+        "P5_P6",
+    ]
+    rows = [
+        [7.0, 3.0, 5.0, 5.0, 5.0, 5.0],
+        [3.0, 7.0, 5.0, 5.0, 5.0, 5.0],
+        [5.0, 5.0, 9.0, 1.0, 5.0, 5.0],
+        [5.0, 5.0, 1.0, 9.0, 5.0, 5.0],
+        [5.0, 5.0, 5.0, 5.0, 7.0, 3.0],
+        [5.0, 5.0, 5.0, 5.0, 3.0, 7.0],
+        pair1_a,
+        pair1_b,
+        pair2_a,
+        pair2_b,
+        pair3_a,
+        pair3_b,
+    ]
+
+    artifact = _write_hand_built_artifact(tmp_path, genes, roles, perturbations, rows)
+    block = _identity_block(genes, median_library, control_mean=[0.0] * 6)
+    return {
+        "fit_role_artifact": artifact,
+        "response_projection": block,
+        "sealed_pair_ids": ["ZZZ_YYY"],
+        "basis_config_sha256": "a" * 64,
+        "registered_seeds": [11, 23, 37],
+        "replicates": 40,
+        "git_commit": "b" * 40,
+        "norman_source_sha256": "c" * 64,
+        "pod_instance": "unit-test-local",
+    }
+
+
+def test_report_has_v1_schema_and_strata(tmp_path):
+    module = _load_metric_module()
+    kwargs = _full_report_fixture(tmp_path)
+
+    report = module.measure_approximation_bias_v1(**kwargs)
+
+    assert report["schema"] == "compose_approximation_bias_report_v1"
+    assert set(report["strata"]) == {"combo_calibration", "singles"}
+    assert report["strata"]["combo_calibration"]["n_pairs"] == 3
+    assert report["strata"]["singles"]["n_pairs"] == 6
+    assert "gi_and_fairness" in report
+    assert "provenance" in report
+    assert "self_checksum" in report
+
+    # v1 REPLACES the legacy aggregate report -- its key-set must be absent,
+    # not merely unused.
+    for legacy_key in (
+        "directional_bias_l2",
+        "directional_bias_per_dim",
+        "relative_magnitude_median",
+        "relative_magnitude_max",
+        "roles_measured",
+        "n_groups",
+        "group_roster",
+    ):
+        assert legacy_key not in report
+
+    prov = report["provenance"]
+    assert prov["sealed_pair_overlap_count"] == 0
+    assert prov["pca_dim"] == 6
+    assert prov["registered_seeds"] == [11, 23, 37]
+    assert prov["measurement_contract_sha256"] == sha256_file(_SPEC_PATH)
+    assert prov["basis_config_sha256"] == "a" * 64
+    assert prov["git_commit"] == "b" * 40
+    assert prov["norman_source_sha256"] == "c" * 64
+    assert prov["pod_instance"] == "unit-test-local"
+
+
+def test_self_checksum_detects_tampering(tmp_path):
+    module = _load_metric_module()
+    kwargs = _full_report_fixture(tmp_path)
+    report = module.measure_approximation_bias_v1(**kwargs)
+
+    # Anti-tautology: recompute over the MUTATED object (a field the checksum
+    # actually covers), not the original -- a test that merely re-hashed the
+    # untouched report would pass even if self_checksum ignored every field.
+    mutated = copy.deepcopy(report)
+    del mutated["self_checksum"]
+    assert mutated["method"] == "raw_pseudobulk_approximation"
+    mutated["method"] = "TAMPERED"
+    recomputed = module._self_checksum(mutated)
+
+    assert recomputed != report["self_checksum"]
+
+
+def test_final_config_sha_absent_from_report(tmp_path):
+    module = _load_metric_module()
+    kwargs = _full_report_fixture(tmp_path)
+    report = module.measure_approximation_bias_v1(**kwargs)
+
+    final_sha = "f" * 64  # a distinct, fabricated "final config" SHA
+    assert final_sha != kwargs["basis_config_sha256"]
+    assert final_sha not in json.dumps(report)
+
+
+def test_canonical_json_byte_reproducible(tmp_path):
+    module = _load_metric_module()
+    kwargs = _full_report_fixture(tmp_path)
+
+    report_1 = module.measure_approximation_bias_v1(**kwargs)
+    report_2 = module.measure_approximation_bias_v1(**kwargs)
+
+    json_1 = json.dumps(report_1, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    json_2 = json.dumps(report_2, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    assert json_1 == json_2
+
+
+# ---------------------------------------------------------------------------
+# Task 5: Probe-A admission gate -- fail-closed refusal to emit a report.
+#
+# These tests drive the real CLI entry point (`module.main(argv)`), not just
+# `_probe_a_admission` in isolation, because the anti-tautology requirement is
+# that a refused admission must leave NO output file on disk -- a property
+# only observable by exercising `main()` end-to-end with a real `--out` path.
+# ---------------------------------------------------------------------------
+
+
+def _write_main_cli_fixture(tmp_path: Path) -> dict:
+    """Write every on-disk input `main()` needs and return their paths/values.
+
+    Reuses the exact numeric roster of `_full_report_fixture` (already known
+    to assemble a real, finite, non-degenerate report via direct calls to
+    `measure_approximation_bias_v1`) but serializes `response_projection` /
+    `sealed_pair_ids` / `basis_config` to actual files, since `main()` reads
+    these from `--*` CLI paths rather than accepting in-memory objects.
+    """
+    kwargs = _full_report_fixture(tmp_path)
+
+    response_projection_path = tmp_path / "response_projection.json"
+    response_projection_path.write_text(json.dumps(kwargs["response_projection"]), encoding="utf-8")
+
+    sealed_pair_ids_path = tmp_path / "sealed_pair_ids.json"
+    sealed_pair_ids_path.write_text(json.dumps(kwargs["sealed_pair_ids"]), encoding="utf-8")
+
+    basis_config_path = tmp_path / "basis_config.yaml"
+    basis_config_path.write_text(
+        yaml.safe_dump({"seeds": {"registered_seeds": kwargs["registered_seeds"]}}),
+        encoding="utf-8",
+    )
+
+    return {
+        "fit_role_artifact": kwargs["fit_role_artifact"],
+        "response_projection": response_projection_path,
+        "sealed_pair_ids": sealed_pair_ids_path,
+        "basis_config": basis_config_path,
+        "norman_source_sha256": kwargs["norman_source_sha256"],
+        "git_commit": kwargs["git_commit"],
+        "pod_instance": kwargs["pod_instance"],
+    }
+
+
+def _write_probe_a_evidence(tmp_path: Path, status: str) -> Path:
+    path = tmp_path / "probe_a_evidence.json"
+    path.write_text(json.dumps({"status": status}), encoding="utf-8")
+    return path
+
+
+def _main_cli_argv(fixture: dict, probe_a_evidence_path: Path, out_path: Path) -> list[str]:
+    return [
+        "--probe-a-evidence",
+        str(probe_a_evidence_path),
+        "--fit-role-artifact",
+        str(fixture["fit_role_artifact"]),
+        "--response-projection",
+        str(fixture["response_projection"]),
+        "--sealed-pair-ids",
+        str(fixture["sealed_pair_ids"]),
+        "--basis-config",
+        str(fixture["basis_config"]),
+        "--norman-source-sha256",
+        fixture["norman_source_sha256"],
+        "--git-commit",
+        fixture["git_commit"],
+        "--pod-instance",
+        fixture["pod_instance"],
+        "--bootstrap-replicates",
+        "10",
+        "--out",
+        str(out_path),
+    ]
+
+
+def test_probe_a_pass_admits(tmp_path):
+    module = _load_metric_module()
+    fixture = _write_main_cli_fixture(tmp_path)
+    probe_a_evidence_path = _write_probe_a_evidence(tmp_path, "pass")
+    out_path = tmp_path / "report.json"
+
+    exit_code = module.main(_main_cli_argv(fixture, probe_a_evidence_path, out_path))
+
+    assert exit_code == 0
+    assert out_path.exists()
+    report = json.loads(out_path.read_text(encoding="utf-8"))
+    assert report["admission_status"] == "admitted"
+
+
+@pytest.mark.parametrize("status", ["missing", "failed", "quarantined"])
+def test_probe_a_missing_failed_quarantined_refuse(tmp_path, status):
+    module = _load_metric_module()
+    fixture = _write_main_cli_fixture(tmp_path)
+    probe_a_evidence_path = _write_probe_a_evidence(tmp_path, status)
+    out_path = tmp_path / "report.json"
+
+    with pytest.raises(ValueError, match="NOT_ADMISSIBLE"):
+        module.main(_main_cli_argv(fixture, probe_a_evidence_path, out_path))
+
+    # Anti-tautology: refusal must leave no promoted report on disk, not
+    # merely raise -- a gate that raised AFTER writing the file would still
+    # pass a test that only checked the exception.
+    assert not out_path.exists()
+
+
+@pytest.mark.parametrize("evidence", [{"status": "bogus"}, {"status": "PASS"}, {}])
+def test_probe_a_unknown_or_absent_status_fails_closed(evidence):
+    # Fail-closed normalization line: any status that is NOT the exact "pass"
+    # token -- an unrecognized string, a wrong-case "PASS", or an entirely
+    # absent `status` key -- collapses to "missing" and refuses. This exercises
+    # the normalization branch that the three explicit refusal statuses skip.
+    module = _load_metric_module()
+    with pytest.raises(ValueError, match="Probe-A missing; measurement NOT_ADMISSIBLE"):
+        module._probe_a_admission(evidence)
