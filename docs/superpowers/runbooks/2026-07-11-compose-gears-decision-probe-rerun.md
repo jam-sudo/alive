@@ -175,6 +175,7 @@ inputs.json                   source/GO/pair/alias/fit-role/response/roster iden
 roster_receipts/              receipt-last generation records and their externally anchored SHA-256 values
 role_attestation.json         metadata-derived roles, counts, zero overlap, reader-spy proof
 probe_a.json                  P1-P4 measurements + equivalence verdict + raw-sample references
+probe_a_admission.json        exact promotion object consumed by the bias-metric admission gate
 probe_b_<roster>.json         B1-B4 measurements, repeats, extrapolation status
 logs/                         stdout/stderr and raw CPU/GPU/RSS samples for every run
 verify.json                   local offline verifier result and verifier code SHA-256
@@ -183,6 +184,15 @@ verify.json                   local offline verifier result and verifier code SH
 Every JSON uses canonical serialization and schema versioning. The manifest must reject missing/extra files,
 duplicate logical run keys, absolute source paths presented as identities, non-finite measurements, mismatched
 rosters, unbound overrides, and evidence produced from a different commit or runtime.
+
+The offline verifier emits `probe_a_admission.json` only after every raw Probe-A artifact and the complete
+evidence manifest verify. Its exact schema is `compose_gears_probe_a_admission_v1` with exactly
+`{schema, protocol, status, git_commit, evidence_manifest_sha256, output_bridge, self_checksum}`;
+`output_bridge` has exactly `{representation, verdict, tolerance, max_abs_error}`. Promotion requires
+`status=pass`, `protocol=COMPOSE-K562-v1`, the approved Git commit,
+`representation=raw_pseudobulk_approximation`, `verdict=pass`, finite non-negative error/tolerance,
+`max_abs_error ≤ tolerance`, and a canonical checksum over every field except `self_checksum`. A raw
+`probe_a.json`, command-result line, or bare `{status: pass}` is not admission evidence.
 
 ## 6. Decision and stop rules
 

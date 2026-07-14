@@ -4,7 +4,8 @@
 > decision #4 (`docs/superpowers/specs/2026-07-01-compose-deep-baselines-design.md` §7) and the
 > dev-pod plan Phase-2 Task 2.2 (`docs/superpowers/plans/2026-07-09-compose-dev-pod-real-workers.md`).
 > **Opens no seal.** Model-free measurement on observed non-sealed roles only.
-> **개정일:** 2026-07-13.
+> **개정일:** 2026-07-14. Implementation contract synchronized with the shared validator and
+> scientific pre-seal carrier.
 
 ---
 
@@ -118,15 +119,19 @@ tolerance. A quarantined, missing, or failed probe makes this measurement `NOT_A
 may be inserted into the active config.
 
 **Inputs.**
-- Observed raw per-cell counts for each non-sealed pair (from the Norman source synced in dev-pod plan
-  Task 0.3), restricted to roles `∈ {singles, combo_calibration}`.
+- The authoritative fit-role artifact may contain the exact non-sealed roster
+  `{control, singles, combo_calibration}`. `control` rows are accepted only as reference provenance;
+  they are excluded before population grouping and never appear in either measured stratum. Any role
+  outside that roster is rejected. The actually measured rows are restricted to
+  `{singles, combo_calibration}`.
 - The committed frozen `response_projection` block (the same one the fit-role artifact carries).
 - The single-role δ_g values and calibration double truth δ_i (computed from observed cells) needed for
   the GI signal `ε_i = δ_i − (δ_g + δ_h)` on combo_calibration doubles.
 
 **Seal safety (fail-closed).**
-- Assert every pair's role is in `{singles, combo_calibration}`; a `control` or a `sealed_pair_ids`
-  member as an input pair aborts (`ValueError`).
+- Accept `control` rows in the authoritative artifact but prove they are reference-only: no control
+  identifier may enter a measured stratum, the GI roster, or the measured-pair overlap computation.
+  An unknown role or a `sealed_pair_ids` member in a measured stratum aborts (`ValueError`).
 - Recompute and assert **zero overlap** between the measured pair roster and `sealed_pair_ids`, and
   record the overlap count (must be 0) in the report — mirroring the dev-pod plan's independent-overlap
   evidence.
@@ -136,13 +141,16 @@ may be inserted into the active config.
 **Point-estimate determinism.** Pure numpy over frozen arrays; no RNG in the point arithmetic. Row order is
 canonicalized (sorted pair IDs) so the point report is byte-reproducible.
 
-**Finite-sample uncertainty.** The observed cells and calibration pairs are samples, so the fairness ratio is
-not treated as known without error. A registered two-stage bootstrap resamples calibration pairs and then
-cells within each sampled pair, using the config's registered seed roster and bootstrap replicate count. The
-report includes a percentile 95% interval for `floor_median`, `gi_signal_median`, and `R`. `fairness_flag`
-uses the point estimate; the interval is mandatory context, not a second post-hoc decision rule. Degenerate
-replicates with zero GI denominator are recorded as `NON_FINITE` and their count is reported; they are never
-silently dropped.
+**Finite-sample uncertainty.** The observed cells, single-perturbation effects, and calibration pairs are
+samples, so the fairness ratio is not treated as known without error. Each registered bootstrap replicate
+(1) resamples combo-calibration pair IDs with replacement, (2) resamples cells within every sampled combo,
+and (3) independently resamples cells within every single-gene population and recomputes every `δ_g` before
+recomputing the additive null and `ε_i`. Holding point-estimate single effects fixed is forbidden because it
+would omit uncertainty in the denominator. The config's registered seed roster and bootstrap replicate count
+drive this procedure. The report includes a percentile 95% interval for `floor_median`,
+`gi_signal_median`, and `R`. `fairness_flag` uses the point estimate; the interval is mandatory context,
+not a second post-hoc decision rule. Degenerate replicates with zero GI denominator are recorded as
+`NON_FINITE` and their count is reported; they are never silently dropped.
 
 ---
 
@@ -168,7 +176,10 @@ A single JSON object whose SHA-256 fills `baselines.gears.approximation_bias_rep
   `bias_to_signal_ratio_R`, plus `replicates_requested`, `replicates_finite`, and
   `replicates_non_finite`.
 - `R_star`: `0.5` (the pre-registered threshold, embedded for auditability).
-- `fairness_flag`: `"representation_confounded"` if `bias_to_signal_ratio_R ≥ R_star`, else `"clear"`.
+- `fairness_flag`: `"representation_confounded"` if the finite
+  `bias_to_signal_ratio_R ≥ R_star`, `"clear"` if the finite ratio is below the threshold, and
+  `"indeterminate"` if the point ratio is `"NON_FINITE"`. A non-finite ratio must never be mapped to
+  `"clear"`.
 
 **Provenance / integrity:**
 - `measurement_contract_sha256` (this reviewed spec's file SHA), `basis_config_sha256`, `git_commit`,
@@ -176,6 +187,12 @@ A single JSON object whose SHA-256 fills `baselines.gears.approximation_bias_rep
   `response_projection_sha256`, `gene_order_sha256`, `pca_dim` (`p`), `registered_seeds`,
   `sealed_pair_overlap_count` (must be `0`), `pod_instance`.
 - `self_checksum`: SHA-256 of the canonical JSON of every field above except `self_checksum`.
+
+Every producer and consumer uses the same exact-schema validator. It requires exact top-level and nested
+key rosters; unique byte-sorted pair IDs; exact equality between the combo-calibration and GI pair rosters;
+non-negative squared-error/signal magnitudes; signed-PC vector dimension consistency; closed bootstrap
+accounting; flag/ratio coherence; zero sealed overlap; all content/provenance digests; and the canonical
+`self_checksum`. A merely non-empty flag or a bare partial JSON object is not admissible evidence.
 
 `basis_config_sha256` is the canonical config whose
 `baselines.gears.approximation_bias_report_sha256` is still `null`. The report **must not contain the
@@ -191,8 +208,17 @@ The finalization tool must mechanically prove that step 3 changed only
 `baselines.gears.approximation_bias_report_sha256`; otherwise it fails closed and a fresh measurement lineage
 is required.
 
-`p`, gene order and projection digests must equal the fit-role artifact's, binding the report to the
-same evaluation space and run identity.
+The scientific `ResolvedRunSpec` additionally carries
+`scientific.approximation_bias_report = {path, sha256}` (or `null` exactly while the config field is null).
+Before runtime identity capture and again before any sealed-store construction, the carrier/driver require:
+the declaration SHA equals the config-pinned SHA and the file bytes; the full report validates; the report's
+`git_commit` equals `approved_git_sha`; the measurement-contract SHA equals this file; and
+`basis_config_sha256` equals the independently reconstructed config obtained by changing only the final
+report-SHA leaf back to null. Any mismatch is a pre-seal rejection and consumes no seal.
+
+`p`, gene order and projection digests must equal the verified fit-role/response artifacts, binding the
+report to the same evaluation space and run identity. The report's Norman-source SHA, fit-role file SHA,
+and registered seed roster must likewise equal the scientific carrier inputs and final config.
 
 ---
 
@@ -204,8 +230,9 @@ that may apply to sealed GEARS δ. This is not an exchangeability proof: cell-co
 pair-composition shift between calibration and sealed roles remain explicit limitations and are summarized
 without reading sealed outcomes.
 
-**Pre-registered rule (fixed now, pre-seal; no post-hoc change — §14).**
-`R ≥ R* = 0.5` ⇒ the sealed GEARS family-comparison is declared **`representation_confounded`**.
+**Pre-registered rule (fixed now, pre-seal; no post-hoc change — §14).** A finite
+`R ≥ R* = 0.5` ⇒ **`representation_confounded`**; a finite `R < R*` ⇒ **`clear`**;
+`R = NON_FINITE` ⇒ **`indeterminate`**.
 
 **What the flag does.** When confounded, a computational `GI_LEARNABLE_WIN` verdict that includes beating
 GEARS may **not** be narrated as a *clean representation-matched GEARS win*. The registered exact method
@@ -219,11 +246,10 @@ The fairness flag therefore does not change the primary estimate; it constrains 
 family-comparator interpretation. `R* = 0.5` is a preregistered material-contamination heuristic, not a
 hypothesis test or proof that a comparison is invalid.
 
-The flag is **recorded pre-seal** in this spec and the report so it is genuinely pre-registered. The current
-verdict code does **not yet consume it**. Before scientific activation, a separately tested integration must
-carry the report SHA, flag, ratio, and interval into the durable registered summary and mandatory narrative
-limitations without changing the verdict. Until that integration exists, this item remains a pre-seal
-implementation blocker; documentation must not claim it is already consumed.
+The flag is **recorded pre-seal** in this spec and the report so it is genuinely pre-registered. The durable
+summary integration carries the report SHA, flag, ratio, threshold, and registered interval without changing
+the verdict. Scientific driver activation is nevertheless permitted only when the full report carrier and
+one-way lineage checks above pass before the sealed store exists.
 
 ---
 
@@ -240,13 +266,17 @@ a synthetic frozen projection block (no `gears`, no Norman):
 4. **Signal ratio + flag.** Construct floor and ε so `R` straddles `R*=0.5` ⇒ `fairness_flag` flips at
    the threshold (both branches tested); zero-denominator bootstrap replicates become counted
    `NON_FINITE`, never silently disappear.
-5. **Seal-safety negatives.** A `control` or `sealed_pair_ids` pair among inputs aborts; a nonzero
-   sealed overlap aborts; a projection-block `gene_order_sha256` mismatch aborts.
+5. **Seal-safety negatives.** Control rows in the authoritative artifact are accepted but excluded from
+   every measured roster; an unknown role or a `sealed_pair_ids` member among measured inputs aborts; a
+   nonzero sealed overlap aborts; a projection-block `gene_order_sha256` mismatch aborts.
 6. **Self-checksum / determinism.** Re-running with the same registered seeds yields byte-identical JSON;
    tampering any field fails `self_checksum`.
 7. **One-way provenance.** The report binds the bias-null `basis_config_sha256`; finalization changes only
    the GEARS report-SHA field and proves the final config SHA does not appear inside the report.
-8. **Probe-A admission.** Missing/failed/quarantined Probe A evidence refuses report promotion.
+8. **Probe-A admission.** A bare `{status: pass}` is rejected. Admission requires the exact versioned
+   schema, protocol, approved Git commit, evidence-manifest SHA, raw-pseudobulk bridge representation,
+   `verdict=pass`, finite non-negative tolerance/error with `max_abs_error ≤ tolerance`, and canonical
+   self-checksum. Missing/failed/quarantined/tampered evidence refuses report promotion.
 
 ---
 

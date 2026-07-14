@@ -181,7 +181,14 @@ _FIXTURE_BLOCK_KEYS: frozenset[str] = frozenset(
     {"fixture_corpus_id", "builder_code_digest", "sealed_input"}
 )
 _SCIENTIFIC_BLOCK_KEYS: frozenset[str] = frozenset(
-    {"activation_evidence", "dependency_manifest", "device", "precision", "sealed_input"}
+    {
+        "activation_evidence",
+        "dependency_manifest",
+        "approximation_bias_report",
+        "device",
+        "precision",
+        "sealed_input",
+    }
 )
 _FIXTURE_SEALED_INPUT_KEYS: frozenset[str] = frozenset(
     {"source_path", "expected_file_sha256", "audit_path"}
@@ -741,6 +748,22 @@ def _validate_scientific_evidence_block(block: Mapping[str, Any], *, root_real: 
         raise RunSpecError(
             f"scientific.dependency_manifest: declared sha256 {dep.sha256} != actual {actual}"
         )
+
+    bias_report = block["approximation_bias_report"]
+    if bias_report is not None:
+        bias = _parse_path_sha(bias_report, field="scientific.approximation_bias_report")
+        _check_path_policy(
+            bias.path,
+            root_real,
+            kind="file",
+            field="scientific.approximation_bias_report",
+        )
+        actual = sha256_file(bias.path)
+        if actual != bias.sha256:
+            raise RunSpecError(
+                "scientific.approximation_bias_report: declared sha256 "
+                f"{bias.sha256} != actual {actual}"
+            )
 
 
 # ---------------------------------------------------------------------------

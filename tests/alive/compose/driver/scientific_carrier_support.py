@@ -22,6 +22,15 @@ from typing import Any
 
 import yaml
 
+from alive.compose.approximation_bias import (
+    APPROXIMATION_BIAS_SCHEMA,
+    NON_FINITE,
+    PROTOCOL,
+    REPRESENTATION,
+    canonical_json,
+    measurement_contract_sha256,
+    self_checksum,
+)
 from alive.compose.config2 import load_compose_phase2_config
 from alive.compose.datacard import compute_compose_run_id
 from alive.compose.driver import fixture_builder as fb
@@ -32,6 +41,7 @@ from alive.compose.driver.run_spec import (
     RESOLVED_RUN_SPEC_SCHEMA,
     RUN_PRODUCED_BASENAMES,
 )
+from alive.compose.fit_role import build_response_projection
 from alive.compose.split import ROLE_NAMES, build_split_manifest
 from alive.provenance import sha256_file, sha256_json
 
@@ -76,20 +86,117 @@ def init_synthetic_repo(repo_root: Path) -> str:
     return run("rev-parse", "HEAD").stdout.strip()
 
 
-def _write_activated_config(stage1: Path) -> tuple[Any, Path, str]:
+def _write_activated_config(stage1: Path, *, approved_git_sha: str) -> tuple[Any, Path, str, Path]:
     """Write + load an ACTIVATED test-only config with all local blockers resolved."""
     raw = yaml.safe_load(Path(_CANON_CONFIG).read_text(encoding="utf-8"))
     raw["status"] = "active"
     raw["regimes"]["power_status"] = "established_from_registered_report"
     raw["baselines"]["gears"]["revision"] = "cell-gears==0.1.2"
     raw["baselines"]["gears"]["environment_status"] = "pinned_and_fresh_sync_verified"
-    raw["baselines"]["gears"]["approximation_bias_report_sha256"] = "a" * 64
     raw["baselines"]["cpa"]["revision"] = "cpa-tools==0.8.5"
     raw["baselines"]["cpa"]["environment_status"] = "pinned_and_fresh_sync_verified"
+    raw["baselines"]["gears"]["approximation_bias_report_sha256"] = None
+    basis_sha = sha256_json(raw)
+    empty_stratum = {
+        "n_pairs": 0,
+        "per_pair": [],
+        "b_distribution": dict.fromkeys(("median", "mean", "max", "q90"), NON_FINITE),
+        "signed_pc_bias": [],
+    }
+    report_body = {
+        "schema": APPROXIMATION_BIAS_SCHEMA,
+        "deliverable": "gears_pseudobulk_approximation_bias_report",
+        "protocol": PROTOCOL,
+        "seal_status": "unopened",
+        "method": REPRESENTATION,
+        "admission_status": "admitted",
+        "strata": {"combo_calibration": empty_stratum, "singles": empty_stratum},
+        "gi_and_fairness": {
+            "gi_signal_per_pair": [],
+            "gi_signal_median": NON_FINITE,
+            "floor_median": NON_FINITE,
+            "bias_to_signal_ratio_R": NON_FINITE,
+            "bias_to_signal_ratio_per_pair_median": NON_FINITE,
+            "R_star": 0.5,
+            "fairness_flag": "indeterminate",
+            "bootstrap_95_interval": {
+                "floor_median": NON_FINITE,
+                "gi_signal_median": NON_FINITE,
+                "bias_to_signal_ratio_R": NON_FINITE,
+            },
+            "replicates_requested": 1,
+            "replicates_finite": 0,
+            "replicates_non_finite": 1,
+        },
+        "provenance": {
+            "measurement_contract_sha256": measurement_contract_sha256(),
+            "basis_config_sha256": basis_sha,
+            "git_commit": approved_git_sha,
+            "norman_source_sha256": "1" * 64,
+            "fit_role_artifact_sha256": "2" * 64,
+            "response_projection_sha256": "3" * 64,
+            "gene_order_sha256": "4" * 64,
+            "pca_dim": 1,
+            "registered_seeds": list(raw["seeds"]["registered_seeds"]),
+            "sealed_pair_overlap_count": 0,
+            "pod_instance": "synthetic-test",
+        },
+    }
+    report = {**report_body, "self_checksum": self_checksum(report_body)}
+    report_path = stage1 / "approximation_bias_report.json"
+    report_path.write_text(canonical_json(report) + "\n", encoding="utf-8")
+    raw["baselines"]["gears"]["approximation_bias_report_sha256"] = sha256_file(report_path)
     path = stage1 / "config.yaml"
     path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
     cfg = load_compose_phase2_config(path)
-    return cfg, path, cfg.config_sha256
+    return cfg, path, cfg.config_sha256, report_path
+
+
+def _rebind_bias_report_to_scientific_inputs(
+    *,
+    config_path: Path,
+    report_path: Path,
+    approved_git_sha: str,
+    response_artifact: dict[str, Any],
+    gene_order: list[str],
+    fit_role_sha256: str,
+    raw_data_sha256: str,
+) -> tuple[Any, str]:
+    """Replace synthetic placeholders with exact stage-1 provenance, then re-finalize."""
+    from alive.compose.driver.carrier_loader import _deserialize_response_space
+
+    raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    raw["baselines"]["gears"]["approximation_bias_report_sha256"] = None
+    basis_sha = sha256_json(raw)
+    rounded_space = _deserialize_response_space(
+        json.loads(response_artifact["response_space"].artifact_bytes())
+    )
+    projection = build_response_projection(
+        rounded_space,
+        gene_order=gene_order,
+        control_mean=response_artifact["control_mean"],
+        raw_data_sha256=raw_data_sha256,
+    )
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    report["provenance"].update(
+        {
+            "basis_config_sha256": basis_sha,
+            "git_commit": approved_git_sha,
+            "norman_source_sha256": raw_data_sha256,
+            "fit_role_artifact_sha256": fit_role_sha256,
+            "response_projection_sha256": sha256_json(projection),
+            "gene_order_sha256": projection["gene_order_sha256"],
+            "pca_dim": len(projection["control_mean"]),
+            "registered_seeds": list(raw["seeds"]["registered_seeds"]),
+        }
+    )
+    report_body = {key: value for key, value in report.items() if key != "self_checksum"}
+    report["self_checksum"] = self_checksum(report_body)
+    report_path.write_text(canonical_json(report) + "\n", encoding="utf-8")
+    raw["baselines"]["gears"]["approximation_bias_report_sha256"] = sha256_file(report_path)
+    config_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+    cfg = load_compose_phase2_config(config_path)
+    return cfg, cfg.config_sha256
 
 
 def _build_dependency_lock_evidence(ev: Path, *, gears_lock: Path, cpa_lock: Path) -> Path:
@@ -305,7 +412,9 @@ def build_scientific_carrier_fixture(root: Path, *, repo_root: Path) -> Scientif
     audit_path = scientific_protocol_seal_audit_path(root, fb.PROTOCOL)
 
     approved_git_sha = init_synthetic_repo(repo_root)
-    cfg, config_path, config_sha = _write_activated_config(stage1)
+    cfg, config_path, config_sha, bias_report_path = _write_activated_config(
+        stage1, approved_git_sha=approved_git_sha
+    )
 
     # 1. split manifest + instance (config-independent given split_seed / k_grid).
     gene_ids = [f"G{i:02d}" for i in range(fb._N_GENES)]
@@ -329,6 +438,15 @@ def build_scientific_carrier_fixture(root: Path, *, repo_root: Path) -> Scientif
             cal_pair_ids=instance["cal_pairs"],
             single_gene_ids=instance["gene_ids"],
         )
+    )
+    cfg, config_sha = _rebind_bias_report_to_scientific_inputs(
+        config_path=config_path,
+        report_path=bias_report_path,
+        approved_git_sha=approved_git_sha,
+        response_artifact=response_artifact,
+        gene_order=list(gene_order),
+        fit_role_sha256=sha256_file(stage1 / "fit_role.h5ad"),
+        raw_data_sha256=fit_role_raw_sha,
     )
 
     # 3. run identity from the ACTIVATED config sha.
@@ -563,6 +681,10 @@ def build_scientific_carrier_fixture(root: Path, *, repo_root: Path) -> Scientif
             "dependency_manifest": {
                 "path": str(dependency_path),
                 "sha256": sha256_file(dependency_path),
+            },
+            "approximation_bias_report": {
+                "path": str(bias_report_path),
+                "sha256": sha256_file(bias_report_path),
             },
             "device": "cpu",
             "precision": "float32",

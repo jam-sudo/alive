@@ -28,6 +28,14 @@ import pandas as pd
 import pytest
 import yaml
 
+from alive.compose.approximation_bias import (
+    PROBE_A_SCHEMA,
+    PROTOCOL,
+    REPRESENTATION,
+    ApproximationBiasValidationError,
+    self_checksum,
+    validate_approximation_bias_report,
+)
 from alive.compose.fit_role import canonical_gene_order_sha256
 from alive.provenance import sha256_file
 
@@ -254,6 +262,20 @@ def test_fairness_flag_flips_at_r_star():
     assert 0.5 <= result_above["bias_to_signal_ratio_R"] < 0.6
 
 
+def test_non_finite_ratio_is_indeterminate_not_clear():
+    module = _load_metric_module()
+    genes = ["F1", "F2"]
+    block = _identity_block(genes, median_library=10.0, control_mean=[0.0, 0.0])
+    zero = _cells([0.0, 0.0])
+    singles_rows = {"A": zero, "B": zero}
+    result = module._gi_and_fairness(
+        {"A_B": zero}, module._single_effects(singles_rows, block, genes), block, genes
+    )
+
+    assert result["bias_to_signal_ratio_R"] == _SENTINEL
+    assert result["fairness_flag"] == "indeterminate"
+
+
 # ---------------------------------------------------------------------------
 # Test 5: control is reference-only -- never a measured pair in any stratum.
 # ---------------------------------------------------------------------------
@@ -344,18 +366,18 @@ def _three_pair_ratio_fixture(module):
         "P6": _cells([5.0, 5.0, 5.0, 5.0, 3.0, 7.0]),
     }
     single_effects = module._single_effects(singles_rows, block, genes)
-    return genes, block, combo_pairs, single_effects
+    return genes, block, combo_pairs, singles_rows, single_effects
 
 
 def test_bootstrap_determinism_byte_identical():
     module = _load_metric_module()
-    genes, block, combo_pairs, single_effects = _three_pair_ratio_fixture(module)
+    genes, block, combo_pairs, singles_rows, _single_effects = _three_pair_ratio_fixture(module)
 
     result_1 = module._bootstrap_intervals(
-        combo_pairs, single_effects, block, genes, seeds=[11, 23, 37], replicates=50
+        combo_pairs, singles_rows, block, genes, seeds=[11, 23, 37], replicates=50
     )
     result_2 = module._bootstrap_intervals(
-        combo_pairs, single_effects, block, genes, seeds=[11, 23, 37], replicates=50
+        combo_pairs, singles_rows, block, genes, seeds=[11, 23, 37], replicates=50
     )
 
     # Byte-identical canonical-JSON serialisation across two independent calls with
@@ -373,11 +395,30 @@ def test_bootstrap_determinism_byte_identical():
     # A DIFFERENT seed roster must generally move the interval (proves the seeds are
     # actually consumed, not ignored) while still summing to the requested count.
     result_3 = module._bootstrap_intervals(
-        combo_pairs, single_effects, block, genes, seeds=[999, 1000], replicates=50
+        combo_pairs, singles_rows, block, genes, seeds=[999, 1000], replicates=50
     )
     assert result_3["replicates_finite"] + result_3["replicates_non_finite"] == 50
     json_3 = json.dumps(result_3, sort_keys=True, separators=(",", ":"))
     assert json_3 != json_1
+
+
+def test_bootstrap_reestimates_single_effects_each_replicate(monkeypatch):
+    module = _load_metric_module()
+    genes, block, combo_pairs, singles_rows, _single_effects = _three_pair_ratio_fixture(module)
+    original = module._single_effects
+    calls = 0
+
+    def counted(rows, projection, gene_order):
+        nonlocal calls
+        calls += 1
+        return original(rows, projection, gene_order)
+
+    monkeypatch.setattr(module, "_single_effects", counted)
+    module._bootstrap_intervals(
+        combo_pairs, singles_rows, block, genes, seeds=[11, 23], replicates=7
+    )
+
+    assert calls == 7
 
 
 def test_zero_gi_denominator_counted_non_finite():
@@ -419,7 +460,7 @@ def test_zero_gi_denominator_counted_non_finite():
     assert zero_pair_g_i == 0.0
 
     result = module._bootstrap_intervals(
-        combo_pairs, single_effects, block, genes, seeds=[11, 23, 37], replicates=300
+        combo_pairs, singles_rows, block, genes, seeds=[11, 23, 37], replicates=300
     )
 
     # Nothing silently dropped: every replicate lands in exactly one bucket.
@@ -439,16 +480,16 @@ def test_zero_gi_denominator_counted_non_finite():
 
 def test_point_estimate_is_rng_free():
     module = _load_metric_module()
-    genes, block, combo_pairs, single_effects = _three_pair_ratio_fixture(module)
+    genes, block, combo_pairs, singles_rows, single_effects = _three_pair_ratio_fixture(module)
 
     stratum_before = module._stratum_bias(combo_pairs, block, genes)
     point_before = module._gi_and_fairness(combo_pairs, single_effects, block, genes)
 
     module._bootstrap_intervals(
-        combo_pairs, single_effects, block, genes, seeds=[11, 23, 37], replicates=25
+        combo_pairs, singles_rows, block, genes, seeds=[11, 23, 37], replicates=25
     )
     module._bootstrap_intervals(
-        combo_pairs, single_effects, block, genes, seeds=[999, 1000], replicates=40
+        combo_pairs, singles_rows, block, genes, seeds=[999, 1000], replicates=40
     )
 
     stratum_after = module._stratum_bias(combo_pairs, block, genes)
@@ -507,29 +548,39 @@ def _write_hand_built_artifact(
     return str(path)
 
 
-def test_control_member_as_measured_pair_aborts(tmp_path):
+def test_control_reference_rows_are_accepted_but_not_measured(tmp_path):
     module = _load_metric_module()
     genes = ["G1", "G2"]
     block = _identity_block(genes, median_library=10.0, control_mean=[0.0, 0.0])
 
-    roles = ["control", "singles", "combo_calibration"]
-    perturbations = ["control", "GENEA", "GENEA_GENEB"]
-    rows = [[5.0, 5.0], [3.0, 7.0], [4.0, 6.0]]
+    roles = ["control", "singles", "singles", "combo_calibration"]
+    perturbations = ["control", "GENEA", "GENEB", "GENEA_GENEB"]
+    rows = [[5.0, 5.0], [3.0, 7.0], [7.0, 3.0], [4.0, 6.0]]
 
-    # Anti-tautology: the forbidden `control` role genuinely reaches the metric
-    # here (never filtered upstream) -- the OPPOSITE of
-    # `_stratify_by_role`, which silently DROPS `control` from its output
-    # roster (test_control_is_not_a_measured_pair, above). A seal-safety gate
-    # must fail closed on this input, not fail silent.
+    # The authoritative fit-role artifact contains control rows for reference
+    # provenance. They are legal artifact rows but never enter either measured
+    # stratum.
     assert "control" in roles
-    assert "control" not in module._MEASURED_ROLES
+    assert "control" in module._ARTIFACT_ROLES
 
     artifact = _write_hand_built_artifact(tmp_path, genes, roles, perturbations, rows)
 
-    with pytest.raises(ValueError, match="measured role must be singles|combo_calibration"):
-        module.measure_approximation_bias_v1(
-            fit_role_artifact=artifact, response_projection=block, sealed_pair_ids=[]
-        )
+    report = module.measure_approximation_bias_v1(
+        fit_role_artifact=artifact,
+        response_projection=block,
+        sealed_pair_ids=[],
+        basis_config_sha256="a" * 64,
+        registered_seeds=[11],
+        replicates=2,
+        git_commit="b" * 40,
+        norman_source_sha256="c" * 64,
+        pod_instance="unit-test",
+    )
+    assert {entry["pair_id"] for entry in report["strata"]["singles"]["per_pair"]} == {
+        "GENEA",
+        "GENEB",
+    }
+    assert report["strata"]["combo_calibration"]["per_pair"][0]["pair_id"] == "GENEA_GENEB"
 
 
 def test_sealed_pair_member_aborts(tmp_path):
@@ -725,6 +776,30 @@ def test_report_has_v1_schema_and_strata(tmp_path):
     assert prov["pod_instance"] == "unit-test-local"
 
 
+def test_report_validator_binds_basis_and_approved_commit(tmp_path):
+    module = _load_metric_module()
+    kwargs = _full_report_fixture(tmp_path)
+    report = module.measure_approximation_bias_v1(**kwargs)
+
+    validate_approximation_bias_report(
+        report,
+        expected_basis_config_sha256=kwargs["basis_config_sha256"],
+        expected_git_commit=kwargs["git_commit"],
+    )
+    with pytest.raises(ApproximationBiasValidationError, match="bias-NULL config"):
+        validate_approximation_bias_report(
+            report,
+            expected_basis_config_sha256="d" * 64,
+            expected_git_commit=kwargs["git_commit"],
+        )
+    with pytest.raises(ApproximationBiasValidationError, match="approved run commit"):
+        validate_approximation_bias_report(
+            report,
+            expected_basis_config_sha256=kwargs["basis_config_sha256"],
+            expected_git_commit="e" * 40,
+        )
+
+
 def test_self_checksum_detects_tampering(tmp_path):
     module = _load_metric_module()
     kwargs = _full_report_fixture(tmp_path)
@@ -808,9 +883,26 @@ def _write_main_cli_fixture(tmp_path: Path) -> dict:
     }
 
 
-def _write_probe_a_evidence(tmp_path: Path, status: str) -> Path:
+def _write_probe_a_evidence(tmp_path: Path, status: str, *, git_commit: str = "b" * 40) -> Path:
     path = tmp_path / "probe_a_evidence.json"
-    path.write_text(json.dumps({"status": status}), encoding="utf-8")
+    if status == "pass":
+        body = {
+            "schema": PROBE_A_SCHEMA,
+            "protocol": PROTOCOL,
+            "status": "pass",
+            "git_commit": git_commit,
+            "evidence_manifest_sha256": "d" * 64,
+            "output_bridge": {
+                "representation": REPRESENTATION,
+                "verdict": "pass",
+                "tolerance": 1e-6,
+                "max_abs_error": 1e-8,
+            },
+        }
+        evidence = {**body, "self_checksum": self_checksum(body)}
+    else:
+        evidence = {"status": status}
+    path.write_text(json.dumps(evidence), encoding="utf-8")
     return path
 
 
@@ -842,7 +934,9 @@ def _main_cli_argv(fixture: dict, probe_a_evidence_path: Path, out_path: Path) -
 def test_probe_a_pass_admits(tmp_path):
     module = _load_metric_module()
     fixture = _write_main_cli_fixture(tmp_path)
-    probe_a_evidence_path = _write_probe_a_evidence(tmp_path, "pass")
+    probe_a_evidence_path = _write_probe_a_evidence(
+        tmp_path, "pass", git_commit=fixture["git_commit"]
+    )
     out_path = tmp_path / "report.json"
 
     exit_code = module.main(_main_cli_argv(fixture, probe_a_evidence_path, out_path))
@@ -851,6 +945,12 @@ def test_probe_a_pass_admits(tmp_path):
     assert out_path.exists()
     report = json.loads(out_path.read_text(encoding="utf-8"))
     assert report["admission_status"] == "admitted"
+
+
+def test_probe_a_bare_pass_is_not_admission_grade():
+    module = _load_metric_module()
+    with pytest.raises(ValueError, match="key roster|schema"):
+        module._probe_a_admission({"status": "pass"})
 
 
 @pytest.mark.parametrize("status", ["missing", "failed", "quarantined"])

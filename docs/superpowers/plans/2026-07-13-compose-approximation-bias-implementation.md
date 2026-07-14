@@ -12,7 +12,7 @@
 
 Every task's requirements implicitly include this section. Values are verbatim from the spec + the understand-phase seal-safety risk map.
 
-- **Opens no seal.** No task constructs a `ComposeOutcomeStore`, calls `evaluate_sealed_once`, reads a sealed pair outcome, or imports `gears`/`cpa`. The measurement touches only observed non-sealed `{singles, combo_calibration}` cells; `control` is reference-only via `block["control_mean"]` and is NEVER a measured pair.
+- **Opens no seal.** No task constructs a `ComposeOutcomeStore`, calls `evaluate_sealed_once`, reads a sealed pair outcome, or imports `gears`/`cpa`. The authoritative artifact may include observed non-sealed `{control, singles, combo_calibration}` rows; `control` is accepted as reference-only provenance and excluded from every measured pair roster.
 - **§4.3 guard files stay byte-untouched:** `src/alive/compose/outcome_store.py`, `gates.py`, `freeze.py`, `preflight.py`, `identity_lock.py`, and `io.atomic_write_once`. Do not weaken, bypass, or mock any guard.
 - **`fit_role.apply_response_projection` is reused BYTE-UNCHANGED.** Do NOT fork or modify the projection math (`src/alive/compose/fit_role.py` is READ-ONLY). The exact per-cell truth path uses `representation="cell_raw_counts"`; the pseudobulk path uses `representation="raw_pseudobulk_approximation"` on the single population-mean row.
 - **`config2.py` is touched READ-ONLY** (reuse `sha256_json`). The bias report MUST NOT be added to `config2._CONFIG_BOUND_EVIDENCE_REQUIREMENTS` — that would force `report.config_sha256 == final_config_sha256`, the forbidden report→final-config→report cycle.
@@ -69,7 +69,7 @@ Every task's requirements implicitly include this section. Values are verbatim f
     "bias_to_signal_ratio_R": f,                          # floor_median / gi_signal_median (ratio of medians)
     "bias_to_signal_ratio_per_pair_median": f,            # median_i(b_i / g_i) — secondary
     "R_star": 0.5,
-    "fairness_flag": "representation_confounded" | "clear",
+    "fairness_flag": "representation_confounded" | "clear" | "indeterminate",
     "bootstrap_95_interval": {                            # Task 2
       "floor_median": [lo, hi] | "NON_FINITE",
       "gi_signal_median": [lo, hi] | "NON_FINITE",
@@ -138,7 +138,7 @@ git commit -F <msg>   # feat(compose): approximation-bias v1 point-estimate core
 
 **Interfaces:**
 - Consumes: Task 1's per-pair `b_i`, `g_i`, `floor_median`, `gi_signal_median`, `R`; `registered_seeds` (list of int); a registered replicate count.
-- Produces: `_bootstrap_intervals(combo_pairs, single_effects, block, *, seeds, replicates) -> dict` returning `{bootstrap_95_interval:{floor_median,gi_signal_median,bias_to_signal_ratio_R}, replicates_requested, replicates_finite, replicates_non_finite}`. Two-stage resample: (a) resample `combo_calibration` pairs with replacement, (b) resample cells within each sampled pair with replacement; recompute the three statistics per replicate; a zero-GI-denominator replicate ⇒ `R` counted `replicates_non_finite` (never dropped). Interval = 2.5/97.5 percentiles over FINITE replicates, else `"NON_FINITE"`.
+- Produces: `_bootstrap_intervals(combo_pairs, singles_rows_by_gene, block, *, seeds, replicates) -> dict` returning `{bootstrap_95_interval:{floor_median,gi_signal_median,bias_to_signal_ratio_R}, replicates_requested,replicates_finite,replicates_non_finite}`. Each replicate (a) resamples `combo_calibration` pairs with replacement, (b) resamples cells within each sampled combo, and (c) independently resamples every single-gene population and recomputes `delta_g`; holding single effects fixed is forbidden. Recompute the three statistics per replicate; a zero-GI-denominator replicate ⇒ `R` counted `replicates_non_finite` (never dropped). Interval = 2.5/97.5 percentiles over FINITE replicates, else `"NON_FINITE"`.
 
 - [ ] **Step 1: Write failing tests**
   - `test_bootstrap_determinism_byte_identical`: two runs with the SAME `registered_seeds` yield byte-identical interval fields.
@@ -158,10 +158,10 @@ git commit -F <msg>   # feat(compose): approximation-bias v1 point-estimate core
 - Test: `tests/alive/compose/test_approximation_bias_metric.py`
 
 **Interfaces:**
-- Produces: the v1 measurement entry `measure_approximation_bias_v1(*, fit_role_artifact, response_projection, sealed_pair_ids, ...) ` gains explicit `sealed_pair_ids: Sequence[str]`. Guards run BEFORE any projection: (a) every measured pair role ∈ `{singles, combo_calibration}` else `ValueError("approximation-bias: measured role must be singles|combo_calibration")`; (b) recompute `sealed_pair_overlap_count = len(measured_ids & set(sealed_pair_ids))`, assert `== 0` else `ValueError("approximation-bias: measured roster overlaps sealed_pair_ids")`; (c) assert `canonical_gene_order_sha256(gene_order) == block["gene_order_sha256"]` up front else `ValueError("approximation-bias: gene_order digest mismatch")`.
+- Produces: the v1 measurement entry `measure_approximation_bias_v1(*, fit_role_artifact, response_projection, sealed_pair_ids, ...)` gains explicit `sealed_pair_ids: Sequence[str]`. Guards run BEFORE any projection: (a) artifact roles must be a subset of `{control, singles, combo_calibration}`, while only `{singles, combo_calibration}` enter measured rosters; (b) recompute `sealed_pair_overlap_count = len(measured_ids & set(sealed_pair_ids))`, assert `== 0` else `ValueError("approximation-bias: measured roster overlaps sealed_pair_ids")`; (c) assert `canonical_gene_order_sha256(gene_order) == block["gene_order_sha256"]` up front else `ValueError("approximation-bias: gene_order digest mismatch")`.
 
 - [ ] **Step 1: Write failing tests** (ANTI-TAUTOLOGY — bypass `extract_fit_roles`; build the roster/AnnData by hand so the forbidden pair survives to the metric):
-  - `test_control_member_as_measured_pair_aborts`: hand-built roster with a `control`-role measured pair ⇒ raises with match=`"measured role must be singles|combo_calibration"` (assert on the METRIC message, not `FitRoleArtifactError`).
+  - `test_control_is_reference_only`: a hand-built authoritative roster containing control rows succeeds, while control appears in neither stratum nor the GI roster; an unknown role still fails at the metric boundary.
   - `test_sealed_pair_member_aborts`: a measured id also in `sealed_pair_ids` ⇒ raises match=`"overlaps sealed_pair_ids"`; assert `sealed_pair_overlap_count` never reported > 0 (fail-closed before report).
   - `test_gene_order_mismatch_aborts`: block `gene_order_sha256` altered ⇒ raises match=`"gene_order digest mismatch"` up front (prove it fires before projection by using a block whose arrays would otherwise project fine).
   - `test_zero_overlap_recorded`: clean roster ⇒ `sealed_pair_overlap_count == 0` in the report.
@@ -280,5 +280,5 @@ git commit -F <msg>   # feat(compose): approximation-bias v1 point-estimate core
 
 - **Spec coverage:** §2 bias → Task 1; §3 procedure + seal-safety → Tasks 1/3; §4 report schema + one-way provenance → Tasks 4/6; §5 fairness flag + durable carry → Tasks 1/7; §6 known-answer tests 1–8 → Tasks 1–6; §7 files (script MODIFY, finalization, durable integration) → Tasks 4/6/7; Probe-A admission → Task 5. Dev-pod plan Open-decisions gate → Task 8.
 - **POD boundary:** every task is LOCAL-testable on synthetic fixtures; the real Norman measurement, Probe-A execution, config finalization with a real SHA, evidence regen, and the sealed run are explicitly out of scope (Global Constraints).
-- **Type consistency:** `b_i = p^-1||bias_i||_2^2` (mean of squares), `g_i = p^-1||eps_i||_2^2`, `R = median(b_i)/median(g_i)` (ratio of medians), `R_star = 0.5`, `fairness_flag ∈ {representation_confounded, clear, unavailable}` used identically across Tasks 1/2/4/7.
+- **Type consistency:** `b_i = p^-1||bias_i||_2^2` (mean of squares), `g_i = p^-1||eps_i||_2^2`, `R = median(b_i)/median(g_i)` (ratio of medians), `R_star = 0.5`, report `fairness_flag ∈ {representation_confounded, clear, indeterminate}`; durable null-config carry alone uses `unavailable`.
 - **Anti-tautology** is a Global Constraint and is re-stated in Task 3 (bypass `extract_fit_roles`, assert the metric's own message, verify by guard deletion).

@@ -166,6 +166,7 @@ def _write_spec(
         payload["scientific"] = {
             "activation_evidence": {},
             "dependency_manifest": _mkfile(root, "dep_manifest.json", b"{}\n"),
+            "approximation_bias_report": None,
             "device": "cuda",
             "precision": "float32",
             "sealed_input": {
@@ -291,6 +292,7 @@ def test_scientific_block_in_fixture_spec_raises(tmp_path: Path) -> None:
             "scientific": {
                 "activation_evidence": {},
                 "dependency_manifest": {"path": "/x", "sha256": _HEX},
+                "approximation_bias_report": None,
                 "device": "cuda",
                 "precision": "float32",
                 "sealed_input": {

@@ -57,6 +57,10 @@ from typing import Any
 
 import yaml
 
+from alive.compose.approximation_bias import (
+    measurement_contract_sha256,
+    validate_approximation_bias_report,
+)
 from alive.provenance import sha256_file, sha256_json
 
 #: The ONLY leaf this tool is ever permitted to change (design spec §4 / brief
@@ -254,6 +258,16 @@ def finalize_bias_config(*, basis_config_path: str | Path, report_path: str | Pa
             "finalize_bias_config: report.provenance.basis_config_sha256 does not match "
             "sha256_json(basis_config) -- this report is not bound to this basis config"
         )
+
+    validate_approximation_bias_report(
+        report,
+        expected_protocol=str(basis.get("protocol")),
+        expected_basis_config_sha256=basis_sha,
+        expected_measurement_contract_sha256=measurement_contract_sha256(),
+        expected_provenance={
+            "registered_seeds": list(basis.get("seeds", {}).get("registered_seeds", []))
+        },
+    )
 
     final = copy.deepcopy(basis)
     # The ONE authoritative content-SHA recipe: the SHA-256 of the EXACT on-disk

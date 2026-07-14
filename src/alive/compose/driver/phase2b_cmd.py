@@ -77,6 +77,12 @@ from typing import Any, Iterator, Mapping
 
 import anndata
 
+from alive.compose.approximation_bias import (
+    ApproximationBiasValidationError,
+    basis_config_sha256_from_final_config,
+    load_approximation_bias_report,
+    measurement_contract_sha256,
+)
 from alive.compose.config2 import load_compose_phase2_config
 from alive.compose.driver.confirmation import verify_seal_confirmation_manifest
 from alive.compose.driver.preflight_cmd import build_confirmation_inputs
@@ -91,6 +97,7 @@ from alive.compose.driver.seal_boundary import (
     scientific_protocol_seal_audit_path,
 )
 from alive.compose.durable import COMMIT_CHECKSUM_FIELD, DURABLE_COMMIT_FILENAME
+from alive.compose.fit_role import build_response_projection
 from alive.compose.freeze import FrozenPredictionBundle
 from alive.compose.outcome_store import (
     ComposeOutcomeStore,
@@ -235,6 +242,9 @@ def _run_confirmed_phase2b(
         spec_path, approved_artifacts_root=approved_artifacts_root, mode_expected=mode
     )
     config = load_compose_phase2_config(spec.pre_seal["config"].path)
+    approximation_bias_report_path = _resolve_approximation_bias_report(
+        spec, config, response_artifact=run_spec.response_artifact
+    )
     bundle = FrozenPredictionBundle.load(run_dir / RUN_PRODUCED_BASENAMES["frozen_bundle"])
     ledger_path = run_dir / RUN_PRODUCED_BASENAMES["run_ledger"]
     ledger = RunLedger.read(ledger_path)
@@ -343,6 +353,7 @@ def _run_confirmed_phase2b(
                 oof_manifest_checksum=bundle.dev_diagnostics["oof_fold_manifest_checksum"],
                 seed_variability_report_path=seed_report_path,
                 seed_variability_report_checksum=sha256_file(seed_report_path),
+                approximation_bias_report_path=approximation_bias_report_path,
             )
     except Exception as exc:  # noqa: BLE001 - re-raised unless the seal was consumed
         if _seal_consumed(audit_path):
@@ -557,6 +568,76 @@ def _verify_sealed_source_integrity(source_path: Path, expected_sha: str) -> Non
             f"sealed source {str(source_path)!r} digest mismatch "
             f"(expected {expected_sha!r}, got {actual_sha!r})"
         )
+
+
+def _resolve_approximation_bias_report(
+    spec: ResolvedRunSpec, config: Any, *, response_artifact: Mapping[str, Any]
+) -> Path | None:
+    """Validate the config-pinned report before any scientific store is built."""
+    expected_sha = next(
+        (
+            bias
+            for name, _representation, bias in config.baseline_representations
+            if name == "gears"
+        ),
+        None,
+    )
+    if spec.mode != "scientific":
+        if expected_sha is not None:
+            raise Phase2bSubcommandError(
+                "fixture phase2b does not accept a config-pinned approximation-bias report"
+            )
+        return None
+    if spec.scientific is None:  # pragma: no cover - schema already proves this
+        raise Phase2bSubcommandError("scientific run spec has no scientific block")
+    declaration = spec.scientific["approximation_bias_report"]
+    if expected_sha is None:
+        if declaration is not None:
+            raise Phase2bSubcommandError(
+                "scientific approximation_bias_report must be null while the config SHA is null"
+            )
+        return None
+    if not isinstance(declaration, Mapping):
+        raise Phase2bSubcommandError(
+            "scientific config pins an approximation-bias SHA but the run spec carries no report"
+        )
+    if declaration.get("sha256") != expected_sha:
+        raise Phase2bSubcommandError(
+            "scientific approximation-bias report SHA does not match the config-pinned SHA"
+        )
+    path = Path(str(declaration.get("path")))
+    try:
+        projection = build_response_projection(
+            response_artifact["response_space"],
+            gene_order=response_artifact["gene_order"],
+            control_mean=response_artifact["control_mean"],
+            raw_data_sha256=response_artifact["raw_data_sha256"],
+        )
+        basis_sha = basis_config_sha256_from_final_config(
+            spec.pre_seal["config"].path,
+            expected_report_sha256=expected_sha,
+        )
+        load_approximation_bias_report(
+            path,
+            expected_content_sha256=expected_sha,
+            expected_protocol=spec.protocol,
+            expected_basis_config_sha256=basis_sha,
+            expected_measurement_contract_sha256=measurement_contract_sha256(),
+            expected_git_commit=spec.approved_git_sha,
+            expected_provenance={
+                "norman_source_sha256": response_artifact["raw_data_sha256"],
+                "fit_role_artifact_sha256": spec.pre_seal["fit_role_artifact"].sha256,
+                "response_projection_sha256": sha256_json(projection),
+                "gene_order_sha256": projection["gene_order_sha256"],
+                "pca_dim": len(projection["control_mean"]),
+                "registered_seeds": list(config.registered_seeds),
+            },
+        )
+    except (OSError, ApproximationBiasValidationError) as exc:
+        raise Phase2bSubcommandError(
+            f"scientific approximation-bias report failed pre-seal validation: {exc}"
+        ) from exc
+    return path
 
 
 def _resolve_seal_audit_destination(

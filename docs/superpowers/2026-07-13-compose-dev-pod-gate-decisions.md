@@ -165,12 +165,11 @@ this record.
 **Decision.** The *method* by which GEARS's `raw_pseudobulk_approximation` representation's bias
 is quantified is settled by this session's design spec:
 `docs/superpowers/specs/2026-07-13-compose-approximation-bias-metric-design.md` — a model-free,
-representation-floor measurement over non-sealed roles only (`control`, `singles`,
-`combo_calibration`), with a pre-registered fairness rule (§5 of that spec): `R_star = 0.5`;
-`fairness_flag = "representation_confounded"` if the bias-to-signal ratio `R ≥ R_star`, else
-`"clear"`. (Verbatim from the spec: *"`R_star`: `0.5` (the pre-registered threshold, embedded for
-auditability)."* and *"`fairness_flag`: `"representation_confounded"` if
-`bias_to_signal_ratio_R ≥ R_star`, else `"clear"`."*)
+representation-floor measurement over non-sealed roles only (the authoritative artifact may contain
+`control`, but only `singles` and `combo_calibration` enter measured strata), with a pre-registered
+fairness rule (§5 of that spec): `R_star = 0.5`; a finite `R ≥ R_star` is
+`"representation_confounded"`, a finite `R < R_star` is `"clear"`, and `R = NON_FINITE` is
+`"indeterminate"`.
 
 **Implementation status (this branch).** The metric's point-estimate core, bootstrap, seal-safety
 guards, report assembly/provenance, Probe-A admission gate, one-way config-finalization tool, and

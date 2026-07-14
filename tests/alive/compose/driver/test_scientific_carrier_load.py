@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -11,9 +12,10 @@ from alive.compose.driver.carrier_loader import (
     RunSpecCarrier,
     load_run_spec_carrier,
 )
+from alive.compose.driver.phase2b_cmd import _resolve_approximation_bias_report
 from alive.compose.driver.run_spec import RunSpecError, load_resolved_run_spec
 from alive.compose.phase2b import ActivationProvenanceInputs
-from alive.provenance import EnvironmentInfo
+from alive.provenance import EnvironmentInfo, sha256_json
 from tests.alive.compose.driver.scientific_carrier_support import build_scientific_carrier_fixture
 
 
@@ -50,6 +52,45 @@ def test_scientific_carrier_fully_assembles(tmp_path):
         "perturbation_column",
         "combo_sep",
     }
+
+
+def test_phase2b_resolves_the_same_preseal_validated_bias_report(tmp_path):
+    bundle = build_scientific_carrier_fixture(tmp_path / "a", repo_root=tmp_path / "r")
+    carrier = load_run_spec_carrier(
+        bundle.spec_path,
+        approved_artifacts_root=bundle.approved_artifacts_root,
+        trusted_repo_root=bundle.repo_root,
+    )
+    spec = load_resolved_run_spec(
+        bundle.spec_path,
+        approved_artifacts_root=bundle.approved_artifacts_root,
+        mode_expected="scientific",
+    )
+    config = load_compose_phase2_config(spec.pre_seal["config"].path)
+
+    resolved = _resolve_approximation_bias_report(
+        spec, config, response_artifact=carrier.response_artifact
+    )
+
+    assert resolved == Path(spec.scientific["approximation_bias_report"]["path"])
+
+
+def test_scientific_carrier_rejects_missing_config_pinned_bias_report(tmp_path):
+    bundle = build_scientific_carrier_fixture(tmp_path / "a", repo_root=tmp_path / "r")
+    raw = json.loads(bundle.spec_path.read_text(encoding="utf-8"))
+    raw["scientific"]["approximation_bias_report"] = None
+    body = {key: value for key, value in raw.items() if key != "self_checksum"}
+    raw["self_checksum"] = sha256_json(body)
+    bundle.spec_path.write_text(
+        json.dumps(raw, sort_keys=True, separators=(",", ":")), encoding="utf-8"
+    )
+
+    with pytest.raises(RunSpecError, match="pins an approximation-bias SHA|carries no report"):
+        load_run_spec_carrier(
+            bundle.spec_path,
+            approved_artifacts_root=bundle.approved_artifacts_root,
+            trusted_repo_root=bundle.repo_root,
+        )
 
 
 def test_scientific_requires_trusted_repo_root(tmp_path):

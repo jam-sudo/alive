@@ -9,9 +9,9 @@ nonlinear, projecting the pseudobulk mean of raw counts differs from projecting
 each cell then averaging — a systematic "pseudobulk-approximation bias". This
 script QUANTIFIES that representation gap on the NON-SEALED fit roles.
 
-For each non-sealed group (control, each single, each ``combo_calibration`` pair
-— grouped by ``(role, perturbation)`` in the fit-role artifact) with raw cell
-counts ``raw`` over the block's gene order:
+For each measured non-sealed group (each single and each
+``combo_calibration`` pair — grouped by ``(role, perturbation)`` in the
+fit-role artifact) with raw cell counts ``raw`` over the block's gene order:
 
     delta_pb = z(mean_cells(raw)) - control_mean      # pseudobulk path
     delta_pc = mean_cells(z(raw)) - control_mean      # per-cell path
@@ -19,22 +19,25 @@ counts ``raw`` over the block's gene order:
 
 where ``z`` is :func:`alive.compose.fit_role.apply_response_projection`. The
 control-mean subtraction cancels in the difference, so ``b`` is purely the
-aggregation gap on the group. It is nevertheless applied to both paths so
-the relative-magnitude denominator is the registered perturbation effect
-``delta_pc = mean(z(raw)) - control_mean``, not an origin-dependent PCA
-coordinate.
+aggregation gap on the group. Control rows may exist in the authoritative
+fit-role artifact, but they are reference-only and excluded from every
+measured stratum and GI roster.
 
 This is a MODEL-INDEPENDENT, NON-SEALED activation-requirement report: it opens
 NO seal, reads NO sealed outcome, fits NO model, imports no ``gears``/``cpa``,
-and touches NO sealed cells (the input artifact has no sealed rows by
-construction). It becomes ``baselines.gears.approximation_bias_report_sha256``;
+and touches NO sealed cells (the metric independently proves zero measured
+overlap with the declared sealed pair roster). It becomes
+``baselines.gears.approximation_bias_report_sha256``;
 the GPU pod runs it on real Norman, and it is unit-tested locally on synthetic
 data.
 
 Probe-A admission gate (design spec §3 "Admission prerequisite"): the CLI
 refuses to run this measurement at all -- no report is assembled or written --
-unless ``--probe-a-evidence`` names a JSON file whose ``status`` field is
-``"pass"``. A missing, failed, or quarantined Probe-A status raises
+unless ``--probe-a-evidence`` names a fully validated, self-checksummed Probe-A
+object that binds the protocol, requested Git commit, evidence-manifest SHA,
+raw-pseudobulk bridge representation, pass verdict, and observed bridge error
+within its preregistered tolerance. A bare ``{"status":"pass"}``, missing,
+failed, quarantined, or tampered object raises
 :class:`ValueError` from :func:`_probe_a_admission`, called at the very TOP of
 :func:`main` before any other input is read. See
 ``docs/superpowers/runbooks/2026-07-11-compose-gears-decision-probe-rerun.md``
@@ -80,47 +83,36 @@ import numpy as np
 import yaml
 from scipy import sparse
 
+from alive.compose.approximation_bias import (
+    NON_FINITE,
+    R_STAR,
+    canonical_json,
+    measurement_contract_sha256,
+    self_checksum,
+    validate_approximation_bias_report,
+    validate_probe_a_evidence,
+)
 from alive.compose.fit_role import apply_response_projection, canonical_gene_order_sha256
-from alive.provenance import sha256_bytes, sha256_file, sha256_json
+from alive.provenance import sha256_file, sha256_json
 
 #: Only finite floats or this string sentinel are ever embedded in the report
 #: (CLAUDE.md#invariants / #data-eval — report the degenerate value honestly,
 #: never a silent NaN; mirrors ``compose.phase2b._NON_FINITE_SENTINEL``).
-_NON_FINITE_SENTINEL = "NON_FINITE"
+_NON_FINITE_SENTINEL = NON_FINITE
 
 #: Pre-registered fairness threshold (design spec §5): ``R >= _R_STAR`` marks the
 #: sealed GEARS family-comparator interpretation ``"representation_confounded"``.
-_R_STAR = 0.5
+_R_STAR = R_STAR
 
 #: The v1 measurement entry's measured-role whitelist (design spec §3 "Seal
 #: safety"). Deliberately narrower than ``fit_role``'s overall allowed-role set
 #: (which also permits ``control`` as a reference-only row): ``control`` may
 #: legitimately exist in a fit-role artifact for ``control_mean`` provenance,
 #: but must NEVER be presented as a *measured* pair to this metric.
-_MEASURED_ROLES: frozenset[str] = frozenset({"singles", "combo_calibration"})
+_ARTIFACT_ROLES: frozenset[str] = frozenset({"control", "singles", "combo_calibration"})
 
 #: The v1 report's ``schema`` literal (design spec §4).
 _SCHEMA_V1 = "compose_approximation_bias_report_v1"
-
-#: Probe-A evidence ``status`` values that refuse admission (design spec §3
-#: "Admission prerequisite" / §6 test 8). The vocabulary matches
-#: ``docs/superpowers/runbooks/2026-07-11-compose-gears-decision-probe-rerun.md``.
-#: Any status NOT ``"pass"`` and NOT in this set (including an absent
-#: ``status`` field) is fail-closed-normalized to ``"missing"`` -- an unknown
-#: state is never silently treated as passing (CLAUDE.md invariants).
-_PROBE_A_REFUSAL_STATUSES: frozenset[str] = frozenset({"missing", "failed", "quarantined"})
-
-#: Repo-relative path to the reviewed measurement-contract spec (design spec
-#: §4 ``measurement_contract_sha256`` — this file's own frozen definition of
-#: the metric, hashed for provenance so the report is bound to the exact
-#: reviewed contract it was computed against).
-_MEASUREMENT_CONTRACT_PATH = (
-    Path(__file__).resolve().parents[2]
-    / "docs"
-    / "superpowers"
-    / "specs"
-    / "2026-07-13-compose-approximation-bias-metric-design.md"
-)
 
 
 def _finite_or_sentinel(value: float) -> float | str:
@@ -151,11 +143,11 @@ def _stratify_by_role(
     """Group raw rows by fit role into per-pair / per-gene raw cell matrices.
 
     Only rows whose role is ``"combo_calibration"`` or ``"singles"`` are kept;
-    ``control_token`` rows (and any other role) are dropped — ``control`` is
+    ``control_token`` rows are dropped — ``control`` is
     reference-only via the frozen projection block's ``control_mean`` and is
-    NEVER a measured pair (CLAUDE.md invariants; spec §3 "Populations"). This
-    is stratification only: the seal-safety fail-closed rejection of a
-    ``sealed_pair_ids`` member is Task 3's guard, not built here (YAGNI).
+    NEVER a measured pair (CLAUDE.md invariants; spec §3 "Populations"). The
+    caller's exact artifact-role guard rejects every other role before this
+    helper runs.
 
     Parameters
     ----------
@@ -390,11 +382,13 @@ def _gi_and_fairness(
         float(np.median(finite_per_pair_ratios)) if finite_per_pair_ratios else math.nan
     )
 
-    # A non-finite ratio (undetermined floor/GI-signal median) never claims
-    # confoundedness; it honestly falls back to "clear" (CLAUDE.md invariants
-    # — do not overclaim on a degenerate/undefined comparison).
+    # An undefined comparison is not evidence that the representation is clear.
     fairness_flag = (
-        "representation_confounded" if math.isfinite(ratio_r) and ratio_r >= _R_STAR else "clear"
+        "indeterminate"
+        if not math.isfinite(ratio_r)
+        else "representation_confounded"
+        if ratio_r >= _R_STAR
+        else "clear"
     )
 
     return {
@@ -424,7 +418,7 @@ def _split_bootstrap_replicates(replicates: int, n_seeds: int) -> list[int]:
 
 def _bootstrap_intervals(
     combo_pairs: Mapping[str, np.ndarray],
-    single_effects: Mapping[str, np.ndarray],
+    singles_rows_by_gene: Mapping[str, np.ndarray],
     block: Mapping,
     gene_order: Sequence[str],
     *,
@@ -432,7 +426,7 @@ def _bootstrap_intervals(
     replicates: int,
     combo_sep: str = "_",
 ) -> dict:
-    """Two-stage nonparametric bootstrap 95% interval for the GI fairness statistics.
+    """Hierarchical nonparametric bootstrap interval for the GI fairness statistics.
 
     Registered-seed, byte-reproducible finite-sample uncertainty for
     ``floor_median``, ``gi_signal_median``, and ``bias_to_signal_ratio_R`` (design
@@ -441,14 +435,10 @@ def _bootstrap_intervals(
     resamples cells WITH REPLACEMENT within each sampled pair's own observed cell
     matrix, then recomputes the three statistics on that resampled data via
     :func:`_gi_and_fairness` -- the SAME ratio-of-medians aggregation as the point
-    estimate, not a re-derived formula. ``single_effects`` (the additive-null
-    delta_g/delta_h baseline from :func:`_single_effects`) is held FIXED across
-    every replicate: only the ``combo_calibration`` cells are resampled, because the
-    finite-sample question this interval answers is "how much does the observed
-    combo_calibration SAMPLE (of pairs, and of cells within each pair) move the
-    fairness ratio", not "how much would the single-role delta_g/delta_h estimate
-    itself move" -- resampling singles too would conflate two different estimands
-    into one interval.
+    estimate, not a re-derived formula. Single-role cells are also resampled
+    within gene once per replicate before recomputing ``delta_g``/``delta_h``:
+    those effects are estimated from finite samples and contribute directly to
+    the uncertainty of ``g_i`` and ``R``.
 
     Replicate count: ``replicates`` is a DEDICATED bootstrap-interval draw count,
     never silently taken from
@@ -460,7 +450,7 @@ def _bootstrap_intervals(
     Determinism: ``seeds`` (the config's ``seeds.registered_seeds``) are consumed
     via ``np.random.default_rng(seed)`` in the given order, each producing a fixed
     deterministic share of ``replicates`` (:func:`_split_bootstrap_replicates`).
-    Neither ``combo_pairs`` nor ``single_effects`` is ever mutated, so
+    Neither input mapping is ever mutated, so
     byte-identical inputs + ``seeds`` + ``replicates`` always yield byte-identical
     output, and calling this function never perturbs a separately-computed point
     estimate (the point estimate takes no RNG input at all).
@@ -469,7 +459,7 @@ def _bootstrap_intervals(
     occurrences (each with its own independently-resampled cell subsample) by
     giving each occurrence a unique salted key
     (``f"{gene_a}~{occurrence}{combo_sep}{gene_b}~{occurrence}"``) with a
-    correspondingly salted copy of ``single_effects`` for that occurrence's two
+    correspondingly salted copy of the resampled single effects for that occurrence's two
     genes. This lets ONE call to :func:`_gi_and_fairness` per replicate compute
     every occurrence's ``b_i``/``g_i`` and their ratio-of-medians aggregation
     exactly as the point estimate would, including a duplicate pair contributing
@@ -480,9 +470,9 @@ def _bootstrap_intervals(
     combo_pairs : mapping of str to numpy.ndarray
         ``pair_id -> raw cell matrix`` for ``combo_calibration`` (the OBSERVED
         sample; never mutated).
-    single_effects : mapping of str to numpy.ndarray
-        ``gene_id -> delta_g``, as returned by :func:`_single_effects`; held fixed
-        across every replicate (never mutated or resampled).
+    singles_rows_by_gene : mapping of str to numpy.ndarray
+        ``gene_id -> raw single-role cell matrix``. Cells are resampled within
+        each gene once per replicate before recomputing ``delta_g``.
     block : Mapping
         The frozen ``response_projection`` block (spec §2.2).
     gene_order : sequence of str
@@ -529,7 +519,14 @@ def _bootstrap_intervals(
         rng = np.random.default_rng(seed)
         for _ in range(n_rep):
             resampled_combo: dict[str, np.ndarray] = {}
-            resampled_singles: dict[str, np.ndarray] = dict(single_effects)
+            single_draws: dict[str, np.ndarray] = {}
+            for gene in sorted(singles_rows_by_gene):
+                single_raw = np.asarray(singles_rows_by_gene[gene], dtype=np.float64)
+                n_single_cells = single_raw.shape[0]
+                single_idx = rng.integers(0, n_single_cells, size=n_single_cells)
+                single_draws[gene] = single_raw[single_idx, :]
+            resampled_base_effects = _single_effects(single_draws, block, gene_order)
+            resampled_effects: dict[str, np.ndarray] = dict(resampled_base_effects)
             if n_pairs > 0:
                 drawn = rng.integers(0, n_pairs, size=n_pairs)
                 for occurrence, idx in enumerate(drawn):
@@ -540,12 +537,12 @@ def _bootstrap_intervals(
                     cell_idx = rng.integers(0, n_cells, size=n_cells)
                     key_a, key_b = f"{gene_a}~{occurrence}", f"{gene_b}~{occurrence}"
                     resampled_combo[f"{key_a}{combo_sep}{key_b}"] = raw[cell_idx, :]
-                    resampled_singles[key_a] = single_effects[gene_a]
-                    resampled_singles[key_b] = single_effects[gene_b]
+                    resampled_effects[key_a] = resampled_base_effects[gene_a]
+                    resampled_effects[key_b] = resampled_base_effects[gene_b]
 
             if resampled_combo:
                 rep = _gi_and_fairness(
-                    resampled_combo, resampled_singles, block, gene_order, combo_sep=combo_sep
+                    resampled_combo, resampled_effects, block, gene_order, combo_sep=combo_sep
                 )
                 floor_rep = rep["floor_median"]
                 gi_rep = rep["gi_signal_median"]
@@ -589,7 +586,7 @@ def _canonical_json(obj: Mapping) -> str:
     :func:`_self_checksum` and to write the report file in :func:`main`, so
     the checksum always covers exactly the bytes that get written.
     """
-    return json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return canonical_json(obj)
 
 
 def _self_checksum(report_without_checksum: Mapping) -> str:
@@ -610,7 +607,7 @@ def _self_checksum(report_without_checksum: Mapping) -> str:
     str
         Lowercase hex-encoded SHA-256 digest.
     """
-    return sha256_bytes(_canonical_json(report_without_checksum).encode("utf-8"))
+    return self_checksum(report_without_checksum)
 
 
 def measure_approximation_bias_v1(
@@ -725,8 +722,9 @@ def measure_approximation_bias_v1(
     Raises
     ------
     ValueError
-        ``"approximation-bias: measured role must be singles|combo_calibration"``
-        for guard (a); ``"approximation-bias: measured roster overlaps
+        ``"approximation-bias: artifact role must be
+        control|singles|combo_calibration"`` for guard (a);
+        ``"approximation-bias: measured roster overlaps
         sealed_pair_ids"`` for guard (b); ``"approximation-bias: gene_order
         digest mismatch"`` for guard (c); ``"approximation-bias: missing
         required provenance field(s): ..."`` or a ``registered_seeds``/
@@ -738,10 +736,17 @@ def measure_approximation_bias_v1(
     perturbations = [str(p) for p in adata.obs["perturbation"]]
     gene_order = [str(g) for g in adata.var_names]
 
-    if not set(roles) <= _MEASURED_ROLES:
-        raise ValueError("approximation-bias: measured role must be singles|combo_calibration")
+    if not set(roles) <= _ARTIFACT_ROLES:
+        raise ValueError(
+            "approximation-bias: artifact role must be control|singles|combo_calibration"
+        )
 
-    sealed_pair_overlap_count = len(set(perturbations) & set(sealed_pair_ids))
+    measured_perturbations = {
+        perturbation
+        for role, perturbation in zip(roles, perturbations, strict=True)
+        if role in {"singles", "combo_calibration"}
+    }
+    sealed_pair_overlap_count = len(measured_perturbations & set(sealed_pair_ids))
     if sealed_pair_overlap_count != 0:
         raise ValueError("approximation-bias: measured roster overlaps sealed_pair_ids")
 
@@ -783,7 +788,7 @@ def measure_approximation_bias_v1(
     gi_point = _gi_and_fairness(combo_rows, single_effects, block, gene_order, combo_sep=combo_sep)
     bootstrap = _bootstrap_intervals(
         combo_rows,
-        single_effects,
+        singles_rows,
         block,
         gene_order,
         seeds=list(registered_seeds),
@@ -793,7 +798,7 @@ def measure_approximation_bias_v1(
     gi_and_fairness = {**gi_point, **bootstrap}
 
     provenance = {
-        "measurement_contract_sha256": sha256_file(_MEASUREMENT_CONTRACT_PATH),
+        "measurement_contract_sha256": measurement_contract_sha256(),
         "basis_config_sha256": str(basis_config_sha256),
         "git_commit": str(git_commit),
         "norman_source_sha256": str(norman_source_sha256),
@@ -819,10 +824,24 @@ def measure_approximation_bias_v1(
     }
     report = dict(report_without_checksum)
     report["self_checksum"] = _self_checksum(report_without_checksum)
+    validate_approximation_bias_report(
+        report,
+        expected_basis_config_sha256=str(basis_config_sha256),
+        expected_measurement_contract_sha256=measurement_contract_sha256(),
+        expected_git_commit=str(git_commit),
+        expected_provenance={
+            "norman_source_sha256": str(norman_source_sha256),
+            "fit_role_artifact_sha256": sha256_file(fit_role_artifact),
+            "response_projection_sha256": sha256_json(block),
+            "gene_order_sha256": str(block["gene_order_sha256"]),
+            "pca_dim": int(len(block["control_mean"])),
+            "registered_seeds": [int(seed) for seed in registered_seeds],
+        },
+    )
     return report
 
 
-def _probe_a_admission(evidence: Mapping) -> str:
+def _probe_a_admission(evidence: Mapping, *, expected_git_commit: str | None = None) -> str:
     """Fail-closed Probe-A admission gate (design spec §3 "Admission prerequisite").
 
     A conforming Probe A report must establish the GEARS population vector is
@@ -855,12 +874,11 @@ def _probe_a_admission(evidence: Mapping) -> str:
         §6 test 8; CLAUDE.md invariants -- an unknown admission state is
         never silently treated as passing).
     """
-    status = evidence.get("status")
-    if status == "pass":
-        return "admitted"
-    if status not in _PROBE_A_REFUSAL_STATUSES:
-        status = "missing"
-    raise ValueError(f"approximation-bias: Probe-A {status}; measurement NOT_ADMISSIBLE")
+    try:
+        validate_probe_a_evidence(evidence, expected_git_commit=expected_git_commit)
+    except ValueError as exc:
+        raise ValueError(f"approximation-bias: {exc}") from exc
+    return "admitted"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -913,7 +931,7 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
 
     probe_a_evidence = json.loads(args.probe_a_evidence.read_text(encoding="utf-8"))
-    admission_status = _probe_a_admission(probe_a_evidence)
+    admission_status = _probe_a_admission(probe_a_evidence, expected_git_commit=args.git_commit)
 
     block = json.loads(args.response_projection.read_text(encoding="utf-8"))
     sealed_pair_ids = json.loads(args.sealed_pair_ids.read_text(encoding="utf-8"))

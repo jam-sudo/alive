@@ -87,6 +87,10 @@ scientific = {
     path: absolute normalized path,
     sha256: <64 lowercase hex>
   },
+  approximation_bias_report: null | {
+    path: absolute normalized path,
+    sha256: <64 lowercase hex>
+  },
   device: non-empty string,
   precision: non-empty string,
   sealed_input: {
@@ -102,6 +106,13 @@ scientific = {
 For activation evidence and the dependency manifest it must enforce the same approved-root policy as
 other pre-seal artifacts: absolute normalized path, lexical containment, existing regular file,
 non-symlink final component, and actual byte-SHA equality. These are non-sealed inputs and may be read.
+
+`approximation_bias_report` is null if and only if the loaded config's GEARS report SHA is null. If
+the config pins a SHA, this declaration is mandatory and its digest must equal both the config value
+and the actual file bytes. Before runtime environment capture, the carrier runs the shared full-report
+validator and additionally binds the report to the approved Git commit, current reviewed measurement
+contract, and the bias-null basis config reconstructed from the final config by nulling only the report
+SHA leaf. Any failure is a pre-seal `RunSpecError`; no store, audit, or run-produced output is created.
 
 After loading the config, the carrier requires
 `activation_evidence.requirements.keys() == config.activation_requirements` exactly. No missing,
@@ -234,16 +245,17 @@ For scientific mode:
 
 1. Fully load and validate the canonical `ResolvedRunSpec` and all declared pre-seal bytes.
 2. Validate the nested scientific block (§2.1) and sealed attestation equality (§2.2).
-3. Load the config, then resolve the runtime context from the trusted repository root — capturing
+3. Load the config and validate the declared approximation-bias report/config/basis/Git lineage.
+4. Resolve the runtime context from the trusted repository root — capturing
    `EnvironmentInfo` with the config's registered seeds — and validate it against `approved_git_sha`
    (§2.3); no asserted context is accepted.
-4. Build and validate the `ActivationRecord` from the loaded config.
-5. Reuse the existing phase2a/dev-store/response deserializers and the scientific sealed-data
+5. Build and validate the `ActivationRecord` from the loaded config.
+6. Reuse the existing phase2a/dev-store/response deserializers and the scientific sealed-data
    deserializer. Validate deserialized schema/checksum fidelity as today.
-6. Build typed `ActivationProvenanceInputs` (§4).
-7. Construct the carrier through its scientific-only constructor; `__post_init__` rejects partial or
+7. Build typed `ActivationProvenanceInputs` (§4).
+8. Construct the carrier through its scientific-only constructor; `__post_init__` rejects partial or
    mixed-mode state.
-8. CLI stage dispatch continues unchanged except for scientific environment plumbing.
+9. CLI stage dispatch continues unchanged except for scientific environment plumbing.
 
 This work hashes only declared non-sealed files. It does not open the sealed source or construct any
 outcome store.

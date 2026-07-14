@@ -222,8 +222,10 @@ ResolvedRunSpec **안에 저장하지 않아** file-SHA 순환참조를 피하�
   §5의 `adapter_sha256` 출처다(worker self-report의 adapter identity와 대조; runtime은 launched
   `worker_script` 파일을 별도 `worker_sha256`으로 검증한다, `baseline_subprocess.py`)
 - scientific 전용: activation requirement→evidence path+`sha256:` digest exact roster, dependency manifest,
-  device, precision, `sealed_input={source_path, expected_file_sha256, snapshot_id, audit_path}`. Fixture
-  mode에서는 이 block이 없어야 한다
+  `approximation_bias_report=null|{path,sha256}`, device, precision,
+  `sealed_input={source_path, expected_file_sha256, snapshot_id, audit_path}`. Fixture mode에서는 이
+  block이 없어야 한다. Config가 GEARS report SHA를 pin하면 report 선언도 반드시 존재하고 같은 SHA를
+  가져야 한다
 - fixture 전용: committed fixture corpus ID, builder-code digest와
   `sealed_input={source_path, expected_file_sha256, audit_path}`. Scientific mode에서는 이 block이 없어야 한다
 
@@ -345,7 +347,10 @@ seal 직전(runbook §6/§7) 순서로 재검증한다.
    content-addressed read-only snapshot이어야 하고, `run_dir`와 protocol-global audit destination은 별도의
    write-once output 영역으로 writable해야 한다(둘 다 승인 root 아래). Driver는 input snapshot identity를
    attestation/confirmation과 대조한다. 이 단계에서는 sealed source file 자체를 open/stat/hash하지 않는다.
-1. scientific이면 clean-git + `activation_evidence` roster/hash를 재검증한다.
+1. scientific이면 clean-git + `activation_evidence` roster/hash를 재검증한다. 또한 config에 pin된
+   approximation-bias report의 선언/file SHA/full schema/self-checksum/measurement-contract SHA를 검증하고,
+   최종 config의 report-SHA leaf만 null로 되돌려 재계산한 basis config SHA 및 report Git commit을 각각
+   report provenance/`approved_git_sha`와 대조한다. 이 검증은 store 생성 전에 끝나야 한다.
 2. frozen bundle(`FrozenPredictionBundle.load`)과 upstream ledger(`RunLedger.read`)를 다시 읽어 Phase-2a
    `CONTINUE`, frozen bundle checksum, ledger header·artifact↔bundle 일치를 재검증한다.
 3. write-once confirmation manifest를 읽고 exact schema/self-checksum/file SHA를 검증한다.
@@ -365,7 +370,8 @@ seal 직전(runbook §6/§7) 순서로 재검증한다.
    **`ComposeOutcomeStore`가 import·생성되는 유일한 함수이며 phase2b에서만 도달 가능하다(§4).** fixture
    builder는 store 객체가 아니라 sealed-outcome DATA만 만든다(§6).
 5. `run_phase2b[_fixture](run_dir=, outcome_store=, frozen_bundle=, pair_manifest=, response_artifact=,
-   config=, ledger=, ...)`를 호출한다. 내부에서 D1/D2 §7 전체(pre-access ledger → durable audit claim →
+   config=, ledger=, approximation_bias_report_path=<pre-seal-validated path>, ...)`를 호출한다.
+   Scientific config SHA가 non-null인데 이 path가 전달되지 않는 상태는 금지한다. 내부에서 D1/D2 §7 전체(pre-access ledger → durable audit claim →
    terminal → durable finalize + commit marker)가 이미 강제된다.
 6. Driver는 `phase2b_durable_commit.json`을 독립 재독출해 terminal/summary/final-ledger/pre-access-ledger/
    seed-report SHA와 marker self-checksum을 모두 재검증한 뒤에만 exit 0을 반환한다. 그 전에는 aggregate metric,

@@ -39,6 +39,13 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from alive.compose.approximation_bias import (
+    APPROXIMATION_BIAS_SCHEMA,
+    PROTOCOL,
+    REPRESENTATION,
+    measurement_contract_sha256,
+    self_checksum,
+)
 from alive.compose.config2 import (
     _EXPECTED_METHOD_ROSTER,
     ScientificModeError,
@@ -1783,9 +1790,22 @@ def _write_bias_report(
     trailing newline. So the durable loader is exercised against the real schema +
     hashing recipe, not a stub that would hide the integration bug.
     """
-    report = {
-        "schema": "compose_approximation_bias_report_v1",
+    empty_stratum = {
+        "n_pairs": 0,
+        "per_pair": [],
+        "b_distribution": {"median": 0.0, "mean": 0.0, "max": 0.0, "q90": 0.0},
+        "signed_pc_bias": [],
+    }
+    body = {
+        "schema": APPROXIMATION_BIAS_SCHEMA,
+        "deliverable": "gears_pseudobulk_approximation_bias_report",
+        "protocol": PROTOCOL,
+        "seal_status": "unopened",
+        "method": REPRESENTATION,
+        "admission_status": "admitted",
+        "strata": {"combo_calibration": empty_stratum, "singles": empty_stratum},
         "gi_and_fairness": {
+            "gi_signal_per_pair": [],
             "fairness_flag": fairness_flag,
             "bias_to_signal_ratio_R": bias_to_signal_ratio_R,
             "R_star": R_star,
@@ -1797,9 +1817,26 @@ def _write_bias_report(
             # sibling fields a real report carries and the loader ignores.
             "gi_signal_median": 0.9,
             "floor_median": 0.54,
+            "bias_to_signal_ratio_per_pair_median": bias_to_signal_ratio_R,
+            "replicates_requested": 10,
+            "replicates_finite": 10,
+            "replicates_non_finite": 0,
         },
-        "provenance": {"basis_config_sha256": "a" * 64},
+        "provenance": {
+            "measurement_contract_sha256": measurement_contract_sha256(),
+            "basis_config_sha256": "a" * 64,
+            "git_commit": "b" * 40,
+            "norman_source_sha256": "1" * 64,
+            "fit_role_artifact_sha256": "2" * 64,
+            "response_projection_sha256": "3" * 64,
+            "gene_order_sha256": "4" * 64,
+            "pca_dim": 2,
+            "registered_seeds": [11, 23, 37],
+            "sealed_pair_overlap_count": 0,
+            "pod_instance": "unit-test",
+        },
     }
+    report = {**body, "self_checksum": self_checksum(body)}
     # EXACTLY as main writes it: canonical JSON + a trailing newline.
     text = json.dumps(report, sort_keys=True, separators=(",", ":"), ensure_ascii=False) + "\n"
     Path(path).write_text(text, encoding="utf-8")

@@ -57,6 +57,11 @@ from pathlib import Path
 
 import numpy as np
 
+from alive.compose.approximation_bias import (
+    ApproximationBiasValidationError,
+    measurement_contract_sha256,
+    validate_approximation_bias_report,
+)
 from alive.compose.config2 import (
     ActivationRecord,
     ComposePhase2Config,
@@ -859,6 +864,16 @@ def _load_approximation_bias_fairness(
         raise ApproximationBiasReportError(
             f"pinned approximation-bias report {str(path)!r} is not a JSON object (fail closed)."
         )
+    try:
+        validate_approximation_bias_report(
+            report,
+            expected_measurement_contract_sha256=measurement_contract_sha256(),
+        )
+    except ApproximationBiasValidationError as exc:
+        raise ApproximationBiasReportError(
+            f"pinned approximation-bias report {str(path)!r} failed its v1 integrity "
+            f"contract: {exc}"
+        ) from exc
     gi = report.get("gi_and_fairness")
     if not isinstance(gi, dict):
         raise ApproximationBiasReportError(

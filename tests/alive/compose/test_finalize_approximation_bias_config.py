@@ -28,6 +28,14 @@ import pytest
 import yaml
 
 from alive.compose import config2
+from alive.compose.approximation_bias import (
+    APPROXIMATION_BIAS_SCHEMA,
+    NON_FINITE,
+    PROTOCOL,
+    REPRESENTATION,
+    measurement_contract_sha256,
+    self_checksum,
+)
 from alive.provenance import sha256_json
 
 _REPO = Path(__file__).resolve().parents[3]
@@ -93,19 +101,53 @@ def _write_report_json(tmp_path: Path, report: dict, *, name: str = "report.json
 
 
 def _bound_report(basis_sha: str) -> dict:
-    """A minimal, well-formed report bound to ``basis_sha`` via its
-    ``provenance.basis_config_sha256`` -- the ONLY field the tool inspects on the
-    report side of the binding check."""
-    return {
-        "schema": "compose_approximation_bias_report_v1",
-        "gi_and_fairness": {"bias_to_signal_ratio_R": 0.12, "fairness_flag": "clear"},
+    """A complete, integrity-valid v1 report bound to ``basis_sha``."""
+    empty_stratum = {
+        "n_pairs": 0,
+        "per_pair": [],
+        "b_distribution": dict.fromkeys(("median", "mean", "max", "q90"), NON_FINITE),
+        "signed_pc_bias": [],
+    }
+    body = {
+        "schema": APPROXIMATION_BIAS_SCHEMA,
+        "deliverable": "gears_pseudobulk_approximation_bias_report",
+        "protocol": PROTOCOL,
+        "seal_status": "unopened",
+        "method": REPRESENTATION,
+        "admission_status": "admitted",
+        "strata": {"combo_calibration": empty_stratum, "singles": empty_stratum},
+        "gi_and_fairness": {
+            "gi_signal_per_pair": [],
+            "gi_signal_median": 0.4,
+            "floor_median": 0.048,
+            "bias_to_signal_ratio_R": 0.12,
+            "bias_to_signal_ratio_per_pair_median": 0.12,
+            "R_star": 0.5,
+            "fairness_flag": "clear",
+            "bootstrap_95_interval": {
+                "floor_median": [0.03, 0.06],
+                "gi_signal_median": [0.3, 0.5],
+                "bias_to_signal_ratio_R": [0.08, 0.18],
+            },
+            "replicates_requested": 10,
+            "replicates_finite": 10,
+            "replicates_non_finite": 0,
+        },
         "provenance": {
+            "measurement_contract_sha256": measurement_contract_sha256(),
             "basis_config_sha256": basis_sha,
             "git_commit": "b" * 40,
+            "norman_source_sha256": "1" * 64,
+            "fit_role_artifact_sha256": "2" * 64,
+            "response_projection_sha256": "3" * 64,
+            "gene_order_sha256": "4" * 64,
+            "pca_dim": 2,
+            "registered_seeds": [11, 23, 37],
+            "sealed_pair_overlap_count": 0,
             "pod_instance": "unit-test-local",
         },
-        "self_checksum": "d" * 64,
     }
+    return {**body, "self_checksum": self_checksum(body)}
 
 
 # ---------------------------------------------------------------------------
@@ -139,6 +181,19 @@ def test_finalization_changes_only_the_one_leaf(tmp_path):
     assert final["baselines"]["gears"]["revision"] == basis["baselines"]["gears"]["revision"]
     # basis itself must be untouched (no in-place mutation).
     assert basis["baselines"]["gears"]["approximation_bias_report_sha256"] is None
+
+
+def test_finalization_rejects_tampered_report_self_checksum(tmp_path):
+    module = _load_finalize_module()
+    basis = _basis_dict()
+    basis_path = _write_basis_yaml(tmp_path, basis)
+    basis_sha = sha256_json(yaml.safe_load(basis_path.read_text(encoding="utf-8")))
+    report = _bound_report(basis_sha)
+    report["gi_and_fairness"]["fairness_flag"] = "representation_confounded"
+    report_path = _write_report_json(tmp_path, report)
+
+    with pytest.raises(ValueError, match="fairness_flag|self_checksum|integrity"):
+        module.finalize_bias_config(basis_config_path=basis_path, report_path=report_path)
 
 
 # ---------------------------------------------------------------------------

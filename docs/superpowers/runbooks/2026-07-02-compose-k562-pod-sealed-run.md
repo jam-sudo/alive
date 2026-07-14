@@ -162,6 +162,10 @@ post-seal non-COMPLETE(durable export 미완료 포함), `10` pre-seal rejection
   digest가 있어야 한다. Import 성공이나 관찰자 서술만으로 대체할 수 없다.
 - config의 `power_status`, GEARS/CPA `revision`·`environment_status`와 실제 activation overlay의 관계를
   문서화하고, config digest가 바뀌면 새 run identity와 evidence 결속을 재생성.
+- Probe-A exact admission evidence와 approximation-bias report가 shared full-schema validator를
+  통과해야 한다. Final config의 GEARS report SHA, report file SHA, ResolvedRunSpec의
+  `scientific.approximation_bias_report.{path,sha256}`가 모두 같아야 하며, report의 contract SHA,
+  `approved_git_sha`, bias-null basis config SHA도 독립 재검증한다.
 - 독립 검토자가 leakage, exact roster, response projection, pair alignment, single seal open,
   final-ledger recovery를 확인.
 - 실행할 exact Git SHA를 owner가 승인. 이 시점에만 본 문서 상태를 `READY`로 변경한다.
@@ -228,6 +232,13 @@ pod에서 real Norman data로 두 evidence를 **최종 active config** 하에 �
 requirement(config `power_status`, GEARS/CPA `environment_status`, GEARS `approximation_bias_report_sha256`)를
 실데이터로 확립해 모든 ActivationRecord requirement가 active run identity에 결속된 non-empty evidence hash를
 갖도록 한다. rank/power/bias는 어차피 pod-only Norman data가 필요하므로 재생성은 자연스러운 pod 단계다.
+
+**Approximation-bias one-way carrier.** Probe-A 통과 후 bias-null config를 canonical hash하고 report를
+생성한다. Finalizer로 config의 GEARS report-SHA leaf 하나만 채운 다음, ResolvedRunSpec에 같은 report의
+absolute path와 byte SHA를 선언한다. Carrier load와 `phase2b` 진입은 seal 전에 report 전체 schema,
+self-checksum, pair/GI roster 정렬, bootstrap accounting, fairness coherence, contract/basis/Git provenance를
+재검증한다. Config가 SHA를 pin했는데 선언/path가 없거나 어느 결속이라도 다르면 즉시 중단한다. 이 단계에서
+sealed source를 열거나 audit을 생성해서는 안 된다.
 
 ## 5. Phase-2a — seal closed
 
