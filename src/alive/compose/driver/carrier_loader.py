@@ -57,17 +57,16 @@ from typing import Any, Mapping
 
 import numpy as np
 
-from alive.compose.approximation_bias import (
-    ApproximationBiasValidationError,
-    basis_config_sha256_from_final_config,
-    load_approximation_bias_report,
-    measurement_contract_sha256,
-)
+from alive.compose.approximation_bias import ApproximationBiasValidationError
 from alive.compose.config2 import (
     ActivationRecord,
     ComposePhase2Config,
     assert_scientific_mode_allowed,
     load_compose_phase2_config,
+)
+from alive.compose.driver.bias_report_preseal import (
+    ApproximationBiasDeclarationError,
+    resolve_pinned_approximation_bias_evidence,
 )
 from alive.compose.driver.fixture_builder import _MODEL_CLASS_BY_NAME
 from alive.compose.driver.pair_index import validate_scientific_sealed_declaration
@@ -77,7 +76,7 @@ from alive.compose.driver.run_spec import (
     load_resolved_run_spec,
 )
 from alive.compose.driver.scientific_runtime import resolve_scientific_runtime_context
-from alive.compose.fit_role import FitRoleArtifactSpec, build_response_projection
+from alive.compose.fit_role import FitRoleArtifactSpec
 from alive.compose.outcome_store import FIXTURE_CORPUS_V1
 from alive.compose.phase2a import OutcomeAccessAudit, Phase2aInputs
 from alive.compose.phase2b import (
@@ -85,7 +84,7 @@ from alive.compose.phase2b import (
     build_activation_provenance_inputs,
 )
 from alive.compose.response import ResponseSpace
-from alive.provenance import EnvironmentInfo, sha256_bytes, sha256_json
+from alive.provenance import EnvironmentInfo, sha256_bytes
 
 __all__ = [
     "RunSpecCarrier",
@@ -382,57 +381,11 @@ def _validate_scientific_approximation_bias_report(
     """Bind the scientific report declaration to config and validate it pre-seal."""
     if spec.scientific is None:  # pragma: no cover - loader proves the mode block
         raise RunSpecError("scientific run spec has no scientific block")
-    expected_sha = next(
-        (
-            bias
-            for name, _representation, bias in config.baseline_representations
-            if name == "gears"
-        ),
-        None,
-    )
-    declaration = spec.scientific["approximation_bias_report"]
-    if expected_sha is None:
-        if declaration is not None:
-            raise RunSpecError(
-                "scientific.approximation_bias_report must be null while the config SHA is null"
-            )
-        return
-    if not isinstance(declaration, Mapping):
-        raise RunSpecError(
-            "scientific config pins an approximation-bias SHA but the run spec carries no report"
-        )
-    if declaration.get("sha256") != expected_sha:
-        raise RunSpecError(
-            "scientific.approximation_bias_report.sha256 does not match the config-pinned SHA"
-        )
     try:
         response = _load_response_artifact(spec)
-        projection = build_response_projection(
-            response["response_space"],
-            gene_order=response["gene_order"],
-            control_mean=response["control_mean"],
-            raw_data_sha256=response["raw_data_sha256"],
-        )
-        basis_sha = basis_config_sha256_from_final_config(
-            spec.pre_seal["config"].path,
-            expected_report_sha256=expected_sha,
-        )
-        load_approximation_bias_report(
-            declaration["path"],
-            expected_content_sha256=expected_sha,
-            expected_protocol=config.protocol,
-            expected_basis_config_sha256=basis_sha,
-            expected_measurement_contract_sha256=measurement_contract_sha256(),
-            expected_git_commit=spec.approved_git_sha,
-            expected_provenance={
-                "norman_source_sha256": response["raw_data_sha256"],
-                "fit_role_artifact_sha256": spec.pre_seal["fit_role_artifact"].sha256,
-                "response_projection_sha256": sha256_json(projection),
-                "gene_order_sha256": projection["gene_order_sha256"],
-                "pca_dim": len(projection["control_mean"]),
-                "registered_seeds": list(config.registered_seeds),
-            },
-        )
+        resolve_pinned_approximation_bias_evidence(spec, config, response_artifact=response)
+    except ApproximationBiasDeclarationError as exc:
+        raise RunSpecError(str(exc)) from exc
     except (OSError, ApproximationBiasValidationError) as exc:
         raise RunSpecError(
             f"scientific approximation-bias report failed pre-seal validation: {exc}"

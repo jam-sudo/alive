@@ -197,7 +197,7 @@ Scientific `run_id`의 기존 정의(config/data-card/raw/sequence)는 바꾸지
 ResolvedRunSpec **안에 저장하지 않아** file-SHA 순환참조를 피하고, phase2a ledger와 confirmation manifest에
 기록한다. Bundle/model이 만들어진 뒤의 최종 실행 identity는 confirmation manifest checksum이 담당한다.
 
-### 2.2 ResolvedRunSpec v1 exact schema
+### 2.2 ResolvedRunSpec v2 exact schema
 
 - identity: `schema="compose_resolved_run_spec_v2"`, `mode`, `protocol`, `run_id`,
   `approved_git_sha`, `run_dir`, `approved_artifacts_root`, `self_checksum`

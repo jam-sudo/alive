@@ -75,6 +75,7 @@ _STORE_NAMES = frozenset({"ComposeOutcomeStore", "build_fixture_outcome_store"})
 _DRIVER_MODULES = frozenset(
     {
         "__init__",
+        "bias_report_preseal",
         "carrier_loader",
         "cli",
         "confirmation",
