@@ -1,4 +1,4 @@
-"""Fail-closed loader tests for the ResolvedRunSpec v1 schema.
+"""Fail-closed loader tests for the ResolvedRunSpec v2 schema.
 
 Every fixture spec written here is canonical JSON (``sort_keys`` + compact
 separators) with a correct ``self_checksum`` and real, byte-matching on-disk

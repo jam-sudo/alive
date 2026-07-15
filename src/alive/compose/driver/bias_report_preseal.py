@@ -6,7 +6,7 @@ report to the same evidence-space inputs BEFORE any sealed store is built. This
 module owns that binding once so the two pre-seal gates cannot drift: a report
 that passed one gate but failed the other would still fail closed (no seal
 burned), but keeping two hand-copied ``expected_provenance`` blocks in sync is a
-maintenance hazard the v1 spec-review flagged.
+maintenance hazard the schema review flagged.
 
 It lives at the driver layer (not in the import-light
 ``alive.compose.approximation_bias`` contract module) because it depends on the

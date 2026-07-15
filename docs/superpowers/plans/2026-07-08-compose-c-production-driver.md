@@ -41,7 +41,7 @@ Every task's requirements implicitly include these (copied from the C spec 2026-
 
 ---
 
-## Task 1: ResolvedRunSpec v1 schema + fail-closed loader
+## Task 1: ResolvedRunSpec v2 schema + fail-closed loader
 
 **Files:**
 - Create: `src/alive/compose/driver/__init__.py`, `src/alive/compose/driver/run_spec.py`
@@ -63,7 +63,7 @@ Every task's requirements implicitly include these (copied from the C spec 2026-
 - [ ] **Step 2: Run tests, verify they fail** — `.venv/bin/python -m pytest tests/alive/compose/driver/test_run_spec.py -v` → FAIL (module missing).
 - [ ] **Step 3: Implement `run_spec.py`** — the dataclass + constants + loader with each fail-closed check in the order above; digest checks stream-hash real bytes via `sha256_file`. Provide `compute_execution_id`.
 - [ ] **Step 4: Run tests → PASS**; ruff check + format on both files.
-- [ ] **Step 5: Commit** `src/alive/compose/driver/__init__.py src/alive/compose/driver/run_spec.py tests/alive/compose/driver/__init__.py tests/alive/compose/driver/test_run_spec.py` — `feat(compose-driver): ResolvedRunSpec v1 schema + fail-closed loader`.
+- [ ] **Step 5: Commit** `src/alive/compose/driver/__init__.py src/alive/compose/driver/run_spec.py tests/alive/compose/driver/__init__.py tests/alive/compose/driver/test_run_spec.py` — `feat(compose-driver): ResolvedRunSpec v2 schema + fail-closed loader`.
 
 ## Task 2: Pair-index manifest v1 pre-seal validation
 
