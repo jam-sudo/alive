@@ -11,11 +11,20 @@ import math
 from pathlib import Path
 from typing import Mapping
 
+from alive.compose.approximation_bias import (
+    PROBE_A_SCHEMA,
+    ApproximationBiasValidationError,
+    self_checksum,
+    validate_probe_a_evidence,
+)
 from alive.provenance import sha256_file, sha256_json
 
 REPORT_SCHEMA = "compose_gears_probe_a_report_v1"
 MANIFEST_SCHEMA = "compose_gears_probe_a_evidence_manifest_v1"
-ADMISSION_SCHEMA = "compose_gears_probe_a_admission_v1"
+# The admission schema and its validation live exactly once, in the sole consumer
+# gate ``approximation_bias.validate_probe_a_evidence``.  Re-export the name and
+# reuse that validator here so this producer cannot drift from the consumer.
+ADMISSION_SCHEMA = PROBE_A_SCHEMA
 PROTOCOL = "COMPOSE-K562-v1"
 
 _REPORT_KEYS = {
@@ -35,15 +44,6 @@ _REPORT_KEYS = {
     "self_checksum",
 }
 _BRIDGE_KEYS = {"representation", "verdict", "tolerance", "max_abs_error"}
-_ADMISSION_KEYS = {
-    "schema",
-    "protocol",
-    "status",
-    "git_commit",
-    "evidence_manifest_sha256",
-    "output_bridge",
-    "self_checksum",
-}
 
 
 class ProbeAEvidenceError(ValueError):
@@ -69,6 +69,16 @@ def _finite_nonnegative(value: object, field: str) -> float:
     return observed
 
 
+def _finite(value: object, field: str) -> float:
+    """Finite number of any sign (output-scale summary values may be negative)."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ProbeAEvidenceError(f"{field} must be numeric")
+    observed = float(value)
+    if not math.isfinite(observed):
+        raise ProbeAEvidenceError(f"{field} must be finite")
+    return observed
+
+
 def _exact_keys(value: object, expected: set[str], field: str) -> Mapping:
     if not isinstance(value, Mapping) or set(value) != expected:
         raise ProbeAEvidenceError(f"{field} keys differ from the registered schema")
@@ -88,9 +98,14 @@ def _relative_file(root: Path, relative: object) -> Path:
     rel = Path(relative)
     if rel.is_absolute() or ".." in rel.parts:
         raise ProbeAEvidenceError("raw sample path must be safe and relative")
+    raw = root / rel
+    # ``lstat`` (does not follow) — reject a symlinked terminal before resolving,
+    # since ``resolve(strict=True)`` below would canonicalize it and hide it.
+    if raw.is_symlink():
+        raise ProbeAEvidenceError("raw sample must be a regular file, not a symlink")
     base = root.resolve(strict=True)
-    candidate = (root / rel).resolve(strict=True)
-    if not candidate.is_relative_to(base) or not candidate.is_file() or candidate.is_symlink():
+    candidate = raw.resolve(strict=True)
+    if not candidate.is_relative_to(base) or not candidate.is_file():
         raise ProbeAEvidenceError("raw sample must be a regular file under evidence root")
     return candidate
 
@@ -171,8 +186,11 @@ def validate_probe_a_report(
         {"minimum", "median", "maximum", "negative_fraction", "near_integer_fraction"},
         "output_scale",
     )
-    values = [float(output_scale[key]) for key in ("minimum", "median", "maximum")]
-    if not all(math.isfinite(value) for value in values) or values != sorted(values):
+    values = [
+        _finite(output_scale[key], f"output_scale.{key}")
+        for key in ("minimum", "median", "maximum")
+    ]
+    if values != sorted(values):
         raise ProbeAEvidenceError("Probe-A output-scale summary is invalid")
     for field in ("negative_fraction", "near_integer_fraction"):
         value = _finite_nonnegative(output_scale[field], f"output_scale.{field}")
@@ -265,24 +283,53 @@ def build_admission(
         "evidence_manifest_sha256": _sha(evidence_manifest_sha256, "evidence_manifest_sha256"),
         "output_bridge": dict(report["output_bridge"]),
     }
-    return {**body, "self_checksum": sha256_json(body)}
+    # Sign with the consumer's canonicalization and re-validate through the sole
+    # consumer gate, so this producer can only emit an admission the gate accepts.
+    admission = {**body, "self_checksum": self_checksum(body)}
+    validate_admission(admission, expected_git_commit=expected_git_commit)
+    return admission
 
 
 def validate_admission(payload: Mapping, *, expected_git_commit: str) -> None:
-    """Validate the compact snapshot consumed by the bias-metric gate."""
-    _exact_keys(payload, _ADMISSION_KEYS, "Probe-A admission")
-    _checksum(payload, "Probe-A admission")
-    if payload["schema"] != ADMISSION_SCHEMA or payload["protocol"] != PROTOCOL:
-        raise ProbeAEvidenceError("Probe-A admission identity mismatch")
-    if payload["status"] != "pass" or payload["git_commit"] != expected_git_commit:
-        raise ProbeAEvidenceError("Probe-A admission status or Git commit mismatch")
-    _sha(payload["evidence_manifest_sha256"], "evidence_manifest_sha256")
-    bridge = _exact_keys(payload["output_bridge"], _BRIDGE_KEYS, "output_bridge")
-    error = _finite_nonnegative(bridge["max_abs_error"], "output_bridge.max_abs_error")
-    tolerance = _finite_nonnegative(bridge["tolerance"], "output_bridge.tolerance")
-    if (
-        bridge["representation"] != "raw_pseudobulk_approximation"
-        or bridge["verdict"] != "pass"
-        or error > tolerance
-    ):
-        raise ProbeAEvidenceError("Probe-A admission bridge failed")
+    """Validate the compact admission via the single consumer-side contract.
+
+    Delegates to :func:`approximation_bias.validate_probe_a_evidence` — the one
+    gate that actually admits the bias measurement — so producer and consumer
+    can never disagree on key roster, checksum canonicalization, Git-commit
+    format, or bridge tolerance.  The consumer's error type is re-raised as
+    :class:`ProbeAEvidenceError` to preserve this module's boundary contract.
+    """
+    try:
+        validate_probe_a_evidence(payload, expected_git_commit=expected_git_commit)
+    except ApproximationBiasValidationError as exc:
+        raise ProbeAEvidenceError(str(exc)) from exc
+
+
+def assert_report_samples_manifested(report: Mapping, manifest: Mapping) -> None:
+    """Require every report raw sample to appear in the exhaustive manifest roster.
+
+    Binds the two otherwise-independent evidence tracks: the ``evidence_manifest_sha256``
+    sealed into the admission then genuinely attests the raw inputs the report
+    rests on.  Expects an already-validated report and manifest, but guards its
+    own accesses so a malformed roster fails as a typed ``ProbeAEvidenceError``
+    like every other entry point, never a bare ``KeyError``.
+    """
+    files = manifest.get("files") if isinstance(manifest, Mapping) else None
+    samples = report.get("raw_samples") if isinstance(report, Mapping) else None
+    if not isinstance(files, list) or not isinstance(samples, list):
+        raise ProbeAEvidenceError("Probe-A binding requires a report and manifest roster")
+    manifest_files: dict[str, str] = {}
+    for entry in files:
+        pair = _exact_keys(entry, {"path", "sha256", "bytes"}, "manifest file")
+        manifest_files[pair["path"]] = pair["sha256"]
+    for sample in samples:
+        pair = _exact_keys(sample, {"path", "sha256"}, "raw sample")
+        path = pair["path"]
+        if path not in manifest_files:
+            raise ProbeAEvidenceError(
+                "Probe-A raw sample is absent from the evidence manifest roster"
+            )
+        if manifest_files[path] != pair["sha256"]:
+            raise ProbeAEvidenceError(
+                "Probe-A raw sample SHA-256 disagrees with the evidence manifest"
+            )

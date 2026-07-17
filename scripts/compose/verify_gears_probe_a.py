@@ -9,20 +9,27 @@ from pathlib import Path
 
 from alive.compose.gears_probe_a import (
     ProbeAEvidenceError,
+    assert_report_samples_manifested,
     build_admission,
     validate_evidence_manifest,
 )
 from alive.io import atomic_write_once
-from alive.provenance import sha256_file
+from alive.provenance import sha256_bytes
 
 
 def _read_json(path: Path, *, expected_sha256: str, label: str) -> dict:
-    if sha256_file(path) != expected_sha256:
+    # Read once, then hash and parse the SAME bytes so the pinned digest and the
+    # parsed content can never come from two different reads of the file.
+    try:
+        data = path.read_bytes()
+    except OSError as exc:
+        raise ProbeAEvidenceError(f"cannot read {label}: {exc}") from exc
+    if sha256_bytes(data) != expected_sha256:
         raise ProbeAEvidenceError(f"{label} file SHA-256 mismatch")
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise ProbeAEvidenceError(f"cannot read {label}: {exc}") from exc
+        value = json.loads(data)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ProbeAEvidenceError(f"cannot parse {label}: {exc}") from exc
     if not isinstance(value, dict):
         raise ProbeAEvidenceError(f"{label} must be a JSON object")
     return value
@@ -56,6 +63,9 @@ def main(argv: list[str] | None = None) -> int:
         evidence_manifest_sha256=args.manifest_sha256,
         expected_git_commit=args.git_commit,
     )
+    # Bind the two evidence tracks before publishing: the sealed manifest digest
+    # must actually attest every raw sample the report rests on.
+    assert_report_samples_manifested(report, manifest)
     encoded = json.dumps(admission, indent=2, sort_keys=True, allow_nan=False) + "\n"
     atomic_write_once(args.out_admission, encoded)
     print(json.dumps({"schema": admission["schema"], "status": "OK"}, sort_keys=True))
