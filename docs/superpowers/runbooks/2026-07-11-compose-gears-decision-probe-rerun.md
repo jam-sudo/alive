@@ -61,12 +61,17 @@ identity and overrides.
   roster SHA computed from the candidate file, and offline verification requires the pinned probe-manifest SHA.
 - [ ] Before Probe B, extend the same maintained CLI with the reviewed GEARS timing subcommand and complete raw
   command/resource sampling. Do not copy the archived timing harness.
-- [ ] After Probe A, define and review the scientific output bridge/negative-value policy. This is an activation
-  gate, not a prerequisite for running Probe A itself.
+- [ ] Before Probe A, define and independently review the candidate scientific output bridge,
+  negative-value policy, and equivalence tolerance without observing Probe-A outputs. Freeze those decisions in
+  `probe_a_registration.json`. Probe A may accept or reject that candidate; it may not redefine it.
+- [ ] Before Probe A, the owner freezes `probe_a_registration.json` and its externally recorded SHA-256. It uses
+  schema `compose_gears_probe_a_registration_v1`, the approved Git SHA, and exact input-scale, determinism,
+  control-count, and output-bridge tolerances. No verifier or pod harness supplies defaults, and this artifact is
+  immutable once any Probe-A measurement has been observed.
 
-Probe A may run after the first four completed implementation gates, exact-SHA review, and §3 identity checks.
-Probe B additionally requires the timing subcommand. No scientific GEARS prediction may be activated until the
-last output-bridge gate passes.
+Probe A may run only after the completed implementation gates, candidate bridge/registration freeze,
+exact-SHA review, and §3 identity checks. Probe B additionally requires the timing subcommand. No scientific
+GEARS prediction may be activated unless the frozen output-bridge gate passes.
 
 ### 2.2 Required local verification
 
@@ -129,16 +134,40 @@ unavailable reader-spy attestation is a **STOP**, not a warning.
 
 ### Phase A — scale/behavior characterization
 
+- Copy the already owner-frozen `probe_a_registration.json` into the fresh evidence root and verify its SHA
+  against the external pre-run pin before fitting or prediction. A missing pin or any mismatch is a STOP; the
+  observed report is never allowed to define or widen its own tolerance.
 - Dump and hash the pinned GEARS source surfaces used by preprocessing, target construction, and prediction.
 - Use a tiny synthetic or explicitly non-sealed fit-role artifact to measure P1–P4.
 - Fit the same deterministic tiny input twice; require checkpoint and output equality under the registered
-  determinism policy, or record a reproducibility failure.
+  determinism policy, or record a reproducibility failure. Archive both real checkpoint files under
+  `checkpoints/`; a checkpoint digest written only inside JSON is not evidence.
 - Compare public `predict` with the candidate per-control reconstruction on identical inputs. Record negative
   predictions, control-count sensitivity, output scale, and inference-equivalence error without choosing a bridge
-  after seeing downstream scientific outcomes.
+  after seeing downstream scientific outcomes. Freeze one ordered roster of at least 400 unique control-row
+  identities. Every count uses the exact prefix of that roster and retains every per-control prediction; the
+  verifier reconstructs the public prediction from the first `min(n,300)` rows itself.
 
 Probe A must emit a mechanical PASS/FAIL against a preregistered tolerance. A failed bridge routes to the named
 raw comparator; it does not trigger a post-hoc alternate transform.
+
+`probe_a_registration.json` has exactly the following semantic shape (with finite non-negative owner-frozen
+numbers replacing the metavariables; there are no defaults):
+
+```text
+schema = compose_gears_probe_a_registration_v1
+protocol = COMPOSE-K562-v1
+git_commit = <approved full Git SHA>
+input_scale = {normalization_target, transform=full_library_normalize_log1p_then_roster_subset}
+determinism = {max_abs_error_tolerance=T_det}
+control_count = {counts=[1,8,300,301,400], first_300_max_abs_error_tolerance=T_cap}
+output_bridge = {representation=raw_pseudobulk_approximation, max_abs_error_tolerance=T_bridge}
+self_checksum = SHA-256(canonical JSON of every preceding field)
+```
+
+The canonical file-byte SHA is separately anchored before the run. Changing a value requires a new registration
+identity and is forbidden after any Probe-A measurement is observed; recomputing `self_checksum` does not make a
+post-hoc change preregistered.
 
 ### Phase B — exact-roster resource benchmark
 
@@ -174,25 +203,85 @@ runtime.json                  pod/GPU/driver/CUDA/CPU/RAM/image/package/lock ide
 inputs.json                   source/GO/pair/alias/fit-role/response/roster identities
 roster_receipts/              receipt-last generation records and their externally anchored SHA-256 values
 role_attestation.json         metadata-derived roles, counts, zero overlap, reader-spy proof
+probe_a_registration.json     owner-frozen decisions/tolerances + external pre-run SHA-256 pin
+probe_a_source.txt            combined pinned GEARS source closure named by the report digest
+checkpoints/                  exactly two fresh Probe-A trained-model checkpoint files
 probe_a.json                  P1-P4 measurements + equivalence verdict + raw-sample references
 probe_a_admission.json        exact promotion object consumed by the bias-metric admission gate
-probe_b_<roster>.json         B1-B4 measurements, repeats, extrapolation status
 logs/                         stdout/stderr and raw CPU/GPU/RSS samples for every run
-verify.json                   local offline verifier result and verifier code SHA-256
+verify.json                   write-once local verifier receipt + verifier-code-closure SHA-256
 ```
 
-Every JSON uses canonical serialization and schema versioning. The manifest must reject missing/extra files,
-duplicate logical run keys, absolute source paths presented as identities, non-finite measurements, mismatched
-rosters, unbound overrides, and evidence produced from a different commit or runtime.
+Every JSON uses canonical serialization and schema versioning. `manifest.json` uses
+`compose_gears_probe_a_evidence_manifest_v4`; every file entry has exactly `{role,path,sha256,bytes}`. It assigns
+exactly one role each to `commands`, `runtime`, `inputs`, `role_attestation`, `probe_a_registration`,
+`probe_a_report`, and `probe_a_source`, at least one each to `roster_receipt`, `raw_sample`, and `log`, and exactly
+the two raw-referenced files under the `probe_a_checkpoint` role.
+**Probe B is not a Probe-A manifest role or admission prerequisite.** It receives a separate timestamped archive
+and verifier only after the timing runner and raw/statistical contract are reviewed. The declared paths must
+equal the recursively enumerated regular-file inventory. Only
+`manifest.json` itself and the post-manifest outputs `probe_a_admission.json`/`verify.json` are excluded from that
+comparison. Symlinks, missing/extra files, duplicate paths, unknown roles, absolute source paths presented as
+identities, non-finite measurements, mismatched rosters, unbound overrides, and evidence produced from a
+different commit or runtime are rejected.
 
-The offline verifier emits `probe_a_admission.json` only after every raw Probe-A artifact and the complete
-evidence manifest verify. Its exact schema is `compose_gears_probe_a_admission_v1` with exactly
-`{schema, protocol, status, git_commit, evidence_manifest_sha256, output_bridge, self_checksum}`;
+The report uses `compose_gears_probe_a_report_v4` and carries `registration_sha256`. Its runtime, inputs, source,
+registration, report-byte, and complete raw-sample path/SHA identities must match the corresponding manifest
+roles exactly; neither subset-only nor superset-only raw-sample rosters are accepted.
+
+Probe A has exactly one canonical `compose_gears_probe_a_raw_measurements_v2` artifact emitted write-once by the
+maintained `probe-a` publication command. It contains full numeric `input_before`/`input_after` matrices, two run
+predictions plus checkpoint paths/identities, one frozen ordered control-row roster, each count's exact prefix and
+per-control predictions for `[1,8,300,301,400]`, the corresponding public predictions, the public output-scale
+prediction, and the preregistered bridge prediction. The command's primary-file SHA must equal this raw artifact's
+manifest SHA. The offline validator independently hashes the actual checkpoint bytes, requires their exact
+two-file manifest roster, and recomputes input/prediction digests, exact input equality, two-run maximum absolute
+error, every public-vs-first-`min(n,300)` reconstruction error, the 300-vs-301/400 first-batch error, output
+minimum/median/maximum, negative
+fraction, near-integer fraction (distance to the nearest integer `<= 1e-6`), and bridge maximum absolute error.
+A self-reported aggregate or verdict cannot substitute for these raw arrays.
+
+The offline verifier requires `--expected-verifier-code-sha256` and compares that independently reviewed pre-run
+pin with its actual source closure **before evidence validation**. It first emits a canonical, write-once
+`verify.json` receipt, then emits
+`probe_a_admission.json` **last**. A pre-existing receipt or admission is a failed attempt; neither file may be
+overwritten or reused. The verifier hashes its actual source closure (entrypoint plus the shared producer and
+consumer validators), not a caller-supplied label. `verify.json` uses
+`compose_gears_probe_a_verification_v1` with exactly
+`{schema, protocol, status, git_commit, registration_sha256, report_sha256,
+evidence_manifest_sha256, verifier_code_sha256, output_bridge, self_checksum}`.
+
+Only after the externally pinned registration, every raw Probe-A artifact, the complete evidence manifest, and
+the receipt verify may the verifier publish `compose_gears_probe_a_admission_v3` with exactly
+`{schema, protocol, status, git_commit, registration_sha256, evidence_manifest_sha256, verification_sha256,
+output_bridge, self_checksum}`;
 `output_bridge` has exactly `{representation, verdict, tolerance, max_abs_error}`. Promotion requires
-`status=pass`, `protocol=COMPOSE-K562-v1`, the approved Git commit,
+`status=pass`, `protocol=COMPOSE-K562-v1`, the approved Git commit, the externally frozen registration SHA,
 `representation=raw_pseudobulk_approximation`, `verdict=pass`, finite non-negative error/tolerance,
 `max_abs_error ≤ tolerance`, and a canonical checksum over every field except `self_checksum`. A raw
 `probe_a.json`, command-result line, or bare `{status: pass}` is not admission evidence.
+The receipt and admission must agree byte-for-byte on the bridge object and on every shared identity. The
+admission's `verification_sha256` must equal the exact receipt-byte SHA. The approximation-bias command receives
+the immutable registration and receipt bytes plus both independently anchored pins as
+`--probe-a-registration`, `--probe-a-registration-sha256`, `--probe-a-verification`, and
+`--probe-a-verification-sha256`; it must not derive either expected value from the evidence it is validating.
+A self-consistent admission/registration/receipt rewrite is not authenticated unless its external pins also
+match.
+
+Decision-bearing manifest roles are content-validated, not merely inventoried. `commands.jsonl` contains at
+least one successful invocation of each maintained CLI subcommand that actually exists:
+`{build-roster, prepare-input, verify-input, probe-a}`. Prep labels may repeat for multiple candidate rosters;
+`probe-a` occurs exactly once and its primary SHA is the manifested raw artifact SHA;
+unknown or fictional subcommands are rejected. Records carry secret-free environment allowlists, UTC intervals,
+primary-file SHA values, and one runtime fingerprint.
+`runtime.json`, `inputs.json`, and `role_attestation.json` use respectively
+`compose_gears_probe_runtime_v1`, `compose_gears_probe_inputs_v1`, and
+`compose_gears_probe_role_attestation_v1`; they bind the approved commit, dependency lock, runtime/input
+identities, exact fit-role counts, zero sealed overlap/read counts, and a passing reader-spy attestation. Every
+`compose_gears_roster_receipt_v1` binds its exact roster and dependency lineage. Any placeholder JSON that merely
+occupies a manifest role is rejected. Until the separate Probe-B runner/archive spec defines raw epoch samples,
+the exact CV estimator, extrapolation formula, and cross-roster monotonicity rule, **no Probe-B JSON is
+decision-grade and no Probe-B PASS schema is recognized by this verifier**.
 
 ## 6. Decision and stop rules
 

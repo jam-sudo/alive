@@ -3,7 +3,7 @@
 ``docs/superpowers/specs/2026-07-13-compose-approximation-bias-metric-design.md``):
 the LOCAL one-way tool
 (``scripts/compose/finalize_approximation_bias_config.py``) that binds a
-completed ``compose_approximation_bias_report_v2`` report's content SHA into
+completed ``compose_approximation_bias_report_v3`` report's content SHA into
 the bias-NULL Phase-2 config, while MECHANICALLY proving it changed exactly
 one leaf (``baselines.gears.approximation_bias_report_sha256``) and nothing
 else, and that the resulting finalized config's own SHA never leaks back into
@@ -145,6 +145,8 @@ def _bound_report(basis_sha: str) -> dict:
             "registered_seeds": [11, 23, 37],
             "probe_a_evidence_sha256": "5" * 64,
             "probe_a_evidence_manifest_sha256": "6" * 64,
+            "probe_a_registration_sha256": "7" * 64,
+            "probe_a_verification_sha256": "8" * 64,
             "sealed_pair_overlap_count": 0,
             "pod_instance": "unit-test-local",
         },

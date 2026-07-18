@@ -92,7 +92,7 @@ def resolve_pinned_approximation_bias_evidence(
         non-mapping, or declares a mismatched SHA (or pins no SHA but the run
         spec declares one).
     ApproximationBiasValidationError
-        If the report bytes fail the full v2 integrity / provenance contract.
+        If the report bytes fail the full v3 integrity / provenance contract.
     OSError
         If the pinned report file is missing or unreadable.
     """

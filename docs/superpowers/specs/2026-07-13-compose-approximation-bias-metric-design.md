@@ -113,10 +113,14 @@ the exact space the sealed comparison will score in.
 - **Secondary:** `singles` — broader characterization; also the roles from which the operator fits δ_g.
 - Reported **separately**, never pooled (regime mixing would blur the floor).
 
-**Admission prerequisite (before measurement).** A conforming Probe A report and reviewed output-bridge
-contract must establish that the GEARS population vector is a raw-count pseudobulk mean within the frozen
-tolerance. A quarantined, missing, or failed probe makes this measurement `NOT_ADMISSIBLE`; no report SHA
-may be inserted into the active config.
+**Admission prerequisite (before measurement).** A conforming Probe A v3 admission, v1 verifier receipt, exact
+owner-frozen registration bytes, and reviewed output-bridge
+contract must establish that the GEARS population vector is a raw-count pseudobulk mean within an externally
+frozen tolerance. The registration and receipt SHA-256 values are independently anchored outside the evidence
+bundle. The admission binds the registration, exhaustive evidence manifest, and receipt; the receipt additionally
+binds the report and verifier-code closure. A tolerance declared only by the observed Probe-A report is not
+preregistration. A quarantined, missing, failed, legacy, pin-mismatched, or cross-binding-inconsistent probe makes
+this measurement `NOT_ADMISSIBLE`; no report SHA may be inserted into the active config.
 
 **Inputs.**
 - The authoritative fit-role artifact may contain the exact non-sealed roster
@@ -154,7 +158,7 @@ not a second post-hoc decision rule. Degenerate replicates with zero GI denomina
 
 ---
 
-## 4. Report schema `compose_approximation_bias_report_v2` {#report}
+## 4. Report schema `compose_approximation_bias_report_v3` {#report}
 
 A single JSON object whose SHA-256 fills `baselines.gears.approximation_bias_report_sha256`.
 
@@ -187,6 +191,8 @@ A single JSON object whose SHA-256 fills `baselines.gears.approximation_bias_rep
   `response_projection_sha256`, `gene_order_sha256`, `pca_dim` (`p`), `registered_seeds`,
   `probe_a_evidence_sha256` (exact immutable Probe-A file bytes),
   `probe_a_evidence_manifest_sha256` (the independently reviewed manifest named inside Probe-A),
+  `probe_a_registration_sha256` (exact owner-frozen registration bytes),
+  `probe_a_verification_sha256` (exact independently anchored verifier-receipt bytes),
   `sealed_pair_overlap_count` (must be `0`), `pod_instance`.
 - `self_checksum`: SHA-256 of the canonical JSON of every field above except `self_checksum`.
 
@@ -199,9 +205,14 @@ flag/ratio coherence; zero sealed overlap; all content/provenance digests; and t
 A merely non-empty flag, a freshly checksummed inconsistent aggregate, or a bare partial JSON object is
 not admissible evidence.
 
-Probe-A admission is not a CLI-only convention. The report producer requires an immutable
-`ProbeAEvidence` byte snapshot even for direct library calls, revalidates its checksum, protocol, Git
-commit, representation, tolerance and verdict, and binds both Probe-A digests above. There is no default
+Probe-A admission is not a CLI-only convention. The report producer requires immutable admission, registration,
+and verification-receipt byte snapshots even for direct library calls. It revalidates their canonical bytes,
+self-checksums, protocol, Git commit, representation, tolerance and verdict; checks every shared identity and
+bridge value across all three objects; and binds all four Probe-A digests above. Admission self-checksum is
+integrity only, not authentication. Both CLI and direct-library entry points therefore require the externally
+anchored registration and verification SHA values as independent arguments and compare them to the exact byte
+snapshots; reading either expected value back from the evidence bundle is forbidden.
+There is no default
 `"admitted"` argument that a direct caller can select.
 
 `basis_config_sha256` is the canonical config whose
@@ -286,10 +297,12 @@ a synthetic frozen projection block (no `gears`, no Norman):
    tampering any field fails `self_checksum`.
 7. **One-way provenance.** The report binds the bias-null `basis_config_sha256`; finalization changes only
    the GEARS report-SHA field and proves the final config SHA does not appear inside the report.
-8. **Probe-A admission.** A bare `{status: pass}` is rejected. Admission requires the exact versioned
-   schema, protocol, approved Git commit, evidence-manifest SHA, raw-pseudobulk bridge representation,
-   `verdict=pass`, finite non-negative tolerance/error with `max_abs_error ≤ tolerance`, and canonical
-   self-checksum. Missing/failed/quarantined/tampered evidence refuses report promotion.
+8. **Probe-A admission.** A bare `{status: pass}` is rejected. Admission requires the exact versioned v3 schema,
+   protocol, approved Git commit, externally frozen registration SHA, exhaustive evidence-manifest SHA,
+   independently anchored v1 verification-receipt SHA, raw-pseudobulk bridge representation, `verdict=pass`,
+   finite non-negative tolerance/error with `max_abs_error ≤ tolerance`, and canonical self-checksums. Tests
+   also forge a self-consistent admission with a changed tolerance and prove that the original receipt pin rejects
+   it. Missing/failed/quarantined/tampered or cross-binding-inconsistent evidence refuses report promotion.
 
 ---
 
@@ -298,7 +311,7 @@ a synthetic frozen projection block (no `gears`, no Norman):
 - **MODIFY/REPLACE** the existing legacy
   `scripts/compose/measure_pseudobulk_approximation_bias.py` contract — it currently emits an earlier
   aggregate-only report and is **not** an implementation of this v1 schema. The upgraded pod measurement
-  reads non-sealed role cells + frozen projection block, emits `compose_approximation_bias_report_v2`, and
+  reads non-sealed role cells + frozen projection block, emits `compose_approximation_bias_report_v3`, and
   uses `cell_raw_counts` for the exact path. Pure library calls
   (`fit_role.apply_response_projection`); import-light so its contract is unit-tested locally.
 - **CREATE** `docs/activation-evidence/compose/real_norman_approximation_bias_report.json` — the

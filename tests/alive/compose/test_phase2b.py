@@ -41,7 +41,9 @@ import pytest
 
 from alive.compose.approximation_bias import (
     APPROXIMATION_BIAS_SCHEMA,
+    PROBE_A_REGISTRATION_SCHEMA,
     PROBE_A_SCHEMA,
+    PROBE_A_VERIFICATION_SCHEMA,
     PROTOCOL,
     REPRESENTATION,
     ApproximationBiasEvidence,
@@ -1827,10 +1829,10 @@ def _write_bias_report(
     bootstrap_95_interval=(0.4, 0.9),
     R_star=0.5,
 ):
-    """Write a REAL-shaped ``compose_approximation_bias_report_v2`` report and return
+    """Write a REAL-shaped ``compose_approximation_bias_report_v3`` report and return
     its ``sha256_file`` content SHA.
 
-    Faithful to the true on-disk contract that ``measure_approximation_bias_v2`` /
+    Faithful to the true on-disk contract that ``measure_approximation_bias_v3`` /
     ``measure_pseudobulk_approximation_bias.py::main`` produce — NOT a flat,
     newline-free stub: the fairness fields are NESTED under ``gi_and_fairness``, the
     ``bootstrap_95_interval`` is a DICT of three sub-intervals (the loader carries only
@@ -1899,6 +1901,8 @@ def _write_bias_report(
             "registered_seeds": [11, 23, 37],
             "probe_a_evidence_sha256": "5" * 64,
             "probe_a_evidence_manifest_sha256": "6" * 64,
+            "probe_a_registration_sha256": "7" * 64,
+            "probe_a_verification_sha256": "8" * 64,
             "sealed_pair_overlap_count": 0,
             "pod_instance": "unit-test",
         },
@@ -2005,7 +2009,7 @@ def test_null_config_field_yields_unavailable_block(tmp_path):
 # ---------------------------------------------------------------------------
 # END-TO-END: metric ↔ finalize ↔ phase2b agree on BOTH schema nesting AND the
 # on-disk-bytes hashing recipe. This is the integration seam the per-task stubs
-# papered over: it builds a REAL compose_approximation_bias_report_v2 via the
+# papered over: it builds a REAL compose_approximation_bias_report_v3 via the
 # metric, writes it EXACTLY as production does (canonical JSON + trailing '\n'),
 # finalizes the config leaf SHA via the real finalize tool (which now pins
 # sha256_file of those bytes), and feeds that SHA + report path into the phase2b
@@ -2027,26 +2031,77 @@ def _load_script_module(rel_path: str, mod_name: str):
 
 def _probe_a_evidence_snapshot() -> ProbeAEvidence:
     """Return a valid immutable Probe-A snapshot for direct producer tests."""
+    registration_body = {
+        "schema": PROBE_A_REGISTRATION_SCHEMA,
+        "protocol": PROTOCOL,
+        "git_commit": "b" * 40,
+        "input_scale": {
+            "normalization_target": 10000.0,
+            "transform": "full_library_normalize_log1p_then_roster_subset",
+        },
+        "determinism": {"max_abs_error_tolerance": 1e-7},
+        "control_count": {
+            "counts": [1, 8, 300, 301, 400],
+            "first_300_max_abs_error_tolerance": 1e-7,
+        },
+        "output_bridge": {
+            "representation": REPRESENTATION,
+            "max_abs_error_tolerance": 1e-6,
+        },
+    }
+    registration = {
+        **registration_body,
+        "self_checksum": self_checksum(registration_body),
+    }
+    registration_bytes = (canonical_json(registration) + "\n").encode("utf-8")
+    registration_sha = sha256_bytes(registration_bytes)
+    bridge = {
+        "representation": REPRESENTATION,
+        "verdict": "pass",
+        "tolerance": 1e-6,
+        "max_abs_error": 0.0,
+    }
+    verification_body = {
+        "schema": PROBE_A_VERIFICATION_SCHEMA,
+        "protocol": PROTOCOL,
+        "status": "pass",
+        "git_commit": "b" * 40,
+        "registration_sha256": registration_sha,
+        "report_sha256": "a" * 64,
+        "evidence_manifest_sha256": "d" * 64,
+        "verifier_code_sha256": "e" * 64,
+        "output_bridge": bridge,
+    }
+    verification = {
+        **verification_body,
+        "self_checksum": self_checksum(verification_body),
+    }
+    verification_bytes = (canonical_json(verification) + "\n").encode("utf-8")
+    verification_sha = sha256_bytes(verification_bytes)
     body = {
         "schema": PROBE_A_SCHEMA,
         "protocol": PROTOCOL,
         "status": "pass",
         "git_commit": "b" * 40,
+        "registration_sha256": registration_sha,
         "evidence_manifest_sha256": "d" * 64,
-        "output_bridge": {
-            "representation": REPRESENTATION,
-            "verdict": "pass",
-            "tolerance": 1e-6,
-            "max_abs_error": 0.0,
-        },
+        "verification_sha256": verification_sha,
+        "output_bridge": bridge,
     }
     payload = {**body, "self_checksum": self_checksum(body)}
-    encoded = canonical_json(payload).encode("utf-8")
-    return ProbeAEvidence(content_sha256=sha256_bytes(encoded), evidence_bytes=encoded)
+    encoded = (canonical_json(payload) + "\n").encode("utf-8")
+    return ProbeAEvidence(
+        content_sha256=sha256_bytes(encoded),
+        evidence_bytes=encoded,
+        registration_sha256=registration_sha,
+        registration_bytes=registration_bytes,
+        verification_sha256=verification_sha,
+        verification_bytes=verification_bytes,
+    )
 
 
 def _build_real_bias_report(tmp_path):
-    """Build a REAL v2 report via ``measure_approximation_bias_v2`` on a small
+    """Build a REAL v2 report via ``measure_approximation_bias_v3`` on a small
     synthetic control-free fit-role artifact + identity projection block, bound to a
     bias-NULL basis config. Writes the report EXACTLY as the metric CLI does
     (canonical JSON + trailing newline). Returns ``(report, basis_yaml, report_path)``.
@@ -2122,7 +2177,8 @@ def _build_real_bias_report(tmp_path):
         "gene_order_sha256": canonical_gene_order_sha256(genes),
         "control_mean": [0.0] * 6,
     }
-    report = metric.measure_approximation_bias_v2(
+    probe_a_evidence = _probe_a_evidence_snapshot()
+    report = metric.measure_approximation_bias_v3(
         fit_role_artifact=str(artifact),
         response_projection=block,
         sealed_pair_ids=["ZZZ_YYY"],
@@ -2132,7 +2188,9 @@ def _build_real_bias_report(tmp_path):
         git_commit="b" * 40,
         norman_source_sha256="c" * 64,
         pod_instance="unit-test-local",
-        probe_a_evidence=_probe_a_evidence_snapshot(),
+        probe_a_evidence=probe_a_evidence,
+        probe_a_registration_sha256=probe_a_evidence.registration_sha256,
+        probe_a_verification_sha256=probe_a_evidence.verification_sha256,
     )
     report_path = tmp_path / "approximation_bias_report.json"
     # EXACTLY as measure_pseudobulk_approximation_bias.py::main writes it.
@@ -2227,7 +2285,7 @@ def test_loader_fail_closed_branches(tmp_path):
     with pytest.raises(ApproximationBiasReportError, match="no immutable report"):
         _load_approximation_bias_fairness(report_sha256="a" * 64, report_evidence=None)
     # A report whose content SHA matches the pin but lacks the nested gi_and_fairness block.
-    nogi_bytes = b'{"schema":"compose_approximation_bias_report_v2"}\n'
+    nogi_bytes = b'{"schema":"compose_approximation_bias_report_v3"}\n'
     nogi_sha = sha256_bytes(nogi_bytes)
     with pytest.raises(ApproximationBiasReportError):
         _load_approximation_bias_fairness(

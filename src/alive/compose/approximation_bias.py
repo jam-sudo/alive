@@ -20,8 +20,10 @@ import yaml
 
 from alive.provenance import sha256_bytes, sha256_file, sha256_json
 
-APPROXIMATION_BIAS_SCHEMA = "compose_approximation_bias_report_v2"
-PROBE_A_SCHEMA = "compose_gears_probe_a_admission_v1"
+APPROXIMATION_BIAS_SCHEMA = "compose_approximation_bias_report_v3"
+PROBE_A_SCHEMA = "compose_gears_probe_a_admission_v3"
+PROBE_A_REGISTRATION_SCHEMA = "compose_gears_probe_a_registration_v1"
+PROBE_A_VERIFICATION_SCHEMA = "compose_gears_probe_a_verification_v1"
 PROTOCOL = "COMPOSE-K562-v1"
 REPRESENTATION = "raw_pseudobulk_approximation"
 R_STAR = 0.5
@@ -72,6 +74,8 @@ _PROVENANCE_KEYS = frozenset(
         "registered_seeds",
         "probe_a_evidence_sha256",
         "probe_a_evidence_manifest_sha256",
+        "probe_a_registration_sha256",
+        "probe_a_verification_sha256",
         "sealed_pair_overlap_count",
         "pod_instance",
     }
@@ -85,7 +89,35 @@ _PROBE_A_KEYS = frozenset(
         "protocol",
         "status",
         "git_commit",
+        "registration_sha256",
         "evidence_manifest_sha256",
+        "verification_sha256",
+        "output_bridge",
+        "self_checksum",
+    }
+)
+_PROBE_A_REGISTRATION_KEYS = frozenset(
+    {
+        "schema",
+        "protocol",
+        "git_commit",
+        "input_scale",
+        "determinism",
+        "control_count",
+        "output_bridge",
+        "self_checksum",
+    }
+)
+_PROBE_A_VERIFICATION_KEYS = frozenset(
+    {
+        "schema",
+        "protocol",
+        "status",
+        "git_commit",
+        "registration_sha256",
+        "report_sha256",
+        "evidence_manifest_sha256",
+        "verifier_code_sha256",
         "output_bridge",
         "self_checksum",
     }
@@ -126,27 +158,62 @@ class ApproximationBiasEvidence:
 
 @dataclass(frozen=True)
 class ProbeAEvidence:
-    """Immutable Probe-A admission bytes and their exact file SHA-256."""
+    """Immutable, cross-bound Probe-A admission/registration/verification bytes."""
 
     content_sha256: str
     evidence_bytes: bytes
+    registration_sha256: str
+    registration_bytes: bytes
+    verification_sha256: str
+    verification_bytes: bytes
 
     def __post_init__(self) -> None:
-        if _HEX64.fullmatch(self.content_sha256) is None:
-            raise ApproximationBiasValidationError(
-                "ProbeAEvidence.content_sha256 must be 64 lowercase hex characters"
-            )
-        if not isinstance(self.evidence_bytes, bytes):
-            raise ApproximationBiasValidationError("ProbeAEvidence.evidence_bytes must be bytes")
-        if sha256_bytes(self.evidence_bytes) != self.content_sha256:
-            raise ApproximationBiasValidationError(
-                "ProbeAEvidence bytes do not match content_sha256"
-            )
+        snapshots = (
+            ("content_sha256", self.content_sha256, "evidence_bytes", self.evidence_bytes),
+            (
+                "registration_sha256",
+                self.registration_sha256,
+                "registration_bytes",
+                self.registration_bytes,
+            ),
+            (
+                "verification_sha256",
+                self.verification_sha256,
+                "verification_bytes",
+                self.verification_bytes,
+            ),
+        )
+        for sha_field, digest, bytes_field, data in snapshots:
+            if _HEX64.fullmatch(digest) is None:
+                raise ApproximationBiasValidationError(
+                    f"ProbeAEvidence.{sha_field} must be 64 lowercase hex characters"
+                )
+            if not isinstance(data, bytes):
+                raise ApproximationBiasValidationError(
+                    f"ProbeAEvidence.{bytes_field} must be immutable bytes"
+                )
+            if sha256_bytes(data) != digest:
+                raise ApproximationBiasValidationError(
+                    f"ProbeAEvidence.{bytes_field} do not match {sha_field}"
+                )
 
 
 def canonical_json(obj: object) -> str:
-    """Return the single canonical JSON representation used by this contract."""
-    return json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    """Return the single canonical JSON representation used by this contract.
+
+    ``ensure_ascii=False`` and ``allow_nan=False`` are part of the recipe: bytes
+    are literal UTF-8 and no non-finite float may ever be serialised.  Every
+    producer write and every consumer re-authentication routes through this so a
+    file is never ``canonical`` at one boundary and rejected at another.
+    """
+    return json.dumps(
+        obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False
+    )
+
+
+def canonical_file_bytes(obj: object) -> bytes:
+    """The single canonical on-disk serialisation: canonical JSON + one trailing newline."""
+    return (canonical_json(obj) + "\n").encode("utf-8")
 
 
 def self_checksum(payload_without_checksum: Mapping[str, Any]) -> str:
@@ -295,31 +362,195 @@ def _validate_checksum(payload: Mapping[str, Any], *, field: str = "self_checksu
         _fail(f"{field} does not match the canonical payload")
 
 
-def validate_probe_a_evidence(
-    evidence: Mapping[str, Any], *, expected_git_commit: str | None = None
-) -> None:
-    """Validate the admission-grade Probe-A bridge evidence.
+def _canonical_json_object(data: bytes, *, field: str) -> dict[str, Any]:
+    """Decode one immutable snapshot and require compact canonical bytes."""
+    try:
+        payload = json.loads(data)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ApproximationBiasValidationError(f"{field} is invalid JSON: {exc}") from exc
+    if not isinstance(payload, dict):
+        _fail(f"{field} must be a JSON object")
+    try:
+        expected = canonical_file_bytes(payload)
+    except ValueError as exc:
+        raise ApproximationBiasValidationError(f"{field} is not canonical finite JSON") from exc
+    if data != expected:
+        _fail(f"{field} must use canonical JSON with one trailing newline")
+    return payload
 
-    A bare ``{"status": "pass"}`` is intentionally insufficient.  Admission
-    binds the protocol, Git identity, evidence-manifest digest, measured bridge
-    error, preregistered tolerance, representation, and canonical checksum.
-    """
+
+def validate_probe_a_registration(
+    registration: Mapping[str, Any], *, expected_git_commit: str
+) -> None:
+    """Validate the exact owner-frozen decisions consumed by both boundaries."""
+    obj = _exact_keys(
+        registration,
+        _PROBE_A_REGISTRATION_KEYS,
+        field="Probe-A registration",
+    )
+    if obj["schema"] != PROBE_A_REGISTRATION_SCHEMA or obj["protocol"] != PROTOCOL:
+        _fail("Probe-A registration identity mismatch")
+    if _git_commit(obj["git_commit"], field="Probe-A registration.git_commit") != _git_commit(
+        expected_git_commit, field="expected Probe-A Git commit"
+    ):
+        _fail("Probe-A registration git_commit does not match the requested measurement commit")
+    input_scale = _exact_keys(
+        obj["input_scale"],
+        frozenset({"normalization_target", "transform"}),
+        field="Probe-A registration.input_scale",
+    )
+    normalization_target = _finite(
+        input_scale["normalization_target"],
+        field="Probe-A registration.input_scale.normalization_target",
+        minimum=0,
+    )
+    if normalization_target == 0:
+        _fail("Probe-A registration normalization_target must be positive")
+    if input_scale["transform"] != "full_library_normalize_log1p_then_roster_subset":
+        _fail("Probe-A registration input transform is unsupported")
+    determinism = _exact_keys(
+        obj["determinism"],
+        frozenset({"max_abs_error_tolerance"}),
+        field="Probe-A registration.determinism",
+    )
+    _finite(
+        determinism["max_abs_error_tolerance"],
+        field="Probe-A registration.determinism.max_abs_error_tolerance",
+        minimum=0,
+    )
+    control = _exact_keys(
+        obj["control_count"],
+        frozenset({"counts", "first_300_max_abs_error_tolerance"}),
+        field="Probe-A registration.control_count",
+    )
+    if control["counts"] != [1, 8, 300, 301, 400]:
+        _fail("Probe-A registration control-count roster is unsupported")
+    _finite(
+        control["first_300_max_abs_error_tolerance"],
+        field="Probe-A registration.control_count.first_300_max_abs_error_tolerance",
+        minimum=0,
+    )
+    bridge = _exact_keys(
+        obj["output_bridge"],
+        frozenset({"representation", "max_abs_error_tolerance"}),
+        field="Probe-A registration.output_bridge",
+    )
+    if bridge["representation"] != REPRESENTATION:
+        _fail(f"Probe-A registration output representation must be {REPRESENTATION!r}")
+    _finite(
+        bridge["max_abs_error_tolerance"],
+        field="Probe-A registration.output_bridge.max_abs_error_tolerance",
+        minimum=0,
+    )
+    _validate_checksum(obj)
+
+
+def validate_probe_a_verification(
+    verification: Mapping[str, Any],
+    *,
+    expected_git_commit: str,
+    expected_registration_sha256: str,
+) -> None:
+    """Validate the externally anchored offline-verifier receipt."""
+    obj = _exact_keys(
+        verification,
+        _PROBE_A_VERIFICATION_KEYS,
+        field="Probe-A verification receipt",
+    )
+    if obj["schema"] != PROBE_A_VERIFICATION_SCHEMA or obj["protocol"] != PROTOCOL:
+        _fail("Probe-A verification receipt identity mismatch")
+    if obj["status"] != "pass":
+        _fail("Probe-A verification receipt status must be 'pass'")
+    if _git_commit(obj["git_commit"], field="Probe-A verification.git_commit") != _git_commit(
+        expected_git_commit, field="expected Probe-A Git commit"
+    ):
+        _fail("Probe-A verification git_commit does not match the requested measurement commit")
+    if _hex64(
+        obj["registration_sha256"], field="Probe-A verification.registration_sha256"
+    ) != _hex64(
+        expected_registration_sha256,
+        field="expected Probe-A registration SHA-256",
+    ):
+        _fail("Probe-A verification registration SHA-256 does not match the external pin")
+    for field in ("report_sha256", "evidence_manifest_sha256", "verifier_code_sha256"):
+        _hex64(obj[field], field=f"Probe-A verification.{field}")
+    bridge = _exact_keys(
+        obj["output_bridge"],
+        _OUTPUT_BRIDGE_KEYS,
+        field="Probe-A verification.output_bridge",
+    )
+    if bridge["representation"] != REPRESENTATION or bridge["verdict"] != "pass":
+        _fail("Probe-A verification output bridge is not an admitted raw-pseudobulk bridge")
+    tolerance = _finite(
+        bridge["tolerance"], field="Probe-A verification.output_bridge.tolerance", minimum=0
+    )
+    observed = _finite(
+        bridge["max_abs_error"],
+        field="Probe-A verification.output_bridge.max_abs_error",
+        minimum=0,
+    )
+    if observed > tolerance:
+        _fail("Probe-A verification output bridge exceeds its tolerance")
+    _validate_checksum(obj)
+
+
+def validate_probe_a_evidence(
+    evidence: Mapping[str, Any],
+    *,
+    registration: Mapping[str, Any],
+    registration_sha256: str,
+    verification: Mapping[str, Any],
+    verification_sha256: str,
+    expected_git_commit: str,
+) -> None:
+    """Validate an admission against independently pinned source and verifier bytes."""
     status = evidence.get("status") if isinstance(evidence, Mapping) else None
     if status != "pass":
         normalized = status if status in {"failed", "quarantined"} else "missing"
         _fail(f"Probe-A {normalized}; measurement NOT_ADMISSIBLE")
+    registration_pin = _hex64(registration_sha256, field="expected Probe-A registration SHA-256")
+    verification_pin = _hex64(verification_sha256, field="expected Probe-A verification SHA-256")
+    try:
+        registration_bytes = canonical_file_bytes(registration)
+        verification_bytes = canonical_file_bytes(verification)
+    except (TypeError, ValueError) as exc:
+        raise ApproximationBiasValidationError(
+            "Probe-A registration/verification mappings are not canonical finite JSON"
+        ) from exc
+    if sha256_bytes(registration_bytes) != registration_pin:
+        _fail("Probe-A registration mapping bytes do not match the external pin")
+    if sha256_bytes(verification_bytes) != verification_pin:
+        _fail("Probe-A verification mapping bytes do not match the external pin")
+    validate_probe_a_registration(registration, expected_git_commit=expected_git_commit)
+    validate_probe_a_verification(
+        verification,
+        expected_git_commit=expected_git_commit,
+        expected_registration_sha256=registration_pin,
+    )
     obj = _exact_keys(evidence, _PROBE_A_KEYS, field="Probe-A evidence")
-    if obj["schema"] != PROBE_A_SCHEMA:
-        _fail(f"Probe-A schema must be {PROBE_A_SCHEMA!r}")
-    if obj["protocol"] != PROTOCOL:
-        _fail(f"Probe-A protocol must be {PROTOCOL!r}")
-    commit = _git_commit(obj["git_commit"], field="Probe-A git_commit")
-    if expected_git_commit is not None and commit != expected_git_commit:
+    if obj["schema"] != PROBE_A_SCHEMA or obj["protocol"] != PROTOCOL:
+        _fail("Probe-A admission identity mismatch")
+    if _git_commit(obj["git_commit"], field="Probe-A git_commit") != _git_commit(
+        expected_git_commit, field="expected Probe-A Git commit"
+    ):
         _fail("Probe-A git_commit does not match the requested measurement commit")
-    _hex64(obj["evidence_manifest_sha256"], field="Probe-A evidence_manifest_sha256")
+    if _hex64(obj["registration_sha256"], field="Probe-A registration_sha256") != registration_pin:
+        _fail("Probe-A registration_sha256 does not match the externally frozen pin")
+    if _hex64(obj["verification_sha256"], field="Probe-A verification_sha256") != verification_pin:
+        _fail("Probe-A verification_sha256 does not match the externally frozen pin")
+    manifest_sha = _hex64(obj["evidence_manifest_sha256"], field="Probe-A evidence_manifest_sha256")
+    if verification["evidence_manifest_sha256"] != manifest_sha:
+        _fail("Probe-A admission and verification receipt manifest SHA-256 differ")
+    if verification["registration_sha256"] != registration_pin:
+        _fail("Probe-A admission and verification receipt registration SHA-256 differ")
     bridge = _exact_keys(obj["output_bridge"], _OUTPUT_BRIDGE_KEYS, field="Probe-A output_bridge")
-    if bridge["representation"] != REPRESENTATION:
-        _fail(f"Probe-A output_bridge.representation must be {REPRESENTATION!r}")
+    if dict(bridge) != dict(verification["output_bridge"]):
+        _fail("Probe-A admission output bridge differs from the pinned verification receipt")
+    registered_bridge = registration["output_bridge"]
+    if bridge["representation"] != registered_bridge["representation"] or float(
+        bridge["tolerance"]
+    ) != float(registered_bridge["max_abs_error_tolerance"]):
+        _fail("Probe-A admission output bridge differs from the pinned registration")
     if bridge["verdict"] != "pass":
         _fail("Probe-A output_bridge.verdict must be 'pass'")
     tolerance = _finite(bridge["tolerance"], field="Probe-A output_bridge.tolerance", minimum=0)
@@ -332,37 +563,82 @@ def validate_probe_a_evidence(
 
 
 def probe_a_from_evidence(
-    evidence: ProbeAEvidence, *, expected_git_commit: str | None = None
+    evidence: ProbeAEvidence,
+    *,
+    expected_git_commit: str | None,
+    expected_registration_sha256: str,
+    expected_verification_sha256: str,
 ) -> dict[str, Any]:
-    """Revalidate an immutable Probe-A snapshot and return a fresh object."""
+    """Revalidate all immutable Probe-A snapshots and return the admission object."""
     if not isinstance(evidence, ProbeAEvidence):
         _fail("Probe-A evidence must be a ProbeAEvidence snapshot")
-    if sha256_bytes(evidence.evidence_bytes) != evidence.content_sha256:
-        _fail("Probe-A evidence bytes changed after capture")
-    try:
-        payload = json.loads(evidence.evidence_bytes)
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise ApproximationBiasValidationError(f"Probe-A evidence is invalid JSON: {exc}") from exc
-    if not isinstance(payload, dict):
-        _fail("Probe-A evidence must be a JSON object")
-    validate_probe_a_evidence(payload, expected_git_commit=expected_git_commit)
+    expected_registration = _hex64(
+        expected_registration_sha256, field="expected Probe-A registration SHA-256"
+    )
+    expected_verification = _hex64(
+        expected_verification_sha256, field="expected Probe-A verification SHA-256"
+    )
+    if evidence.registration_sha256 != expected_registration:
+        _fail("Probe-A registration bytes do not match the externally frozen pin")
+    if evidence.verification_sha256 != expected_verification:
+        _fail("Probe-A verification bytes do not match the externally frozen pin")
+    payload = _canonical_json_object(evidence.evidence_bytes, field="Probe-A admission")
+    registration = _canonical_json_object(evidence.registration_bytes, field="Probe-A registration")
+    verification = _canonical_json_object(
+        evidence.verification_bytes, field="Probe-A verification receipt"
+    )
+    validation_commit = (
+        expected_git_commit
+        if expected_git_commit is not None
+        else _git_commit(payload.get("git_commit"), field="Probe-A git_commit")
+    )
+    validate_probe_a_evidence(
+        payload,
+        registration=registration,
+        registration_sha256=expected_registration,
+        verification=verification,
+        verification_sha256=expected_verification,
+        expected_git_commit=validation_commit,
+    )
     return payload
 
 
 def load_probe_a_evidence(
-    path: str | Path, *, expected_git_commit: str | None = None
+    path: str | Path,
+    *,
+    registration_path: str | Path,
+    verification_path: str | Path,
+    expected_git_commit: str,
+    expected_registration_sha256: str,
+    expected_verification_sha256: str,
 ) -> ProbeAEvidence:
-    """Read Probe-A once, validate it, and retain the exact immutable bytes."""
-    try:
-        evidence_bytes = Path(path).read_bytes()
-    except OSError as exc:
-        raise ApproximationBiasValidationError(
-            f"Probe-A evidence is missing or unreadable: {exc}"
-        ) from exc
+    """Read the three Probe-A artifacts once and retain their exact immutable bytes."""
+
+    def read(path_value: str | Path, *, field: str) -> bytes:
+        try:
+            return Path(path_value).read_bytes()
+        except OSError as exc:
+            raise ApproximationBiasValidationError(
+                f"{field} is missing or unreadable: {exc}"
+            ) from exc
+
+    evidence_bytes = read(path, field="Probe-A admission")
+    registration_bytes = read(registration_path, field="Probe-A registration")
+    verification_bytes = read(verification_path, field="Probe-A verification receipt")
     evidence = ProbeAEvidence(
-        content_sha256=sha256_bytes(evidence_bytes), evidence_bytes=evidence_bytes
+        content_sha256=sha256_bytes(evidence_bytes),
+        evidence_bytes=evidence_bytes,
+        registration_sha256=sha256_bytes(registration_bytes),
+        registration_bytes=registration_bytes,
+        verification_sha256=sha256_bytes(verification_bytes),
+        verification_bytes=verification_bytes,
     )
-    probe_a_from_evidence(evidence, expected_git_commit=expected_git_commit)
+    probe_a_from_evidence(
+        evidence,
+        expected_git_commit=expected_git_commit,
+        expected_registration_sha256=expected_registration_sha256,
+        expected_verification_sha256=expected_verification_sha256,
+    )
     return evidence
 
 
@@ -375,7 +651,7 @@ def validate_approximation_bias_report(
     expected_git_commit: str | None = None,
     expected_provenance: Mapping[str, Any] | None = None,
 ) -> None:
-    """Validate the complete v2 report, including scientific interpretation coherence."""
+    """Validate the complete v3 report, including scientific interpretation coherence."""
     obj = _exact_keys(report, _TOP_KEYS, field="approximation-bias report")
     if obj["schema"] != APPROXIMATION_BIAS_SCHEMA:
         _fail(f"report schema must be {APPROXIMATION_BIAS_SCHEMA!r}")
@@ -571,6 +847,8 @@ def validate_approximation_bias_report(
         "gene_order_sha256",
         "probe_a_evidence_sha256",
         "probe_a_evidence_manifest_sha256",
+        "probe_a_registration_sha256",
+        "probe_a_verification_sha256",
     ):
         _hex64(provenance[field], field=f"report.provenance.{field}")
     if (

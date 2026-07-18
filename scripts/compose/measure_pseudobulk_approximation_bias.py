@@ -33,13 +33,18 @@ data.
 
 Probe-A admission gate (design spec §3 "Admission prerequisite"): the CLI
 refuses to run this measurement at all -- no report is assembled or written --
-unless ``--probe-a-evidence`` names a fully validated, self-checksummed Probe-A
-object that binds the protocol, requested Git commit, evidence-manifest SHA,
+unless ``--probe-a-evidence``, ``--probe-a-registration``, and
+``--probe-a-verification`` name a fully validated, immutable Probe-A evidence
+bundle. The bundle cross-binds the protocol, requested Git commit, externally
+frozen registration bytes, evidence-manifest SHA, verifier-code closure,
 raw-pseudobulk bridge representation, pass verdict, and observed bridge error
-within its preregistered tolerance. A bare ``{"status":"pass"}``, missing,
-failed, quarantined, or tampered object raises
-:class:`ValueError` from :func:`_probe_a_admission`, called at the very TOP of
-:func:`main` before any other input is read. See
+within its preregistered tolerance. The registration and verification receipt
+pins must be supplied independently through
+``--probe-a-registration-sha256`` and
+``--probe-a-verification-sha256``. A bare ``{"status":"pass"}``, missing,
+failed, quarantined, self-consistent forgery, or tampered object raises
+:class:`ValueError` from the shared immutable evidence validator, called at the
+very TOP of :func:`main` before any other scientific input is read. See
 ``docs/superpowers/runbooks/2026-07-11-compose-gears-decision-probe-rerun.md``
 for the admission vocabulary.
 
@@ -58,6 +63,10 @@ Usage
 -----
     uv run python scripts/compose/measure_pseudobulk_approximation_bias.py \
         --probe-a-evidence artifacts/compose/probe_a_evidence.json \
+        --probe-a-registration artifacts/compose/probe_a_registration.json \
+        --probe-a-registration-sha256 <externally frozen sha256> \
+        --probe-a-verification artifacts/compose/verify.json \
+        --probe-a-verification-sha256 <externally anchored sha256> \
         --fit-role-artifact artifacts/compose/fit_role.h5ad \
         --response-projection artifacts/compose/response_projection.json \
         --sealed-pair-ids artifacts/compose/sealed_pair_ids.json \
@@ -96,7 +105,7 @@ from alive.compose.approximation_bias import (
     validate_approximation_bias_report,
 )
 from alive.compose.fit_role import apply_response_projection, canonical_gene_order_sha256
-from alive.provenance import sha256_bytes, sha256_file, sha256_json
+from alive.provenance import sha256_file, sha256_json
 
 #: Only finite floats or this string sentinel are ever embedded in the report
 #: (CLAUDE.md#invariants / #data-eval — report the degenerate value honestly,
@@ -114,8 +123,8 @@ _R_STAR = R_STAR
 #: but must NEVER be presented as a *measured* pair to this metric.
 _ARTIFACT_ROLES: frozenset[str] = frozenset({"control", "singles", "combo_calibration"})
 
-#: The v2 report's ``schema`` literal (design spec §4).
-_SCHEMA_V2 = APPROXIMATION_BIAS_SCHEMA
+#: The v3 report's ``schema`` literal (design spec §4).
+_SCHEMA_V3 = APPROXIMATION_BIAS_SCHEMA
 
 
 def _finite_or_sentinel(value: float) -> float | str:
@@ -580,7 +589,7 @@ def _bootstrap_intervals(
 
 
 def _canonical_json(obj: Mapping) -> str:
-    """The v1 report's ONE canonical serialisation recipe (design spec §4).
+    """The v3 report's one canonical serialisation recipe (design spec §4).
 
     ``sort_keys=True`` (dict key order never affects the bytes),
     ``separators=(",", ":")`` (no incidental whitespace), and
@@ -598,11 +607,11 @@ def _self_checksum(report_without_checksum: Mapping) -> str:
     Parameters
     ----------
     report_without_checksum : Mapping
-        The full v1 report object MINUS its own ``self_checksum`` key (design
+        The full v3 report object MINUS its own ``self_checksum`` key (design
         spec §4: "SHA-256 of the canonical JSON of every field above except
         ``self_checksum``"). Passing a dict that still contains
         ``self_checksum`` would make the digest depend on itself; callers
-        (including :func:`measure_approximation_bias_v2`) always strip that
+        (including :func:`measure_approximation_bias_v3`) always strip that
         key first.
 
     Returns
@@ -613,7 +622,7 @@ def _self_checksum(report_without_checksum: Mapping) -> str:
     return self_checksum(report_without_checksum)
 
 
-def measure_approximation_bias_v2(
+def measure_approximation_bias_v3(
     *,
     fit_role_artifact: str,
     response_projection: Mapping,
@@ -626,8 +635,10 @@ def measure_approximation_bias_v2(
     pod_instance: str | None = None,
     combo_sep: str = "_",
     probe_a_evidence: ProbeAEvidence | None = None,
+    probe_a_registration_sha256: str | None = None,
+    probe_a_verification_sha256: str | None = None,
 ) -> dict:
-    """Assemble the FULL ``compose_approximation_bias_report_v2`` object.
+    """Assemble the FULL ``compose_approximation_bias_report_v3`` object.
 
     Task 4 of the COMPOSE approximation-bias v1 implementation plan
     (``docs/superpowers/plans/2026-07-13-compose-approximation-bias-implementation.md``):
@@ -637,7 +648,7 @@ def measure_approximation_bias_v2(
     ``self_checksum`` blocks (design spec §4). In order:
 
     (a)-(c) Task 3's guards (measured-role whitelist, sealed-roster overlap,
-        gene-order digest) — see :func:`measure_approximation_bias_v2`'s prior
+        gene-order digest) — see :func:`measure_approximation_bias_v3`'s prior
         revision for their exact messages; UNCHANGED here so every existing
         seal-safety negative test keeps matching the metric's OWN message
         before any provenance field is even inspected.
@@ -646,7 +657,7 @@ def measure_approximation_bias_v2(
         ``git_commit``, ``norman_source_sha256``, ``pod_instance``) must be an
         explicitly-resolved, non-empty value — none of them defaults to a
         placeholder like ``"UNKNOWN"``; a missing one raises here rather than
-        silently embedding a fake value in a binding v1 report (CLAUDE.md
+        silently embedding a fake value in a binding v3 report (CLAUDE.md
         §data-eval, §invariants #1 "Protocol first"). This intentionally runs
         AFTER the seal-safety guards so a bad roster/gene-order/role always
         raises its own dedicated message first, never masked by a
@@ -703,15 +714,27 @@ def measure_approximation_bias_v2(
         Separator between a combo pair id's two constituent gene tokens (the
         config's ``data.combo_sep``).
     probe_a_evidence : ProbeAEvidence
-        Required immutable Probe-A admission bytes. The producer revalidates
-        them even for direct API calls and binds both their exact file SHA and
-        evidence-manifest SHA into report provenance; there is no admitted
-        default or free-form status bypass.
+        Required immutable Probe-A admission, registration, and verification
+        receipt bytes. The producer revalidates them even for direct API calls
+        and binds their exact SHA values plus the evidence-manifest SHA into
+        report provenance; there is no admitted default or free-form status
+        bypass.
+    probe_a_registration_sha256 : str
+        Externally frozen pre-run registration SHA-256, supplied independently of
+        the admission bytes so it cannot be read back from the admission it
+        validates. It authenticates the separately supplied registration-byte
+        snapshot, binds the admission to that frozen identity, and rejects any
+        legacy or registration-unbound admission.
+    probe_a_verification_sha256 : str
+        Externally anchored SHA-256 of ``verify.json``. The immutable evidence
+        bundle must contain those exact bytes, and the admission must bind the
+        same receipt digest. This authenticates the measured error and manifest
+        identity instead of trusting a recomputable admission self-checksum.
 
     Returns
     -------
     dict
-        The full ``compose_approximation_bias_report_v2`` object (see "The v2
+        The full ``compose_approximation_bias_report_v3`` object (see "The v3
         report object" in the implementation plan): ``schema``,
         ``deliverable``, ``protocol``, ``seal_status``, ``method``,
         ``admission_status``, ``strata`` (``combo_calibration`` + ``singles``),
@@ -733,8 +756,23 @@ def measure_approximation_bias_v2(
         raise ValueError(
             "approximation-bias: Probe-A evidence is required; measurement NOT_ADMISSIBLE"
         )
+    if probe_a_registration_sha256 is None:
+        raise ValueError(
+            "approximation-bias: externally frozen Probe-A registration SHA-256 is required; "
+            "measurement NOT_ADMISSIBLE"
+        )
+    if probe_a_verification_sha256 is None:
+        raise ValueError(
+            "approximation-bias: externally anchored Probe-A verification SHA-256 is required; "
+            "measurement NOT_ADMISSIBLE"
+        )
     try:
-        probe_a = probe_a_from_evidence(probe_a_evidence, expected_git_commit=git_commit)
+        probe_a = probe_a_from_evidence(
+            probe_a_evidence,
+            expected_git_commit=git_commit,
+            expected_registration_sha256=probe_a_registration_sha256,
+            expected_verification_sha256=probe_a_verification_sha256,
+        )
     except ValueError as exc:
         raise ValueError(f"approximation-bias: {exc}") from exc
 
@@ -817,12 +855,14 @@ def measure_approximation_bias_v2(
         "registered_seeds": [int(s) for s in registered_seeds],
         "probe_a_evidence_sha256": probe_a_evidence.content_sha256,
         "probe_a_evidence_manifest_sha256": str(probe_a["evidence_manifest_sha256"]),
+        "probe_a_registration_sha256": probe_a_evidence.registration_sha256,
+        "probe_a_verification_sha256": probe_a_evidence.verification_sha256,
         "sealed_pair_overlap_count": sealed_pair_overlap_count,
         "pod_instance": str(pod_instance),
     }
 
     report_without_checksum = {
-        "schema": _SCHEMA_V2,
+        "schema": _SCHEMA_V3,
         "deliverable": "gears_pseudobulk_approximation_bias_report",
         "protocol": "COMPOSE-K562-v1",
         "seal_status": "unopened",
@@ -848,66 +888,26 @@ def measure_approximation_bias_v2(
             "registered_seeds": [int(seed) for seed in registered_seeds],
             "probe_a_evidence_sha256": probe_a_evidence.content_sha256,
             "probe_a_evidence_manifest_sha256": str(probe_a["evidence_manifest_sha256"]),
+            "probe_a_registration_sha256": probe_a_evidence.registration_sha256,
+            "probe_a_verification_sha256": probe_a_evidence.verification_sha256,
         },
     )
     return report
 
 
-def _probe_a_admission(evidence: Mapping, *, expected_git_commit: str | None = None) -> str:
-    """Fail-closed Probe-A admission gate (design spec §3 "Admission prerequisite").
-
-    A conforming Probe A report must establish the GEARS population vector is
-    a raw-count pseudobulk mean within the frozen tolerance BEFORE this
-    measurement may run at all: "A quarantined, missing, or failed probe
-    makes this measurement ``NOT_ADMISSIBLE``" (design spec §3). This function
-    is the mechanical gate for that prerequisite, called from the TOP of
-    :func:`main`, before any fit-role/response-projection/config file is even
-    read.
-
-    Parameters
-    ----------
-    evidence : Mapping
-        The parsed Probe-A evidence JSON (``--probe-a-evidence``); expected to
-        carry a ``status`` field.
-
-    Returns
-    -------
-    str
-        ``"admitted"`` -- the only value this function ever returns; every
-        other outcome raises.
-
-    Raises
-    ------
-    ValueError
-        ``"approximation-bias: Probe-A <status>; measurement NOT_ADMISSIBLE"``
-        when ``evidence["status"]`` is ``"failed"`` or ``"quarantined"``, or
-        when it is absent, empty, or any unrecognized value -- all of which
-        are fail-closed-normalized to ``<status> = "missing"`` (design spec
-        §6 test 8; CLAUDE.md invariants -- an unknown admission state is
-        never silently treated as passing).
-    """
-    # Compatibility helper for focused tests; the production assembler accepts
-    # only immutable ProbeAEvidence and revalidates it itself.
-    body = canonical_json(evidence).encode("utf-8")
-    snapshot = ProbeAEvidence(content_sha256=sha256_bytes(body), evidence_bytes=body)
-    try:
-        probe_a_from_evidence(snapshot, expected_git_commit=expected_git_commit)
-    except ValueError as exc:
-        raise ValueError(f"approximation-bias: {exc}") from exc
-    return "admitted"
-
-
 def main(argv: list[str] | None = None) -> int:
-    """Gate on Probe-A admission, then load inputs and write the v1 report.
+    """Gate on Probe-A evidence, then load inputs and write the v3 report.
 
-    The FIRST thing this function does after parsing arguments is read
-    ``--probe-a-evidence`` and call :func:`_probe_a_admission` on it -- BEFORE
-    ``--fit-role-artifact``, ``--response-projection``, or any other input is
-    even opened (design spec §3 "Admission prerequisite"). A missing, failed,
-    or quarantined Probe-A status raises there and the function returns
-    control to the caller via that exception: no report is assembled, no
-    ``--out`` file is written, and (run as a script) the process exits
-    non-zero. Only a ``"pass"`` status lets execution continue past the gate.
+    The FIRST thing this function does after parsing arguments is read and
+    validate the immutable admission, registration, and verification snapshots
+    against the independently supplied registration and verification SHA-256
+    pins -- BEFORE ``--fit-role-artifact``,
+    ``--response-projection``, or any other scientific input is opened (design
+    spec §3 "Admission prerequisite"). A missing, failed, quarantined, or
+    pin-mismatched Probe-A raises there: no report is assembled, no
+    ``--out`` file is written, and the process exits non-zero. Only a conforming
+    v3 pass admission and v1 verification receipt let execution continue past
+    the gate.
 
     ``--basis-config`` is the bias-NULL YAML config (design spec §4): its
     ``sha256_json`` becomes ``provenance.basis_config_sha256`` and its
@@ -920,9 +920,31 @@ def main(argv: list[str] | None = None) -> int:
         "--probe-a-evidence",
         required=True,
         type=Path,
-        help="Probe-A evidence JSON with a status field (design spec §3 admission "
+        help="exact verifier-published Probe-A admission JSON (design spec §3 admission "
         "prerequisite; vocabulary: "
         "docs/superpowers/runbooks/2026-07-11-compose-gears-decision-probe-rerun.md)",
+    )
+    ap.add_argument(
+        "--probe-a-registration-sha256",
+        required=True,
+        help="externally frozen pre-run SHA-256 of probe_a_registration.json",
+    )
+    ap.add_argument(
+        "--probe-a-registration",
+        required=True,
+        type=Path,
+        help="exact owner-frozen probe_a_registration.json bytes",
+    )
+    ap.add_argument(
+        "--probe-a-verification",
+        required=True,
+        type=Path,
+        help="exact verifier-published verify.json receipt",
+    )
+    ap.add_argument(
+        "--probe-a-verification-sha256",
+        required=True,
+        help="externally anchored SHA-256 of verify.json",
     )
     ap.add_argument("--fit-role-artifact", required=True, type=Path)
     ap.add_argument("--response-projection", required=True, type=Path, help="§2.2 block JSON")
@@ -947,7 +969,12 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
 
     probe_a_evidence = load_probe_a_evidence(
-        args.probe_a_evidence, expected_git_commit=args.git_commit
+        args.probe_a_evidence,
+        registration_path=args.probe_a_registration,
+        verification_path=args.probe_a_verification,
+        expected_git_commit=args.git_commit,
+        expected_registration_sha256=args.probe_a_registration_sha256,
+        expected_verification_sha256=args.probe_a_verification_sha256,
     )
 
     block = json.loads(args.response_projection.read_text(encoding="utf-8"))
@@ -956,11 +983,13 @@ def main(argv: list[str] | None = None) -> int:
     basis_config_sha256 = sha256_json(basis_config_raw)
     registered_seeds = [int(s) for s in basis_config_raw["seeds"]["registered_seeds"]]
 
-    report = measure_approximation_bias_v2(
+    report = measure_approximation_bias_v3(
         fit_role_artifact=str(args.fit_role_artifact),
         response_projection=block,
         sealed_pair_ids=sealed_pair_ids,
         probe_a_evidence=probe_a_evidence,
+        probe_a_registration_sha256=args.probe_a_registration_sha256,
+        probe_a_verification_sha256=args.probe_a_verification_sha256,
         basis_config_sha256=basis_config_sha256,
         registered_seeds=registered_seeds,
         replicates=args.bootstrap_replicates,

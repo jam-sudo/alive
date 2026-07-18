@@ -705,7 +705,7 @@ def _bias_numeric_or_sentinel(value: object, *, path: Path, field: str) -> float
     """Coerce a metric-report numeric-or-sentinel field to a finite float or the
     verbatim :data:`_NON_FINITE_SENTINEL` string, failing closed on any other value.
 
-    ``measure_approximation_bias_v2`` legitimately emits the STRING
+    ``measure_approximation_bias_v3`` legitimately emits the STRING
     :data:`_NON_FINITE_SENTINEL` for a degenerate ``bias_to_signal_ratio_R`` (or a
     bootstrap-interval endpoint); that string is carried through verbatim. A finite
     number is routed through :func:`_finite_or_sentinel`. A JSON ``true``/``false``
@@ -801,7 +801,7 @@ def _load_approximation_bias_fairness(
     values can never leak into the registered summary (design spec §5/§7).
 
     The fairness fields live NESTED under ``report["gi_and_fairness"]`` exactly as
-    ``measure_approximation_bias_v2`` emits them (``fairness_flag``,
+    ``measure_approximation_bias_v3`` emits them (``fairness_flag``,
     ``bias_to_signal_ratio_R``, ``R_star``), and the carried interval is the single
     ``report["gi_and_fairness"]["bootstrap_95_interval"]["bias_to_signal_ratio_R"]``
     sub-interval (a ``[lower, upper]`` pair OR the ``"NON_FINITE"`` sentinel string —

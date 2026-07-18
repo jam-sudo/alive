@@ -140,6 +140,8 @@ def _write_activated_config(stage1: Path, *, approved_git_sha: str) -> tuple[Any
             "registered_seeds": list(raw["seeds"]["registered_seeds"]),
             "probe_a_evidence_sha256": "5" * 64,
             "probe_a_evidence_manifest_sha256": "6" * 64,
+            "probe_a_registration_sha256": "7" * 64,
+            "probe_a_verification_sha256": "8" * 64,
             "sealed_pair_overlap_count": 0,
             "pod_instance": "synthetic-test",
         },

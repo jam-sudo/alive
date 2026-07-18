@@ -35,6 +35,7 @@ from alive.compose.fit_role import (
     row_identity_sha256,
     validate_fit_role_artifact,
 )
+from alive.compose.gears_probe_a import RAW_SCHEMA, validate_probe_a_raw_artifact
 from alive.compose.gene_universe import (
     AliasMap,
     GeneUniverseError,
@@ -213,6 +214,59 @@ def _emit_command_result(*, command: str, primary_file_sha256: str) -> None:
         "status": "OK",
     }
     print(json.dumps(payload, sort_keys=True, separators=(",", ":")), flush=True)
+
+
+def publish_probe_a_measurements(
+    *, measurement_json: str | Path, evidence_root: str | Path, out_raw: str | Path
+) -> str:
+    """Publish and immediately revalidate the maintained Probe-A raw artifact.
+
+    The measurement hook supplies numeric observations, ordered control-row
+    identities, per-control predictions, and real checkpoint paths.  This
+    maintained boundary owns the schema/checksum and refuses overwrite; the
+    independent admission verifier later repeats every check against the
+    exhaustive evidence manifest.
+    """
+    try:
+        relative_output = (
+            Path(out_raw).resolve().relative_to(Path(evidence_root).resolve(strict=True)).as_posix()
+        )
+    except (OSError, ValueError) as exc:
+        raise GeneUniverseError(
+            "Probe-A raw output must be under the existing evidence root"
+        ) from exc
+    data = _stable_bytes(measurement_json, label="Probe-A measurement hook output")
+    try:
+        measurement = json.loads(data)
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise GeneUniverseError(f"cannot decode Probe-A measurement hook output: {exc}") from exc
+    expected = {
+        "input_before",
+        "input_after",
+        "determinism_runs",
+        "ordered_control_row_ids",
+        "control_predictions",
+        "public_prediction",
+        "bridge_prediction",
+    }
+    if not isinstance(measurement, dict) or set(measurement) != expected:
+        raise GeneUniverseError("Probe-A measurement hook output key roster is invalid")
+    body = {"schema": RAW_SCHEMA, **measurement}
+    payload = {**body, "self_checksum": sha256_json(body)}
+    encoded = (
+        json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False) + "\n"
+    ).encode("utf-8")
+    atomic_write_once(out_raw, encoded.decode("utf-8"))
+    digest = sha256_bytes(encoded)
+    try:
+        validate_probe_a_raw_artifact(
+            evidence_root=evidence_root,
+            relative_path=relative_output,
+            expected_sha256=digest,
+        )
+    except (ValueError, OSError) as exc:
+        raise GeneUniverseError(f"Probe-A raw publication failed validation: {exc}") from exc
+    return digest
 
 
 def _generator_code_sha256() -> str:
@@ -723,6 +777,10 @@ def _parser() -> argparse.ArgumentParser:
     verify.add_argument("--h5ad", required=True)
     verify.add_argument("--roster", required=True)
     verify.add_argument("--roster-receipt", required=True)
+    probe_a = commands.add_parser("probe-a")
+    probe_a.add_argument("--measurement-json", required=True)
+    probe_a.add_argument("--evidence-root", required=True)
+    probe_a.add_argument("--out-raw", required=True)
     return parser
 
 
@@ -768,7 +826,7 @@ def main(argv: list[str] | None = None) -> int:
                 )
             ),
         )
-    else:
+    elif args.command == "verify-input":
         verify_probe_input(
             manifest_path=args.manifest,
             expected_manifest_sha256=args.manifest_sha256,
@@ -780,6 +838,13 @@ def main(argv: list[str] | None = None) -> int:
             command="verify-input",
             primary_file_sha256=args.manifest_sha256,
         )
+    else:
+        raw_sha256 = publish_probe_a_measurements(
+            measurement_json=args.measurement_json,
+            evidence_root=args.evidence_root,
+            out_raw=args.out_raw,
+        )
+        _emit_command_result(command="probe-a", primary_file_sha256=raw_sha256)
     return 0
 
 
