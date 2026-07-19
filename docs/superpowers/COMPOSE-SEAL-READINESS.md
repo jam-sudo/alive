@@ -5,7 +5,7 @@
 > **이 문서는 아무것도 정의하지 않는다** — 세부(task)는 plan, claim은 spec, exact param은 config,
 > 시간순 audit는 git이 authoritative다([sources of truth](../../CLAUDE.md#sources)). 상태 행이 authoritative
 > 문서와 어긋나면 **authoritative 문서가 옳다**; 이 인덱스를 갱신한다.
-> **Updated:** 2026-07-19 @ `f62bd8c` (branch `main`)
+> **Updated:** 2026-07-19 @ `589bc1b` (branch `main`)
 > **갱신 트리거:** sub-project/gate **상태가 바뀔 때만**(커밋마다 아님).
 > **종결 상태:** COMPOSE seal이 정확히 한 번 열리면 이 인덱스는 **frozen/은퇴**한다. 이후 진행상황은
 > seal 결과와 post-hoc analysis가 대신한다.
@@ -51,14 +51,18 @@ branch에서 추적 가능하게 기록한다. `LOCAL` ledger ID만으로는 이
    provenance를 필수화하고, 모든 per-pair 파생 통계를 재계산하며, driver가 report를 한 번만
    읽은 immutable snapshot을 `run_phase2b`가 seal 전에 재검증한다. 따라서 pod에서 생성할
    신규 report와 ResolvedRunSpec은 v3 계약만 사용한다.
-   **2026-07-19 Probe-A local production update:** commit `f62bd8c` implements the maintained write-once
-   `probe-a → build-probe-a-report → build-evidence-manifest` chain, canonical CSR float32 input boundary,
+   **2026-07-19 Probe-A local production update:** commits `f62bd8c` and `589bc1b` implement the maintained
+   `prepare/verify → build-probe-a-registration → probe-a → build-probe-a-report → build-evidence-manifest`
+   write-once chain, canonical CSR float32 input boundary,
    separate preparation/GEARS lock identities with full installed-package-roster verification, actual clean-HEAD
-   enforcement, and offline recomputation of matrix/row-role/sealed-overlap/reader-spy bindings. Local verification:
-   focused 77 green, adjacent contract 199 green, full `tests/alive/compose` 1468 green, Ruff/format/diff clean.
-   This satisfies the local implementation portion of conforming Probe A only. Pod measurement remains blocked
-   until an independent exact-SHA review and an owner-frozen externally pinned `probe_a_registration.json`; it
-   does not change `RELEASE-BLOCKED`, activate the scientific worker, or open the seal.
+   enforcement, and offline recomputation of matrix/row-role/sealed-overlap/reader-spy bindings. `589bc1b`
+   additionally freezes the outcome-independent owner policy (`log_normalized_pseudobulk`, no second
+   normalization, signed output preserved, exact determinism, `1e-5` numerical tolerances) and derives
+   registration-v2's only run-specific scalar from the pinned prepared manifest. Local verification: full
+   `tests/alive/compose` 1470 green, Ruff/format/diff clean. This satisfies the local implementation and owner-policy
+   portions of conforming Probe A only. Pod measurement remains blocked until an independent exact-SHA review and
+   the prepared-input-derived registration's external pin; it does not change `RELEASE-BLOCKED`, activate the
+   scientific worker, validate the raw Jensen-floor metric, or open the seal.
 5. **§2.5 release gate** — worker locked-env integration green + 독립 검토 + **owner의 exact Git SHA 승인** → runbook을 `READY`로.
 6. **A100 sealed-run pod: runbook 실행** — 유효한 `ActivationRecord`(requirement별 non-empty evidence) + clean tree 하에 `phase2a → preflight → phase2b --confirm-seal`. **COMPOSE seal 1회 개봉** — `TG-K562`와 독립.
 
