@@ -1,5 +1,8 @@
 # COMPOSE Scientific PREPARE Carrier — Implementation Plan
 
+> **Status update (2026-07-19): IMPLEMENTED + MERGED to the B-boundary.** 아래 task는 as-built
+> record이며 current work queue가 아니다. Scientific execution remains RELEASE-BLOCKED.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development
 > (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use
 > checkbox (`- [ ]`) syntax for tracking. Each task is written test-first (TDD: RED → GREEN →
@@ -41,7 +44,7 @@ dependency; no `gears`/`cpa` import; no `anndata` open of the sealed source.
 - **NO §4.3 guard is weakened, bypassed, or mocked.** `outcome_store.py`, `gates.py`, `freeze.py`,
   `io.atomic_write_once`, `durable.py`, `terminal.py`, `preflight.py`, and the
   `identity_lock.py` scientific `adapter_version` boundary are left intact. If a guard blocks work,
-  STOP and report a conflict per CLAUDE.md §1 — do not edit the guard.
+  STOP and report a conflict per `CLAUDE.md`#sources — do not edit the guard.
 - **Fixture serialized artifacts + execution semantics remain byte-unchanged.** No test relabels the
   committed fixture artifact in place; `build_compose_fixture` is not modified.
 - **Runtime Git state is measured independently in every CLI process** (each of phase2a / preflight /

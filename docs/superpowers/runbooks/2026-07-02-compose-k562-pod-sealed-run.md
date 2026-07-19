@@ -1,15 +1,17 @@
 # COMPOSE-K562-v1 — A100 Pod Sealed-Run Runbook
 
 > **문서 역할:** COMPOSE-K562-v1의 일회성 sealed evaluation을 위한 운영 계약.
-> **개정일:** 2026-07-13
+> **개정일:** 2026-07-19 (status/reference sanitization; execution remains blocked)
+> **protocol 상태:** lifecycle **ACTIVE** · execution **RELEASE-BLOCKED** · seal **UNOPENED**.
 > **현재 실행 상태:** **BLOCKED — §2의 pre-seal release blocker가 모두 해결·검토·commit되기 전에는 실행 금지.**
-> **코드 기준점:** `main` `2bbc2e8`(2026-07-12). §2.1 fit-role artifact(A1)+payload-v2(A2), §2.4 durable
+> **코드 기준점:** release 시 owner가 승인한 clean exact Git SHA만 사용한다. 과거 snapshot SHA는 실행
+> floor가 아니다. Current `main`에는 §2.1 fit-role artifact(A1)+payload-v2(A2), §2.4 durable
 > final-ledger+seed-variability(D1/D2), 그리고 §2.3 단일 production driver(sub-project C, `phase2a`/
 > `preflight`/`phase2b --confirm-seal`/`recover`)가 모두 **main에 병합됐다**(C = merge commit `1c46708`;
-> whole-branch 2-lens 리뷰 + Important 2건 fix 후, driver 211 / compose 1106 green). Local dev-pod
+> whole-branch 2-lens 리뷰 + Important 2건 fix 후 관련 suites green). Local dev-pod
 > scientific ResolvedRunSpec/PREPARE carrier assembly까지 main에 병합됐지만 실제 fit body와 activation
 > evidence는 아직 미완료다. **남은 blocker: §2.2 real GEARS/CPA worker(+GO graph·pinned env), conforming
-> Probe A와 reviewed output bridge, approximation-bias v1 report/integration, §4 activation-evidence를 finalized active config로
+> Probe A와 reviewed output bridge, approximation-bias v3 report/integration, §4 activation-evidence를 finalized active config로
 > 재생성 + null requirement 확립, §2.5 release gate(worker locked-env green + owner의 exact Git SHA 승인).**
 > 이들이 별도 development pod에서 해결·검토·commit되기 전에는 runbook은 계속 BLOCKED다.
 > **상위 계약:** COMPOSE spec §7/§10.5–§10.6, deep-baseline design §1/§7,

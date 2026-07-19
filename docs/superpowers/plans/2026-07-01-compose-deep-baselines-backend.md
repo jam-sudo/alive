@@ -1,5 +1,9 @@
 # COMPOSE Deep-Baseline Subprocess Backend (Change A) Implementation Plan
 
+> **Status update (2026-07-19): controller/backend protocol + stub IMPLEMENTED/MERGED.** Real
+> GEARS/CPA worker completion and pod evidence remain in the current dev-pod plan. 아래 completed task는
+> 재실행하지 않는다.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Build the concrete `SubprocessBaselineBackend` behind the existing `BaselineAdapter` seam so GEARS/CPA can run as separate locked-env subprocesses, with a fully local stub worker; the real gears/cpa workers stay pod-only.

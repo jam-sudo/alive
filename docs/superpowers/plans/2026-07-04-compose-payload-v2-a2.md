@@ -1,5 +1,8 @@
 # COMPOSE payload-v2 Protocol (sub-project A2) Implementation Plan
 
+> **Status update (2026-07-19): IMPLEMENTED + MERGED.** 아래 task는 as-built record이며 current
+> work queue가 아니다.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Extend the deep-baseline subprocess protocol to payload-v2 — carry the A1 fit-role artifact + a serialized native→PCA-50 response operator, wrap predictions in a `{predictions, execution_manifest}` envelope, and make the reference stub worker exercise the real operator path — so real GEARS/CPA (sub-project B, pod-only) can fit leakage-safe cell-level data and return predictions comparable to L1 in the same δ-space.

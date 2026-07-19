@@ -1,13 +1,14 @@
 # COMPOSE-K562 GEARS gene-roster generator — design spec
 
-> **Protocol:** `COMPOSE-K562-v1` (ACTIVE). **Date:** 2026-07-11. **Status:** LOCAL REMEDIATION AFTER INVALIDATED
-> REVIEW ITERATION 3 — pending a new clean-commit exact-SHA independent review. Generator and fit-input
-> preprocessing are implemented locally; the scientific GEARS output bridge remains explicitly blocked on Probe A.
+> **Protocol:** `COMPOSE-K562-v1` (ACTIVE / RELEASE-BLOCKED; seal UNOPENED). **Date:** 2026-07-11.
+> **Status update (2026-07-19 sanitization):** generator and fit-input preprocessing are IMPLEMENTED + MERGED;
+> exact-committed-SHA independent review passed for `7f6595f` and is recorded in
+> `docs/superpowers/audits/2026-07-11-compose-gu-exact-sha-independent-review.md`. The scientific GEARS output
+> bridge remains explicitly blocked on conforming Probe A and the current readiness gate.
 > **Opens NO seal.** Formalizes §2 of `docs/superpowers/2026-07-10-compose-gears-scale-and-gene-universe-recommendations.md`
 > into an implementable contract, incorporating the rigor corrections in
 > `docs/superpowers/2026-07-11-compose-gears-decision-probe-results.md` (the 2,088-vs-2,000 root cause) and the
-> CLAUDE.md invariants it must satisfy (§3.5 no outcome-selected universe, §6 eligibility fixed before the split,
-> §4.2 write-once provenance).
+> CLAUDE.md invariants it must satisfy (`CLAUDE.md`#invariants/#data-eval/#provenance).
 
 ---
 
@@ -33,8 +34,8 @@ reads no sealed outcome, and does not change `config_sha256` by itself (freezing
 into config is a separate, owner-gated act that mints a new run identity).
 
 **What it must NOT do (invariants it exists to enforce):** select genes using any perturbation response, effect
-size, or sealed expression (CLAUDE.md §3.5); let the requested/sealed pair roster influence `R_gears`; silently
-drop ineligible perturbations (CLAUDE.md §6); subset `U_full` before full-library normalization; or let
+size, or sealed expression (`CLAUDE.md`#invariants); let the requested/sealed pair roster influence `R_gears`;
+silently drop ineligible perturbations (`CLAUDE.md`#data-eval); subset `U_full` before full-library normalization; or let
 GEARS/GO/resource constraints alter the frozen response HVGs/PCA used to define truth and score every method;
 or infer a missing full-library denominator by summing a reduced GEARS prediction.
 
@@ -141,7 +142,7 @@ artifact.
 
 ## 4. Output — the method-specific GEARS roster artifact {#output}
 
-A single immutable artifact (JSON; write-once per CLAUDE.md §4.2 via `io.atomic_write_once`):
+A single immutable artifact (JSON; write-once per `CLAUDE.md`#provenance via `io.atomic_write_once`):
 
 ```
 gears_gene_roster.v1:
@@ -290,7 +291,7 @@ registered normalize-total-median/log1p arithmetic without densifying the full f
 dense known answers. `generator_code_sha256` is not a single-file hash: it is the canonical digest of the exact
 source-hash map for `gene_universe.py`, `response.py`, `fit_role.py`, `provenance.py`, and `io.py`, so changes to a
 shared ranking, identity, checksum, or publication primitive mint a new generator identity. No hardcoded gene
-lists, thresholds, or `N_target` exist in source (CLAUDE.md §7).
+lists, thresholds, or `N_target` exist in source (`CLAUDE.md`#repo).
 
 ---
 

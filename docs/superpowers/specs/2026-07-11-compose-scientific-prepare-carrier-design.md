@@ -1,10 +1,10 @@
 # COMPOSE production driver — Scientific PREPARE carrier design
 
-> **Status:** IMPLEMENTED + MERGED on `main` (carrier B-boundary); scientific activation remains BLOCKED · 2026-07-13
-> **Protocol:** `COMPOSE-K562-v1` (ACTIVE). Opens **no** seal; the COMPOSE seal remains UNOPENED.
+> **Status:** IMPLEMENTED + MERGED on `main` (carrier B-boundary); execution remains RELEASE-BLOCKED · 2026-07-19
+> **Protocol:** `COMPOSE-K562-v1` (ACTIVE / RELEASE-BLOCKED). Opens **no** seal; the COMPOSE seal remains UNOPENED.
 > **Sub-project:** completion of driver sub-project **C**'s deferred scientific carrier path.
 > **Authoritative parents:** driver spec `specs/2026-07-07-compose-production-driver-design.md`;
-> governance `CLAUDE.md` §3/§4; readiness `COMPOSE-SEAL-READINESS.md` row C + critical-path
+> governance `CLAUDE.md`#invariants/#seal/#provenance; readiness `COMPOSE-SEAL-READINESS.md` row C + critical-path
 > step 4.
 
 ---

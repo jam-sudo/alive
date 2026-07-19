@@ -1,5 +1,8 @@
 # CARTOGRAPHER Real-Run Hardening Implementation Plan
 
+> **Status update (2026-07-19): IMPLEMENTED / historical.** 이 hardening은 완료된 `TG-K562-v1`
+> run에 반영됐다. 본 plan은 provenance를 위해 보존하며 재실행 지시가 아니다.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Close the remaining `TG-K562-v1` scientific-run blockers — write-once run immutability (#4 / audit P1-2) and protein-sequence provenance separation (#5 / audit P2-1) — plus the P3-1 duplicate-write nit, so that the real K562 A100 run is permitted by spec §11.3.

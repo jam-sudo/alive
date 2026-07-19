@@ -1,6 +1,6 @@
 # ALIVE Model #1 — Perturbation-as-Operator (A-centered hybrid) · FINAL 설계 스펙
 
-> **⚠ SUPERSEDED / long-range-parked (2026-07-04).** 이 "확정 설계"는 `CLAUDE.md` §4 protocol registry에
+> **⚠ SUPERSEDED / long-range-parked (2026-07-04).** 이 "확정 설계"는 `CLAUDE.md`#registry에
 > 등록되지 않았고 어떤 active spec도 참조하지 않는다. 핵심 capability(Cell-B mean win by architecture)가
 > prior-art 대비 non-novel로 판명되어 `COMPOSE-K562-v1`(비가산 epistasis operator)로 pivot했다.
 > unseen-target transfer 축은 `CT-RPE1-v1`(DEFERRED)로 이관했다. 이 문서는 long-range 참고로만 보존한다.

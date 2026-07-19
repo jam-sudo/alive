@@ -1,7 +1,9 @@
 # COMPOSE-K562-v1 Phase 2b Seal and Verdict — Corrected Implementation Plan
 
-> **Status:** ACTIVE (2026-06-30 activation). This plan delivered the seal machinery + inference;
-> the real one-time COMPOSE seal open runs on the A100 with a live ActivationRecord + clean tree.
+> **Status update (2026-07-19): IMPLEMENTED + MERGED; scientific execution RELEASE-BLOCKED; seal
+> UNOPENED.** This plan delivered the seal machinery + inference and is now an as-built record.
+> The real one-time COMPOSE seal open requires current finalized evidence/config, a valid
+> ActivationRecord, clean owner-approved exact SHA, and the readiness release gate.
 > **Scope:** seal machinery and inference built and tested with synthetic/tiny fixtures. The real
 > Norman sealed outcome is opened only by the separate activated A100 run, exactly once.
 > **Contract:** `CLAUDE.md`, COMPOSE design spec §10.5–§10.6,

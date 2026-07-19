@@ -1,13 +1,17 @@
 # CARTOGRAPHER Trust-Gate MVP Implementation Plan
 
+> **Status update (2026-07-19): COMPLETE historical implementation plan.** `TG-K562-v1`의 seal은
+> 이미 한 번 열렸고 verdict는 `NO_DISTINCT_WIN`이다. 아래 task를 재실행하거나 체크리스트를 current
+> work queue로 사용하지 않는다.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: use
 > `superpowers:subagent-driven-development` or `superpowers:executing-plans`.
 > Execute tasks in order. Do not open sealed outcomes, change registered analysis choices,
 > or reinterpret a failed criterion after the decisive run.
 
-**Status:** implementation-ready specification  
-**Revision:** 2026-06-21, audit v2  
-**Scope:** K562 retrospective Trust-Gate MVP  
+**Original status:** implementation-ready specification
+**Revision:** 2026-06-21, audit v2
+**Scope:** K562 retrospective Trust-Gate MVP
 **Non-claim:** this MVP is not an Active Cartographer and does not select wet-lab experiments.
 
 ---

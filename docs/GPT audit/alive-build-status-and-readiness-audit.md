@@ -2,11 +2,12 @@
 
 > **⚠ SUPERSEDED (2026-07-04) — 2026-06-21 시점 snapshot.** 이 감사는 TG-K562를 "full-data 미시작 /
 > sealed 미실행"으로 기술하지만, 이후 `TG-K562-v1` sealed run이 실행되어 **`NO_DISTINCT_WIN`**을
-> registered했고 `COMPOSE-K562-v1`이 ACTIVE(2026-06-30)가 됐다. 현재 상태는 `CLAUDE.md` §5 registry.
+> registered했고 `COMPOSE-K562-v1`이 ACTIVE(2026-06-30)가 됐다. 현재 상태는
+> [CLAUDE.md registry](../../CLAUDE.md#registry)를 따른다.
 > 원본은 point-in-time 기록으로 보존한다.
 
 작성일: 2026-06-21  
-대상 저장소: `/Users/jam/ALIVE`  
+대상 저장소: ALIVE repository root (audit-time checkout)
 검토 방식: 코드 수정 없는 읽기 전용 검사, cache-disabled 테스트, 저장소 밖 패키지 빌드
 
 ---
@@ -63,7 +64,7 @@ Config는 `esm2_t33_650M_UR50D_mean_pool`을 primary feature로 선언한다. �
 encoder 선택 함수는 torch·ESM import 또는 ESM model 초기화 과정에서 어떠한 예외가
 발생해도 이를 숨기고 8차원 `MockSequenceEncoder`를 반환한다.
 
-근거: [`src/alive/cli.py:125`](/Users/jam/ALIVE/src/alive/cli.py:125)
+근거: [`src/alive/cli.py:125`](../../src/alive/cli.py#L125)
 
 ### 위험
 
@@ -90,7 +91,7 @@ model forward를 실행한다. 주석에는 chunking이 필요할 수 있다고 
 chunking 구현은 없다. ESM token limit을 초과하는 서열에 대한 reject·truncate·windowing
 정책도 정의되지 않았다.
 
-근거: [`src/alive/data/features.py:241`](/Users/jam/ALIVE/src/alive/data/features.py:241)
+근거: [`src/alive/data/features.py:241`](../../src/alive/data/features.py#L241)
 
 ### 위험
 
@@ -120,8 +121,8 @@ chunking 구현은 없다. ESM token limit을 초과하는 서열에 대한 reje
 
 근거:
 
-- [`src/alive/cli.py:208`](/Users/jam/ALIVE/src/alive/cli.py:208)
-- [`src/alive/data/replogle.py:368`](/Users/jam/ALIVE/src/alive/data/replogle.py:368)
+- [`src/alive/cli.py:208`](../../src/alive/cli.py#L208)
+- [`src/alive/data/replogle.py:368`](../../src/alive/data/replogle.py#L368)
 
 ### 위험
 
@@ -151,9 +152,9 @@ ledger helper도 같은 artifact name의 checksum을 새 값으로 교체할 수
 
 근거:
 
-- [`src/alive/config.py:377`](/Users/jam/ALIVE/src/alive/config.py:377)
-- [`src/alive/cli.py:189`](/Users/jam/ALIVE/src/alive/cli.py:189)
-- [`src/alive/cli.py:435`](/Users/jam/ALIVE/src/alive/cli.py:435)
+- [`src/alive/config.py:377`](../../src/alive/config.py#L377)
+- [`src/alive/cli.py:189`](../../src/alive/cli.py#L189)
+- [`src/alive/cli.py:435`](../../src/alive/cli.py#L435)
 
 ### 위험
 
@@ -181,7 +182,7 @@ ledger helper도 같은 artifact name의 checksum을 새 값으로 교체할 수
 Feature bank의 `sequence_source`에는 protein sequence database release가 아니라 data card의
 `raw_data_uri`가 전달된다.
 
-근거: [`src/alive/cli.py:223`](/Users/jam/ALIVE/src/alive/cli.py:223)
+근거: [`src/alive/cli.py:223`](../../src/alive/cli.py#L223)
 
 ### 위험
 
@@ -202,7 +203,7 @@ Feature bank의 `sequence_source`에는 protein sequence database release가 아
 
 `cmd_fit()`이 동일한 base predictor를 같은 경로에 두 번 연속 기록한다.
 
-근거: [`src/alive/cli.py:267`](/Users/jam/ALIVE/src/alive/cli.py:267)
+근거: [`src/alive/cli.py:267`](../../src/alive/cli.py#L267)
 
 ### 영향
 

@@ -1,7 +1,7 @@
 # COMPOSE Development Seed-Variability (sub-project D2) Implementation Plan
 
-> **Status:** implementation-ready after this revision. Execute tasks in order; D1 consumes the
-> completed D2 artifact and therefore must not be wired into scientific Phase-2b before Task 7.
+> **Status update (2026-07-19): IMPLEMENTED + MERGED.** The original plan was implementation-ready;
+> D2 is now wired and the task list below is an as-built record, not a current execution queue.
 
 **Goal:** Measure registered-seed variability for the seed-refittable stochastic comparators
 `gears` and `cpa` on the exact Phase2a gene-disjoint calibration OOF design, without opening a

@@ -2,6 +2,8 @@
 
 > **문서 역할:** dev-stage 설계 계약 (scientific claim contract 아님)
 > **개정일:** 2026-07-06
+> **상태:** IMPLEMENTED + MERGED (D1 durable publish/final ledger; D2 seed variability). 이 문서는
+> as-built 계약이며 current release 상태는 readiness index가 추적한다.
 > **상위 protocol:** `COMPOSE-K562-v1`
 > **상위 계약:** pod sealed-run runbook
 > `docs/superpowers/runbooks/2026-07-02-compose-k562-pod-sealed-run.md` §2.4, §2.5, §7–§8

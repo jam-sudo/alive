@@ -4,6 +4,8 @@
 > decision #4 (`docs/superpowers/specs/2026-07-01-compose-deep-baselines-design.md` §7) and the
 > dev-pod plan Phase-2 Task 2.2 (`docs/superpowers/plans/2026-07-09-compose-dev-pod-real-workers.md`).
 > **Opens no seal.** Model-free measurement on observed non-sealed roles only.
+> **Status:** implementation contract merged; real Norman measurement, config finalization, and release evidence
+> remain pod-blocked. COMPOSE execution is RELEASE-BLOCKED and the seal is UNOPENED.
 > **개정일:** 2026-07-14. Implementation contract synchronized with the shared validator and
 > scientific pre-seal carrier.
 
@@ -279,7 +281,7 @@ one-way lineage checks above pass before the sealed store exists.
 
 ## 6. Known-answer tests (local, no pod) {#tests}
 
-Per `CLAUDE.md` §6 (metric direction + toy known-answer). All run locally against synthetic cells and
+Per `CLAUDE.md`#data-eval/#verify (metric direction + toy known-answer). All run locally against synthetic cells and
 a synthetic frozen projection block (no `gears`, no Norman):
 
 1. **Degenerate (zero floor).** All cells identical ⇒ `mean_cells(z) = z(mean)` ⇒ `bias_i = 0` exactly.

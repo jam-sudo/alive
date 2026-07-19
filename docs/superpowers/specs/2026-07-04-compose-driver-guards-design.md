@@ -2,10 +2,12 @@
 
 > **문서 역할:** dev-stage 설계 계약 (scientific claim contract 아님)
 > **개정일:** 2026-07-04
-> **상위 protocol:** `COMPOSE-K562-v1` (ACTIVE, 2026-06-30 activation)
+> **상태:** IMPLEMENTED/MERGED as-built guard design. Protocol은 ACTIVE / RELEASE-BLOCKED / seal UNOPENED.
+> **상위 protocol:** `COMPOSE-K562-v1` (ACTIVE, 2026-06-30 lifecycle activation)
 > **상위 runbook:** `docs/superpowers/specs/2026-07-01-compose-deep-baselines-design.md` (Changes A/B/C — 전부 완료)
 > **거버넌스:** `CLAUDE.md`#invariants, #seal, #data-eval, #provenance, #agent
-> **선행:** deep-baselines A(=A1 fit-role + A2 payload-v2), B+C(provenance/ledger) 모두 merged. 실제 sealed run은 A100 + 유효 `ActivationRecord` + clean tree로 1회.
+> **선행:** deep-baselines A(=A1 fit-role + A2 payload-v2), B+C(provenance/ledger) 모두 merged. 실제 sealed
+> run은 current release gate와 owner-approved exact SHA가 추가로 필요하다.
 
 ---
 

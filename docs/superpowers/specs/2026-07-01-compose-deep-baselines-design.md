@@ -7,12 +7,14 @@
 > `"BLOCKED candidate config"` docstring 후속만 여전히 유효.)
 
 > **문서 역할:** activation-time **구현 설계**. 새 과학 주장이 아니다.
-> **상태:** DRAFT (rev 2, spec-review iteration 1 반영) — owner 검토 대기.
+> **상태:** IMPLEMENTED/MERGED design record. §0의 미배선 서술은 2026-07-01 snapshot이며,
+> real-worker/pod release 상태는 `docs/superpowers/COMPOSE-SEAL-READINESS.md`가 추적한다.
 > **개정일:** 2026-07-01
 > **상위 계약:** `docs/superpowers/specs/2026-06-22-compose-epistasis-operator-design.md`(이하 "상위 spec")의 §10.5 comparator family, §10.6 seal-once, §7 immutability. 본 문서는 그 계약의 미완 실행 배선을 정의할 뿐, claim·metric·verdict 정의를 바꾸지 않는다.
-> **거버넌스 앵커:** immutability·write-once는 `CLAUDE.md` §11, seal은 `CLAUDE.md` §6, baseline governance는 `CLAUDE.md` §9, fit-role/seal 불변식은 `CLAUDE.md` §5.
-> **참조 표기 규약:** `CLAUDE.md §N`(거버넌스), `상위 spec §N`(claim 계약), `본 문서 §N`(이 설계). 접두사 없는 `§N`은 사용하지 않는다.
-> **선행:** COMPOSE-K562-v1 ACTIVE (2026-06-30 activation). 실제 sealed run은 A100 + 유효한 `ActivationRecord` + clean tree로 1회.
+> **거버넌스 앵커:** `CLAUDE.md`#invariants/#seal/#provenance/#data-eval.
+> **참조 표기 규약:** CLAUDE governance는 stable `#anchor`, 상위 spec과 본 문서는 `§N`을 사용한다.
+> **선행:** COMPOSE-K562-v1 ACTIVE / RELEASE-BLOCKED / seal UNOPENED. 실제 sealed run은 current
+> `ActivationRecord`, finalized evidence/config, clean owner-approved SHA와 release gate가 모두 필요하다.
 
 ---
 
@@ -104,7 +106,7 @@ payload·prediction은 JSON 헤더 + 배열 파일(예: `.npz`)로 직렬화하�
 
 ### 1.6 published-default 충실도 (owner 결정)
 
-GEARS·CPA는 각자 published/기본 config로 `singles`+`combo_calibration`에 학습한다(sealed 미접촉). 어떤 튜닝 knob도 outcome 기반으로 고르지 않으며, 필요한 경우 상위가 제공한 calibration gene-disjoint OOF fold 배정만 사용한다(`CLAUDE.md` §9, 상위 spec §10.5). GEARS는 GO-graph·gene2go 등 외부 리소스가 필요하며, 이 리소스 취득·구성은 worker 안에서 pod 단계에 이뤄진다. 로컬 stub은 이 외부 리소스를 요구하지 않는다.
+GEARS·CPA는 각자 published/기본 config로 `singles`+`combo_calibration`에 학습한다(sealed 미접촉). 어떤 튜닝 knob도 outcome 기반으로 고르지 않으며, 필요한 경우 상위가 제공한 calibration gene-disjoint OOF fold 배정만 사용한다(`CLAUDE.md`#data-eval, 상위 spec §10.5). GEARS는 GO-graph·gene2go 등 외부 리소스가 필요하며, 이 리소스 취득·구성은 worker 안에서 pod 단계에 이뤄진다. 로컬 stub은 이 외부 리소스를 요구하지 않는다.
 
 ---
 
@@ -135,11 +137,11 @@ GEARS·CPA는 각자 published/기본 config로 `singles`+`combo_calibration`에
 - **seal 접근 후:** subset을 재계산해 ledger에서 읽어온 persisted 값과 대조한다. 불일치면 결과를 **INVALID**로 만든다.
 - post-access result/terminal checksum은 접근 후 scoring에서만 알 수 있으므로 지금처럼 접근 후 write-once로 기록한다(구조 유지).
 
-이로써 provenance leg가 자기참조를 벗어나 실제 tamper-detecting 무결성 검사가 된다(`CLAUDE.md` §11, 상위 spec §7). "모든 무결성 검증 완료"로 표현하지 않는다(구조적 self-check 한계 유지, 상위 spec §10.6).
+이로써 provenance leg가 자기참조를 벗어나 실제 tamper-detecting 무결성 검사가 된다(`CLAUDE.md`#provenance, 상위 spec §7). "모든 무결성 검증 완료"로 표현하지 않는다(구조적 self-check 한계 유지, 상위 spec §10.6).
 
 ---
 
-## 4. 테스트 (전부 로컬 실행 가능, `CLAUDE.md` §13)
+## 4. 테스트 (전부 로컬 실행 가능, `CLAUDE.md`#verify)
 
 - **프로토콜 round-trip:** payload↔prediction 직렬화/역직렬화 왕복이 값·checksum을 보존한다.
 - **leakage:** sealed role/token을 주입한 payload는 직렬화 전 스캐너가 예외를 던진다; `allowed_roles`에 `control`을 넣으면 seam이 거부한다; 정상 payload는 학습 role `{singles, combo_calibration}`만 갖는다.
@@ -155,11 +157,11 @@ pod 단계에서만 가능한 것(real gears/cpa import·GO-graph·real fit·min
 
 ## 5. 보존되는 거버넌스 불변식
 
-- sealed 미접근: backend·worker·stub 어느 것도 sealed outcome을 만지지 않는다(`CLAUDE.md` §5.3, §6).
-- 학습 role 한정: GEARS/CPA는 `singles`·`combo_calibration`에만 학습한다(`CLAUDE.md` §5.4, 상위 spec §10.5). `control`은 비-sealed 참조(응답공간 사영·δ 기준)이며 학습 role이 아니다.
+- sealed 미접근: backend·worker·stub 어느 것도 sealed outcome을 만지지 않는다(`CLAUDE.md`#invariants/#seal).
+- 학습 role 한정: GEARS/CPA는 `singles`·`combo_calibration`에만 학습한다(`CLAUDE.md`#invariants, 상위 spec §10.5). `control`은 비-sealed 참조(응답공간 사영·δ 기준)이며 학습 role이 아니다.
 - fail-closed: 사용 불가 backend는 Phase-2a freeze에서 roster 미완으로 INVALID이며 조용히 제외하지 않는다(상위 spec §10.5).
-- write-once·immutability: pre-access provenance subset은 접근 전 기록되고 이후 tamper-detecting이다(`CLAUDE.md` §11).
-- published-default·OOF-only 튜닝: outcome 기반 baseline 튜닝 금지(`CLAUDE.md` §9).
+- write-once·immutability: pre-access provenance subset은 접근 전 기록되고 이후 tamper-detecting이다(`CLAUDE.md`#provenance).
+- published-default·OOF-only 튜닝: outcome 기반 baseline 튜닝 금지(`CLAUDE.md`#data-eval).
 - PASS는 과학 verdict가 아니다: 본 작업은 실행 배선이며 claim을 바꾸지 않는다.
 
 ---
@@ -182,7 +184,7 @@ pod 단계에서만 가능한 것(real gears/cpa import·GO-graph·real fit·min
 ## 참고
 
 - 상위 계약: 상위 spec §10.5–§10.6, §7.
-- 거버넌스: `CLAUDE.md` §5, §6, §9, §11.
+- 거버넌스: `CLAUDE.md`#invariants/#seal/#data-eval/#provenance.
 - seam·guard: `src/alive/compose/baselines_combo.py`.
 - 바인딩 지점: `src/alive/compose/phase2b.py`(provenance 조립, post-access 정합성), `src/alive/compose/provenance2.py`(`Phase2bProvenance`, self-checksum), `src/alive/compose/freeze.py`(roster-completeness fail-closed).
 - env lock: `docs/activation-evidence/compose/gears_cpa_dependency_lock.json`.

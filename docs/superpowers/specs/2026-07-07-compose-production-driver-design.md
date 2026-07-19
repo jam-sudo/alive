@@ -1,10 +1,11 @@
 # COMPOSE 단일 production driver (sub-project C) Design
 
 > **문서 역할:** dev-stage 구현·검증 계약 (scientific claim contract 아님)
-> **개정일:** 2026-07-07
-> **상태:** NEEDS-IMPLEMENTATION — §0.1 선행 blocker와 본 문서 acceptance gate가 모두 구현·검증되기 전
-> production sealed run 금지
-> **상위 protocol:** `COMPOSE-K562-v1` (ACTIVE)
+> **개정일:** 2026-07-19 (status sanitization; design unchanged)
+> **상태:** IMPLEMENTED + MERGED (fixture orchestration and scientific PREPARE carrier). 이 문서의
+> NEEDS-IMPLEMENTATION/TODO 서술은 설계 당시 snapshot이며 current remaining blocker는 readiness row C가
+> 추적한다. Production sealed run은 계속 RELEASE-BLOCKED다.
+> **상위 protocol:** `COMPOSE-K562-v1` (ACTIVE / RELEASE-BLOCKED; seal UNOPENED)
 > **상위 계약:** pod sealed-run runbook
 > `docs/superpowers/runbooks/2026-07-02-compose-k562-pod-sealed-run.md` §2.3, §5, §6, §7
 > **거버넌스:** `CLAUDE.md`#invariants, #provenance, #compute, #agent
@@ -573,7 +574,9 @@ phase2b). 이 해석을 조용히 남기지 않고 runbook에서 두 gate의 이
 - blanket "빈 run directory" → 본 문서 §7.1의 command별 exact state roster로 바꾼다.
 - production driver가 PREPARE를 수행한다는 표현 → pre-built immutable ResolvedRunSpec을 소비한다고 바꾼다.
 
-이 문서 동기화가 끝나지 않으면 코드가 green이어도 release 상태는 `NEEDS-IMPLEMENTATION`이다.
+설계 당시에는 이 문서 동기화가 끝나지 않으면 코드가 green이어도 release 상태를
+`NEEDS-IMPLEMENTATION`으로 유지하기로 했다. 해당 구현·동기화는 이후 merge되었으며, 현재 남은
+release blocker는 상단의 readiness index가 추적한다.
 
 ## 11. Definition of Done / release gate
 

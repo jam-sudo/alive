@@ -3,8 +3,9 @@
 > **문서 역할:** dev-pod 작업 sub-project **A**의 과학적/구현 계약. published GEARS/CPA가
 > leakage-safe한 실입력(real-input) fit 데이터로 학습하고, L1과 동일한 PCA-50 응답공간에서
 > 비교 가능한 예측을 반환하도록 하는 fit-data 계약을 정의한다.
-> **개정일:** 2026-07-03
-> **상태:** DRAFT — 독립 검토 + critical-review Finding 1 반영(owner 승인 2026-07-03); implementation plan 대기.
+> **개정일:** 2026-07-19 (status sanitization; contract unchanged)
+> **상태:** IMPLEMENTED + MERGED (sub-project A; fit-role artifact A1 + payload-v2 A2). 이 문서는
+> as-built 계약이며 current release 상태는 `docs/superpowers/COMPOSE-SEAL-READINESS.md` row A가 추적한다.
 > **코드 기준점:** `main` merge commit `8321af3` (PR #7 이후).
 > **상위 계약:** runbook `docs/superpowers/runbooks/2026-07-02-compose-k562-pod-sealed-run.md` §2.1,
 > deep-baseline design `docs/superpowers/specs/2026-07-01-compose-deep-baselines-design.md` §1,

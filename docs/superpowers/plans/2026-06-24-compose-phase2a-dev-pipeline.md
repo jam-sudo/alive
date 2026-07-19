@@ -1,10 +1,14 @@
 # COMPOSE-K562-v1 Phase 2a Development Pipeline — Corrected Implementation Plan
 
-> **Note (2026-07-04):** the activation gate has since passed (2026-06-30: config/spec/tests → ACTIVE).
+> **Status update (2026-07-19): IMPLEMENTED + MERGED; scientific execution RELEASE-BLOCKED.** 아래
+> task는 dev implementation의 as-built record이며 current work queue가 아니다.
+>
+> **Note (2026-07-04):** the lifecycle activation gate passed (2026-06-30: config/spec/tests → ACTIVE).
 > The body's §1 clause "Real execution remains forbidden until `CLAUDE.md` … marked `ACTIVE`" is
-> pre-activation; the remaining gate for a real run is A100 + a valid `ActivationRecord` + clean tree.
+> pre-activation; a real run additionally requires current finalized evidence/config, a valid
+> `ActivationRecord`, clean owner-approved exact SHA, and the readiness release gate.
 
-> **Status:** ACTIVE (2026-06-30 activation). This plan delivered the dev implementation;
+> **Original status:** ACTIVE (2026-06-30 activation). This plan delivered the dev implementation;
 > the real activated Phase-2a run (real Norman δ/ε on the A100) is the separate execution step.
 > **Scope:** implementation and synthetic/tiny-fixture tests only. No real Norman Phase-2a run,
 > no sealed role materialisation, and no scientific verdict.

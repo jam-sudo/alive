@@ -1,5 +1,10 @@
 # ALIVE — Virtual Cell Project Governance
 
+> **⚠ SUPERSEDED (2026-07-08) — historical proposal only.** 이 제안본은 적용된 root
+> `CLAUDE.md`가 아니며 현재 protocol 상태·release gate·agent instruction의 source가 아니다.
+> 현재 거버넌스는 repository root `CLAUDE.md`, 실행 준비도는
+> `docs/superpowers/COMPOSE-SEAL-READINESS.md`를 따른다. 아래 본문은 당시 제안 기록으로 보존한다.
+
 > **역할:** project-wide scientific governance + agent operating contract
 > **개정일:** 2026-07-04
 > **활성 protocol:** `COMPOSE-K562-v1` (ACTIVE, 2026-06-30 activation; `TG-K562-v1` COMPLETE)

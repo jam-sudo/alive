@@ -1,5 +1,9 @@
 # COMPOSE sub-project C — production driver Implementation Plan
 
+> **Status update (2026-07-19): fixture orchestration and scientific PREPARE carrier IMPLEMENTED +
+> MERGED.** 아래 task는 as-built record이며 current work queue가 아니다. Remaining scientific blockers는
+> readiness row C와 dev-pod plan이 추적한다.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Build the single committed COMPOSE production driver `scripts/run_compose_k562_phase2.py` (`phase2a`/`preflight`/`phase2b --confirm-seal`/`recover`) driven by an immutable ResolvedRunSpec, orchestrating the existing (post-C0) library entry points into three independent processes + recovery, without ever re-implementing science or opening a seal outside the one sanctioned phase2b construction point.

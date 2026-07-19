@@ -1,5 +1,9 @@
 # COMPOSE approximation-bias metric v1 — Implementation Plan
 
+> **Status update (2026-07-19): local implementation + v3 hardening MERGED.** Real Norman
+> measurement, config finalization, and release evidence remain pod-blocked. 아래 completed local task는
+> current work queue가 아니다.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 > **Updated 2026-07-18 — Probe-A admission model superseded.** The single-`status` Probe-A admission gate described below (task "Probe-A admission gate") was subsequently hardened into a THREE-ARTIFACT anti-forgery chain: an owner-frozen `compose_gears_probe_a_registration_v1`, a verifier-code-bound `compose_gears_probe_a_verification_v1` receipt, and a `compose_gears_probe_a_admission_v3` admission that binds both by externally-anchored SHA; the report is now `compose_approximation_bias_report_v3`. Where this plan's admission/verification details differ from the authoritative spec (`docs/superpowers/specs/2026-07-13-compose-approximation-bias-metric-design.md`) and runbook (`docs/superpowers/runbooks/2026-07-11-compose-gears-decision-probe-rerun.md`), those govern.

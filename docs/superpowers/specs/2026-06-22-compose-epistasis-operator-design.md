@@ -1,8 +1,11 @@
 # COMPOSE — 식별가능한 Interaction-Composition Operator (Epistasis) Design
 
 > **문서 역할:** milestone의 scientific claim 계약
-> **상태:** **ACTIVE** (2026-06-30 activation) — §10.1 activation blocker 6개가 version-controlled evidence/tests로 충족되어 CLAUDE.md registry가 같은 activation commit에서 `ACTIVE`로 전환됨. real Phase-2 fit·sealed 접근 인가; 실제 sealed run은 A100에서 유효한 `ActivationRecord`(requirement별 evidence hash) + clean git tree로만 실행되고 COMPOSE seal은 정확히 한 번 열린다(§6.3). Phase-2 config는 `configs/compose_k562_v1_phase2.yaml`.
-> **개정일:** 2026-06-30
+> **상태:** **ACTIVE / RELEASE-BLOCKED / seal UNOPENED.** Lifecycle activation은 2026-06-30에
+> 완료됐지만 현재 committed config/evidence는 release-ready가 아니다. Real fit과 sealed access는
+> current `ActivationRecord`, finalized config/evidence, clean owner-approved exact SHA와
+> `docs/superpowers/COMPOSE-SEAL-READINESS.md`의 release gate가 모두 유효할 때만 허용된다.
+> **개정일:** 2026-07-19 (status sanitization; scientific claim unchanged)
 > **protocol 이름:** `COMPOSE-K562-v1`
 > **선행 milestone:** `TG-K562-v1` (COMPLETE, verdict `NO_DISTINCT_WIN`; 본 milestone은 그 결과에 소급 주장하지 않음, seal 영구 독립 §6.3)
 
@@ -13,11 +16,12 @@
 본 문서는 **조합 perturbation의 비가산(genetic-interaction) 성분을 식별가능한 composition
 operator로 예측**하는 차기 milestone의 과학 계약과 Phase-2 사전등록 후보이다.
 CLAUDE.md(safety/governance) 하위, milestone claim 도메인의 최상위 문서이다.
-**§10.1 activation blocker 6개가 2026-06-30 모두 충족되어 active scientific protocol로 전환됐다**
-(CLAUDE.md registry 동일 commit `ACTIVE`). 실제 sealed run은 여전히 A100 + ActivationRecord +
-clean tree를 요구하고 COMPOSE seal은 1회 열린다.
+**§10.1의 initial lifecycle activation blocker 6개가 2026-06-30 충족되어 active protocol로
+전환됐다**(`CLAUDE.md`#registry). 이 이력은 현재 실행 준비도를 의미하지 않는다. 현재 release
+blocker와 seal 상태는 readiness index가 추적하며, release gate 전에는 real fit과 sealed run을 금지한다.
 
-이 milestone은 다음이 모두 충족되기 전까지 활성화하지 않는다(§9):
+이 milestone의 initial lifecycle activation에는 다음이 모두 필요했다(§9). 현재 실행은 이 조건의
+current-lineage 재검증과 별도 release gate를 추가로 요구한다:
 
 1. owner 승인
 2. 별도 versioned config (split·thresholds·seeds·metrics 확정)
@@ -359,23 +363,23 @@ tests(unit/leakage/metric/repro/integration)를 동반한다.
 
 ---
 
-## 10. Phase-2 candidate pre-registration (owner-approved design; activation blocked)
+## 10. Phase-2 registered design (owner-approved; execution release-blocked)
 
 Owner는 2026-06-23 Phase-2 설계와 사전등록 후보 작성을 승인했다. exact 후보 값은
 `configs/compose_k562_v1_phase2.yaml`가 source-of-truth(CLAUDE.md#sources)이며, 본 절은
 claim·정직성 계약을 고정한다. 이는 sealed scientific run의 승인이 아니다.
 
-### 10.1 Activation blockers
+### 10.1 Initial activation contract와 current release gate
 
-> **상태 (2026-06-30): 6개 blocker 전부 충족 — activation 완료.** evidence는
+> **Lifecycle 기록 (2026-06-30): 6개 blocker 충족 — activation 완료.** 당시 evidence는
 > `docs/activation-evidence/compose/`(phi-rank, detectable-effect, GEARS/CPA lock)와
-> `docs/data-cards/norman_compose_k562_v1.json`, tests는 `tests/alive/compose/` (activation commit `d507a09` 기준 591 green; 현재 645).
-> CLAUDE.md registry는 같은 activation commit에서 `ACTIVE`로 전환된다. 아래 목록은 충족한
-> 계약을 기록으로 보존한다.
+> `docs/data-cards/norman_compose_k562_v1.json`, tests는 `tests/alive/compose/`에 기록됐다.
+> `CLAUDE.md`#registry는 같은 activation commit에서 `ACTIVE`로 전환됐다. 아래 목록은 initial
+> activation 계약을 보존한다. 현재 evidence set은 `INCOMPLETE`이며 scientific guard가 거부하므로,
+> finalized config lineage에서 재생성되고 readiness release gate가 통과되기 전에는 실행할 수 없다.
 
-다음이 version-control된 evidence/artifact와 tests로 충족되고 `CLAUDE.md` registry가 같은
-activation commit에서 `ACTIVE`로 전환되기 전에는 real Phase-2 fit, sealed outcome 접근과 verdict
-산출을 금지한다.
+다음은 lifecycle activation과 모든 후속 release lineage에서 유지되어야 한다. Current evidence/artifact가
+하나라도 미완료·불일치하면 real Phase-2 fit, sealed outcome 접근과 verdict 산출을 금지한다.
 
 1. 실제 Norman `combo_calibration`에서 각 후보 total factor dimension에 대한
    $\Phi$ rank·condition number 보고.

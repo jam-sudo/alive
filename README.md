@@ -1,12 +1,16 @@
-# ALIVE — CARTOGRAPHER Trust-Gate MVP (`TG-K562-v1`, COMPLETE)
+# ALIVE — Virtual Cell Research Program
 
-> **Status (2026-07-04).** `TG-K562-v1` is **COMPLETE** — the sealed evaluation was opened once and
+> **Current state (2026-07-19).** `COMPOSE-K562-v1` is **ACTIVE / RELEASE-BLOCKED / seal
+> UNOPENED**. Resolve the current development-pod and evidence blockers in
+> `docs/superpowers/COMPOSE-SEAL-READINESS.md` before following the one-time sealed-run runbook.
+> `TG-K562-v1` is **COMPLETE** — the sealed evaluation was opened once and
 > registered **`NO_DISTINCT_WIN`** (the conformal error bound was valid and retained, but the gate
-> did **not** beat the comparator family). The active protocol is now **`COMPOSE-K562-v1`** (Norman
-> K562 CRISPRa non-additive epistasis operator; ACTIVE 2026-06-30, A100 sealed confirmatory run
-> pending). **This README documents the now-complete CARTOGRAPHER pipeline and its mechanics** — the
-> `evaluate-once` seal described below has already been spent for `TG-K562-v1`. See `CLAUDE.md`#registry
-> for the protocol registry.
+> did **not** beat the comparator family). **The remainder of this README documents the completed
+> CARTOGRAPHER pipeline and its mechanics** — the
+> `evaluate-once` seal described below has already been spent for `TG-K562-v1`. See the
+> [protocol registry](CLAUDE.md#registry) for the current lifecycle/readiness/seal state.
+
+## Completed pipeline: CARTOGRAPHER Trust-Gate (`TG-K562-v1`)
 
 A retrospective, leakage-controlled **trust-gate** for single-gene CRISPRi perturbation-response
 prediction. Given a frozen base predictor, an error-aware gate ranks held-out K562 perturbations by
@@ -40,7 +44,8 @@ uv sync --extra features   # adds torch, transformers, fair-esm
 The numpy-only mock encoder is **opt-in only**, via the `--mock-encoder` flag on `prepare`
 (synthetic/CI runs). A scientific run (no `--mock-encoder`) requires the real ESM-2: if the
 `features` extras are absent, `prepare` fails loudly with a clear `error: …` — it **never silently
-falls back** to the mock encoder (see `CLAUDE.md`#data-eval and design spec §4.2).
+falls back** to the mock encoder (see [data/evaluation governance](CLAUDE.md#data-eval) and design
+spec §4.2).
 
 Run the test suite and linters:
 

@@ -1,271 +1,193 @@
 # ALIVE — Virtual Cell Project Governance
 
 > **역할:** project-wide scientific governance + agent operating contract
-> **개정일:** 2026-07-07
-> **활성 protocol:** `COMPOSE-K562-v1` (ACTIVE, 2026-06-30 activation; `TG-K562-v1` COMPLETE)
-> **다음 milestone:** COMPOSE sealed double-unseen 확정 실행(A100, 1회) → `CT-RPE1-v1` (deferred)
+> **개정일:** 2026-07-19
+> **protocol lifecycle:** `COMPOSE-K562-v1` ACTIVE · `TG-K562-v1` COMPLETE · `CT-RPE1-v1` DEFERRED
+> **execution readiness:** COMPOSE **RELEASE-BLOCKED** · seal **UNOPENED**
+> **다음 gate:** `docs/superpowers/COMPOSE-SEAL-READINESS.md`의 blocker와 owner release gate를 모두 충족
 
-이 문서는 매 세션 전체가 context에 로드된다. 따라서 여기에는 protocol-independent safety invariant와
-agent operating contract만 둔다. Milestone별 세부(exact split·threshold·seed·metric·grid·roster)는
-versioned spec/plan/config가 authoritative이며, 여기서는 가리키기만 한다(§1). 새 milestone 세부를 이
-문서에 추가하지 않는다.
-
----
+이 파일은 매 세션 전체가 context에 들어간다. 모든 작업에 필요한 불변식과 운영 규칙만 두며, 자주 바뀌는
+진행 상태와 milestone 세부는 versioned spec/plan/config/readiness/runbook이 정의한다. 경로별 세부는
+`.claude/rules/`에 둔다. 새 threshold·seed·metric·roster·실행 절차를 이 파일에 복제하지 않는다.
 
 ## 1. Sources of truth & 충돌 처리 {#sources}
 
-문서 계층 — 도메인별 우선순위:
+도메인별 우선순위:
 
-1. Safety · seal · leakage · governance invariant → 이 문서 (`CLAUDE.md`)
-2. Scientific claim 정의 → 해당 milestone versioned design spec (spec §0)
-3. Execution contract → 해당 milestone implementation plan
-4. Exact split · threshold · seed · metric → committed protocol/config
+1. Safety · seal · leakage · governance invariant → 이 파일
+2. Scientific claim · estimand · non-claim → milestone design spec
+3. Execution contract · task order → implementation plan/runbook
+4. Exact split · threshold · seed · metric · roster → committed protocol/config/data card
 5. Runtime behavior → `src/alive/`
-6. Vision → `virtual-cell-model-blueprint.md` · Evidence → `virtual-cell-research-report.md` ·
-   Long-range → `virtual-cell-project-plan.md`
+6. Current release readiness → `docs/superpowers/COMPOSE-SEAL-READINESS.md`
+7. Vision/evidence/long-range → `virtual-cell-model-blueprint.md` · `virtual-cell-research-report.md` ·
+   `virtual-cell-project-plan.md`
 
-Safety invariant는 이 문서가 최상위, claim 정의는 milestone spec이 최상위다. 두 도메인이 직접 충돌하면
-(예: safety invariant가 어떤 claim 구성을 금지) safety invariant가 우선하여 run을 중단시킨다.
+Safety invariant와 claim/config가 충돌하면 safety가 우선한다. 충돌을 발견하면 (1) 충돌과 affected protocol/
+invariant를 보고하고, (2) scientific run을 시작·계속하지 않으며, (3) owner가 authoritative 문서를
+reconcile하게 하고, (4) 변경된 lineage에는 새 run identity를 사용한다. 편리한 쪽을 조용히 선택하지 않는다.
 
-충돌은 조용히 해결하거나 편리한 쪽을 고르지 않는다. 문서가 충돌하면:
+## 2. Mission과 claim 경계 {#mission}
 
-1. 충돌을 보고한다.
-2. active protocol과 affected invariant를 식별한다.
-3. scientific run을 시작·계속하지 **않는다.**
-4. owner가 명시적으로 reconcile하게 한다.
-5. 변경 후 새 run identity와 artifact lineage를 만든다.
-
-현재 active protocol의 spec/plan/config는 §5 registry의 `COMPOSE-K562-v1` 항목이 가리킨다.
-
----
-
-## 2. Mission (요약) {#mission}
-
-ALIVE는 단계적으로 causal virtual-cell world model을 구축한다. 장기 target:
+ALIVE는 단계적으로 causal virtual-cell world model을 구축한다:
 
 $$p(X_{post}\mid P_{control}, A, C)$$
 
-$P_{control}$ = control-cell population(paired individual cell 아님), $A$ = intervention/CRISPRi
-target, $C$ = context, $X_{post}$ = post-intervention cell-population distribution.
+$P_{control}$은 control-cell population, $A$는 intervention/perturbation, $C$는 context,
+$X_{post}$는 post-intervention cell-population distribution이다. 개별 protocol의 modality와 dataset은
+그 spec/config/data card가 정하며 CRISPRi·CRISPRa 또는 서로 다른 dataset을 상호 대체하지 않는다.
 
-현재는 특정 milestone MVP만 활성이며(§5), 그 이상을 주장하지 않는다. 다음 용어는 근거 없이 쓰지 않는다:
-mechanistic · causal · temporally resolved · clinically predictive · distribution-valued
-prediction-set · Active Cartographer. 현재 additive/bilinear base의 결과를 deep virtual-cell 성과로
-표현하지 않는다.
+현재 근거 없이 mechanistic · causal · temporally resolved · clinically predictive ·
+distribution-valued prediction-set · Active Cartographer라고 주장하지 않는다. additive/bilinear 결과를
+deep virtual-cell 성과로 표현하지 않고, split이 직접 검증하지 않은 context/target 일반화를 주장하지 않는다.
 
----
+## 3. Universal scientific invariants {#invariants}
 
-## 3. Universal scientific invariants — 모든 protocol에 적용 {#invariants}
+1. **Protocol first.** train/tune/eval 전에 protocol, manifest, estimand, primary metric, comparator family,
+   failure condition을 version-control한다.
+2. **Baseline first.** learned model 결과를 보기 전에 registered baseline과 evaluation harness를 구현한다.
+3. **Seal outcomes.** evaluation outcome은 selection freeze 뒤 authorized evaluation code에서만 접근한다.
+4. **Fit on allowed roles only.** normalization·selection·embedding·calibration·hyperparameter·threshold는
+   protocol이 허용한 role만 사용한다.
+5. **No outcome-selected evaluation set.** universe와 exclusion은 metadata·external-feature availability·
+   사전등록 QC로 정하며 response strength나 base error로 고르지 않는다.
+6. **Split at the claim unit.** perturbation claim은 perturbation ID/pair로 split한다. cell-barcode split으로
+   unseen-perturbation claim을 만들지 않는다.
+7. **Match claim to split.** K562-internal·shared-target·pair-zero-shot 결과를 각각 new-context·unseen-target·
+   gene-zero-shot 증거로 확대하지 않는다.
+8. **Risk is measured outcome error.** routing utility를 자기 confidence/bound/threshold로 평가하지 않는다.
+9. **Coverage is table stakes.** calibration validity만으로 routing novelty를 주장하지 않는다.
+10. **No single-metric win.** primary/registered secondary metric, effect size, claim-unit CI, seed variability,
+    failed run을 함께 보고한다.
+11. **Interrogate systematic variation.** batch·cell cycle·panel bias·common shift·mean collapse를 점검한다.
+12. **Do not overclaim heterogeneity.** outcome-independent 정의와 noise audit 없이 responder/multimodality를
+    주장하지 않는다.
+13. **Uncertainty needs a method.** raw variance를 aleatoric/epistemic uncertainty로 부르지 않고 estimator,
+    calibration role, coverage event를 명시한다.
+14. **Negative results are results.** futility·calibration failure·invalid evaluation·no-distinct-win을 삭제,
+    대체하거나 threshold를 사후 변경하지 않는다.
+15. **Define the experimental unit.** biological unit과 technical replicate를 구분하고 exact N과 반복 구조를
+    manifest/report에 기록한다.
+16. **Pre-register adequacy and exclusions.** sample size/power 또는 detectable-effect 근거, inclusion/exclusion,
+    outlier, missing-data 정책을 outcome 접근 전에 고정한다.
+17. **Separate exploratory from confirmatory.** planned/unplanned analysis를 표시하고 exploratory 결과를
+    confirmatory verdict로 승격하지 않는다.
+18. **Report transparently.** effect size·CI·exact N·반복 횟수·제외/누락 사유·측정했지만 보고하지 않은
+    outcome과 근거 수준을 남긴다.
 
-1. **Protocol first.** train/tune/eval 전에 active protocol, manifest, primary metric, comparator
-   family, failure condition을 version-control한다.
-2. **Baseline first.** learned model 성과를 보기 전에 registered baseline과 evaluation harness를
-   구현한다.
-3. **Seal evaluation outcomes.** active protocol의 evaluation outcome은 model/method selection이
-   freeze된 뒤 authorized evaluation code에서만 접근한다.
-4. **Fit on training roles only.** normalization · feature selection · embedding · calibration ·
-   hyperparameter · threshold는 protocol이 허용한 role만 쓴다.
-5. **No outcome-selected test set.** evaluation universe는 metadata · external-feature availability ·
-   사전등록 QC로 정한다. response strength나 base error로 고르지 않는다.
-6. **Split at the claim unit.** perturbation-level claim은 perturbation ID로 split한다. cell-barcode
-   split으로 unseen-perturbation claim을 만들지 않는다.
-7. **Match claim to split.** K562-internal split은 new-context transfer를, shared-target split은
-   unseen-target generalization을 증명하지 않는다.
-8. **Risk is measured outcome error.** routing utility를 conformal bound · confidence score · 자기
-   자신의 threshold로 평가하지 않는다.
-9. **Coverage is table stakes.** calibration validity 자체를 routing novelty로 광고하지 않는다.
-10. **No single-metric win.** primary metric · registered secondary metric · effect size ·
-    perturbation-level CI · failed run을 모두 보고한다.
-11. **Interrogate systematic variation.** batch · cell cycle · target-panel bias · common treatment
-    shift · mean collapse를 점검한다.
-12. **Do not overclaim heterogeneity.** responder/non-responder · multimodality는
-    outcome-independent 정의와 noise audit 없이 주장하지 않는다.
-13. **Uncertainty needs a method.** raw variance를 aleatoric/epistemic uncertainty로 부르지 않는다.
-    estimator · calibration role · coverage event를 명시한다.
-14. **Negative results are results.** futility · calibration failure · invalid evaluation ·
-    no-distinct-win을 삭제·대체하거나 threshold를 사후 변경하지 않는다.
+## 4. Seal, provenance & enforcement {#seal-immutability}
 
----
+### 4.1 Seal 원칙 {#seal}
 
-## 4. Seal & immutability contracts — safety core {#seal-immutability}
+- evaluation outcome은 selection freeze 후 protocol당 정확히 한 번 연다.
+- fit/develop/calibrate/PREPARE 단계의 sealed access count는 0이어야 한다.
+- futility-stopped run은 count 0으로 영구 종료한다. futility는 negative verdict가 아니다.
+- protocol별 seal/run ID/audit/result는 상호 대체하지 않는다. cross-protocol 비교는 immutable artifact를
+  입력으로 받는 별도 analysis다.
 
-### 4.1 Seal 원칙 (protocol-independent) {#seal}
+### 4.2 Run identity & write-once {#provenance}
 
-- evaluation outcome은 selection freeze 후 authorized code에서만, protocol당 **정확히 한 번** 연다.
-- fit/develop/calibrate 단계의 sealed access count는 0이어야 한다.
-- futility-stopped run은 sealed access count 0으로 영구 종료한다. futility ≠ negative verdict.
-- 서로 다른 protocol의 seal은 대체 불가. 하나의 run ID·audit file·result가 두 protocol seal을 동시에
-  대표할 수 없다. cross-protocol 비교는 각 protocol의 immutable artifact를 입력으로 받는 별도 analysis다.
+모든 run은 protocol/version, resolved config, data/data-card/manifest/exclusion/feature hashes, seed, Git SHA,
+dependency lock, device/precision, stage checksum, seal audit, report checksum을 기록한다. Existing run을
+덮어쓰지 않고, byte-identical upstream에서만 resume하며, terminal/seal 이후 upstream을 재실행하지 않는다.
+lineage가 달라지면 새 run identity를 사용한다.
 
-### 4.2 Run identity & write-once (provenance) {#provenance}
+### 4.3 실제 강제 지점 {#enforcement}
 
-모든 run은 기록한다: protocol name/version · resolved config · dataset/data-card hash · manifest/
-exclusion hash · feature-bank/sequence-map hash · seed · Git SHA · dependency-lock hash ·
-device/precision · stage artifact checksum · seal-access audit · report checksum.
+이 파일은 규범을 제공하는 context이며 자체로 보안 경계가 아니다. 아래 guard가 계약을 집행한다. 우회·약화·
+mock 대체하지 않는다. guard가 작업을 막으면 코드를 완화하지 말고 충돌 절차를 따른다.
 
-Run directory와 ledger는 write-once state machine이다:
-
-- existing run을 조용히 덮어쓰지 않는다.
-- resume은 upstream hash가 byte-identical할 때만 허용한다.
-- ledger entry를 새 checksum으로 교체하지 않는다.
-- terminal status 또는 seal access 후 upstream stage를 재실행하지 않는다.
-- input lineage가 달라지면 새 run identity를 쓴다.
-
-### 4.3 강제 지점 (code guards — 권고 아님) {#enforcement}
-
-§4.1–4.2는 아래 코드가 강제한다. 이 가드를 우회·비활성화·약화하거나 mock으로 대체하지 않는다. 가드가
-작업을 막으면 버그가 아니라 seal/lineage 위반 신호이므로, 가드를 고치지 말고 §1 충돌 처리(중단·보고)를
-따른다.
-
-- seal 1회 · sealed-read 차단 → `compose/outcome_store.py` (`ComposeOutcomeStore.read_unsealed`가
-  sealed role read 차단; `claim_sealed_access`/`evaluate_sealed_once`가 `audit_path`당 정확히 1회;
-  `ComposeSealingError`).
-- leakage wall → `compose/gates.py::measurability_gate` (sealed role 시 `LeakageError`);
-  `compose/freeze.py` (`_assert_no_sealed`·`OutcomeLeakageError`·`FreezeError`가 measured outcome·
-  sealed 참조의 freeze 번들 유입 차단).
-- write-once / provenance → `io.atomic_write_once`; `compose/durable.py` · `compose/terminal.py`
-  (byte/SHA-identical 재쓰기만 허용).
-- run-entry contract audit → `compose/preflight.py::run_preflight` (`PreflightError`,
-  `EvaluationLock`) — checksum · sealed marker · manifest role 검증 후에만 sealed 접근 인가.
-
----
+- protocol-global scientific seal → `compose/driver/seal_boundary.py`, `run_spec.py`, `phase2b_cmd.py`
+- sealed-read 차단·1회 claim → `compose/outcome_store.py` (`ComposeSealingError`)
+- leakage/freeze wall → `compose/gates.py`, `compose/freeze.py`
+- write-once/durable terminal → `io.atomic_write_once`, `compose/durable.py`, `compose/terminal.py`
+- entry/identity/pair audit → `compose/preflight.py`, `compose/driver/confirmation.py`, `pair_index.py`
 
 ## 5. Protocol registry {#registry}
 
-정확한 split·verdict·claim은 각 protocol의 spec/plan/config가 authoritative다. 이 표는 claim을 정의하지
-않으며, protocol status(ACTIVE/COMPLETE/DEFERRED·seal open 여부)의 단일 authoritative source다.
+- **`TG-K562-v1` — COMPLETE.** Replogle K562 CRISPRi Trust-Gate; seal opened once; verdict
+  `NO_DISTINCT_WIN`. Spec `docs/superpowers/specs/2026-06-20-cartographer-design.md`.
+- **`COMPOSE-K562-v1` — ACTIVE / RELEASE-BLOCKED / seal UNOPENED.** Norman K562 CRISPRa pair-level
+  bilinear GI operator. Spec `docs/superpowers/specs/2026-06-22-compose-epistasis-operator-design.md`;
+  config `configs/compose_k562_v1_phase2.yaml`; readiness `docs/superpowers/COMPOSE-SEAL-READINESS.md`.
+- **`CT-RPE1-v1` — DEFERRED.** K562→RPE1 shared-target context transfer. 별도 owner approval, spec/config,
+  manifest, leakage/power analysis, outcome store/audit가 생기기 전에는 활성화하거나 perturbed outcome에
+  접근하지 않는다.
 
-| protocol | status | 한 줄 목적 | 문서 · seal |
-|---|---|---|---|
-| `TG-K562-v1` | COMPLETE | K562-internal held-out(four-way split)에서 Trust-Gate가 사전등록 UQ comparator보다 prediction error를 잘 순위화하는가 (sealed eval; verdict: **NO_DISTINCT_WIN**) | spec `docs/superpowers/specs/2026-06-20-cartographer-design.md`; plan `.../plans/2026-06-20-cartographer-mvp.md`; config `configs/cartographer_trust_gate_k562_v1.yaml`; K562-internal seal (opened once) |
-| `COMPOSE-K562-v1` | **ACTIVE** | Norman K562 CRISPRa combo(pair-level split)에서 단일-gene signature로 고정한 factor로 비가산 성분을 identifiable bilinear operator로 예측 | spec `docs/superpowers/specs/2026-06-22-compose-epistasis-operator-design.md`; plan series `docs/superpowers/plans/*compose*.md` (phase1 → 2a/2b → deep-baselines → fit/payload → durable-ledger …); config `configs/compose_k562_v1_phase2.yaml`; 진행 index `docs/superpowers/COMPOSE-SEAL-READINESS.md` (seal 시 retire); 독립 COMPOSE seal (protocol당 1회; 아직 미개봉, A100 sealed run 대기) |
-| `CT-RPE1-v1` | DEFERRED | K562→RPE1 shared-target **context transfer** 평가 (clean cell-type split 아님) | 별도 spec/config/seal 필요 (미작성) |
+COMPOSE의 2026-06-30 lifecycle activation은 유지되지만 현재 committed evidence/config는 release-ready가
+아니다. Current `ActivationRecord`, finalized config/evidence, clean owner-approved SHA와 runbook release gate가
+모두 유효하기 전에는 real fit·sealed run을 실행하지 않는다. 미래 protocol은 각각 고유 이름, spec, seal,
+success criteria를 요구한다.
 
-**`COMPOSE-K562-v1` activation (2026-06-30).** spec §10.1의 activation blocker가 version-controlled
-evidence/test(`docs/activation-evidence/compose/`, `docs/data-cards/`)로 충족되어 real Phase-2 fit과
-sealed outcome 접근이 인가됐다. 단:
+## 6. Data · model · evaluation governance {#data-eval}
 
-- 실제 sealed confirmatory run은 A100에서 유효한 `ActivationRecord`(requirement별 non-empty evidence
-  hash) + clean git tree로만 실행된다.
-- COMPOSE seal은 `TG-K562`와 독립적으로 protocol당 정확히 한 번 연다 (현재 open 여부는 위 표가 authoritative).
-- activation은 기존 결과에 소급 적용하지 않는다.
+**Data.** Source/modality/cell line/assay/endpoint/license/checksum/schema는 active config와 data card로 확인한다.
+raw counts와 transformation provenance를 보존하고 sparse/on-disk/chunked access를 사용하며 bounded slice만
+densify한다. Cell line/dataset/external biological resource identity를 검증한다. Raw/processed data,
+checkpoint, credential, identifiable donor data를 commit하지 않는다. Transfer 전 size·destination·license·
+privacy를 확인한다. External-feature eligibility와 ambiguous/missing ID 정책은 split 전에 고정한다.
 
-**`CT-RPE1-v1` (DEFERRED).** cell line · experiment · batch · endpoint day가 함께 변하는
-cross-dataset context transfer다. 다음이 모두 있기 전엔 활성화하지 않는다: owner approval · 별도
-spec/config · shared-target manifest · RPE1-specific leakage test · K562 seal과 독립된 RPE1 outcome
-store/audit · adequate sample-size/detectable-effect 분석. RPE1 perturbed outcome 접근은 이 protocol
-활성화를 요구한다. 활성화 시 RPE1 seal 규칙 적용: control은 inference context 사용 가능; perturbed
-outcome은 selection freeze 후 evaluation code만; response strength로 target 선택 금지; audit는
-TG-K562와 별도 저장.
+**Model / feature.** 요청 encoder 실패를 mock으로 조용히 대체하지 않는다(mock은 synthetic/CI 전용).
+revision·dimension·pooling·sequence/ontology release를 기록한다. 새 deep architecture/operator/decoder는 별도
+spec, strongest baseline, ablation이 필요하다. Biological prior encoder(gene/pathway/network)는 ID-only null
+baseline과 ablation해 marginal signal을 격리한다. Population sample 출력만으로 heterogeneity 학습을 주장하지
+않고 pseudobulk·self-distance/noise floor·mean-collapse diagnostic를 유지한다.
 
-R2/R3 · causal masking · Norman/Tahoe OOD · combo · drug · time series · distribution-valued set ·
-Active Cartography는 각각 별도 이름·spec·seal·success criteria가 필요한 후속 protocol이다.
+**Evaluation.** Comparator roster와 protocol을 outcome 전에 freeze한다. Metric 방향·scientific event를
+명시하고 known-answer/constant/shuffled/random sanity를 둔다. Comparator-family selection을 반영한
+simultaneous inference를 사용한다. Per-target/null behavior, biological/distributional regression margin,
+noise ceiling, failed run을 보고한다. Prospective validation은 별도 milestone이다.
 
----
-
-## 6. Data · model · baseline · evaluation governance {#data-eval}
-
-세부 grid·roster·threshold는 active spec/config가 정한다. 아래는 protocol-independent 규칙이다.
-
-**Data** (`src/alive/data/`)
-
-- source: versioned Replogle processed Perturb-seq AnnData(`.h5ad`); raw counts·provenance 보존.
-- sparse/on-disk/chunked access; bounded population/minibatch만 densify.
-- manifest에 asset·day·endpoint·target universe 기록.
-- `K562_gwps`를 `K562_essential` 대신 조용히 쓰지 않는다.
-- cell-count/UMI threshold를 universal fact로 hardcode하지 않고, 실제 분포를 profile해 threshold와
-  sensitivity를 사전등록한다.
-- raw/processed data·checkpoint·credential·identifiable donor data를 commit하지 않는다.
-- large transfer 전 size·destination·license를 확인한다.
-- external feature eligibility는 split 전에 확정하고, missing/ambiguous sequence를 split 후 조용히
-  건너뛰지 않는다.
-
-**Model / feature**
-
-- requested encoder(예: ESM) 실패를 mock으로 조용히 대체하지 않는다 (mock은 synthetic/CI 전용).
-- feature-bank revision·dimension·pooling·config를 대조하고, long-sequence policy와 sequence database
-  release를 기록한다.
-- deep encoder·low-rank operator·OT-CFM·NB decoder 등 새 architecture는 별도 spec과 baseline/ablation이
-  필요하다.
-- population sample 출력이 heterogeneity 학습을 뜻하지 않는다 — pseudobulk·mean·self-distance floor·
-  mean-collapse diagnostic를 유지한다.
-
-**Baseline**
-
-- 모든 protocol은 strongest eligible baseline과 비교하고, roster는 evaluation outcome을 보기 전에
-  고정한다.
-- biological gene/pathway/network encoder는 ID-only baseline과 ablation한다.
-
-**Evaluation**
-
-- versioned evaluation protocol을 comparison 전에 freeze한다.
-- primary metric의 방향과 scientific event를 명시하고 toy known-answer test를 둔다.
-- strongest comparator를 사후 선택해 ordinary pairwise CI를 적용하지 않고, comparator-family selection을
-  반영한 simultaneous inference를 쓴다.
-- secondary biological/distributional metric의 material-regression margin을 사전등록한다.
-- per-target · null/weak behavior · seed variability · self-prediction/noise ceiling · failed run을
-  보고한다.
-- futility status와 scientific verdict를 혼합하지 않는다.
-- independent prospective hit-rate validation은 별도 milestone이다.
-
----
-
-## 7. Repository & compute conventions {#repo}
+## 7. Repository, commands & compute {#repo}
 
 ```text
-src/alive/
-  data/ base/ gate/ baselines/ conformal/ metrics/ eval/ experiment/   # TG-K562 pipeline
-  compose/                                                             # COMPOSE outcome store · terminal state machine · provenance2 (ACTIVE)
-  cli.py config.py io.py provenance.py types.py                        # top-level modules
-configs/   tests/   docs/   artifacts/(gitignored)
+src/alive/      maintained library and CLI
+configs/        immutable experiment configuration inputs
+tests/          unit, leakage, metric, provenance, integration tests
+scripts/        thin entry points; production logic remains in src/
+docs/           specs, plans, runbooks, readiness, immutable evidence/audits
+artifacts/      gitignored run outputs
 ```
 
-- Python version은 `pyproject.toml`을 따른다.
-- public API에 type hint + NumPy-style docstring.
-- Ruff line length 100 + committed lockfile.
-- hardcoded path · split ID · threshold · feature list · seed · hyperparameter를 production source에
-  넣지 않는다.
-- production logic은 `src/`, notebook은 library function만 호출한다.
-- 명령을 추측하지 않는다 — `pyproject.toml` · CLI help · README를 확인한다.
+```bash
+uv sync
+uv run pytest -q <target>
+uv run pytest -q
+uv run ruff check src tests
+uv run ruff format --check src tests
+```
 
-**Compute** {#compute}
+Python version은 `pyproject.toml`, dependency는 committed `uv.lock`을 따른다. Public API는 type hint와
+NumPy-style docstring을 사용한다. Production source에 path·split·threshold·feature list·seed·hyperparameter를
+hardcode하지 않는다. Notebook은 library function만 호출한다. Scientific run 명령은 추측하지 말고 current
+runbook/CLI help를 확인한다.
 
-- MacBook(M5 Pro, 24GB, CUDA 없음): setup · unit test · bounded inspection · CPU/MPS smoke ·
-  mini end-to-end · docs · reproducibility.
-- A100: original-data acquisition · integrity · preprocessing · real ESM feature · full run.
-- mini와 full은 동일 production code, config만 scale/device 변경.
-- mini의 leakage · metric · provenance · resume 검증 후 full 시작.
-- device fallback을 숨기지 않는다.
-- ephemeral disk를 artifact 유일본으로 쓰지 않는다.
-- cloud run은 instance/GPU · image/lock · input hash · Git SHA · config · wall time · cost를 기록한다.
-
----
+**Compute.** {#compute} Local Mac은 setup·unit/mini/synthetic·bounded inspection용, A100/pod는 승인된 real-data
+preparation과 full run용이다. Mini/full은 같은 production code와 다른 config만 사용한다. Device fallback을
+숨기지 않고 ephemeral disk를 유일본으로 쓰지 않는다. Cloud run은 instance/GPU, image/lock, input hash,
+Git SHA, config, wall time, cost를 기록한다.
 
 ## 8. Agent operating contract {#agent}
 
-**작업 순서.**
+- Inspect before editing. Active protocol과 affected invariant를 먼저 식별하고 unrelated user change를 보존한다.
+- Established protocol/config/evidence를 조용히 rewrite하지 않는다. Config field 변경은 새 run identity다.
+- 현재 hypothesis를 falsify할 가장 작은 실험을 우선하고, 좋은 결과일수록 leakage·confounding·collapse·
+  metric gaming·seed sensitivity를 먼저 검사한다.
+- Evidence level과 uncertainty를 명시한다. Preprint/vendor/model-generated claim을 ground truth로 취급하지 않는다.
+- COMPOSE는 RELEASE-BLOCKED다. Readiness/runbook이 READY이고 owner가 exact SHA를 승인하기 전에는 sealed run을
+  시작하지 않는다.
 
-- inspect before editing. scientifically consequential change 전 affected invariant·protocol을 먼저
-  식별한다. unrelated user change를 보존하고, established protocol을 조용히 rewrite하지 않는다.
-- 현재 hypothesis를 falsify할 수 있는 가장 작은 실험을 선호한다. 좋은 결과일수록 leakage · batch
-  confounding · mean collapse · metric gaming · seed sensitivity를 먼저 검사한다.
-- evidence level과 uncertainty를 명시한다. preprint · vendor · model-generated claim을 ground truth로
-  취급하지 않는다.
-- 규칙이 타당한 작업을 막으면 우회하지 말고 충돌을 보고한다(§1).
-
-**완료 전 검증 (관련 변경마다).** {#verify} targeted unit test → applicable integration test → Ruff lint/format →
-(data/evaluation 변경 시) leakage test → (metric 변경 시) known-answer·constant·shuffled·random
-sanity → (artifact/provenance 변경 시) tamper·resume test. 실행한 명령·결과·skip·미완 검사를 보고한다.
-scientific run 전에는 active spec/plan/config와 runtime behavior의 contract audit를 수행한다. 문서와
-코드가 충돌하면 test가 통과해도 run을 시작하지 않는다(§1).
-
----
+**완료 전 검증.** {#verify} Targeted unit → applicable integration → Ruff → data/eval 변경 시 leakage → metric
+변경 시 known-answer/constant/shuffled/random → artifact/provenance 변경 시 tamper/resume. 실행 명령, 결과,
+skip, 미완 검사를 보고한다. Scientific run 전 spec/plan/config/runtime contract audit를 수행하며 문서와 코드가
+충돌하면 test가 통과해도 run을 시작하지 않는다.
 
 ## 9. Governance summary {#summary}
 
 ```text
-RULE : protocol seal · claim · manifest · run ID · report는 상호 교환 불가.
-       현재 protocol 상태(ACTIVE/COMPLETE/DEFERRED · seal open 여부)는 §5 표가 authoritative.
+RULE: claim · split · seal · manifest · run identity · report는 protocol 간 상호 교환 불가.
+STATE: COMPOSE ACTIVE, RELEASE-BLOCKED, seal UNOPENED. Readiness gate가 READY가 되기 전 실행 금지.
 ```
 
-<!-- maintainer note: 이 문서는 매 세션 전체 로드된다. milestone 세부는 여기 추가하지 말고 spec/plan/config에 둔다. 상태 변경(활성 protocol, seal open 등) 시 헤더와 §5 표만 갱신한다 — 다른 절에 상태를 중복 기재하지 않는다. -->
+<!-- maintainer: root는 200줄 미만의 always-on invariant만 유지한다. 상태 전이는 header/registry와 readiness를
+동시에 갱신하고, 세부 규칙은 path-scoped rule/spec/config/runbook에 둔다. -->

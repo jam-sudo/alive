@@ -1,7 +1,8 @@
 # CARTOGRAPHER Trust-Gate — Scientific Design Specification v2
 
-> **상태:** K562 retrospective Trust-Gate MVP 과학 계약 확정안
-> **개정일:** 2026-06-21
+> **상태:** `TG-K562-v1` COMPLETE — seal opened once, registered verdict `NO_DISTINCT_WIN`;
+> 이 문서는 완료 protocol의 immutable scientific claim contract이며 재실행 승인이 아니다.
+> **개정일:** 2026-07-19 (status sanitization; scientific contract unchanged)
 > **현재 범위:** Replogle K562 essential, scalar conformal error bound,
 > R1+R4 PREDICT/ABSTAIN routing
 > **비규범적 후속 범위:** R2/R3, causal masking, RPE1/Norman/Tahoe,
@@ -20,7 +21,7 @@
 4. **Project-wide operational rules:** `CLAUDE.md`
 
 위 순위는 **scientific claim 도메인**에 적용된다. Safety, seal, leakage, governance invariant는
-`CLAUDE.md`(§3.1)가 최상위이며, 위 목록이 `CLAUDE.md`를 마지막에 두는 것은 claim 도메인 기준일
+`CLAUDE.md`#sources가 최상위이며, 위 목록이 `CLAUDE.md`를 마지막에 두는 것은 claim 도메인 기준일
 뿐 governance 권위를 낮추는 것이 아니다. 두 도메인이 직접 충돌하면 — 예: safety invariant가
 어떤 claim 구성을 금지 — safety invariant가 우선하여 run을 중단시킨다.
 

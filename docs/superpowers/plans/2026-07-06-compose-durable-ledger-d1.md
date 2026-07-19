@@ -1,5 +1,8 @@
 # COMPOSE Durable-Publish + Non-Circular Provenance (D1) Implementation Plan
 
+> **Status update (2026-07-19): IMPLEMENTED + MERGED.** 아래 task는 as-built record이며 current
+> work queue가 아니다.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Make the one-time Phase-2b sealed-run artifacts crash-safe and recoverable: a non-circular checksum hierarchy, a v2 terminal payload that embeds the full registered summary + embedded provenance, and an atomic durable-publish + recovery step gated by a single commit marker.

@@ -9,7 +9,7 @@
 > **Scope.** Take a bare A100 instance to a real, decisive K562 scientific run.
 > Phases A→E. Two gates (C: ESM smoke, D: mini validation) must pass before the
 > full run. **One irreversible step: `evaluate-once`** (opens the sealed cohort
-> exactly once). Governance: `CLAUDE.md` §§7, 11, 13, 14.2; spec
+> exactly once). Governance: `CLAUDE.md`#data-eval, #provenance, #verify, #compute; spec
 > `docs/superpowers/specs/2026-06-20-cartographer-design.md` §§3.2, 4.3, 11.3.
 >
 > Configs: full = `configs/cartographer_trust_gate_k562_v1.yaml`; mini (plumbing

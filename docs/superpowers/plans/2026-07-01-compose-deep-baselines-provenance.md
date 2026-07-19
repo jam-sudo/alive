@@ -1,5 +1,8 @@
 # COMPOSE Phase-2b Provenance Digests + Persisted-Ledger Consistency (Changes B+C) Implementation Plan
 
+> **Status update (2026-07-19): IMPLEMENTED + MERGED.** 아래 task는 as-built provenance record이며
+> current work queue가 아니다. Current release evidence 상태는 readiness index가 추적한다.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Resolve the two `TODO(activation)` markers in `src/alive/compose/phase2b.py` — (B) populate the scientific provenance digests from the upstream ledger + a typed inputs object, and (C) make the post-access provenance-consistency check cross-verify a **persisted pre-access digest subset** written to the write-once ledger BEFORE the seal opens, instead of comparing an in-memory record against itself.

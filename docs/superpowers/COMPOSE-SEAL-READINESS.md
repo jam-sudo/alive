@@ -1,10 +1,11 @@
 # COMPOSE-K562-v1 — Sealed-Run Readiness Index
 
 > **역할:** COMPOSE sealed A100 run까지 남은 작업의 단일 human-facing 인덱스.
+> **현재 상태:** lifecycle **ACTIVE** · execution **RELEASE-BLOCKED** · seal **UNOPENED**.
 > **이 문서는 아무것도 정의하지 않는다** — 세부(task)는 plan, claim은 spec, exact param은 config,
-> 시간순 audit는 git이 authoritative다(sources-of-truth: `CLAUDE.md`#sources). 상태 행이 authoritative
+> 시간순 audit는 git이 authoritative다([sources of truth](../../CLAUDE.md#sources)). 상태 행이 authoritative
 > 문서와 어긋나면 **authoritative 문서가 옳다**; 이 인덱스를 갱신한다.
-> **Updated:** 2026-07-18 @ `bd7a808` (branch `main`)
+> **Updated:** 2026-07-19 @ `2e0fd68` (branch `main`)
 > **갱신 트리거:** sub-project/gate **상태가 바뀔 때만**(커밋마다 아님).
 > **종결 상태:** COMPOSE seal이 정확히 한 번 열리면 이 인덱스는 **frozen/은퇴**한다. 이후 진행상황은
 > seal 결과와 post-hoc analysis가 대신한다.
@@ -55,7 +56,7 @@ branch에서 추적 가능하게 기록한다. `LOCAL` ledger ID만으로는 이
 
 ## 이 문서가 *아닌* 것 (중복 금지)
 
-- **governance / safety invariant / seal 규칙** → `CLAUDE.md` (§1 sources-of-truth, §3 invariants, §4 seal)
+- **governance / safety invariant / seal 규칙** → `CLAUDE.md`#sources, #invariants, #seal
 - **scientific claim 정의** → 각 sub-project **spec**
 - **task 세부 · 체크박스 · 구현 순서** → 각 **plan**
 - **exact split / threshold / seed / metric** → **config** (`configs/compose_k562_v1_phase2.yaml`)
