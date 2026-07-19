@@ -29,14 +29,17 @@ import pytest
 import yaml
 
 from alive.compose.approximation_bias import (
+    PROBE_A_ADAPTER_TRANSFORM,
+    PROBE_A_NEGATIVE_OUTPUT_POLICY,
     PROBE_A_REGISTRATION_SCHEMA,
+    PROBE_A_REPRESENTATION,
     PROBE_A_SCHEMA,
     PROBE_A_VERIFICATION_SCHEMA,
     PROTOCOL,
-    REPRESENTATION,
     ApproximationBiasValidationError,
     ProbeAEvidence,
     canonical_json,
+    probe_a_owner_policy_sha256,
     self_checksum,
     validate_approximation_bias_report,
 )
@@ -88,18 +91,21 @@ def _probe_a_snapshot(*, git_commit: str = "b" * 40) -> ProbeAEvidence:
         "schema": PROBE_A_REGISTRATION_SCHEMA,
         "protocol": PROTOCOL,
         "git_commit": git_commit,
+        "owner_policy_sha256": probe_a_owner_policy_sha256(),
         "input_scale": {
             "normalization_target": 10000.0,
             "transform": "full_library_normalize_log1p_then_roster_subset",
         },
-        "determinism": {"max_abs_error_tolerance": 1e-7},
+        "determinism": {"max_abs_error_tolerance": 0.0},
         "control_count": {
             "counts": [1, 8, 300, 301, 400],
-            "first_300_max_abs_error_tolerance": 1e-7,
+            "first_300_max_abs_error_tolerance": 1e-5,
         },
         "output_bridge": {
-            "representation": REPRESENTATION,
-            "max_abs_error_tolerance": 1e-6,
+            "representation": PROBE_A_REPRESENTATION,
+            "transform": PROBE_A_ADAPTER_TRANSFORM,
+            "negative_output_policy": PROBE_A_NEGATIVE_OUTPUT_POLICY,
+            "max_abs_error_tolerance": 1e-5,
         },
     }
     registration = {
@@ -109,9 +115,9 @@ def _probe_a_snapshot(*, git_commit: str = "b" * 40) -> ProbeAEvidence:
     registration_bytes = (canonical_json(registration) + "\n").encode("utf-8")
     registration_sha = sha256_bytes(registration_bytes)
     bridge = {
-        "representation": REPRESENTATION,
+        "representation": PROBE_A_REPRESENTATION,
         "verdict": "pass",
-        "tolerance": 1e-6,
+        "tolerance": 1e-5,
         "max_abs_error": 1e-8,
     }
     verification_body = {

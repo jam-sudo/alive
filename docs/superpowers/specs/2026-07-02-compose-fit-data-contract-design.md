@@ -157,6 +157,10 @@ PCA basis다. truth δ는 항상 `mean_i(z(x_i)) - control_mean`이다.
 - `cell_raw_counts`: predicted cell별 full-gene non-negative counts에 §2.3 전체 operator를 적용한 뒤 평균.
 - `cell_log_normalized`: worker가 선언·검증한 동일 median-library `log1p` scale의 cell별 prediction에
   HVG subset + PCA centering만 적용한 뒤 평균. raw-count normalize/log를 재적용하지 않는다.
+- `log_normalized_pseudobulk`: condition-level prediction이 이미 frozen median-library `log1p` scale일 때
+  사용한다. HVG subset + PCA centering만 적용하고 library normalization/log를 다시 적용하지 않는다.
+  finite signed regression output은 clip하지 않는다. 이 표현은 Probe-A owner policy의 **candidate**이며,
+  Probe-A PASS와 별도 pre-seal config amendment 전에는 scientific worker identity로 활성화되지 않는다.
 - `raw_pseudobulk_approximation`: published implementation이 condition-level(pseudobulk) 예측만 native로
   내보내는 경우에 한해 사용한다. per-cell 예측을 내보내는 baseline에는 금지한다.
 
@@ -167,6 +171,11 @@ GEARS)은 `raw_pseudobulk_approximation`을 **사전등록된 경로**로 사용
 baseline(예상: CPA)은 `cell_raw_counts` 또는 `cell_log_normalized`를 사용한다. 목록에 없는 새 method가
 pseudobulk 경로를 쓰려면 sealed 실행 전에 spec version-up + owner 재승인이 필요하다. 어느 경우에도 truth δ는
 `mean_i(z(x_i)) - control_mean`으로 불변이다(§2.3).
+
+**GEARS activation 상태.** 현재 committed scientific config의 GEARS 표현은 여전히
+`raw_pseudobulk_approximation`이고 approximation-bias SHA가 비어 있어 activation-blocked다. Probe A는
+`log_normalized_pseudobulk` candidate의 scale/aggregation 동치만 판정한다. PASS는 config를 자동 변경하지
+않으며, owner가 결과를 검토한 뒤 별도 config/spec amendment에서 표현과 필요한 bias 해석을 확정해야 한다.
 
 worker output은 `prediction_representation`, adapter version/checksum, expected/observed gene-order digest를
 포함한다. scale이 선언과 다르거나 full-gene universe가 아니면 prediction 생성 전에 실패한다.

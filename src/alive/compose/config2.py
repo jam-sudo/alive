@@ -305,7 +305,12 @@ _KNOWN_BASELINE_CPA = frozenset(
 # representation, so it carries an approximation-bias report; the two
 # ``cell_*`` representations are exact and must NOT carry a bias report.
 _KNOWN_PREDICTION_REPRESENTATIONS = frozenset(
-    {"cell_raw_counts", "cell_log_normalized", "raw_pseudobulk_approximation"}
+    {
+        "cell_raw_counts",
+        "cell_log_normalized",
+        "log_normalized_pseudobulk",
+        "raw_pseudobulk_approximation",
+    }
 )
 _APPROXIMATE_REPRESENTATIONS = frozenset({"raw_pseudobulk_approximation"})
 _KNOWN_LEAKAGE_CONTROL = frozenset(

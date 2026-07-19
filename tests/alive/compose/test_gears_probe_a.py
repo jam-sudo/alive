@@ -18,7 +18,15 @@ import pandas as pd
 import pytest
 from scipy import sparse
 
-from alive.compose.approximation_bias import load_probe_a_evidence, validate_probe_a_evidence
+from alive.compose.approximation_bias import (
+    PROBE_A_ADAPTER_TRANSFORM,
+    PROBE_A_NEGATIVE_OUTPUT_POLICY,
+    PROBE_A_OWNER_POLICY_PATH,
+    PROBE_A_REPRESENTATION,
+    load_probe_a_evidence,
+    probe_a_owner_policy_sha256,
+    validate_probe_a_evidence,
+)
 from alive.compose.fit_role import row_identity_sha256
 from alive.compose.gears_probe_a import (
     ADMISSION_PATH,
@@ -150,18 +158,21 @@ def _registration(root: Path) -> tuple[dict, str]:
         "schema": REGISTRATION_SCHEMA,
         "protocol": PROTOCOL,
         "git_commit": COMMIT,
+        "owner_policy_sha256": probe_a_owner_policy_sha256(),
         "input_scale": {
             "normalization_target": 10000.0,
             "transform": "full_library_normalize_log1p_then_roster_subset",
         },
-        "determinism": {"max_abs_error_tolerance": 1e-7},
+        "determinism": {"max_abs_error_tolerance": 0.0},
         "control_count": {
             "counts": [1, 8, 300, 301, 400],
-            "first_300_max_abs_error_tolerance": 1e-7,
+            "first_300_max_abs_error_tolerance": 1e-5,
         },
         "output_bridge": {
-            "representation": "raw_pseudobulk_approximation",
-            "max_abs_error_tolerance": 1e-7,
+            "representation": PROBE_A_REPRESENTATION,
+            "transform": PROBE_A_ADAPTER_TRANSFORM,
+            "negative_output_policy": PROBE_A_NEGATIVE_OUTPUT_POLICY,
+            "max_abs_error_tolerance": 1e-5,
         },
     }
     registration = {**body, "self_checksum": sha256_json(body)}
@@ -286,7 +297,7 @@ def _report(
                 sha256_json(run["prediction"]) for run in raw_body["determinism_runs"]
             ],
             "max_abs_error": 0.0,
-            "tolerance": 1e-7,
+            "tolerance": 0.0,
             "verdict": "pass",
         },
         "control_count": {
@@ -295,7 +306,7 @@ def _report(
                 sha256_json(item["public_prediction"]) for item in raw_body["control_predictions"]
             ],
             "first_300_max_abs_error": 0.0,
-            "tolerance": 1e-7,
+            "tolerance": 1e-5,
             "verdict": "pass",
         },
         "output_scale": {
@@ -306,9 +317,9 @@ def _report(
             "near_integer_fraction": 0.5,
         },
         "output_bridge": {
-            "representation": "raw_pseudobulk_approximation",
+            "representation": PROBE_A_REPRESENTATION,
             "verdict": "pass",
-            "tolerance": 1e-7,
+            "tolerance": 1e-5,
             "max_abs_error": 0.0,
         },
         "raw_samples": [{"path": "raw.json", "sha256": sha256_file(raw)}],
@@ -551,7 +562,14 @@ def _complete_evidence(root: Path) -> tuple[dict, dict, dict, str, str, str]:
 
     command_lines: list[str] = []
     for index, command in enumerate(
-        ("build-roster", "prepare-input", "verify-input", "probe-a", "build-probe-a-report")
+        (
+            "build-roster",
+            "prepare-input",
+            "verify-input",
+            "build-probe-a-registration",
+            "probe-a",
+            "build-probe-a-report",
+        )
     ):
         command_body = {
             "schema": COMMAND_RECORD_SCHEMA,
@@ -575,14 +593,37 @@ def _complete_evidence(root: Path) -> tuple[dict, dict, dict, str, str, str]:
                 sha256_file(root / "raw.json")
                 if command == "probe-a"
                 else (
-                    sha256_file(root / REPORT_PATH)
-                    if command == "build-probe-a-report"
-                    else str(index + 1) * 64
+                    registration_sha
+                    if command == "build-probe-a-registration"
+                    else (
+                        sha256_file(root / REPORT_PATH)
+                        if command == "build-probe-a-report"
+                        else str(index + 1) * 64
+                    )
                 )
             ),
             "runtime_fingerprint_sha256": runtime_body["runtime_fingerprint_sha256"],
         }
-        if command == "probe-a":
+        if command == "build-probe-a-registration":
+            command_body["argv"].extend(
+                [
+                    "--evidence-root",
+                    "/workspace/evidence",
+                    "--probe-manifest",
+                    "/workspace/evidence/probe_input_manifest.json",
+                    "--probe-manifest-sha256",
+                    sha256_file(probe_manifest_path),
+                    "--owner-policy",
+                    f"/workspace/ALIVE/{PROBE_A_OWNER_POLICY_PATH}",
+                    "--owner-policy-sha256",
+                    probe_a_owner_policy_sha256(),
+                    "--git-commit",
+                    COMMIT,
+                    "--out-registration",
+                    f"/workspace/evidence/{REGISTRATION_PATH}",
+                ]
+            )
+        elif command == "probe-a":
             command_body["argv"].extend(
                 [
                     "--payload-dir",
@@ -758,6 +799,43 @@ def test_report_and_manifest_builders_derive_the_complete_contract(tmp_path):
     assert {entry["path"] for entry in rebuilt_manifest["files"]} == {
         path.relative_to(tmp_path).as_posix() for path in tmp_path.rglob("*") if path.is_file()
     }
+
+
+def test_registration_builder_derives_scale_from_manifest_and_is_write_once(tmp_path, monkeypatch):
+    _complete_evidence(tmp_path)
+    (tmp_path / REGISTRATION_PATH).unlink()
+    probe_cli = _load_probe_cli()
+    monkeypatch.setattr(probe_cli, "assert_clean_approved_checkout", lambda _commit: None)
+    manifest_path = tmp_path / "probe_input_manifest.json"
+    digest = probe_cli.publish_probe_a_registration(
+        evidence_root=tmp_path,
+        probe_manifest_path=manifest_path,
+        probe_manifest_sha256=sha256_file(manifest_path),
+        owner_policy_path=_REPO / PROBE_A_OWNER_POLICY_PATH,
+        owner_policy_sha256=probe_a_owner_policy_sha256(),
+        expected_git_commit=COMMIT,
+        out_registration=tmp_path / REGISTRATION_PATH,
+    )
+    registration = json.loads((tmp_path / REGISTRATION_PATH).read_text(encoding="utf-8"))
+    assert digest == sha256_file(tmp_path / REGISTRATION_PATH)
+    assert registration["input_scale"]["normalization_target"] == 10000.0
+    assert registration["owner_policy_sha256"] == probe_a_owner_policy_sha256()
+    assert registration["output_bridge"] == {
+        "representation": PROBE_A_REPRESENTATION,
+        "transform": PROBE_A_ADAPTER_TRANSFORM,
+        "negative_output_policy": PROBE_A_NEGATIVE_OUTPUT_POLICY,
+        "max_abs_error_tolerance": 1e-5,
+    }
+    with pytest.raises(probe_cli.GeneUniverseError, match="already exists"):
+        probe_cli.publish_probe_a_registration(
+            evidence_root=tmp_path,
+            probe_manifest_path=manifest_path,
+            probe_manifest_sha256=sha256_file(manifest_path),
+            owner_policy_path=_REPO / PROBE_A_OWNER_POLICY_PATH,
+            owner_policy_sha256=probe_a_owner_policy_sha256(),
+            expected_git_commit=COMMIT,
+            out_registration=tmp_path / REGISTRATION_PATH,
+        )
 
 
 def test_manifest_builder_rejects_unclassified_evidence(tmp_path):

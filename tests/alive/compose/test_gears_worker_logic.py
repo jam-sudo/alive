@@ -442,7 +442,7 @@ def test_probe_observer_runs_after_durable_fit_and_skips_scientific_predict(
         _fit_adata(),
         {},
         ["G0", "G1", "G2", "G3"],
-        "raw_pseudobulk_approximation",
+        "log_normalized_pseudobulk",
         fit_artifact_content_sha256="c" * 64,
         checkpoint_path=str(checkpoint),
         fitted_model_observer=observer,
@@ -544,7 +544,7 @@ def test_cell_level_prediction_representation_is_rejected(tmp_path, monkeypatch)
     events: list[object] = []
     work_paths: list[str] = []
     _install_fake_gears(monkeypatch, events, work_paths)
-    with pytest.raises(ValueError, match="method-locked raw pseudobulk"):
+    with pytest.raises(ValueError, match="mode-locked scientific/Probe-A"):
         worker._fit_and_predict(
             {"seed": 11, "pair_ids": [["AAA", "BBB"]], "response_dim": 2},
             _fit_adata(),

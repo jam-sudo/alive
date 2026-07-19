@@ -76,6 +76,13 @@ no representation floor. The additive null is `δ_g + δ_h` in response space �
 the raw-count-mean bridge**. If Probe A establishes a different native scale, this formula is inapplicable;
 the bridge and this spec must be revised pre-seal rather than coercing that output into raw counts.
 
+**Probe-A candidate correction (2026-07-19).** The frozen Probe-A owner policy tests
+`log_normalized_pseudobulk`: GEARS receives full-library normalized/log1p input and its native regression output
+is projected by HVG subset + centering + PCA with no second normalization and no signed-value clipping. A PASS
+therefore does **not** validate the raw-count Jensen-floor formula below and does not admit this report by itself.
+The committed GEARS scientific config remains activation-blocked until a separate pre-seal amendment either
+adopts the candidate and revises this metric or supplies evidence for the existing raw representation.
+
 ---
 
 ## 2. The bias — representation floor (model-free) {#bias}

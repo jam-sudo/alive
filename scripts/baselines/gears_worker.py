@@ -31,6 +31,7 @@ from typing import Callable, Mapping
 import anndata as ad
 import numpy as np
 
+from alive.compose.approximation_bias import PROBE_A_REPRESENTATION
 from alive.compose.baseline_subprocess import (
     canonical_payload_sha256,
     read_payload,
@@ -775,7 +776,7 @@ def _fit_and_predict(
     2. fit GEARS on those rows using only pre-acquired, hash-verified resources;
     3. predict each ``payload["pair_ids"]`` pair's native full-gene expression;
     4. map native -> response space with ``apply_response_projection`` honoring
-       ``representation`` (``raw_pseudobulk_approximation`` ->
+       ``representation`` (scientific ``raw_pseudobulk_approximation`` ->
        ``native.mean(axis=0, keepdims=True)``; ``cell_*`` -> ``native``), then
        ``delta = mean(z) - control_mean``;
     5. return ``{pair: delta[:response_dim]}`` over ``payload["pair_ids"]``.
@@ -856,8 +857,13 @@ def _fit_and_predict(
         raise ValueError("GEARS requires an explicit trained-model checkpoint path")
     if not _is_sha256(fit_artifact_content_sha256):
         raise ValueError("GEARS requires the verified fit artifact content SHA-256")
-    if representation != _GEARS_PREDICTION_REPRESENTATION:
-        raise ValueError("GEARS only supports the method-locked raw pseudobulk representation")
+    expected_representation = (
+        PROBE_A_REPRESENTATION if observer_only else _GEARS_PREDICTION_REPRESENTATION
+    )
+    if representation != expected_representation:
+        raise ValueError(
+            "GEARS representation differs from the mode-locked scientific/Probe-A contract"
+        )
     if os.path.lexists(checkpoint_path):
         raise ValueError("GEARS checkpoint path already exists")
 

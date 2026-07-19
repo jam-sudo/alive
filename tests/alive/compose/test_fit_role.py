@@ -759,6 +759,38 @@ def test_cell_log_normalized_skips_the_raw_transform():
     np.testing.assert_allclose(z_log[0], z_raw[0], atol=1e-9)
 
 
+def test_log_normalized_pseudobulk_preserves_signed_output_without_renormalizing():
+    space, X, _, control_mean, gene_order = _toy_space_and_counts(seed=51)
+    block = build_response_projection(
+        space,
+        gene_order=gene_order,
+        control_mean=control_mean,
+        raw_data_sha256="r",
+    )
+    dense = np.asarray(X.todense(), dtype=np.float64)
+    lib = dense[7].sum()
+    signed = np.log1p(dense[7] * (block["median_library"] / lib))[None, :]
+    signed[0, 0] = -0.25
+    observed = apply_response_projection(
+        block,
+        signed,
+        gene_order,
+        representation="log_normalized_pseudobulk",
+    )
+    columns = [gene_order.index(gene) for gene in block["hvg_gene_ids"]]
+    expected = (signed[:, columns] - np.asarray(block["pca_mean"])) @ np.asarray(
+        block["pca_components"]
+    ).T
+    np.testing.assert_array_equal(observed, expected)
+    with pytest.raises(FitRoleArtifactError, match="non-negative"):
+        apply_response_projection(
+            block,
+            signed,
+            gene_order,
+            representation="cell_log_normalized",
+        )
+
+
 def test_operator_rejects_gene_order_mismatch():
     space, X, control_idx, control_mean, gene_order = _toy_space_and_counts(seed=6)
     block = build_response_projection(

@@ -22,10 +22,18 @@ from alive.provenance import sha256_bytes, sha256_file, sha256_json
 
 APPROXIMATION_BIAS_SCHEMA = "compose_approximation_bias_report_v3"
 PROBE_A_SCHEMA = "compose_gears_probe_a_admission_v3"
-PROBE_A_REGISTRATION_SCHEMA = "compose_gears_probe_a_registration_v1"
+PROBE_A_REGISTRATION_SCHEMA = "compose_gears_probe_a_registration_v2"
+PROBE_A_OWNER_POLICY_SCHEMA = "compose_gears_probe_a_owner_policy_v1"
 PROBE_A_VERIFICATION_SCHEMA = "compose_gears_probe_a_verification_v1"
 PROTOCOL = "COMPOSE-K562-v1"
 REPRESENTATION = "raw_pseudobulk_approximation"
+PROBE_A_REPRESENTATION = "log_normalized_pseudobulk"
+PROBE_A_INPUT_TRANSFORM = "full_library_normalize_log1p_then_roster_subset"
+PROBE_A_ADAPTER_TRANSFORM = "hvg_subset_center_pca_no_renormalization"
+PROBE_A_NEGATIVE_OUTPUT_POLICY = "preserve_finite_signed_model_output"
+PROBE_A_OWNER_POLICY_PATH = "configs/compose_gears_probe_a_owner_policy_v1.json"
+PROBE_A_DETERMINISM_TOLERANCE = 0.0
+PROBE_A_NUMERICAL_TOLERANCE = 1e-5
 R_STAR = 0.5
 NON_FINITE = "NON_FINITE"
 FAIRNESS_FLAGS = frozenset({"clear", "representation_confounded", "indeterminate"})
@@ -101,6 +109,18 @@ _PROBE_A_REGISTRATION_KEYS = frozenset(
         "schema",
         "protocol",
         "git_commit",
+        "owner_policy_sha256",
+        "input_scale",
+        "determinism",
+        "control_count",
+        "output_bridge",
+        "self_checksum",
+    }
+)
+_PROBE_A_OWNER_POLICY_KEYS = frozenset(
+    {
+        "schema",
+        "protocol",
         "input_scale",
         "determinism",
         "control_count",
@@ -379,6 +399,92 @@ def _canonical_json_object(data: bytes, *, field: str) -> dict[str, Any]:
     return payload
 
 
+def probe_a_owner_policy_path() -> Path:
+    """Return the committed, outcome-independent Probe-A owner policy path."""
+    return Path(__file__).resolve().parents[3] / PROBE_A_OWNER_POLICY_PATH
+
+
+def validate_probe_a_owner_policy(policy: Mapping[str, Any]) -> None:
+    """Validate the fixed decisions from which a run-specific registration is derived."""
+    obj = _exact_keys(policy, _PROBE_A_OWNER_POLICY_KEYS, field="Probe-A owner policy")
+    if obj["schema"] != PROBE_A_OWNER_POLICY_SCHEMA or obj["protocol"] != PROTOCOL:
+        _fail("Probe-A owner-policy identity mismatch")
+    input_scale = _exact_keys(
+        obj["input_scale"], frozenset({"transform"}), field="Probe-A owner policy.input_scale"
+    )
+    if input_scale["transform"] != PROBE_A_INPUT_TRANSFORM:
+        _fail("Probe-A owner-policy input transform is unsupported")
+    determinism = _exact_keys(
+        obj["determinism"],
+        frozenset({"max_abs_error_tolerance"}),
+        field="Probe-A owner policy.determinism",
+    )
+    if (
+        _finite(
+            determinism["max_abs_error_tolerance"],
+            field="Probe-A owner policy.determinism.max_abs_error_tolerance",
+            minimum=0,
+        )
+        != PROBE_A_DETERMINISM_TOLERANCE
+    ):
+        _fail("Probe-A owner-policy determinism tolerance is not the frozen exact value")
+    control = _exact_keys(
+        obj["control_count"],
+        frozenset({"counts", "first_300_max_abs_error_tolerance"}),
+        field="Probe-A owner policy.control_count",
+    )
+    if control["counts"] != [1, 8, 300, 301, 400]:
+        _fail("Probe-A owner-policy control-count roster is unsupported")
+    if (
+        _finite(
+            control["first_300_max_abs_error_tolerance"],
+            field="Probe-A owner policy.control_count.first_300_max_abs_error_tolerance",
+            minimum=0,
+        )
+        != PROBE_A_NUMERICAL_TOLERANCE
+    ):
+        _fail("Probe-A owner-policy control tolerance is not the frozen value")
+    bridge = _exact_keys(
+        obj["output_bridge"],
+        frozenset(
+            {
+                "representation",
+                "transform",
+                "negative_output_policy",
+                "max_abs_error_tolerance",
+            }
+        ),
+        field="Probe-A owner policy.output_bridge",
+    )
+    if bridge["representation"] != PROBE_A_REPRESENTATION:
+        _fail("Probe-A owner-policy output representation is unsupported")
+    if bridge["transform"] != PROBE_A_ADAPTER_TRANSFORM:
+        _fail("Probe-A owner-policy adapter transform is unsupported")
+    if bridge["negative_output_policy"] != PROBE_A_NEGATIVE_OUTPUT_POLICY:
+        _fail("Probe-A owner-policy negative-output policy is unsupported")
+    if (
+        _finite(
+            bridge["max_abs_error_tolerance"],
+            field="Probe-A owner policy.output_bridge.max_abs_error_tolerance",
+            minimum=0,
+        )
+        != PROBE_A_NUMERICAL_TOLERANCE
+    ):
+        _fail("Probe-A owner-policy bridge tolerance is not the frozen value")
+    _validate_checksum(obj)
+
+
+def probe_a_owner_policy_sha256() -> str:
+    """Authenticate the canonical committed owner policy and return its byte digest."""
+    path = probe_a_owner_policy_path()
+    if path.is_symlink() or not path.is_file():
+        _fail("Probe-A owner-policy file is missing or unsafe")
+    data = path.read_bytes()
+    policy = _canonical_json_object(data, field="Probe-A owner policy")
+    validate_probe_a_owner_policy(policy)
+    return sha256_bytes(data)
+
+
 def validate_probe_a_registration(
     registration: Mapping[str, Any], *, expected_git_commit: str
 ) -> None:
@@ -394,6 +500,12 @@ def validate_probe_a_registration(
         expected_git_commit, field="expected Probe-A Git commit"
     ):
         _fail("Probe-A registration git_commit does not match the requested measurement commit")
+    _validate_checksum(obj)
+    if (
+        _hex64(obj["owner_policy_sha256"], field="Probe-A registration.owner_policy_sha256")
+        != probe_a_owner_policy_sha256()
+    ):
+        _fail("Probe-A registration owner-policy SHA-256 differs from the committed policy")
     input_scale = _exact_keys(
         obj["input_scale"],
         frozenset({"normalization_target", "transform"}),
@@ -406,18 +518,22 @@ def validate_probe_a_registration(
     )
     if normalization_target == 0:
         _fail("Probe-A registration normalization_target must be positive")
-    if input_scale["transform"] != "full_library_normalize_log1p_then_roster_subset":
+    if input_scale["transform"] != PROBE_A_INPUT_TRANSFORM:
         _fail("Probe-A registration input transform is unsupported")
     determinism = _exact_keys(
         obj["determinism"],
         frozenset({"max_abs_error_tolerance"}),
         field="Probe-A registration.determinism",
     )
-    _finite(
-        determinism["max_abs_error_tolerance"],
-        field="Probe-A registration.determinism.max_abs_error_tolerance",
-        minimum=0,
-    )
+    if (
+        _finite(
+            determinism["max_abs_error_tolerance"],
+            field="Probe-A registration.determinism.max_abs_error_tolerance",
+            minimum=0,
+        )
+        != PROBE_A_DETERMINISM_TOLERANCE
+    ):
+        _fail("Probe-A registration determinism tolerance differs from owner policy")
     control = _exact_keys(
         obj["control_count"],
         frozenset({"counts", "first_300_max_abs_error_tolerance"}),
@@ -425,24 +541,42 @@ def validate_probe_a_registration(
     )
     if control["counts"] != [1, 8, 300, 301, 400]:
         _fail("Probe-A registration control-count roster is unsupported")
-    _finite(
-        control["first_300_max_abs_error_tolerance"],
-        field="Probe-A registration.control_count.first_300_max_abs_error_tolerance",
-        minimum=0,
-    )
+    if (
+        _finite(
+            control["first_300_max_abs_error_tolerance"],
+            field="Probe-A registration.control_count.first_300_max_abs_error_tolerance",
+            minimum=0,
+        )
+        != PROBE_A_NUMERICAL_TOLERANCE
+    ):
+        _fail("Probe-A registration control tolerance differs from owner policy")
     bridge = _exact_keys(
         obj["output_bridge"],
-        frozenset({"representation", "max_abs_error_tolerance"}),
+        frozenset(
+            {
+                "representation",
+                "transform",
+                "negative_output_policy",
+                "max_abs_error_tolerance",
+            }
+        ),
         field="Probe-A registration.output_bridge",
     )
-    if bridge["representation"] != REPRESENTATION:
-        _fail(f"Probe-A registration output representation must be {REPRESENTATION!r}")
-    _finite(
-        bridge["max_abs_error_tolerance"],
-        field="Probe-A registration.output_bridge.max_abs_error_tolerance",
-        minimum=0,
-    )
-    _validate_checksum(obj)
+    if bridge["representation"] != PROBE_A_REPRESENTATION:
+        _fail(f"Probe-A registration output representation must be {PROBE_A_REPRESENTATION!r}")
+    if bridge["transform"] != PROBE_A_ADAPTER_TRANSFORM:
+        _fail("Probe-A registration adapter transform differs from owner policy")
+    if bridge["negative_output_policy"] != PROBE_A_NEGATIVE_OUTPUT_POLICY:
+        _fail("Probe-A registration negative-output policy differs from owner policy")
+    if (
+        _finite(
+            bridge["max_abs_error_tolerance"],
+            field="Probe-A registration.output_bridge.max_abs_error_tolerance",
+            minimum=0,
+        )
+        != PROBE_A_NUMERICAL_TOLERANCE
+    ):
+        _fail("Probe-A registration bridge tolerance differs from owner policy")
 
 
 def validate_probe_a_verification(
@@ -479,8 +613,8 @@ def validate_probe_a_verification(
         _OUTPUT_BRIDGE_KEYS,
         field="Probe-A verification.output_bridge",
     )
-    if bridge["representation"] != REPRESENTATION or bridge["verdict"] != "pass":
-        _fail("Probe-A verification output bridge is not an admitted raw-pseudobulk bridge")
+    if bridge["representation"] != PROBE_A_REPRESENTATION or bridge["verdict"] != "pass":
+        _fail("Probe-A verification output bridge is not the registered candidate bridge")
     tolerance = _finite(
         bridge["tolerance"], field="Probe-A verification.output_bridge.tolerance", minimum=0
     )

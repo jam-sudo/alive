@@ -1051,7 +1051,12 @@ def build_response_projection(
 
 
 PREDICTION_REPRESENTATIONS: frozenset[str] = frozenset(
-    {"cell_raw_counts", "cell_log_normalized", "raw_pseudobulk_approximation"}
+    {
+        "cell_raw_counts",
+        "cell_log_normalized",
+        "log_normalized_pseudobulk",
+        "raw_pseudobulk_approximation",
+    }
 )
 
 
@@ -1077,8 +1082,11 @@ def apply_response_projection(
 
     ``cell_raw_counts`` and ``raw_pseudobulk_approximation`` apply the full frozen
     transform (normalize to ``median_library`` + ``log1p``) then HVG subset +
-    centering + PCA projection; ``cell_log_normalized`` skips the raw transform
-    because the caller already log-normalized at the same ``median_library``.
+    centering + PCA projection. ``cell_log_normalized`` and
+    ``log_normalized_pseudobulk`` skip the raw transform because the caller already
+    supplied values on the registered log-normalized scale. The latter is the
+    Probe-A candidate adapter and intentionally preserves finite signed GEARS
+    regression output rather than clipping it or normalizing it a second time.
     Truth δ (``mean(z) - control_mean``) is computed by the caller and is
     invariant to ``representation`` (spec §2.4).
 
@@ -1089,7 +1097,8 @@ def apply_response_projection(
     x_native : numpy.ndarray
         Rows over the full ``gene_order``: raw counts for ``cell_raw_counts`` /
         ``raw_pseudobulk_approximation``; log-normalized values for
-        ``cell_log_normalized``. Shape ``(n_rows, n_genes)``.
+        ``cell_log_normalized``; finite signed model output for
+        ``log_normalized_pseudobulk``. Shape ``(n_rows, n_genes)``.
     gene_order : sequence of str
         The full gene-ID order of ``x_native``; must match the block's
         ``gene_order_sha256``.
@@ -1117,10 +1126,10 @@ def apply_response_projection(
         raise FitRoleArtifactError("x_native must be (n_rows, n_genes) over the full gene order")
     if not np.all(np.isfinite(X)):
         raise FitRoleArtifactError("x_native must contain only finite values")
-    if np.any(X < 0):
+    if representation != "log_normalized_pseudobulk" and np.any(X < 0):
         raise FitRoleArtifactError("registered native/log1p representations must be non-negative")
 
-    if representation == "cell_log_normalized":
+    if representation in {"cell_log_normalized", "log_normalized_pseudobulk"}:
         normed = X
     else:
         normed = _normalize_log1p_full(X, float(block["median_library"]))

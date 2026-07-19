@@ -25,6 +25,7 @@ import numpy as np
 from scipy import sparse
 
 from alive.compose.approximation_bias import (
+    PROBE_A_OWNER_POLICY_PATH,
     PROBE_A_REGISTRATION_SCHEMA,
     PROBE_A_SCHEMA,
     PROBE_A_VERIFICATION_SCHEMA,
@@ -77,6 +78,7 @@ _REGISTRATION_KEYS = {
     "schema",
     "protocol",
     "git_commit",
+    "owner_policy_sha256",
     "input_scale",
     "determinism",
     "control_count",
@@ -111,7 +113,7 @@ PREPARATION_LOCK_PATH = "uv.lock"
 GEARS_LOCK_PATH = "docs/activation-evidence/compose/requirements.gears_env.lock"
 PROBE_MATRIX_DTYPE = "float32-le"
 PROBE_MATRIX_FORMAT = "canonical_csr"
-_PROBE_INPUT_MANIFEST_KEYS = {
+PROBE_INPUT_MANIFEST_KEYS = {
     "expression_scale",
     "fit_artifact_content_sha256",
     "full_var_order_sha256",
@@ -144,7 +146,14 @@ _PROBE_INPUT_MANIFEST_KEYS = {
 # measurement is admitted from its digest-bound raw artifact below; Probe B has a
 # separate archive contract and must not gate Probe-A admission.
 _REQUIRED_COMMANDS = frozenset(
-    {"build-roster", "prepare-input", "verify-input", "probe-a", "build-probe-a-report"}
+    {
+        "build-roster",
+        "prepare-input",
+        "verify-input",
+        "build-probe-a-registration",
+        "probe-a",
+        "build-probe-a-report",
+    }
 )
 _COMMAND_KEYS = {
     "schema",
@@ -1551,6 +1560,7 @@ def _validate_commands(
     probe_input_h5ad_path: str,
     registration_path: str,
     registration_sha256: str,
+    owner_policy_sha256: str,
     report_path: str,
     report_sha256: str,
     expected_git_commit: str,
@@ -1565,6 +1575,8 @@ def _validate_commands(
     if not lines:
         raise ProbeAEvidenceError("commands evidence is empty")
     observed: Counter[str] = Counter()
+    command_order: list[str] = []
+    registration_primary_sha256: list[str] = []
     probe_a_primary_sha256: list[str] = []
     report_primary_sha256: list[str] = []
     for index, line in enumerate(lines):
@@ -1590,6 +1602,7 @@ def _validate_commands(
                 "commands evidence contains an unsupported maintained-CLI command"
             )
         observed[command] += 1
+        command_order.append(command)
         argv = obj["argv"]
         if (
             not isinstance(argv, list)
@@ -1605,7 +1618,45 @@ def _validate_commands(
             )
         if any("$(" in token or "`" in token for token in argv):
             raise ProbeAEvidenceError("commands argv must not use shell command substitution")
-        if command == "probe-a":
+        if command == "build-probe-a-registration":
+            required_options = (
+                "--evidence-root",
+                "--probe-manifest",
+                "--probe-manifest-sha256",
+                "--owner-policy",
+                "--owner-policy-sha256",
+                "--git-commit",
+                "--out-registration",
+            )
+            for option in required_options:
+                if argv.count(option) != 1 or argv.index(option) + 1 >= len(argv):
+                    raise ProbeAEvidenceError(
+                        f"Probe-A registration command requires exactly one {option} value"
+                    )
+            probe_manifest = argv[argv.index("--probe-manifest") + 1]
+            owner_policy = argv[argv.index("--owner-policy") + 1]
+            output = argv[argv.index("--out-registration") + 1]
+            if (
+                (
+                    Path(probe_manifest).as_posix() != probe_input_manifest_path
+                    and not probe_manifest.endswith(f"/{probe_input_manifest_path}")
+                )
+                or argv[argv.index("--probe-manifest-sha256") + 1] != probe_input_manifest_sha256
+                or (
+                    Path(owner_policy).as_posix() != PROBE_A_OWNER_POLICY_PATH
+                    and not owner_policy.endswith(f"/{PROBE_A_OWNER_POLICY_PATH}")
+                )
+                or argv[argv.index("--owner-policy-sha256") + 1] != owner_policy_sha256
+                or argv[argv.index("--git-commit") + 1] != expected_git_commit
+                or (
+                    Path(output).as_posix() != registration_path
+                    and not output.endswith(f"/{registration_path}")
+                )
+            ):
+                raise ProbeAEvidenceError(
+                    "Probe-A registration command is not bound to policy/prepared input/output"
+                )
+        elif command == "probe-a":
             required_options = (
                 "--payload-dir",
                 "--probe-a-registration",
@@ -1723,7 +1774,9 @@ def _validate_commands(
         primary_sha256 = _sha(
             obj["primary_file_sha256"], f"commands record {index}.primary_file_sha256"
         )
-        if command == "probe-a":
+        if command == "build-probe-a-registration":
+            registration_primary_sha256.append(primary_sha256)
+        elif command == "probe-a":
             probe_a_primary_sha256.append(primary_sha256)
         elif command == "build-probe-a-report":
             report_primary_sha256.append(primary_sha256)
@@ -1741,6 +1794,27 @@ def _validate_commands(
             "commands evidence does not contain the exact required command roster: "
             f"missing={sorted(_REQUIRED_COMMANDS - observed_commands)} "
             f"unexpected={sorted(observed_commands - _REQUIRED_COMMANDS)}"
+        )
+    unique_commands = _REQUIRED_COMMANDS - {"build-roster"}
+    if any(observed[command] != 1 for command in unique_commands):
+        raise ProbeAEvidenceError(
+            "commands evidence must contain each stateful maintained command exactly once"
+        )
+    critical_order = [
+        command_order.index(command)
+        for command in (
+            "prepare-input",
+            "verify-input",
+            "build-probe-a-registration",
+            "probe-a",
+            "build-probe-a-report",
+        )
+    ]
+    if critical_order != sorted(critical_order):
+        raise ProbeAEvidenceError("commands evidence violates the stateful protocol order")
+    if registration_primary_sha256 != [_sha(registration_sha256, "Probe-A registration SHA-256")]:
+        raise ProbeAEvidenceError(
+            "Probe-A registration command primary SHA-256 is not bound to registration"
         )
     if observed["probe-a"] != 1:
         raise ProbeAEvidenceError(
@@ -1779,7 +1853,7 @@ def _validate_prepared_input_chain(
         label="Probe-A prepared-input manifest",
         pretty_canonical=True,
     )
-    _exact_keys(manifest, _PROBE_INPUT_MANIFEST_KEYS, "Probe-A prepared-input manifest")
+    _exact_keys(manifest, PROBE_INPUT_MANIFEST_KEYS, "Probe-A prepared-input manifest")
     if manifest["schema"] != PROBE_INPUT_MANIFEST_SCHEMA:
         raise ProbeAEvidenceError("Probe-A prepared-input manifest schema mismatch")
     for field in (
@@ -2082,6 +2156,7 @@ def validate_evidence_semantics(
         probe_input_h5ad_path=by_role["probe_input_h5ad"][0]["path"],
         registration_path=registration_entry["path"],
         registration_sha256=registration_entry["sha256"],
+        owner_policy_sha256=registration["owner_policy_sha256"],
         report_path=by_role["probe_a_report"][0]["path"],
         report_sha256=by_role["probe_a_report"][0]["sha256"],
         expected_git_commit=expected_git_commit,

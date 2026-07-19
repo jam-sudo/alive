@@ -61,13 +61,15 @@ identity and overrides.
   roster SHA computed from the candidate file, and offline verification requires the pinned probe-manifest SHA.
 - [ ] Before Probe B, extend the same maintained CLI with the reviewed GEARS timing subcommand and complete raw
   command/resource sampling. Do not copy the archived timing harness.
-- [ ] Before Probe A, define and independently review the candidate scientific output bridge,
-  negative-value policy, and equivalence tolerance without observing Probe-A outputs. Freeze those decisions in
-  `probe_a_registration.json`. Probe A may accept or reject that candidate; it may not redefine it.
-- [ ] Before Probe A, the owner freezes `probe_a_registration.json` and its externally recorded SHA-256. It uses
-  schema `compose_gears_probe_a_registration_v1`, the approved Git SHA, and exact input-scale, determinism,
-  control-count, and output-bridge tolerances. No verifier or pod harness supplies defaults, and this artifact is
-  immutable once any Probe-A measurement has been observed.
+- [x] The outcome-independent candidate decisions are frozen in the committed canonical
+  `configs/compose_gears_probe_a_owner_policy_v1.json`: `log_normalized_pseudobulk`, no second
+  library normalization, finite signed output preserved, exact determinism (`0`), and `1e-5` numerical
+  equivalence tolerances. Probe A may accept or reject this candidate; it may not redefine it.
+- [ ] After Phase-0 input preparation and before any Probe-A fit, derive the write-once
+  `probe_a_registration.json` through maintained `build-probe-a-registration`. It uses schema
+  `compose_gears_probe_a_registration_v2`, the approved Git SHA, the committed owner-policy SHA, and the exact
+  positive `normalization_target` copied from the pinned prepared-input manifest. Externally record its emitted
+  SHA-256 before fitting. No caller, verifier, or pod harness supplies a target or tolerance.
 
 Probe A may run only after the completed implementation gates, candidate bridge/registration freeze,
 exact-SHA review, and §3 identity checks. Probe B additionally requires the timing subcommand. No scientific
@@ -91,10 +93,12 @@ git diff --check
 git status --short
 ```
 
-The 2026-07-19 local implementation at commit `f62bd8c` passed the focused Probe-A suite (77), adjacent contract
-suite (199), and full `tests/alive/compose` suite (1468), plus Ruff check, Ruff format check, and `git diff --check`.
-These counts establish local implementation readiness only; exact-SHA independent review and the frozen
-registration remain separate pre-pod gates.
+The earlier 2026-07-19 implementation at commit `f62bd8c` passed the focused Probe-A suite (77), adjacent
+contract suite (199), and full `tests/alive/compose` suite (1468), plus Ruff check, Ruff format check, and
+`git diff --check`. The later owner-policy/registration-v2 correction must be verified and pinned at its own
+clean commit. Its current local full COMPOSE suite is 1470 passing tests with one pre-existing AnnData warning,
+plus clean Ruff check/format and `git diff --check`. These counts establish local implementation readiness only;
+exact-SHA independent review and the run-specific registration pin remain separate pre-pod gates.
 
 Record the final test counts and exact Git SHA in the pod evidence manifest.
 
@@ -140,11 +144,12 @@ unavailable reader-spy attestation is a **STOP**, not a warning.
   runtime fingerprint; record both lock SHA-256 values and the lock-matched installed-package-roster SHA rather
   than assuming local and pod numerical environments are identical.
 
-### Phase A — scale/behavior characterization
+### Phase A — registration then scale/behavior characterization
 
-- Copy the already owner-frozen `probe_a_registration.json` into the fresh evidence root and verify its SHA
-  against the external pre-run pin before fitting or prediction. A missing pin or any mismatch is a STOP; the
-  observed report is never allowed to define or widen its own tolerance.
+- After `prepare-input` and `verify-input`, run maintained `build-probe-a-registration` exactly once against the
+  canonical prepared manifest and committed owner policy. Capture its emitted SHA outside the evidence tree and
+  verify it before fitting or prediction. A missing pin or any mismatch is a STOP; the observed report is never
+  allowed to define its scale, representation, negative policy, or tolerance.
 - Invoke the maintained `probe-a` command with the canonical registration path,
   `--probe-a-registration-sha256`, and the approved full `--git-commit`. The runner validates all three before
   loading the prepared input or fitting GEARS, and binds the registration/input-scale identities into both
@@ -160,26 +165,39 @@ unavailable reader-spy attestation is a **STOP**, not a warning.
   identities. Every count uses the exact prefix of that roster and retains every per-control prediction; the
   verifier reconstructs the public prediction from the first `min(n,300)` rows itself.
 
+Probe A's numerical bridge is specifically the public-vs-first-300 aggregation equivalence check. It does not
+run a sealed response projection and must not be described as such. The adapter arithmetic
+(`hvg_subset_center_pca_no_renormalization`, including finite signed inputs) is separately covered by local
+known-answer tests; scientific usefulness still requires the post-PASS amendment and later sealed evaluation.
+
 Probe A must emit a mechanical PASS/FAIL against a preregistered tolerance. A failed bridge routes to the named
 raw comparator; it does not trigger a post-hoc alternate transform.
 
-`probe_a_registration.json` has exactly the following semantic shape (with finite non-negative owner-frozen
-numbers replacing the metavariables; there are no defaults):
+The owner policy is outcome-independent and repository-frozen. The registration adds only run identity and the
+prepared response scale; it has exactly this semantic shape:
 
 ```text
-schema = compose_gears_probe_a_registration_v1
+schema = compose_gears_probe_a_registration_v2
 protocol = COMPOSE-K562-v1
 git_commit = <approved full Git SHA>
+owner_policy_sha256 = SHA-256(configs/compose_gears_probe_a_owner_policy_v1.json bytes)
 input_scale = {normalization_target, transform=full_library_normalize_log1p_then_roster_subset}
-determinism = {max_abs_error_tolerance=T_det}
-control_count = {counts=[1,8,300,301,400], first_300_max_abs_error_tolerance=T_cap}
-output_bridge = {representation=raw_pseudobulk_approximation, max_abs_error_tolerance=T_bridge}
+determinism = {max_abs_error_tolerance=0}
+control_count = {counts=[1,8,300,301,400], first_300_max_abs_error_tolerance=1e-5}
+output_bridge = {
+  representation=log_normalized_pseudobulk,
+  transform=hvg_subset_center_pca_no_renormalization,
+  negative_output_policy=preserve_finite_signed_model_output,
+  max_abs_error_tolerance=1e-5
+}
 self_checksum = SHA-256(canonical JSON of every preceding field)
 ```
 
-The canonical file-byte SHA is separately anchored before the run. Changing a value requires a new registration
-identity and is forbidden after any Probe-A measurement is observed; recomputing `self_checksum` does not make a
-post-hoc change preregistered.
+`normalization_target` is not a hand-entered constant and is not the fixture value `10000`; the builder copies
+the actual prepared manifest's response-projection `median_library`. The canonical file-byte SHA is separately
+anchored before the fit. Changing any value requires a new clean commit/policy or prepared-input identity and is
+forbidden after any Probe-A measurement is observed; recomputing `self_checksum` does not make a post-hoc change
+preregistered.
 
 ### Phase B — exact-roster resource benchmark
 
@@ -297,7 +315,7 @@ the receipt verify may the verifier publish `compose_gears_probe_a_admission_v3`
 output_bridge, self_checksum}`;
 `output_bridge` has exactly `{representation, verdict, tolerance, max_abs_error}`. Promotion requires
 `status=pass`, `protocol=COMPOSE-K562-v1`, the approved Git commit, the externally frozen registration SHA,
-`representation=raw_pseudobulk_approximation`, `verdict=pass`, finite non-negative error/tolerance,
+`representation=log_normalized_pseudobulk`, `verdict=pass`, finite non-negative error/tolerance,
 `max_abs_error ≤ tolerance`, and a canonical checksum over every field except `self_checksum`. A raw
 `probe_a.json`, command-result line, or bare `{status: pass}` is not admission evidence.
 The receipt and admission must agree byte-for-byte on the bridge object and on every shared identity. The
@@ -310,8 +328,11 @@ match.
 
 Decision-bearing manifest roles are content-validated, not merely inventoried. `commands.jsonl` contains at
 least one successful invocation of each maintained CLI subcommand that actually exists:
-`{build-roster, prepare-input, verify-input, probe-a, build-probe-a-report}`. Prep labels may repeat for multiple
-candidate rosters; `probe-a` occurs exactly once and its primary SHA is the manifested raw artifact SHA;
+`{build-roster, prepare-input, verify-input, build-probe-a-registration, probe-a,
+build-probe-a-report}`. Prep labels may repeat for multiple candidate rosters;
+`build-probe-a-registration` occurs exactly once after prepared-input verification, binds the owner-policy and
+prepared-manifest pins, and its primary SHA equals the manifested registration SHA; `probe-a` occurs exactly once
+and its primary SHA is the manifested raw artifact SHA;
 `build-probe-a-report` occurs exactly once, its arguments bind the raw sample, registration, approved commit and
 canonical report path, and its primary SHA is the manifested report SHA;
 unknown or fictional subcommands are rejected. Records carry secret-free environment allowlists, UTC intervals,

@@ -31,7 +31,17 @@ import numpy as np
 import pandas as pd
 from scipy import sparse
 
-from alive.compose.approximation_bias import canonical_file_bytes
+from alive.compose.approximation_bias import (
+    PROBE_A_INPUT_TRANSFORM,
+    PROBE_A_REGISTRATION_SCHEMA,
+    PROBE_A_REPRESENTATION,
+    PROTOCOL,
+    canonical_file_bytes,
+    probe_a_owner_policy_path,
+    probe_a_owner_policy_sha256,
+    self_checksum,
+    validate_probe_a_owner_policy,
+)
 from alive.compose.baseline_subprocess import canonical_payload_sha256, read_payload
 from alive.compose.fit_role import (
     FitRoleArtifactSpec,
@@ -44,6 +54,7 @@ from alive.compose.gears_probe_a import (
     MANIFEST_SCHEMA,
     PREPARATION_LOCK_PATH,
     PROBE_INPUT_ADATA_SCHEMA,
+    PROBE_INPUT_MANIFEST_KEYS,
     PROBE_INPUT_MANIFEST_SCHEMA,
     PROBE_MATRIX_DTYPE,
     PROBE_MATRIX_FORMAT,
@@ -76,7 +87,7 @@ _ADATA_SCHEMA = PROBE_INPUT_ADATA_SCHEMA
 _CANDIDATE_SCHEMA = "compose_perturbation_candidates_v1"
 _GENE2GO_SCHEMA = "compose_gene2go_nodes_v1"
 _COMMAND_RESULT_SCHEMA = "compose_gears_probe_command_result_v1"
-_PROBE_INPUT_TRANSFORM = "full_library_normalize_log1p_then_roster_subset"
+_PROBE_INPUT_TRANSFORM = PROBE_A_INPUT_TRANSFORM
 _RECEIPT_KEYS = {
     "alias_artifact_sha256",
     "candidate_artifact_sha256",
@@ -329,6 +340,100 @@ def _load_frozen_registration(
     return registration, expected_sha256
 
 
+def publish_probe_a_registration(
+    *,
+    evidence_root: str | Path,
+    probe_manifest_path: str | Path,
+    probe_manifest_sha256: str,
+    owner_policy_path: str | Path,
+    owner_policy_sha256: str,
+    expected_git_commit: str,
+    out_registration: str | Path,
+) -> str:
+    """Derive the write-once run registration from policy and prepared response scale.
+
+    The only run-specific numeric value is ``normalization_target``. It is copied
+    from the already checksum- and byte-pinned prepared-input manifest; callers
+    cannot provide or override it on the command line.
+    """
+    try:
+        assert_clean_approved_checkout(expected_git_commit)
+    except ValueError as exc:
+        raise GeneUniverseError(str(exc)) from exc
+    root = Path(evidence_root).resolve(strict=True)
+    output = Path(out_registration).resolve(strict=False)
+    if output != root / REGISTRATION_PATH:
+        raise GeneUniverseError(
+            f"Probe-A registration must be {REGISTRATION_PATH} under the evidence root"
+        )
+    if output.exists() or output.is_symlink():
+        raise GeneUniverseError("Probe-A registration destination already exists")
+
+    canonical_policy_path = probe_a_owner_policy_path().resolve(strict=True)
+    if Path(owner_policy_path).resolve(strict=True) != canonical_policy_path:
+        raise GeneUniverseError("Probe-A registration must use the committed owner-policy path")
+    declared_policy_sha = _require_sha256(
+        owner_policy_sha256, label="Probe-A owner-policy expected SHA-256"
+    )
+    actual_policy_sha = probe_a_owner_policy_sha256()
+    if declared_policy_sha != actual_policy_sha:
+        raise GeneUniverseError("Probe-A owner-policy SHA-256 differs from the committed policy")
+    policy_bytes = _stable_bytes(canonical_policy_path, label="Probe-A owner policy")
+    try:
+        policy = json.loads(policy_bytes)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise GeneUniverseError(f"cannot parse Probe-A owner policy: {exc}") from exc
+    if not isinstance(policy, dict) or policy_bytes != canonical_file_bytes(policy):
+        raise GeneUniverseError("Probe-A owner policy must be canonical finite JSON")
+    try:
+        validate_probe_a_owner_policy(policy)
+    except ValueError as exc:
+        raise GeneUniverseError(f"Probe-A owner policy is invalid: {exc}") from exc
+
+    expected_manifest_path = root / "probe_input_manifest.json"
+    if Path(probe_manifest_path).resolve(strict=True) != expected_manifest_path:
+        raise GeneUniverseError(
+            "Probe-A registration must use the archived canonical prepared-input manifest"
+        )
+    manifest = _contract_json(
+        expected_manifest_path,
+        expected_file_sha256=probe_manifest_sha256,
+        schema=PROBE_INPUT_MANIFEST_SCHEMA,
+        keys=PROBE_INPUT_MANIFEST_KEYS,
+        label="Probe-A prepared-input manifest",
+    )
+    target = manifest["normalization_target"]
+    if isinstance(target, bool) or not isinstance(target, (int, float)):
+        raise GeneUniverseError("prepared-input normalization_target must be numeric")
+    normalization_target = float(target)
+    if not np.isfinite(normalization_target) or normalization_target <= 0:
+        raise GeneUniverseError("prepared-input normalization_target must be finite and positive")
+    if manifest["expression_scale"] != policy["input_scale"]["transform"]:
+        raise GeneUniverseError("prepared-input scale differs from the frozen owner policy")
+
+    body = {
+        "schema": PROBE_A_REGISTRATION_SCHEMA,
+        "protocol": PROTOCOL,
+        "git_commit": expected_git_commit,
+        "owner_policy_sha256": actual_policy_sha,
+        "input_scale": {
+            "normalization_target": normalization_target,
+            "transform": policy["input_scale"]["transform"],
+        },
+        "determinism": dict(policy["determinism"]),
+        "control_count": dict(policy["control_count"]),
+        "output_bridge": dict(policy["output_bridge"]),
+    }
+    registration = {**body, "self_checksum": self_checksum(body)}
+    try:
+        validate_registration(registration, expected_git_commit=expected_git_commit)
+    except ValueError as exc:
+        raise GeneUniverseError(f"derived Probe-A registration is invalid: {exc}") from exc
+    encoded = canonical_file_bytes(registration)
+    atomic_write_once(output, encoded.decode("utf-8"))
+    return sha256_bytes(encoded)
+
+
 def _matrix_identity(value, *, label: str) -> dict[str, object]:
     """Hash one logical matrix canonically without densifying the full fit input."""
     try:
@@ -574,7 +679,7 @@ def run_probe_a_measurements(
             probe,
             {},
             [str(gene) for gene in probe.var_names],
-            "raw_pseudobulk_approximation",
+            PROBE_A_REPRESENTATION,
             fit_artifact_content_sha256=str(manifest["fit_artifact_content_sha256"]),
             checkpoint_path=str(checkpoint),
             fitted_model_observer=observe,
@@ -1405,6 +1510,14 @@ def _parser() -> argparse.ArgumentParser:
     verify.add_argument("--h5ad", required=True)
     verify.add_argument("--roster", required=True)
     verify.add_argument("--roster-receipt", required=True)
+    registration = commands.add_parser("build-probe-a-registration")
+    registration.add_argument("--evidence-root", required=True)
+    registration.add_argument("--probe-manifest", required=True)
+    registration.add_argument("--probe-manifest-sha256", required=True)
+    registration.add_argument("--owner-policy", required=True)
+    registration.add_argument("--owner-policy-sha256", required=True)
+    registration.add_argument("--git-commit", required=True)
+    registration.add_argument("--out-registration", required=True)
     probe_a = commands.add_parser("probe-a")
     probe_a.add_argument("--payload-dir", required=True)
     probe_a.add_argument("--probe-a-registration", required=True)
@@ -1487,6 +1600,20 @@ def main(argv: list[str] | None = None) -> int:
         _emit_command_result(
             command="verify-input",
             primary_file_sha256=args.manifest_sha256,
+        )
+    elif args.command == "build-probe-a-registration":
+        registration_sha256 = publish_probe_a_registration(
+            evidence_root=args.evidence_root,
+            probe_manifest_path=args.probe_manifest,
+            probe_manifest_sha256=args.probe_manifest_sha256,
+            owner_policy_path=args.owner_policy,
+            owner_policy_sha256=args.owner_policy_sha256,
+            expected_git_commit=args.git_commit,
+            out_registration=args.out_registration,
+        )
+        _emit_command_result(
+            command="build-probe-a-registration",
+            primary_file_sha256=registration_sha256,
         )
     elif args.command == "probe-a":
         raw_sha256 = run_probe_a_measurements(
