@@ -20,6 +20,7 @@ import importlib.metadata
 import importlib.util
 import json
 import os
+import pickle
 import platform
 import stat
 import sys
@@ -31,6 +32,10 @@ import numpy as np
 import pandas as pd
 from scipy import sparse
 
+from alive.compose.activation_evidence import (
+    ActivationEvidenceError,
+    validate_go_resource_manifest,
+)
 from alive.compose.approximation_bias import (
     PROBE_A_INPUT_TRANSFORM,
     PROBE_A_REGISTRATION_SCHEMA,
@@ -219,6 +224,74 @@ def _contract_json(
     if text != canonical:
         raise GeneUniverseError(f"{label} is not canonical JSON")
     return payload
+
+
+def _validate_gene2go_nodes_against_pinned_source(
+    *,
+    nodes: dict[str, object],
+    resource_manifest_path: str | Path,
+    resource_manifest_sha256: str,
+    gene2go_source_path: str | Path,
+    gene2go_source_sha256: str,
+) -> None:
+    """Prove that a derived node artifact is the exact pinned gene2go key set.
+
+    A checksum carried inside a derived JSON file cannot authenticate its own
+    claimed provenance.  This boundary therefore reopens the activation-pinned
+    resource manifest and the exact ``gene2go_all.pkl`` bytes, then compares the
+    complete key roster before any fit-role expression is read.
+    """
+    expected_manifest_sha = _require_sha256(
+        resource_manifest_sha256, label="GEARS resource manifest SHA-256"
+    )
+    manifest_path = Path(resource_manifest_path)
+    manifest_before = _stable_bytes(manifest_path, label="GEARS resource manifest")
+    if sha256_bytes(manifest_before) != expected_manifest_sha:
+        raise GeneUniverseError("GEARS resource manifest SHA-256 mismatch")
+    try:
+        manifest = validate_go_resource_manifest(manifest_path)
+    except ActivationEvidenceError as exc:
+        raise GeneUniverseError(f"GEARS resource manifest is invalid: {exc}") from exc
+    if _stable_bytes(manifest_path, label="GEARS resource manifest") != manifest_before:
+        raise GeneUniverseError("GEARS resource manifest changed while being validated")
+
+    resources = {
+        str(resource["name"]): resource
+        for resource in manifest["resources"]
+        if isinstance(resource, dict) and isinstance(resource.get("name"), str)
+    }
+    gene2go_resource = resources.get("gene2go_all.pkl")
+    if gene2go_resource is None:
+        raise GeneUniverseError("GEARS resource manifest omits gene2go_all.pkl")
+    expected_source_sha = _require_sha256(gene2go_source_sha256, label="gene2go source SHA-256")
+    if gene2go_resource.get("sha256") != expected_source_sha:
+        raise GeneUniverseError("gene2go source SHA-256 differs from the resource manifest")
+    source_path = Path(gene2go_source_path)
+    try:
+        if source_path.resolve(strict=True) != (
+            manifest_path.resolve(strict=True).parent / "gene2go_all.pkl"
+        ).resolve(strict=True):
+            raise GeneUniverseError("gene2go source must be the manifested sibling gene2go_all.pkl")
+    except OSError as exc:
+        raise GeneUniverseError(f"cannot resolve pinned gene2go source: {exc}") from exc
+    source_bytes = _stable_bytes(source_path, label="pinned gene2go source")
+    if sha256_bytes(source_bytes) != expected_source_sha:
+        raise GeneUniverseError("pinned gene2go source SHA-256 mismatch")
+    try:
+        source = pickle.loads(source_bytes)
+    except Exception as exc:
+        raise GeneUniverseError(f"cannot decode pinned gene2go source: {exc}") from exc
+    if not isinstance(source, dict) or not source:
+        raise GeneUniverseError("pinned gene2go source must be a non-empty mapping")
+    source_genes = list(source)
+    if any(not isinstance(gene, str) or not gene for gene in source_genes):
+        raise GeneUniverseError("pinned gene2go source contains an invalid gene key")
+    expected_genes = sorted(source_genes, key=lambda gene: gene.encode("utf-8"))
+    artifact_genes = nodes.get("genes")
+    if artifact_genes != expected_genes:
+        raise GeneUniverseError("gene2go node artifact differs from the pinned source key roster")
+    if nodes.get("source_gene2go_sha256") != expected_source_sha:
+        raise GeneUniverseError("gene2go node artifact names the wrong source SHA-256")
 
 
 def _load_roster_receipt(path: str | Path, *, expected_file_sha256: str) -> dict[str, object]:
@@ -843,6 +916,10 @@ def build_roster(
     candidate_artifact_sha256: str,
     gene2go_nodes_artifact: str | Path,
     gene2go_nodes_artifact_sha256: str,
+    resource_manifest_path: str | Path,
+    resource_manifest_sha256: str,
+    gene2go_source_path: str | Path,
+    gene2go_source_sha256: str,
     alias_artifact: str | Path,
     alias_artifact_sha256: str,
     approved_root: str | Path,
@@ -874,6 +951,13 @@ def build_roster(
         schema=_GENE2GO_SCHEMA,
         keys={"genes", "manifest_checksum", "schema", "source_gene2go_sha256"},
         label="gene2go node artifact",
+    )
+    _validate_gene2go_nodes_against_pinned_source(
+        nodes=gene2go,
+        resource_manifest_path=resource_manifest_path,
+        resource_manifest_sha256=resource_manifest_sha256,
+        gene2go_source_path=gene2go_source_path,
+        gene2go_source_sha256=gene2go_source_sha256,
     )
     if not isinstance(candidates["tokens"], list) or not isinstance(gene2go["genes"], list):
         raise GeneUniverseError("candidate/gene2go node rosters must be lists")
@@ -1483,6 +1567,10 @@ def _parser() -> argparse.ArgumentParser:
     roster.add_argument("--candidate-artifact-sha256", required=True)
     roster.add_argument("--gene2go-nodes-artifact", required=True)
     roster.add_argument("--gene2go-nodes-artifact-sha256", required=True)
+    roster.add_argument("--gears-resource-manifest", required=True)
+    roster.add_argument("--gears-resource-manifest-sha256", required=True)
+    roster.add_argument("--gene2go-source", required=True)
+    roster.add_argument("--gene2go-source-sha256", required=True)
     roster.add_argument("--alias-artifact", required=True)
     roster.add_argument("--alias-artifact-sha256", required=True)
     roster.add_argument("--approved-root", required=True)
@@ -1557,6 +1645,10 @@ def main(argv: list[str] | None = None) -> int:
             candidate_artifact_sha256=args.candidate_artifact_sha256,
             gene2go_nodes_artifact=args.gene2go_nodes_artifact,
             gene2go_nodes_artifact_sha256=args.gene2go_nodes_artifact_sha256,
+            resource_manifest_path=args.gears_resource_manifest,
+            resource_manifest_sha256=args.gears_resource_manifest_sha256,
+            gene2go_source_path=args.gene2go_source,
+            gene2go_source_sha256=args.gene2go_source_sha256,
             alias_artifact=args.alias_artifact,
             alias_artifact_sha256=args.alias_artifact_sha256,
             approved_root=args.approved_root,

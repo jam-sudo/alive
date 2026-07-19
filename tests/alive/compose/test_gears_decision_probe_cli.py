@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import pickle
 import sys
 from pathlib import Path
 
@@ -63,6 +64,25 @@ def _write_contract(path: Path, core: dict) -> Path:
     payload = {**core, "manifest_checksum": sha256_json(core)}
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return path
+
+
+def _pinned_gene2go_source(tmp_path: Path, probe, monkeypatch, genes: list[str]) -> dict:
+    manifest = tmp_path / "go_resource_manifest.json"
+    manifest.write_text("{}\n", encoding="utf-8")
+    source = tmp_path / "gene2go_all.pkl"
+    source.write_bytes(pickle.dumps({gene: set() for gene in genes}, protocol=4))
+    source_sha = sha256_file(source)
+    monkeypatch.setattr(
+        probe,
+        "validate_go_resource_manifest",
+        lambda _path: {"resources": [{"name": "gene2go_all.pkl", "sha256": source_sha}]},
+    )
+    return {
+        "resource_manifest_path": manifest,
+        "resource_manifest_sha256": sha256_file(manifest),
+        "gene2go_source_path": source,
+        "gene2go_source_sha256": source_sha,
+    }
 
 
 def _write_roster_receipt(path: Path, *, probe, payload: dict, roster, roster_path: Path) -> Path:
@@ -255,7 +275,7 @@ def test_probe_cli_prepares_only_verified_fit_rows_and_verifies_offline(tmp_path
         )
 
 
-def test_probe_cli_builds_roster_only_from_verified_contract_artifacts(tmp_path):
+def test_probe_cli_builds_roster_only_from_verified_contract_artifacts(tmp_path, monkeypatch):
     probe = _load(_PROBE, "_probe_test_roster_cli")
     payload, source, _roster, _roster_path, _receipt_path = _build_inputs(tmp_path, probe)
     candidate_core = {
@@ -264,10 +284,15 @@ def test_probe_cli_builds_roster_only_from_verified_contract_artifacts(tmp_path)
         "tokens": [str(gene) for gene in payload["single_gene_ids"]],
     }
     candidates = _write_contract(tmp_path / "candidates.json", candidate_core)
+    gene2go_source = _pinned_gene2go_source(
+        tmp_path, probe, monkeypatch, [str(gene) for gene in source.var_names]
+    )
     gene2go_core = {
-        "genes": [str(gene) for gene in source.var_names],
+        "genes": sorted(
+            [str(gene) for gene in source.var_names], key=lambda gene: gene.encode("utf-8")
+        ),
         "schema": "compose_gene2go_nodes_v1",
-        "source_gene2go_sha256": _SHA,
+        "source_gene2go_sha256": gene2go_source["gene2go_source_sha256"],
     }
     gene2go = _write_contract(tmp_path / "gene2go.json", gene2go_core)
     alias = tmp_path / "aliases.json"
@@ -281,6 +306,7 @@ def test_probe_cli_builds_roster_only_from_verified_contract_artifacts(tmp_path)
         candidate_artifact_sha256=sha256_file(candidates),
         gene2go_nodes_artifact=gene2go,
         gene2go_nodes_artifact_sha256=sha256_file(gene2go),
+        **gene2go_source,
         alias_artifact=alias,
         alias_artifact_sha256=sha256_file(alias),
         approved_root=tmp_path / "approved",
@@ -304,6 +330,25 @@ def test_probe_cli_builds_roster_only_from_verified_contract_artifacts(tmp_path)
     )
     assert result["receipt"]["runtime_fingerprint_sha256"] == probe._runtime_fingerprint_sha256()
     assert report_path.is_file() and roster_path.is_file() and receipt_path.is_file()
+
+
+def test_gene2go_nodes_must_exactly_match_activation_pinned_source(tmp_path, monkeypatch):
+    probe = _load(_PROBE, "_probe_test_gene2go_source_binding")
+    source = _pinned_gene2go_source(tmp_path, probe, monkeypatch, ["AAA", "BBB"])
+    with pytest.raises(GeneUniverseError, match="differs from the pinned source key roster"):
+        probe._validate_gene2go_nodes_against_pinned_source(
+            nodes={
+                "genes": ["AAA"],
+                "source_gene2go_sha256": source["gene2go_source_sha256"],
+            },
+            **source,
+        )
+
+    with pytest.raises(GeneUniverseError, match="names the wrong source"):
+        probe._validate_gene2go_nodes_against_pinned_source(
+            nodes={"genes": ["AAA", "BBB"], "source_gene2go_sha256": "f" * 64},
+            **source,
+        )
 
 
 def test_probe_cli_refuses_overwrite_and_tampered_roster_binding(tmp_path, monkeypatch):
@@ -402,6 +447,10 @@ def test_multi_artifact_outputs_require_distinct_destinations(tmp_path):
             candidate_artifact_sha256=_SHA,
             gene2go_nodes_artifact=tmp_path / "missing-go",
             gene2go_nodes_artifact_sha256=_SHA,
+            resource_manifest_path=tmp_path / "missing-manifest",
+            resource_manifest_sha256=_SHA,
+            gene2go_source_path=tmp_path / "missing-gene2go",
+            gene2go_source_sha256=_SHA,
             alias_artifact=tmp_path / "missing-alias",
             alias_artifact_sha256=_SHA,
             approved_root=tmp_path,

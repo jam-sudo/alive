@@ -50,7 +50,9 @@ re-verified from the MacBook):**
 
 **Load-bearing source anchors:** `cell-gears==0.1.2` wheel `gears/gears.py::GEARS.predict` (per-control `p`,
 first batch ≤300, public mean), `gears/pertdata.py::PertData.new_data_process` (no caller-data normalization),
-and `PertData.set_pert_genes` (`gene2go`-filtered perturbation roster); local
+and `PertData.set_pert_genes` (`gene2go`-filtered perturbation roster). The maintained worker explicitly uses
+`default_pert_graph=False`, making that roster the exact method input roster intersected with pinned `gene2go`;
+the upstream default's separate legacy essential-symbol list is not an additional silent eligibility gate. Local
 `src/alive/compose/fit_role.py::apply_response_projection`,
 `src/alive/compose/response.py::_select_hvg`, and the two real workers. The activation evidence must record the
 wheel SHA-256 and source-symbol checks; line numbers in this note are explanatory, not identity anchors.

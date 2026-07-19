@@ -384,6 +384,8 @@ def _complete_evidence(root: Path) -> tuple[dict, dict, dict, str, str, str]:
         root / "runtime.json",
         {**runtime_body, "self_checksum": sha256_json(runtime_body)},
     )
+    (root / "logs").mkdir(parents=True, exist_ok=True)
+    (root / "logs/gene2go_nodes.json").write_text("pinned nodes\n", encoding="utf-8")
 
     receipt_body = {
         "alias_artifact_sha256": "1" * 64,
@@ -392,7 +394,7 @@ def _complete_evidence(root: Path) -> tuple[dict, dict, dict, str, str, str]:
         "preparation_dependency_lock_sha256": runtime_body["preparation_dependency_lock_sha256"],
         "gears_dependency_lock_sha256": runtime_body["gears_dependency_lock_sha256"],
         "fit_artifact_content_sha256": "4" * 64,
-        "gene2go_nodes_artifact_sha256": "5" * 64,
+        "gene2go_nodes_artifact_sha256": sha256_file(root / "logs/gene2go_nodes.json"),
         "generator_code_sha256": "6" * 64,
         "n_target": 2000,
         "ordered_roster_sha256": "7" * 64,
@@ -623,6 +625,23 @@ def _complete_evidence(root: Path) -> tuple[dict, dict, dict, str, str, str]:
                     f"/workspace/evidence/{REGISTRATION_PATH}",
                 ]
             )
+        elif command == "build-roster":
+            command_body["argv"].extend(
+                [
+                    "--gene2go-nodes-artifact",
+                    "/workspace/evidence/logs/gene2go_nodes.json",
+                    "--gene2go-nodes-artifact-sha256",
+                    receipt["gene2go_nodes_artifact_sha256"],
+                    "--gears-resource-manifest",
+                    "/workspace/gears_data/go_resource_manifest.json",
+                    "--gears-resource-manifest-sha256",
+                    inputs_body["gene2go_manifest_sha256"],
+                    "--gene2go-source",
+                    "/workspace/gears_data/gene2go_all.pkl",
+                    "--gene2go-source-sha256",
+                    "f" * 64,
+                ]
+            )
         elif command == "probe-a":
             command_body["argv"].extend(
                 [
@@ -692,6 +711,7 @@ def _complete_evidence(root: Path) -> tuple[dict, dict, dict, str, str, str]:
         ("probe_a_checkpoint", "checkpoints/run_2.pt"),
         ("raw_sample", "raw.json"),
         ("log", "logs/run.log"),
+        ("log", "logs/gene2go_nodes.json"),
     ]
     manifest = _manifest([_file_entry(root, role, path) for role, path in role_paths])
     _write_json(root / MANIFEST_PATH, manifest)

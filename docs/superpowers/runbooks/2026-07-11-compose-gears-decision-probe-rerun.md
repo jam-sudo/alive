@@ -59,6 +59,11 @@ identity and overrides.
   full-normalize-then-subset AnnData. It cannot accept the original outcome source and contains no hardcoded pod
   path. `build-roster` emits a receipt last; preparation consumes the independently pinned receipt rather than a
   roster SHA computed from the candidate file, and offline verification requires the pinned probe-manifest SHA.
+- [x] `build-roster` independently binds the derived GO-node JSON to the activation-validated resource manifest
+  and exact manifested `gene2go_all.pkl` bytes/key roster. The worker freezes
+  `perturbation_graph_policy=method_roster_intersect_gene2go` and invokes upstream
+  `PertData(..., default_pert_graph=False)`; the legacy essential-symbol filter may not silently redefine global
+  eligibility.
 - [ ] Before Probe B, extend the same maintained CLI with the reviewed GEARS timing subcommand and complete raw
   command/resource sampling. Do not copy the archived timing harness.
 - [x] The outcome-independent candidate decisions are frozen in the committed canonical
@@ -138,6 +143,9 @@ unavailable reader-spy attestation is a **STOP**, not a warning.
 - Run source/manifest/hash validation and metadata-only role resolution.
 - Emit the exact row rosters and a zero-overlap proof without reading expression.
 - Verify the planned sizes satisfy `N_target ≥ |M|` and record the exact ordered roster SHA for each candidate.
+- Pass the activation-pinned GO resource manifest plus its external SHA and the manifested sibling
+  `gene2go_all.pkl` plus its SHA to `build-roster`. A derived node artifact whose source claim or complete key
+  roster differs is a STOP; never substitute `essential_all_data_pert_genes.pkl` for this input.
 - Require the receipt-last completion marker, record its externally anchored SHA, and use only that pin for
   `prepare-input`; a roster/report without its receipt is an incomplete failed attempt.
 - Verify the receipt's generator source-closure, `uv.lock`, the separate GEARS environment lock, and generator

@@ -1553,6 +1553,9 @@ def _validate_commands(
     expected_sha256: str,
     expected_bytes: int,
     runtime_fingerprint_sha256: str,
+    gene2go_manifest_sha256: str,
+    gene2go_nodes_artifact_sha256: str,
+    manifested_files: Mapping[str, str],
     raw_sample_path: str,
     raw_sample_sha256: str,
     probe_input_manifest_path: str,
@@ -1618,7 +1621,43 @@ def _validate_commands(
             )
         if any("$(" in token or "`" in token for token in argv):
             raise ProbeAEvidenceError("commands argv must not use shell command substitution")
-        if command == "build-probe-a-registration":
+        if command == "build-roster":
+            required_options = (
+                "--gene2go-nodes-artifact",
+                "--gene2go-nodes-artifact-sha256",
+                "--gears-resource-manifest",
+                "--gears-resource-manifest-sha256",
+                "--gene2go-source",
+                "--gene2go-source-sha256",
+            )
+            for option in required_options:
+                if argv.count(option) != 1 or argv.index(option) + 1 >= len(argv):
+                    raise ProbeAEvidenceError(
+                        f"GEARS roster command requires exactly one {option} value"
+                    )
+            source = argv[argv.index("--gene2go-source") + 1]
+            nodes = argv[argv.index("--gene2go-nodes-artifact") + 1]
+            matching_node_paths = [
+                relative
+                for relative in manifested_files
+                if Path(nodes).as_posix() == relative or nodes.endswith(f"/{relative}")
+            ]
+            if (
+                argv[argv.index("--gears-resource-manifest-sha256") + 1] != gene2go_manifest_sha256
+                or Path(source).name != "gene2go_all.pkl"
+                or len(matching_node_paths) != 1
+                or manifested_files[matching_node_paths[0]] != gene2go_nodes_artifact_sha256
+                or argv[argv.index("--gene2go-nodes-artifact-sha256") + 1]
+                != gene2go_nodes_artifact_sha256
+            ):
+                raise ProbeAEvidenceError(
+                    "GEARS roster command is not bound to the pinned gene2go resources"
+                )
+            _sha(
+                argv[argv.index("--gene2go-source-sha256") + 1],
+                "GEARS roster gene2go source SHA-256",
+            )
+        elif command == "build-probe-a-registration":
             required_options = (
                 "--evidence-root",
                 "--probe-manifest",
@@ -2149,6 +2188,11 @@ def validate_evidence_semantics(
         expected_sha256=command_entry["sha256"],
         expected_bytes=command_entry["bytes"],
         runtime_fingerprint_sha256=runtime["runtime_fingerprint_sha256"],
+        gene2go_manifest_sha256=inputs["gene2go_manifest_sha256"],
+        gene2go_nodes_artifact_sha256=matching_receipts[0]["gene2go_nodes_artifact_sha256"],
+        manifested_files={
+            entry["path"]: entry["sha256"] for entries in by_role.values() for entry in entries
+        },
         raw_sample_path=raw_entries[0]["path"],
         raw_sample_sha256=raw_entries[0]["sha256"],
         probe_input_manifest_path=by_role["probe_input_manifest"][0]["path"],

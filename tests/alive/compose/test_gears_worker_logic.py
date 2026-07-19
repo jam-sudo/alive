@@ -138,7 +138,8 @@ def _install_fake_gears(
     fake_utils.zip_data_download_wrapper = _unexpected_download
 
     class FakePertData:
-        def __init__(self, data_path):
+        def __init__(self, data_path, *, default_pert_graph):
+            assert default_pert_graph is False
             self.data_path = data_path
             work_paths.append(data_path)
             for relative in (
@@ -271,6 +272,10 @@ def _install_fake_gears(
         assert obj["training_device"] == "cuda"
         assert obj["numeric_precision"] == "float32"
         assert obj["training_config"]["model_selection_policy"] == "fixed_final_epoch"
+        assert obj["perturbation_graph_policy"] == "method_roster_intersect_gene2go"
+        assert (
+            obj["training_config"]["perturbation_graph_policy"] == "method_roster_intersect_gene2go"
+        )
         assert obj["split_manifest"]["monitoring_policy"].endswith("no_holdout")
         events.append("checkpoint")
         file_obj.write(b"actual-trained-state")

@@ -106,6 +106,10 @@ consumption. Every step is outcome-free and request-roster-invariant.
    `unmapped_alias` reason). This set is global and fixed before role assignment; the requested/sealed subset
    never enters it. The standalone control token is ignored as a candidate, but control-containing combos,
    raw self-combos, and combos whose aliases collapse to one canonical gene are malformed inputs and fail closed.
+   The derived node artifact is not trusted on its own: the maintained builder validates the activation-pinned
+   GO resource manifest, hashes the manifested sibling `gene2go_all.pkl`, decodes its complete key set, and
+   requires the artifact's byte-sorted roster and `source_gene2go_sha256` to match exactly before reading any
+   fit-role expression.
 3. **Mandatory set `M`** = `frozen_response_hvg_genes ∪ eligible_perturbation_genes`.
    `frozen_response_hvg_genes` are read verbatim from the full-universe response projection; the generator does
    not rank or recompute them, so no cross-median equality assumption exists. GO membership is irrelevant for a
@@ -122,7 +126,13 @@ consumption. Every step is outcome-free and request-roster-invariant.
    Emit the **GEARS roster artifact** (§4).
 7. **Fail-closed GEARS fit-input consumption:** the full raw fit-role artifact remains `U_full`. The maintained
    adapter verifies fit-role/response/roster lineage, normalizes allowed fit rows over all `U_full` columns, then
-   subsets to this exact ordered roster before `PertData.new_data_process`. The resulting probe/model input and
+   subsets to this exact ordered roster before `PertData.new_data_process`. It constructs
+   `PertData(..., default_pert_graph=False)`, the upstream-supported method-roster graph mode, so perturbation
+   nodes are exactly the canonical method roster intersected with the pinned gene2go mapping. The legacy
+   `default_pert_graph=True` path is forbidden because it silently applies the separate, non-canonical
+   `essential_all_data_pert_genes.pkl` symbol list and can contradict the registered `var ∩ gene2go`
+   eligibility decision. The graph policy string is frozen in the worker config and every checkpoint. The
+   resulting probe/model input and
    GEARS prediction roster must equal `R_gears`; any missing/extra/duplicate gene, order mismatch, response-HVG
    omission, or digest mismatch → `INVALID`. CPA and the response operator do not consume this subset. A reduced
    GEARS prediction is not passed to the raw-count response projector; its scientific bridge is Probe-A-gated.

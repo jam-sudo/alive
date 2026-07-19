@@ -78,6 +78,7 @@ _GEARS_MONITORING_POLICY = "deterministic_training_subset_no_holdout"
 _GEARS_UPSTREAM_BEST_MODEL_METRIC = "monitoring_mse_de_ignored"
 _GEARS_PREDICTION_CONTROL_BATCH_SIZE = 300
 _GEARS_PREDICTION_RNG_POLICY = "sha256(payload_seed,canonical_pair)"
+_GEARS_PERTURBATION_GRAPH_POLICY = "method_roster_intersect_gene2go"
 _GEARS_BATCH_SIZE = 32
 _GEARS_TEST_BATCH_SIZE = 128
 _GEARS_VALIDATION_FRACTION = 0.10
@@ -203,6 +204,7 @@ def _registered_worker_config(adapter_version: str) -> dict[str, object]:
             "upstream_best_model_metric": _GEARS_UPSTREAM_BEST_MODEL_METRIC,
             "prediction_control_batch_size": _GEARS_PREDICTION_CONTROL_BATCH_SIZE,
             "prediction_rng_policy": _GEARS_PREDICTION_RNG_POLICY,
+            "perturbation_graph_policy": _GEARS_PERTURBATION_GRAPH_POLICY,
             "batch_size": _GEARS_BATCH_SIZE,
             "validation_batch_size": _GEARS_TEST_BATCH_SIZE,
             "validation_fraction": _GEARS_VALIDATION_FRACTION,
@@ -970,7 +972,14 @@ def _fit_and_predict(
             if hasattr(module, "zip_data_download_wrapper"):
                 module.zip_data_download_wrapper = _offline_zip_guard
 
-        pert_data = PertData(work)
+        # ``default_pert_graph=True`` silently intersects the method input with
+        # GEARS' legacy ``essential_all_data_pert_genes.pkl`` symbol roster.
+        # That contradicts the governed eligibility contract (canonical
+        # R_gears ∩ pinned gene2go) and can drop an alias-canonicalized gene even
+        # though it is measured and GO-composable.  The upstream-supported
+        # smaller-graph mode derives perturbation nodes from the exact method
+        # roster and then intersects them with the same pinned gene2go mapping.
+        pert_data = PertData(work, default_pert_graph=False)
         pert_data.new_data_process("compose_fit_role", adata=gears_adata)
         _require_fit_genes_in_gears_roster(
             fit_perturbation_genes,
@@ -1062,6 +1071,7 @@ def _fit_and_predict(
             "fit_artifact_content_sha256": fit_artifact_content_sha256,
             "gene_order_sha256": canonical_gene_order_sha256(gene_order),
             "resource_manifest_sha256": snapshot_bundle["manifest_sha256"],
+            "perturbation_graph_policy": _GEARS_PERTURBATION_GRAPH_POLICY,
             "native_input_scale": input_scale,
             "native_input_scale_status": (
                 "PROBE_ONLY_DECISION_MEASUREMENT"
@@ -1093,6 +1103,7 @@ def _fit_and_predict(
                 "upstream_best_model_metric": _GEARS_UPSTREAM_BEST_MODEL_METRIC,
                 "prediction_control_batch_size": _GEARS_PREDICTION_CONTROL_BATCH_SIZE,
                 "prediction_rng_policy": _GEARS_PREDICTION_RNG_POLICY,
+                "perturbation_graph_policy": _GEARS_PERTURBATION_GRAPH_POLICY,
                 "negative_prediction_policy": "clip_zero_before_response_projection",
                 "batch_size": _GEARS_BATCH_SIZE,
                 "validation_batch_size": _GEARS_TEST_BATCH_SIZE,
