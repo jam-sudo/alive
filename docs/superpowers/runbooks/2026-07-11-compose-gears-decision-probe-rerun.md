@@ -102,7 +102,9 @@ GPU-hours/cost. Never place credentials in the repository or transcript artifact
 2. capture provider/pod ID, GPU model/UUID, driver/CUDA, CPU/RAM, filesystem capacity, UTC timestamps, and cost
    rate/limit;
 3. transfer a Git bundle or archive from the exact reviewed clean commit; do not develop directly on the pod;
-4. verify bundle commit, clean tree, `uv.lock`, GEARS era lock, container/image digest, Python/package roster, GO
+4. verify bundle commit, clean tree (including untracked files, replacement refs, and recursive submodules),
+   `uv.lock`, the separate `docs/activation-evidence/compose/requirements.gears_env.lock`, container/image
+   digest, the complete lock-matched installed package roster, GO
    resource manifest and bytes, Norman source bytes, pair manifest, alias artifact, full fit-role/response inputs,
    and every expected SHA-256;
 5. disable network access for the fit after required immutable resources are present; fail on any attempted
@@ -129,14 +131,19 @@ unavailable reader-spy attestation is a **STOP**, not a warning.
 - Verify the planned sizes satisfy `N_target ≥ |M|` and record the exact ordered roster SHA for each candidate.
 - Require the receipt-last completion marker, record its externally anchored SHA, and use only that pin for
   `prepare-input`; a roster/report without its receipt is an incomplete failed attempt.
-- Verify the receipt's generator source-closure, `uv.lock`, and generator runtime fingerprint; record the separate
-  preparation/runtime fingerprint rather than assuming local and pod numerical environments are identical.
+- Verify the receipt's generator source-closure, `uv.lock`, the separate GEARS environment lock, and generator
+  runtime fingerprint; record both lock SHA-256 values and the lock-matched installed-package-roster SHA rather
+  than assuming local and pod numerical environments are identical.
 
 ### Phase A — scale/behavior characterization
 
 - Copy the already owner-frozen `probe_a_registration.json` into the fresh evidence root and verify its SHA
   against the external pre-run pin before fitting or prediction. A missing pin or any mismatch is a STOP; the
   observed report is never allowed to define or widen its own tolerance.
+- Invoke the maintained `probe-a` command with the canonical registration path,
+  `--probe-a-registration-sha256`, and the approved full `--git-commit`. The runner validates all three before
+  loading the prepared input or fitting GEARS, and binds the registration/input-scale identities into both
+  checkpoints and the raw producer envelope.
 - Dump and hash the pinned GEARS source surfaces used by preprocessing, target construction, and prediction.
 - Use a tiny synthetic or explicitly non-sealed fit-role artifact to measure P1–P4.
 - Fit the same deterministic tiny input twice; require checkpoint and output equality under the registered
@@ -175,7 +182,7 @@ post-hoc change preregistered.
 - For each owner-approved candidate `R_gears` (initially the exact-size 2k-ish and 5k-ish artifacts), verify every
   lineage digest and mandatory gene before model construction.
 - Run graph preparation and two preregistered epoch counts with identical seed/config, fresh output directories,
-  no checkpoint reuse, and the maintained measurement hook. Do not mutate worker module constants in place;
+  no checkpoint reuse, and the maintained probe runner. Do not mutate worker module constants in place;
   pass measurement epoch count through the dedicated probe-only API.
 - Record graph-build time, each epoch time, peak/trace host RSS, peak/trace GPU memory/utilization, CPU load,
   checkpoint bytes/SHA, processed roster SHA, and extrapolation assumptions. Preserve raw samples, not only
@@ -186,7 +193,11 @@ post-hoc change preregistered.
 ### Phase C — collection and independent verification
 
 - Stop all background samplers in a trap and record their exit status.
-- Hash every output, raw log, command transcript, and environment record into a canonical evidence manifest.
+- Derive `probe_a.json` only through maintained `build-probe-a-report`; append that command record to
+  `commands.jsonl`, and require its primary SHA to equal the final report bytes.
+- Run maintained `build-evidence-manifest` last to hash every pre-admission output, raw log, command transcript,
+  and environment record. Do not append its result line to the already closed `commands.jsonl`; externally pin
+  the emitted manifest SHA instead.
 - Copy evidence back to the MacBook before terminating the pod; verify local bytes against the pod manifest.
 - Re-run the offline verifier locally. Only its PASS output may promote the archive to decision-grade evidence.
 - Shut down the pod and revoke the temporary SSH key after local verification.
@@ -201,6 +212,8 @@ manifest.json                 canonical schema, self-checksum, complete file ros
 commands.jsonl                argv/cwd/env allowlist/start/end/exit code per command
 runtime.json                  pod/GPU/driver/CUDA/CPU/RAM/image/package/lock identities
 inputs.json                   source/GO/pair/alias/fit-role/response/roster identities
+probe_input_manifest.json     canonical prepared-input manifest consumed by Probe A
+probe_input.h5ad              exact prepared, non-sealed H5AD consumed by both fresh fits
 roster_receipts/              receipt-last generation records and their externally anchored SHA-256 values
 role_attestation.json         metadata-derived roles, counts, zero overlap, reader-spy proof
 probe_a_registration.json     owner-frozen decisions/tolerances + external pre-run SHA-256 pin
@@ -213,10 +226,11 @@ verify.json                   write-once local verifier receipt + verifier-code-
 ```
 
 Every JSON uses canonical serialization and schema versioning. `manifest.json` uses
-`compose_gears_probe_a_evidence_manifest_v4`; every file entry has exactly `{role,path,sha256,bytes}`. It assigns
+`compose_gears_probe_a_evidence_manifest_v7`; every file entry has exactly `{role,path,sha256,bytes}`. It assigns
 exactly one role each to `commands`, `runtime`, `inputs`, `role_attestation`, `probe_a_registration`,
-`probe_a_report`, and `probe_a_source`, at least one each to `roster_receipt`, `raw_sample`, and `log`, and exactly
-the two raw-referenced files under the `probe_a_checkpoint` role.
+`probe_a_report`, `probe_a_source`, `probe_input_manifest`, and `probe_input_h5ad`, at least one each to
+`roster_receipt`, `raw_sample`, and `log`, and exactly the two raw-referenced files under the
+`probe_a_checkpoint` role.
 **Probe B is not a Probe-A manifest role or admission prerequisite.** It receives a separate timestamped archive
 and verifier only after the timing runner and raw/statistical contract are reviewed. The declared paths must
 equal the recursively enumerated regular-file inventory. Only
@@ -225,18 +239,39 @@ comparison. Symlinks, missing/extra files, duplicate paths, unknown roles, absol
 identities, non-finite measurements, mismatched rosters, unbound overrides, and evidence produced from a
 different commit or runtime are rejected.
 
-The report uses `compose_gears_probe_a_report_v4` and carries `registration_sha256`. Its runtime, inputs, source,
+The report uses `compose_gears_probe_a_report_v7` and carries `registration_sha256`. Its runtime, inputs, source,
 registration, report-byte, and complete raw-sample path/SHA identities must match the corresponding manifest
 roles exactly; neither subset-only nor superset-only raw-sample rosters are accepted.
 
-Probe A has exactly one canonical `compose_gears_probe_a_raw_measurements_v2` artifact emitted write-once by the
-maintained `probe-a` publication command. It contains full numeric `input_before`/`input_after` matrices, two run
-predictions plus checkpoint paths/identities, one frozen ordered control-row roster, each count's exact prefix and
-per-control predictions for `[1,8,300,301,400]`, the corresponding public predictions, the public output-scale
-prediction, and the preregistered bridge prediction. The command's primary-file SHA must equal this raw artifact's
-manifest SHA. The offline validator independently hashes the actual checkpoint bytes, requires their exact
-two-file manifest roster, and recomputes input/prediction digests, exact input equality, two-run maximum absolute
-error, every public-vs-first-`min(n,300)` reconstruction error, the 300-vs-301/400 first-batch error, output
+The prepared manifest/H5AD use `compose_gears_probe_input_manifest_v3` and
+`compose_gears_probe_input_v3`. The stored matrix is canonical CSR little-endian float32 before H5AD publication,
+matching the worker's numerical boundary; its logical digest is independently recomputed after reopening. Both
+artifacts record the exact positive finite `normalization_target`, matrix storage contract, selected source-row
+roster digest, preparation-lock SHA, GEARS-lock SHA, and an exact role contract containing the control token,
+single-gene roster, calibration-pair roster, and sealed-pair roster. Pair tokens are reconstructed from the
+registered pairs rather than parsed by splitting gene IDs on `_`. The offline verifier requires all identities to
+agree with the receipt, raw producer, runtime, and owner-frozen registration.
+
+Probe A has exactly one canonical `compose_gears_probe_a_raw_measurements_v6` artifact emitted write-once by the
+maintained `probe-a` execution command. That command accepts no arbitrary measurement JSON: it verifies and
+directly consumes the archived `probe_input_manifest.json`/`probe_input.h5ad`, invokes the maintained pinned GEARS
+worker for two fresh fits, durably writes each checkpoint, and observes the fitted model before publishing raw
+measurements. The artifact contains a producer envelope binding the pinned backend/version, driver and worker
+source hashes, prepared-input/row/control/roster identities, canonical non-sealed query, seed, and measurement run;
+the owner-frozen registration SHA and the exact normalization target/input-scale identity;
+canonical logical-CSR identities for `input_before`/`input_after` (shape, nonzero count, a storage-independent
+little-endian float64 logical digest of the already float32-bounded values, without densifying the 70,987 × roster
+input); the committed GEARS-lock and installed-package-roster digests; two indexed run predictions with checkpoint byte/format and
+input/query/seed/worker bindings; one frozen ordered control-row roster; each count's exact prefix and per-control
+predictions for `[1,8,300,301,400]`; the corresponding public predictions; the public output-scale prediction; and
+the preregistered bridge prediction. The command's primary-file SHA must equal this raw artifact's manifest SHA.
+The offline validator independently hashes the actual checkpoint bytes, validates the load-free PyTorch ZIP
+envelope and all member CRCs, scans pickle opcodes without executing/deserializing them to require the registered
+model/backend/input/query/worker/fit identities, requires the exact two-file manifest roster, reopens the manifested
+H5AD and recomputes its row/control identities, role assignment, sealed-pair overlap, reader-spy row roster, and
+matrix digest, verifies both committed dependency-lock hashes and the maintained source hashes, and recomputes
+input/prediction digests, exact input equality, two-run maximum absolute error, every
+public-vs-first-`min(n,300)` reconstruction error, the 300-vs-301/400 first-batch error, output
 minimum/median/maximum, negative
 fraction, near-integer fraction (distance to the nearest integer `<= 1e-6`), and bridge maximum absolute error.
 A self-reported aggregate or verdict cannot substitute for these raw arrays.
@@ -270,15 +305,19 @@ match.
 
 Decision-bearing manifest roles are content-validated, not merely inventoried. `commands.jsonl` contains at
 least one successful invocation of each maintained CLI subcommand that actually exists:
-`{build-roster, prepare-input, verify-input, probe-a}`. Prep labels may repeat for multiple candidate rosters;
-`probe-a` occurs exactly once and its primary SHA is the manifested raw artifact SHA;
+`{build-roster, prepare-input, verify-input, probe-a, build-probe-a-report}`. Prep labels may repeat for multiple
+candidate rosters; `probe-a` occurs exactly once and its primary SHA is the manifested raw artifact SHA;
+`build-probe-a-report` occurs exactly once, its arguments bind the raw sample, registration, approved commit and
+canonical report path, and its primary SHA is the manifested report SHA;
 unknown or fictional subcommands are rejected. Records carry secret-free environment allowlists, UTC intervals,
 primary-file SHA values, and one runtime fingerprint.
 `runtime.json`, `inputs.json`, and `role_attestation.json` use respectively
-`compose_gears_probe_runtime_v1`, `compose_gears_probe_inputs_v1`, and
-`compose_gears_probe_role_attestation_v1`; they bind the approved commit, dependency lock, runtime/input
-identities, exact fit-role counts, zero sealed overlap/read counts, and a passing reader-spy attestation. Every
-`compose_gears_roster_receipt_v1` binds its exact roster and dependency lineage. Any placeholder JSON that merely
+`compose_gears_probe_runtime_v2`, `compose_gears_probe_inputs_v3`, and
+`compose_gears_probe_role_attestation_v2`; they bind the approved commit, separate preparation/GEARS dependency
+locks, the complete installed-package-roster digest, runtime/input
+identities, exact fit-role counts, the prepared-manifest/H5AD/row/control-roster SHA identities, zero sealed
+overlap/read counts, and a passing reader-spy attestation. Every
+`compose_gears_roster_receipt_v2` binds its exact roster and both dependency-lock lineages. Any placeholder JSON that merely
 occupies a manifest role is rejected. Until the separate Probe-B runner/archive spec defines raw epoch samples,
 the exact CV estimator, extrapolation formula, and cross-roster monotonicity rule, **no Probe-B JSON is
 decision-grade and no Probe-B PASS schema is recognized by this verifier**.

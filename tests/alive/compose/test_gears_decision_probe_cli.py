@@ -69,7 +69,8 @@ def _write_roster_receipt(path: Path, *, probe, payload: dict, roster, roster_pa
     core = {
         "alias_artifact_sha256": _SHA,
         "candidate_artifact_sha256": _SHA,
-        "dependency_lock_sha256": probe._dependency_lock_sha256(),
+        "preparation_dependency_lock_sha256": probe._preparation_dependency_lock_sha256(),
+        "gears_dependency_lock_sha256": probe._gears_dependency_lock_sha256(),
         "driver_code_sha256": sha256_file(_PROBE),
         "fit_artifact_content_sha256": payload["fit_role_artifact"]["content_manifest_sha256"],
         "gene2go_nodes_artifact_sha256": _SHA,
@@ -82,7 +83,7 @@ def _write_roster_receipt(path: Path, *, probe, payload: dict, roster, roster_pa
         "runtime_fingerprint_sha256": probe._runtime_fingerprint_sha256(),
         "roster_artifact_checksum": roster.artifact_checksum,
         "roster_file_sha256": sha256_file(roster_path),
-        "schema": "compose_gears_roster_receipt_v1",
+        "schema": "compose_gears_roster_receipt_v2",
     }
     return _write_contract(path, core)
 
@@ -216,6 +217,8 @@ def test_probe_cli_prepares_only_verified_fit_rows_and_verifies_offline(tmp_path
     assert verified == result
     assert observed.obs_names.tolist() == source.obs_names.tolist()
     assert observed.var_names.tolist() == list(roster.ordered_roster)
+    assert sparse.isspmatrix_csr(observed.X)
+    assert observed.X.dtype == np.dtype("float32")
     assert np.allclose(observed.X.toarray(), expected.toarray())
     assert set(observed.obs["role"].astype(str)) <= {
         "control",
@@ -223,8 +226,33 @@ def test_probe_cli_prepares_only_verified_fit_rows_and_verifies_offline(tmp_path
         "combo_calibration",
     }
     assert result["expression_scale"] == "full_library_normalize_log1p_then_roster_subset"
+    assert result["normalization_target"] == payload["response_projection"]["median_library"]
+    assert observed.uns["normalization_target"] == result["normalization_target"]
     assert observed.uns["roster_receipt_sha256"] == sha256_file(receipt_path)
     assert observed.uns["probe_runtime_fingerprint_sha256"] == producer_runtime_sha256
+
+    forged_target_h5ad = tmp_path / "forged_target.h5ad"
+    observed.uns["normalization_target"] = float(result["normalization_target"]) + 1.0
+    observed.write_h5ad(forged_target_h5ad)
+    forged_target_manifest = json.loads(manifest_path.read_text())
+    forged_target_manifest["output_h5ad_sha256"] = sha256_file(forged_target_h5ad)
+    forged_target_core = {
+        key: value for key, value in forged_target_manifest.items() if key != "manifest_checksum"
+    }
+    forged_target_manifest["manifest_checksum"] = sha256_json(forged_target_core)
+    forged_target_manifest_path = tmp_path / "forged_target_manifest.json"
+    forged_target_manifest_path.write_text(
+        json.dumps(forged_target_manifest, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(GeneUniverseError, match="normalization target differs"):
+        probe.verify_probe_input(
+            manifest_path=forged_target_manifest_path,
+            expected_manifest_sha256=sha256_file(forged_target_manifest_path),
+            h5ad_path=forged_target_h5ad,
+            roster_path=roster_path,
+            roster_receipt_path=receipt_path,
+        )
 
 
 def test_probe_cli_builds_roster_only_from_verified_contract_artifacts(tmp_path):
@@ -268,7 +296,12 @@ def test_probe_cli_builds_roster_only_from_verified_contract_artifacts(tmp_path)
     assert result["receipt"]["roster_file_sha256"] == sha256_file(roster_path)
     assert result["receipt"]["report_file_sha256"] == sha256_file(report_path)
     assert result["receipt_file_sha256"] == sha256_file(receipt_path)
-    assert result["receipt"]["dependency_lock_sha256"] == probe._dependency_lock_sha256()
+    assert result["receipt"]["preparation_dependency_lock_sha256"] == (
+        probe._preparation_dependency_lock_sha256()
+    )
+    assert result["receipt"]["gears_dependency_lock_sha256"] == (
+        probe._gears_dependency_lock_sha256()
+    )
     assert result["receipt"]["runtime_fingerprint_sha256"] == probe._runtime_fingerprint_sha256()
     assert report_path.is_file() and roster_path.is_file() and receipt_path.is_file()
 
@@ -293,8 +326,8 @@ def test_probe_cli_refuses_overwrite_and_tampered_roster_binding(tmp_path, monke
         probe.prepare_probe_input(**kwargs)
 
     with monkeypatch.context() as patch:
-        patch.setattr(probe, "_dependency_lock_sha256", lambda: "e" * 64)
-        with pytest.raises(GeneUniverseError, match="dependency_lock_sha256 differs"):
+        patch.setattr(probe, "_preparation_dependency_lock_sha256", lambda: "e" * 64)
+        with pytest.raises(GeneUniverseError, match="preparation_dependency_lock_sha256 differs"):
             probe.prepare_probe_input(
                 **{
                     **kwargs,

@@ -15,6 +15,7 @@ from alive.compose.gears_probe_a import (
     REPORT_PATH,
     VERIFY_PATH,
     ProbeAEvidenceError,
+    assert_clean_approved_checkout,
     build_evidence_outputs,
 )
 from alive.io import atomic_write_once
@@ -63,6 +64,8 @@ def _verifier_code_sha256() -> str:
         "scripts/compose/verify_gears_probe_a.py",
         "src/alive/compose/gears_probe_a.py",
         "src/alive/compose/approximation_bias.py",
+        # fit_role.row_identity_sha256 participates in the prepared-input admission decision.
+        "src/alive/compose/fit_role.py",
         "src/alive/io.py",
         "src/alive/provenance.py",
     )
@@ -92,6 +95,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--out-admission", required=True)
     args = parser.parse_args(argv)
+
+    assert_clean_approved_checkout(args.git_commit)
 
     observed_verifier_code_sha256 = _verifier_code_sha256()
     if args.expected_verifier_code_sha256 != observed_verifier_code_sha256:

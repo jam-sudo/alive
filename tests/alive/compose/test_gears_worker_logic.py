@@ -94,11 +94,16 @@ def _write_resource_bundle(tmp_path: Path, monkeypatch) -> tuple[Path, dict[str,
 
 def _fit_adata() -> ad.AnnData:
     conditions = ["control"] * 4 + ["AAA"] * 4 + ["BBB"] * 4 + ["AAA_BBB"] * 4
+    roles = ["control"] * 4 + ["singles"] * 8 + ["combo_calibration"] * 4
     counts = sparse.csr_matrix(np.arange(1, len(conditions) * 4 + 1).reshape(-1, 4))
     return ad.AnnData(
         X=counts,
         obs=pd.DataFrame(
-            {"perturbation": conditions},
+            {
+                "perturbation": conditions,
+                "role": roles,
+                "source_row_id": [f"source-row-{index}" for index in range(len(conditions))],
+            },
             index=[f"cell-{index}" for index in range(len(conditions))],
         ),
         var=pd.DataFrame(index=["G0", "G1", "G2", "G3"]),
@@ -155,6 +160,15 @@ def _install_fake_gears(
 
         def new_data_process(self, _name, *, adata):
             self.adata = adata
+            events.append(
+                (
+                    "processed-obs",
+                    tuple(adata.obs_names.astype(str)),
+                    frozenset(map(str, adata.obs.columns)),
+                    str(adata.X.dtype),
+                    np.asarray(adata.X.toarray()),
+                )
+            )
             self.pert_names = np.asarray(["AAA", "BBB"])
             fake_pertdata.dataverse_download(
                 "https://forbidden.invalid/essential",
@@ -391,12 +405,95 @@ def test_real_fit_is_offline_seeded_role_exact_and_checkpointed_before_predict(
     assert ("cuda-seed", seed) in events
     assert ("deterministic-algorithms", True) in events
     assert "network-download" not in events
+    processed = next(event for event in events if event[0] == "processed-obs")
+    assert processed[1] == tuple(f"cell-{index}" for index in range(16))
+    assert processed[2] == frozenset({"condition", "cell_type"})
     pair_seed = worker._pair_prediction_seed(seed, ("AAA", "BBB"))
     assert random.random() == random.Random(pair_seed).random()
     assert np.random.random() == np.random.RandomState(pair_seed).random_sample()
     np.testing.assert_allclose(result[("AAA", "BBB")], [4.0, 0.0])
     assert len(work_paths) == 1
     assert not os.path.exists(work_paths[0])
+
+
+def test_probe_observer_runs_after_durable_fit_and_skips_scientific_predict(
+    tmp_path,
+    monkeypatch,
+):
+    worker = _load_worker()
+    _write_resource_bundle(tmp_path, monkeypatch)
+    events: list[object] = []
+    work_paths: list[str] = []
+    _install_fake_gears(monkeypatch, events, work_paths)
+    checkpoint = tmp_path / "probe-checkpoint.pt"
+    observed: list[str] = []
+    monkeypatch.setattr(
+        worker,
+        "verify_probe_runtime_identity",
+        lambda *, expected_gears_lock_sha256: "6" * 64,
+    )
+
+    def observer(*, checkpoint_path, **_kwargs):
+        assert Path(checkpoint_path).read_bytes() == b"actual-trained-state"
+        observed.append(checkpoint_path)
+
+    result = worker._fit_and_predict(
+        {"seed": 11, "pair_ids": [["AAA", "BBB"]], "response_dim": 2},
+        _fit_adata(),
+        {},
+        ["G0", "G1", "G2", "G3"],
+        "raw_pseudobulk_approximation",
+        fit_artifact_content_sha256="c" * 64,
+        checkpoint_path=str(checkpoint),
+        fitted_model_observer=observer,
+        observer_only=True,
+        input_scale="full_library_normalize_log1p_then_roster_subset",
+        probe_context={
+            "gears_dependency_lock_sha256": "5" * 64,
+            "gears_installed_packages_sha256": "6" * 64,
+            "mode": "probe_a",
+            "input_scale_sha256": "0" * 64,
+            "probe_input_h5ad_sha256": "1" * 64,
+            "query_sha256": "2" * 64,
+            "registration_sha256": "4" * 64,
+            "worker_code_sha256": "3" * 64,
+        },
+    )
+    assert result == {}
+    assert observed == [str(checkpoint)]
+    assert not any(isinstance(event, tuple) and event[0] == "predict" for event in events)
+    processed = next(event for event in events if event[0] == "processed-obs")
+    assert processed[1] == tuple(f"source-row-{index}" for index in range(16))
+    assert processed[2] == frozenset({"condition", "cell_type", "source_row_id", "role"})
+    assert processed[3] == "float32"
+    np.testing.assert_array_equal(
+        processed[4],
+        np.asarray(_fit_adata().X.toarray(), dtype=np.float32),
+    )
+
+
+def test_probe_runtime_identity_binds_lock_and_complete_installed_roster(tmp_path, monkeypatch):
+    worker = _load_worker()
+    worker_path = tmp_path / "scripts/baselines/gears_worker.py"
+    worker_path.parent.mkdir(parents=True)
+    worker_path.write_text("# fixture\n", encoding="utf-8")
+    lock = tmp_path / worker._GEARS_LOCK_RELATIVE_PATH
+    lock.parent.mkdir(parents=True)
+    lock.write_text("cell-gears==0.1.2\nnumpy==1.26.4\n", encoding="utf-8")
+    monkeypatch.setattr(worker, "__file__", str(worker_path))
+    installed = {"cell-gears": "0.1.2", "numpy": "1.26.4"}
+    monkeypatch.setattr(worker.importlib.metadata, "version", installed.__getitem__)
+    lock_sha256 = hashlib.sha256(lock.read_bytes()).hexdigest()
+
+    assert worker.verify_probe_runtime_identity(
+        expected_gears_lock_sha256=lock_sha256
+    ) == sha256_json(installed)
+    with pytest.raises(ValueError, match="externally bound identity"):
+        worker.verify_probe_runtime_identity(expected_gears_lock_sha256="0" * 64)
+
+    installed["numpy"] = "2.0.0"
+    with pytest.raises(ValueError, match="distribution drift: numpy"):
+        worker.verify_probe_runtime_identity(expected_gears_lock_sha256=lock_sha256)
 
 
 def test_existing_checkpoint_fails_before_fit(tmp_path, monkeypatch):
@@ -464,6 +561,71 @@ def test_raw_input_scale_remains_explicitly_activation_blocked():
     worker = _load_worker()
     assert worker._GEARS_NATIVE_INPUT_SCALE == "raw_counts"
     assert worker._GEARS_NATIVE_INPUT_SCALE_STATUS.startswith("ACTIVATION_BLOCKED")
+
+
+def test_probe_observer_only_mode_cannot_silently_skip_without_observer(tmp_path):
+    worker = _load_worker()
+    with pytest.raises(ValueError, match="observer-only Probe A requires"):
+        worker._fit_and_predict(
+            {},
+            _fit_adata(),
+            {},
+            ["G0", "G1", "G2", "G3"],
+            "raw_pseudobulk_approximation",
+            checkpoint_path=str(tmp_path / "checkpoint.pt"),
+            observer_only=True,
+        )
+
+
+def test_probe_input_scale_override_cannot_reach_scientific_worker(tmp_path):
+    worker = _load_worker()
+    with pytest.raises(ValueError, match="scientific GEARS execution forbids"):
+        worker._fit_and_predict(
+            {},
+            _fit_adata(),
+            {},
+            ["G0", "G1", "G2", "G3"],
+            "raw_pseudobulk_approximation",
+            checkpoint_path=str(tmp_path / "checkpoint.pt"),
+            input_scale="full_library_normalize_log1p_then_roster_subset",
+        )
+
+
+def test_probe_observer_cannot_reach_scientific_worker(tmp_path):
+    worker = _load_worker()
+    with pytest.raises(ValueError, match="scientific GEARS execution forbids"):
+        worker._fit_and_predict(
+            {},
+            _fit_adata(),
+            {},
+            ["G0", "G1", "G2", "G3"],
+            "raw_pseudobulk_approximation",
+            checkpoint_path=str(tmp_path / "checkpoint.pt"),
+            fitted_model_observer=lambda **_kwargs: None,
+        )
+
+
+def test_probe_observer_only_requires_registered_normalized_scale(tmp_path):
+    worker = _load_worker()
+    with pytest.raises(ValueError, match="observer-only Probe A requires"):
+        worker._fit_and_predict(
+            {},
+            _fit_adata(),
+            {},
+            ["G0", "G1", "G2", "G3"],
+            "raw_pseudobulk_approximation",
+            checkpoint_path=str(tmp_path / "checkpoint.pt"),
+            fitted_model_observer=lambda **_kwargs: None,
+            observer_only=True,
+            probe_context={
+                "mode": "probe_a",
+                "input_scale_sha256": "0" * 64,
+                "probe_input_h5ad_sha256": "1" * 64,
+                "query_sha256": "2" * 64,
+                "registration_sha256": "4" * 64,
+                "worker_code_sha256": "3" * 64,
+            },
+        )
 
 
 def test_pair_prediction_rng_is_request_order_independent():

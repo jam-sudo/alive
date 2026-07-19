@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.metadata
 import json
 import os
 import random
@@ -25,6 +26,7 @@ import stat
 import sys
 import tempfile
 from pathlib import Path
+from typing import Callable, Mapping
 
 import anndata as ad
 import numpy as np
@@ -87,6 +89,7 @@ _GEARS_MODULE_ORIGIN_POLICY = "regular_non_symlink_under_sys_prefix"
 _GEARS_CUBLAS_WORKSPACE_CONFIG = ":4096:8"
 _GEARS_PYTHON_HASH_SEED_SOURCE = "payload_seed"
 _GEARS_PREDICTION_REPRESENTATION = "raw_pseudobulk_approximation"
+_GEARS_LOCK_RELATIVE_PATH = "docs/activation-evidence/compose/requirements.gears_env.lock"
 _CONTROL_TOKEN = "control"
 _COMBO_SEP = "_"
 
@@ -108,6 +111,56 @@ _REQUIRED_RESOURCE_NAMES = frozenset(
     }
 )
 _EXTRACTED_GO_PATH = "go_essential_all/go_essential_all.csv"
+
+
+def verify_probe_runtime_identity(*, expected_gears_lock_sha256: str) -> str:
+    """Verify the complete installed GEARS environment against its committed lock.
+
+    Returns the canonical installed-package-roster digest embedded in Probe-A raw
+    evidence and checkpoints. This is intentionally stricter than checking only
+    ``cell-gears`` and ``torch`` because a transitive numerical-stack drift can
+    change preprocessing or prediction behavior.
+    """
+    if not _is_sha256(expected_gears_lock_sha256):
+        raise ValueError("Probe-A requires a lowercase GEARS lock SHA-256")
+    lock_path = Path(__file__).resolve().parents[2] / _GEARS_LOCK_RELATIVE_PATH
+    try:
+        lock_bytes = lock_path.read_bytes()
+    except OSError as exc:
+        raise ValueError(f"cannot read committed GEARS lock: {exc}") from exc
+    if hashlib.sha256(lock_bytes).hexdigest() != expected_gears_lock_sha256:
+        raise ValueError("committed GEARS lock differs from the externally bound identity")
+    try:
+        lines = lock_bytes.decode("utf-8").splitlines()
+    except UnicodeDecodeError as exc:
+        raise ValueError("committed GEARS lock is not UTF-8") from exc
+    expected: dict[str, str] = {}
+    for line in lines:
+        if not line or line.startswith("#"):
+            continue
+        if line.count("==") != 1:
+            raise ValueError("committed GEARS lock contains an unsupported requirement")
+        distribution, version = line.split("==", 1)
+        if not distribution or not version or distribution in expected:
+            raise ValueError("committed GEARS lock contains an invalid/duplicate requirement")
+        expected[distribution] = version
+    if not expected:
+        raise ValueError("committed GEARS lock is empty")
+    installed: dict[str, str] = {}
+    for distribution, expected_version in sorted(expected.items()):
+        try:
+            observed_version = importlib.metadata.version(distribution)
+        except importlib.metadata.PackageNotFoundError as exc:
+            raise ValueError(
+                f"GEARS environment is missing locked distribution {distribution}"
+            ) from exc
+        if observed_version != expected_version:
+            raise ValueError(
+                f"GEARS environment distribution drift: {distribution} "
+                f"expected={expected_version} observed={observed_version}"
+            )
+        installed[distribution] = observed_version
+    return sha256_json(installed)
 
 
 def _registered_worker_config(adapter_version: str) -> dict[str, object]:
@@ -708,6 +761,10 @@ def _fit_and_predict(
     *,
     fit_artifact_content_sha256: str | None = None,
     checkpoint_path: str | None = None,
+    fitted_model_observer: Callable[..., None] | None = None,
+    observer_only: bool = False,
+    input_scale: str = _GEARS_NATIVE_INPUT_SCALE,
+    probe_context: Mapping[str, str] | None = None,
 ) -> dict[tuple[str, str], np.ndarray]:
     """Fit real GEARS and predict each requested pair's response-space delta.
 
@@ -737,6 +794,47 @@ def _fit_and_predict(
         If the registered resource bundle, deterministic split, checkpoint path,
         or prediction roster violates the frozen worker contract.
     """
+    probe_input_scale = "full_library_normalize_log1p_then_roster_subset"
+    expected_probe_context_keys = {
+        "gears_dependency_lock_sha256",
+        "gears_installed_packages_sha256",
+        "mode",
+        "input_scale_sha256",
+        "probe_input_h5ad_sha256",
+        "query_sha256",
+        "registration_sha256",
+        "worker_code_sha256",
+    }
+    if observer_only:
+        if (
+            fitted_model_observer is None
+            or input_scale != probe_input_scale
+            or not isinstance(probe_context, Mapping)
+            or set(probe_context) != expected_probe_context_keys
+            or probe_context["mode"] != "probe_a"
+            or any(
+                not _is_sha256(probe_context[field])
+                for field in expected_probe_context_keys - {"mode"}
+            )
+        ):
+            raise ValueError(
+                "observer-only Probe A requires its observer, normalized input scale, "
+                "and complete checkpoint context"
+            )
+        observed_packages_sha256 = verify_probe_runtime_identity(
+            expected_gears_lock_sha256=probe_context["gears_dependency_lock_sha256"]
+        )
+        if observed_packages_sha256 != probe_context["gears_installed_packages_sha256"]:
+            raise ValueError("Probe-A installed-package roster changed before GEARS fitting")
+    elif (
+        fitted_model_observer is not None
+        or probe_context is not None
+        or input_scale != _GEARS_NATIVE_INPUT_SCALE
+    ):
+        raise ValueError(
+            "scientific GEARS execution forbids observers/probe context/input-scale overrides"
+        )
+
     try:
         import gears.pertdata as gears_pertdata
         import gears.utils as gears_utils
@@ -785,13 +883,36 @@ def _fit_and_predict(
         return f"{token}+ctrl"
 
     conditions = [_condition(t) for t in tokens]
-    gears_obs = pd.DataFrame(
-        {
-            "condition": pd.Categorical(conditions),
-            "cell_type": pd.Categorical(["K562"] * len(conditions)),
-        },
-        index=[str(s) for s in adata.obs_names],
-    )
+    if observer_only:
+        # Probe-A only: carry the source-row identity into the GEARS AnnData index so
+        # the observer can bind processed control-row order to the prepared input.  The
+        # scientific caller keeps the original positional index below, so its GEARS
+        # input matrix and predictions are numerically byte-identical to before.
+        required_identity_columns = {"source_row_id", "role"}
+        if not required_identity_columns <= set(adata.obs.columns):
+            raise ValueError("fit-role artifact lacks source_row_id/role identity columns")
+        source_row_ids = adata.obs["source_row_id"].astype(str).tolist()
+        if any(not row_id for row_id in source_row_ids) or len(set(source_row_ids)) != len(
+            source_row_ids
+        ):
+            raise ValueError("fit-role source_row_id values must be non-empty and unique")
+        gears_obs = pd.DataFrame(
+            {
+                "condition": pd.Categorical(conditions),
+                "cell_type": pd.Categorical(["K562"] * len(conditions)),
+                "source_row_id": source_row_ids,
+                "role": adata.obs["role"].astype(str).tolist(),
+            },
+            index=source_row_ids,
+        )
+    else:
+        gears_obs = pd.DataFrame(
+            {
+                "condition": pd.Categorical(conditions),
+                "cell_type": pd.Categorical(["K562"] * len(conditions)),
+            },
+            index=[str(s) for s in adata.obs_names],
+        )
     gears_var = pd.DataFrame({"gene_name": art_genes}, index=art_genes)
     gears_adata = ad.AnnData(
         X=sparse.csr_matrix(adata.X, dtype="float32"), obs=gears_obs, var=gears_var
@@ -929,12 +1050,18 @@ def _fit_and_predict(
         }
         checkpoint_obj = {
             "schema": "compose_gears_trained_model_v1",
+            "backend_distribution": _GEARS_PACKAGE,
+            "backend_version": _GEARS_PACKAGE_VERSION,
             "seed": seed,
             "fit_artifact_content_sha256": fit_artifact_content_sha256,
             "gene_order_sha256": canonical_gene_order_sha256(gene_order),
             "resource_manifest_sha256": snapshot_bundle["manifest_sha256"],
-            "native_input_scale": _GEARS_NATIVE_INPUT_SCALE,
-            "native_input_scale_status": _GEARS_NATIVE_INPUT_SCALE_STATUS,
+            "native_input_scale": input_scale,
+            "native_input_scale_status": (
+                "PROBE_ONLY_DECISION_MEASUREMENT"
+                if observer_only
+                else _GEARS_NATIVE_INPUT_SCALE_STATUS
+            ),
             "training_device": device,
             "numeric_precision": _GEARS_NUMERIC_PRECISION,
             "training_config": {
@@ -965,6 +1092,7 @@ def _fit_and_predict(
                 "validation_batch_size": _GEARS_TEST_BATCH_SIZE,
             },
             "split_manifest": split_manifest,
+            "probe_context": dict(probe_context) if probe_context is not None else None,
             "model_state_dict": state_dict,
         }
         try:
@@ -975,6 +1103,25 @@ def _fit_and_predict(
         except Exception:
             Path(checkpoint_path).unlink(missing_ok=True)
             raise
+
+        # Probe-only callers may observe the already-fitted, checkpointed model inside
+        # this temporary offline resource snapshot.  The scientific worker supplies no
+        # observer and no probe_context: with the positional GEARS obs index restored
+        # above and the default input scale, its fitted model and predictions are
+        # numerically unchanged; the durable checkpoint only additionally records inert
+        # backend distribution/version provenance.  The callback cannot alter the
+        # checkpoint durably written above without the caller's later SHA/envelope
+        # verification failing closed.
+        if fitted_model_observer is not None:
+            fitted_model_observer(
+                model=model,
+                pert_data=pert_data,
+                torch_module=torch,
+                requests=requests,
+                checkpoint_path=checkpoint_path,
+            )
+            if observer_only:
+                return {}
 
         # 6. Predict each requested combo only after the fitted state is durable.
         raw_pred = _predict_pairs_order_independent(

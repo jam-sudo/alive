@@ -1,19 +1,28 @@
 """Fail-closed evidence contract for the COMPOSE GEARS Probe A.
 
-The actual GEARS fit runs only in the pinned pod environment. This module is
-dependency-light so the resulting evidence can be verified independently on a
-CPU host before it is allowed to admit the approximation-bias measurement.
+The actual GEARS fit runs only in the pinned pod environment. This verifier
+reopens the prepared H5AD and validates checkpoint containers without loading
+their pickle payloads, so evidence can be checked independently on a CPU host
+before it is allowed to admit the approximation-bias measurement.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
+import pickletools
+import subprocess
+import zipfile
 from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Mapping
+
+import anndata as ad
+import numpy as np
+from scipy import sparse
 
 from alive.compose.approximation_bias import (
     PROBE_A_REGISTRATION_SCHEMA,
@@ -26,13 +35,14 @@ from alive.compose.approximation_bias import (
     validate_probe_a_evidence,
     validate_probe_a_registration,
 )
+from alive.compose.fit_role import row_identity_sha256
 from alive.provenance import sha256_bytes, sha256_file, sha256_json
 
-REPORT_SCHEMA = "compose_gears_probe_a_report_v4"
-RAW_SCHEMA = "compose_gears_probe_a_raw_measurements_v2"
+REPORT_SCHEMA = "compose_gears_probe_a_report_v7"
+RAW_SCHEMA = "compose_gears_probe_a_raw_measurements_v6"
 REGISTRATION_SCHEMA = PROBE_A_REGISTRATION_SCHEMA
 VERIFICATION_SCHEMA = PROBE_A_VERIFICATION_SCHEMA
-MANIFEST_SCHEMA = "compose_gears_probe_a_evidence_manifest_v4"
+MANIFEST_SCHEMA = "compose_gears_probe_a_evidence_manifest_v7"
 # The admission schema and its validation live exactly once, in the sole consumer
 # gate ``approximation_bias.validate_probe_a_evidence``. Re-export the name and
 # reuse that validator here so this producer cannot drift from the consumer.
@@ -83,20 +93,59 @@ _SINGLETON_ROLE_PATHS = {
     "probe_a_registration": REGISTRATION_PATH,
     "probe_a_report": REPORT_PATH,
     "probe_a_source": "probe_a_source.txt",
+    "probe_input_manifest": "probe_input_manifest.json",
+    "probe_input_h5ad": "probe_input.h5ad",
 }
 _MULTI_ROLES = frozenset({"roster_receipt", "probe_a_checkpoint", "raw_sample", "log"})
 _KNOWN_ROLES = frozenset(_SINGLETON_ROLE_PATHS) | _MULTI_ROLES
 
 COMMAND_RECORD_SCHEMA = "compose_gears_probe_command_record_v1"
-RUNTIME_SCHEMA = "compose_gears_probe_runtime_v1"
-INPUTS_SCHEMA = "compose_gears_probe_inputs_v1"
-ROLE_ATTESTATION_SCHEMA = "compose_gears_probe_role_attestation_v1"
-ROSTER_RECEIPT_SCHEMA = "compose_gears_roster_receipt_v1"
+RUNTIME_SCHEMA = "compose_gears_probe_runtime_v2"
+INPUTS_SCHEMA = "compose_gears_probe_inputs_v3"
+ROLE_ATTESTATION_SCHEMA = "compose_gears_probe_role_attestation_v2"
+ROSTER_RECEIPT_SCHEMA = "compose_gears_roster_receipt_v2"
+PROBE_INPUT_MANIFEST_SCHEMA = "compose_gears_probe_input_manifest_v3"
+PROBE_INPUT_ADATA_SCHEMA = "compose_gears_probe_input_v3"
+PROBE_INPUT_TRANSFORM = "full_library_normalize_log1p_then_roster_subset"
+PREPARATION_LOCK_PATH = "uv.lock"
+GEARS_LOCK_PATH = "docs/activation-evidence/compose/requirements.gears_env.lock"
+PROBE_MATRIX_DTYPE = "float32-le"
+PROBE_MATRIX_FORMAT = "canonical_csr"
+_PROBE_INPUT_MANIFEST_KEYS = {
+    "expression_scale",
+    "fit_artifact_content_sha256",
+    "full_var_order_sha256",
+    "manifest_checksum",
+    "matrix_dtype",
+    "matrix_format",
+    "matrix_logical_sha256",
+    "n_cells",
+    "n_genes",
+    "normalization_target",
+    "ordered_roster_sha256",
+    "output_h5ad_sha256",
+    "payload_sha256",
+    "preparation_dependency_lock_sha256",
+    "gears_dependency_lock_sha256",
+    "probe_driver_code_sha256",
+    "probe_runtime_fingerprint_sha256",
+    "response_artifact_sha256",
+    "role_contract",
+    "role_counts",
+    "roster_artifact_checksum",
+    "roster_file_sha256",
+    "roster_receipt_sha256",
+    "row_identity_sha256",
+    "selected_source_row_ids_sha256",
+    "schema",
+}
 
 # These are the subcommands that the maintained CLI actually implements.  Probe-A
 # measurement is admitted from its digest-bound raw artifact below; Probe B has a
 # separate archive contract and must not gate Probe-A admission.
-_REQUIRED_COMMANDS = frozenset({"build-roster", "prepare-input", "verify-input", "probe-a"})
+_REQUIRED_COMMANDS = frozenset(
+    {"build-roster", "prepare-input", "verify-input", "probe-a", "build-probe-a-report"}
+)
 _COMMAND_KEYS = {
     "schema",
     "command",
@@ -124,7 +173,9 @@ _RUNTIME_KEYS = {
     "ram_bytes",
     "image_digest",
     "python_version",
-    "dependency_lock_sha256",
+    "preparation_dependency_lock_sha256",
+    "gears_dependency_lock_sha256",
+    "gears_installed_packages_sha256",
     "runtime_fingerprint_sha256",
     "network_disabled",
     "self_checksum",
@@ -141,8 +192,13 @@ _INPUTS_KEYS = {
     "response_artifact_sha256",
     "roster_receipt_sha256",
     "roster_sha256",
-    "dependency_lock_sha256",
+    "preparation_dependency_lock_sha256",
+    "gears_dependency_lock_sha256",
     "fit_role_counts",
+    "probe_input_manifest_sha256",
+    "probe_input_h5ad_sha256",
+    "probe_row_identity_sha256",
+    "ordered_control_row_identity_sha256",
     "self_checksum",
 }
 _ROLE_ATTESTATION_KEYS = {
@@ -159,7 +215,8 @@ _ROSTER_RECEIPT_KEYS = {
     "alias_artifact_sha256",
     "candidate_artifact_sha256",
     "driver_code_sha256",
-    "dependency_lock_sha256",
+    "preparation_dependency_lock_sha256",
+    "gears_dependency_lock_sha256",
     "fit_artifact_content_sha256",
     "gene2go_nodes_artifact_sha256",
     "generator_code_sha256",
@@ -175,8 +232,16 @@ _ROSTER_RECEIPT_KEYS = {
     "schema",
 }
 _FIT_ROLE_COUNT_KEYS = {"control", "singles", "combo_calibration"}
+_ROLE_CONTRACT_KEYS = {
+    "calibration_pair_ids",
+    "combo_separator",
+    "control_token",
+    "sealed_pair_ids",
+    "single_gene_ids",
+}
 _RAW_KEYS = {
     "schema",
+    "producer",
     "input_before",
     "input_after",
     "determinism_runs",
@@ -186,15 +251,53 @@ _RAW_KEYS = {
     "bridge_prediction",
     "self_checksum",
 }
-_RAW_RUN_KEYS = {"checkpoint_path", "checkpoint_sha256", "prediction"}
+_RAW_RUN_KEYS = {
+    "run_index",
+    "checkpoint_path",
+    "checkpoint_sha256",
+    "checkpoint_bytes",
+    "checkpoint_format",
+    "seed",
+    "probe_input_h5ad_sha256",
+    "query_sha256",
+    "worker_code_sha256",
+    "prediction",
+}
+_RAW_PRODUCER_KEYS = {
+    "backend_distribution",
+    "backend_version",
+    "gears_dependency_lock_sha256",
+    "gears_installed_packages_sha256",
+    "input_scale_sha256",
+    "normalization_target",
+    "registration_sha256",
+    "worker_code_sha256",
+    "probe_driver_code_sha256",
+    "probe_input_manifest_sha256",
+    "probe_input_h5ad_sha256",
+    "probe_row_identity_sha256",
+    "ordered_control_row_identity_sha256",
+    "roster_sha256",
+    "query",
+    "seed",
+    "measurement_run_index",
+}
 _RAW_CONTROL_KEYS = {
     "count",
     "control_row_ids",
     "per_control_prediction",
     "public_prediction",
 }
+_MATRIX_IDENTITY_KEYS = {"canonical_dtype", "logical_csr_sha256", "nnz", "shape"}
 _CONTROL_COUNTS = (1, 8, 300, 301, 400)
 _NEAR_INTEGER_ATOL = 1e-6
+#: Upper bound on the untrusted prepared-input H5AD before it is read into memory
+#: so an oversized evidence file cannot OOM the CPU verifier (fail-closed; the
+#: read + float64 CSR densify would otherwise be unbounded). Sized conservatively
+#: below the 24 GB verification host: the legitimate ~70,987-cell roster-subset
+#: input is ~1 GB, so a 4 GB cap (peak ~10 GB in memory) never false-rejects yet
+#: keeps the host safe. Tune upward only if the real prepared input grows.
+_H5AD_ENVELOPE_BYTES = 4_000_000_000
 
 
 class ProbeAEvidenceError(ValueError):
@@ -209,6 +312,67 @@ class ProbeAAdmissionOutputs:
     verification_bytes: bytes
     verification_sha256: str
     admission: dict
+
+
+def repository_lock_sha256(relative_path: str, *, repository_root: str | Path | None = None) -> str:
+    """Return the SHA-256 of one committed dependency lock at its canonical path."""
+    root = (
+        Path(repository_root).resolve(strict=True)
+        if repository_root is not None
+        else Path(__file__).resolve().parents[3]
+    )
+    if relative_path not in {PREPARATION_LOCK_PATH, GEARS_LOCK_PATH}:
+        raise ProbeAEvidenceError("dependency lock path is not part of the Probe-A contract")
+    path = root / relative_path
+    if path.is_symlink() or not path.is_file():
+        raise ProbeAEvidenceError(f"dependency lock is missing or unsafe: {relative_path}")
+    return sha256_file(path)
+
+
+def assert_clean_approved_checkout(
+    expected_git_commit: str,
+    *,
+    repository_root: str | Path | None = None,
+) -> None:
+    """Require the executing checkout to be the exact clean owner-approved commit.
+
+    The check includes untracked files, replacement refs, and recursively dirty or
+    uninitialized submodules. It intentionally runs immediately before every
+    decision-bearing production/verification boundary rather than trusting a
+    caller-supplied commit string.
+    """
+    expected = _git_commit(expected_git_commit, "expected Git commit")
+    root = (
+        Path(repository_root).resolve(strict=True)
+        if repository_root is not None
+        else Path(__file__).resolve().parents[3]
+    )
+
+    def git(*args: str) -> str:
+        try:
+            result = subprocess.run(
+                ["git", *args],
+                cwd=root,
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise ProbeAEvidenceError(f"cannot verify executing Git checkout: {exc}") from exc
+        return result.stdout.strip()
+
+    if git("rev-parse", "--show-toplevel") != str(root):
+        raise ProbeAEvidenceError("Probe-A repository root is not the Git toplevel")
+    if git("rev-parse", "HEAD") != expected:
+        raise ProbeAEvidenceError("executing checkout does not match the approved Git commit")
+    if git("status", "--porcelain=v1", "--untracked-files=all"):
+        raise ProbeAEvidenceError("executing checkout is dirty")
+    if git("replace", "-l"):
+        raise ProbeAEvidenceError("executing checkout has active Git replacement refs")
+    submodules = git("submodule", "status", "--recursive")
+    if any(line[:1] in {"-", "+", "U"} for line in submodules.splitlines() if line):
+        raise ProbeAEvidenceError("executing checkout has unclean or uninitialized submodules")
 
 
 def _sha(value: object, field: str) -> str:
@@ -359,6 +523,61 @@ def _finite_matrix(value: object, field: str) -> list[list[float]]:
     return rows
 
 
+def _matrix_identity(value, field: str) -> dict[str, object]:
+    """Independently derive the logical CSR identity used by the probe runner."""
+    try:
+        matrix = sparse.csr_matrix(value, dtype=np.float64, copy=True)
+    except (TypeError, ValueError) as exc:
+        raise ProbeAEvidenceError(f"{field} must be a two-dimensional numeric matrix") from exc
+    matrix.sum_duplicates()
+    matrix.sort_indices()
+    matrix.eliminate_zeros()
+    if matrix.ndim != 2 or not np.isfinite(matrix.data).all():
+        raise ProbeAEvidenceError(f"{field} must be a finite two-dimensional matrix")
+    digest = hashlib.sha256(b"alive-logical-csr-float64-v1\0")
+    for array, dtype in (
+        (np.asarray(matrix.shape, dtype="<u8"), "<u8"),
+        (matrix.indptr, "<u8"),
+        (matrix.indices, "<u8"),
+        (matrix.data, "<f8"),
+    ):
+        canonical = np.asarray(array, dtype=dtype)
+        view = memoryview(canonical).cast("B")
+        for offset in range(0, len(view), 8 * 1024 * 1024):
+            digest.update(view[offset : offset + 8 * 1024 * 1024])
+    return {
+        "canonical_dtype": "float64-le",
+        "logical_csr_sha256": digest.hexdigest(),
+        "nnz": int(matrix.nnz),
+        "shape": [int(matrix.shape[0]), int(matrix.shape[1])],
+    }
+
+
+def _input_scale_sha256(normalization_target: float) -> str:
+    return sha256_json(
+        {
+            "normalization_target": normalization_target,
+            "transform": PROBE_INPUT_TRANSFORM,
+        }
+    )
+
+
+def _validate_matrix_identity(value: object, field: str) -> dict[str, object]:
+    obj = _exact_keys(value, _MATRIX_IDENTITY_KEYS, field)
+    if obj["canonical_dtype"] != "float64-le":
+        raise ProbeAEvidenceError(f"{field} canonical dtype mismatch")
+    _sha(obj["logical_csr_sha256"], f"{field}.logical_csr_sha256")
+    _positive_int(obj["nnz"], f"{field}.nnz", allow_zero=True)
+    shape = obj["shape"]
+    if not isinstance(shape, list) or len(shape) != 2:
+        raise ProbeAEvidenceError(f"{field}.shape must have exactly two dimensions")
+    for index, dimension in enumerate(shape):
+        _positive_int(dimension, f"{field}.shape[{index}]")
+    if obj["nnz"] > shape[0] * shape[1]:
+        raise ProbeAEvidenceError(f"{field}.nnz exceeds its logical shape")
+    return dict(obj)
+
+
 def _max_abs_error(left: list[float], right: list[float], field: str) -> float:
     if len(left) != len(right):
         raise ProbeAEvidenceError(f"{field} vectors must have identical lengths")
@@ -390,6 +609,60 @@ def _require_close(observed: object, expected: float, field: str) -> None:
         raise ProbeAEvidenceError(f"{field} is inconsistent with the raw measurements")
 
 
+def _validate_pytorch_checkpoint(path: Path, *, expected_bytes: int, field: str) -> set[str]:
+    """Validate the safe, load-free envelope emitted by ``torch.save``.
+
+    Loading an untrusted pickle would execute code, so admission deliberately
+    validates the pinned PyTorch ZIP container and its complete CRCs without
+    deserializing ``data.pkl``.
+    """
+    if path.stat().st_size != expected_bytes:
+        raise ProbeAEvidenceError(f"{field} byte count differs from the archived file")
+    if not zipfile.is_zipfile(path):
+        raise ProbeAEvidenceError(f"{field} is not a PyTorch ZIP checkpoint")
+    try:
+        with zipfile.ZipFile(path) as archive:
+            infos = archive.infolist()
+            names = [info.filename for info in infos]
+            if not infos or len(names) != len(set(names)):
+                raise ProbeAEvidenceError(f"{field} has an invalid ZIP member roster")
+            for info in infos:
+                member = Path(info.filename)
+                if member.is_absolute() or ".." in member.parts or info.flag_bits & 0x1:
+                    raise ProbeAEvidenceError(f"{field} has an unsafe ZIP member")
+                if ((info.external_attr >> 16) & 0o170000) == 0o120000:
+                    raise ProbeAEvidenceError(f"{field} contains a symbolic link")
+            suffixes = {"data.pkl", "byteorder", "version", ".data/serialization_id"}
+            members_by_suffix: dict[str, zipfile.ZipInfo] = {}
+            for suffix in suffixes:
+                matches = [info for info in infos if info.filename.endswith(f"/{suffix}")]
+                if len(matches) != 1:
+                    raise ProbeAEvidenceError(
+                        f"{field} requires exactly one PyTorch member {suffix}"
+                    )
+                members_by_suffix[suffix] = matches[0]
+            if not any("/data/" in name and not name.endswith("/") for name in names):
+                raise ProbeAEvidenceError(f"{field} has no tensor-storage members")
+            if sum(info.file_size for info in infos) > 20_000_000_000:
+                raise ProbeAEvidenceError(f"{field} exceeds the checkpoint envelope bound")
+            if archive.testzip() is not None:
+                raise ProbeAEvidenceError(f"{field} failed ZIP CRC validation")
+            pickle_info = members_by_suffix["data.pkl"]
+            if pickle_info.file_size > 64 * 1024 * 1024:
+                raise ProbeAEvidenceError(f"{field} metadata pickle exceeds the envelope bound")
+            pickle_data = archive.read(pickle_info)
+            strings = {
+                arg
+                for _opcode, arg, _position in pickletools.genops(pickle_data)
+                if isinstance(arg, str)
+            }
+    except (OSError, zipfile.BadZipFile) as exc:
+        raise ProbeAEvidenceError(f"cannot validate {field}: {exc}") from exc
+    except ValueError as exc:
+        raise ProbeAEvidenceError(f"{field} has invalid pickle metadata: {exc}") from exc
+    return strings
+
+
 def _load_probe_a_raw(root: Path, sample: Mapping) -> dict:
     entry = _exact_keys(sample, {"path", "sha256"}, "raw sample")
     path = _relative_file(root, entry["path"])
@@ -415,9 +688,48 @@ def _load_probe_a_raw(root: Path, sample: Mapping) -> dict:
     if obj["schema"] != RAW_SCHEMA:
         raise ProbeAEvidenceError("Probe-A raw-measurement schema mismatch")
 
-    input_before = _finite_matrix(obj["input_before"], "raw.input_before")
-    input_after = _finite_matrix(obj["input_after"], "raw.input_after")
-    if len(input_before) != len(input_after) or len(input_before[0]) != len(input_after[0]):
+    producer = _exact_keys(obj["producer"], _RAW_PRODUCER_KEYS, "raw.producer")
+    if producer["backend_distribution"] != "cell-gears" or producer["backend_version"] != "0.1.2":
+        raise ProbeAEvidenceError("Probe-A raw producer is not the pinned GEARS backend")
+    for field in (
+        "gears_dependency_lock_sha256",
+        "gears_installed_packages_sha256",
+        "input_scale_sha256",
+        "registration_sha256",
+        "worker_code_sha256",
+        "probe_driver_code_sha256",
+        "probe_input_manifest_sha256",
+        "probe_input_h5ad_sha256",
+        "probe_row_identity_sha256",
+        "ordered_control_row_identity_sha256",
+        "roster_sha256",
+    ):
+        _sha(producer[field], f"raw.producer.{field}")
+    normalization_target = _finite_nonnegative(
+        producer["normalization_target"], "raw.producer.normalization_target"
+    )
+    if normalization_target <= 0:
+        raise ProbeAEvidenceError("raw producer normalization target must be positive")
+    if producer["input_scale_sha256"] != _input_scale_sha256(normalization_target):
+        raise ProbeAEvidenceError("raw producer input-scale identity is inconsistent")
+    query = producer["query"]
+    if (
+        not isinstance(query, list)
+        or len(query) != 2
+        or any(not isinstance(gene, str) or not gene for gene in query)
+        or query[0] >= query[1]
+    ):
+        raise ProbeAEvidenceError("raw.producer.query must be one canonical gene pair")
+    seed = _positive_int(producer["seed"], "raw.producer.seed", allow_zero=True)
+    measurement_run_index = _positive_int(
+        producer["measurement_run_index"], "raw.producer.measurement_run_index"
+    )
+    if measurement_run_index != 1:
+        raise ProbeAEvidenceError("Probe-A measurements must originate from determinism run 1")
+
+    input_before = _validate_matrix_identity(obj["input_before"], "raw.input_before")
+    input_after = _validate_matrix_identity(obj["input_after"], "raw.input_after")
+    if input_before["shape"] != input_after["shape"]:
         raise ProbeAEvidenceError("Probe-A input matrices have different shapes")
 
     runs = obj["determinism_runs"]
@@ -425,9 +737,12 @@ def _load_probe_a_raw(root: Path, sample: Mapping) -> dict:
         raise ProbeAEvidenceError("Probe-A raw determinism measurements require exactly two runs")
     checkpoints: list[str] = []
     checkpoint_files: list[tuple[str, str]] = []
+    checkpoint_metadata_strings: list[set[str]] = []
     run_predictions: list[list[float]] = []
     for index, raw_run in enumerate(runs):
         run = _exact_keys(raw_run, _RAW_RUN_KEYS, f"raw determinism run {index}")
+        if run["run_index"] != index + 1:
+            raise ProbeAEvidenceError("Probe-A determinism run indexes must be exactly [1, 2]")
         checkpoint_path = run["checkpoint_path"]
         checkpoint_file = _relative_file(root, checkpoint_path)
         checkpoint_sha = _sha(run["checkpoint_sha256"], f"raw run {index} checkpoint")
@@ -435,8 +750,48 @@ def _load_probe_a_raw(root: Path, sample: Mapping) -> dict:
             raise ProbeAEvidenceError(
                 f"raw run {index} checkpoint SHA-256 differs from the archived file"
             )
+        checkpoint_bytes = _positive_int(
+            run["checkpoint_bytes"], f"raw run {index} checkpoint_bytes"
+        )
+        if run["checkpoint_format"] != "pytorch_zip_v1":
+            raise ProbeAEvidenceError("Probe-A checkpoint format is not registered")
+        metadata_strings = _validate_pytorch_checkpoint(
+            checkpoint_file,
+            expected_bytes=checkpoint_bytes,
+            field=f"raw run {index} checkpoint",
+        )
+        if (
+            run["seed"] != seed
+            or run["probe_input_h5ad_sha256"] != producer["probe_input_h5ad_sha256"]
+            or run["query_sha256"] != sha256_json(query)
+            or run["worker_code_sha256"] != producer["worker_code_sha256"]
+        ):
+            raise ProbeAEvidenceError(
+                "Probe-A determinism run is not bound to its producer/input/query/seed"
+            )
+        required_checkpoint_strings = {
+            "compose_gears_trained_model_v1",
+            "cell-gears",
+            "0.1.2",
+            PROBE_INPUT_TRANSFORM,
+            "PROBE_ONLY_DECISION_MEASUREMENT",
+            "probe_a",
+            "model_state_dict",
+            producer["input_scale_sha256"],
+            producer["gears_dependency_lock_sha256"],
+            producer["gears_installed_packages_sha256"],
+            producer["probe_input_h5ad_sha256"],
+            producer["registration_sha256"],
+            run["query_sha256"],
+            producer["worker_code_sha256"],
+        }
+        if not required_checkpoint_strings <= metadata_strings:
+            raise ProbeAEvidenceError(
+                "Probe-A checkpoint metadata is not bound to the backend/input/query/worker"
+            )
         checkpoints.append(checkpoint_sha)
         checkpoint_files.append((checkpoint_path, checkpoint_sha))
+        checkpoint_metadata_strings.append(metadata_strings)
         run_predictions.append(
             _finite_vector(run["prediction"], f"raw determinism run {index} prediction")
         )
@@ -451,6 +806,8 @@ def _load_probe_a_raw(root: Path, sample: Mapping) -> dict:
         raise ProbeAEvidenceError(
             "Probe-A raw measurements require at least 400 ordered control-row identities"
         )
+    if sha256_json(ordered_control_row_ids) != producer["ordered_control_row_identity_sha256"]:
+        raise ProbeAEvidenceError("Probe-A ordered control identity differs from its producer pin")
 
     raw_controls = obj["control_predictions"]
     if not isinstance(raw_controls, list) or len(raw_controls) != 5:
@@ -514,18 +871,29 @@ def _load_probe_a_raw(root: Path, sample: Mapping) -> dict:
 
     public = _finite_vector(obj["public_prediction"], "raw.public_prediction")
     bridge = _finite_vector(obj["bridge_prediction"], "raw.bridge_prediction")
+    if public != controls[400] or public != run_predictions[measurement_run_index - 1]:
+        raise ProbeAEvidenceError(
+            "Probe-A public measurement is not the 400-control output from determinism run 1"
+        )
+    if bridge != reconstructed_controls[400]:
+        raise ProbeAEvidenceError(
+            "Probe-A bridge is not the direct first-300 reconstruction from the same run"
+        )
     bridge_error = _max_abs_error(public, bridge, "raw public/bridge predictions")
     ordered = sorted(public)
     middle = len(ordered) // 2
     median = ordered[middle] if len(ordered) % 2 else (ordered[middle - 1] + ordered[middle]) / 2.0
     return {
+        "producer": dict(producer),
         "input_before": input_before,
         "input_after": input_after,
         "checkpoints": checkpoints,
         "checkpoint_files": checkpoint_files,
+        "checkpoint_metadata_strings": checkpoint_metadata_strings,
         "run_predictions": run_predictions,
         "det_error": det_error,
         "control_order": control_order,
+        "ordered_control_row_ids": ordered_control_row_ids,
         "controls": controls,
         "reconstructed_controls": reconstructed_controls,
         "cap_error": cap_error,
@@ -552,6 +920,141 @@ def validate_probe_a_raw_artifact(
         Path(evidence_root),
         {"path": relative_path, "sha256": expected_sha256},
     )
+
+
+def build_probe_a_report(
+    *,
+    evidence_root: str | Path,
+    raw_sample_path: str,
+    raw_sample_sha256: str,
+    registration: Mapping,
+    registration_sha256: str,
+    expected_git_commit: str,
+    runtime_sha256: str,
+    inputs_sha256: str,
+    source_fingerprint_sha256: str,
+) -> dict[str, object]:
+    """Derive the complete Probe-A report from validated raw measurements.
+
+    No aggregate or verdict is accepted from the caller. Every value below is
+    recomputed from the raw artifact and compared with the owner-frozen
+    registration by :func:`validate_probe_a_report` before publication.
+    """
+    validate_registration(registration, expected_git_commit=expected_git_commit)
+    raw = _load_probe_a_raw(
+        Path(evidence_root),
+        {"path": raw_sample_path, "sha256": raw_sample_sha256},
+    )
+    producer = raw["producer"]
+    det_tolerance = float(registration["determinism"]["max_abs_error_tolerance"])
+    control_tolerance = float(registration["control_count"]["first_300_max_abs_error_tolerance"])
+    bridge_tolerance = float(registration["output_bridge"]["max_abs_error_tolerance"])
+    body = {
+        "schema": REPORT_SCHEMA,
+        "protocol": PROTOCOL,
+        "status": "pass",
+        "git_commit": _git_commit(expected_git_commit, "expected Git commit"),
+        "registration_sha256": _sha(registration_sha256, "registration_sha256"),
+        "runtime_sha256": _sha(runtime_sha256, "runtime_sha256"),
+        "input_manifest_sha256": _sha(inputs_sha256, "inputs_sha256"),
+        "source_fingerprint_sha256": _sha(source_fingerprint_sha256, "source_fingerprint_sha256"),
+        "input_scale": {
+            "before_sha256": sha256_json(raw["input_before"]),
+            "after_sha256": sha256_json(raw["input_after"]),
+            "exact_equal": raw["input_before"] == raw["input_after"],
+            "normalization_target": producer["normalization_target"],
+            "transform": PROBE_INPUT_TRANSFORM,
+        },
+        "determinism": {
+            "checkpoint_sha256": list(raw["checkpoints"]),
+            "prediction_sha256": [sha256_json(value) for value in raw["run_predictions"]],
+            "max_abs_error": raw["det_error"],
+            "tolerance": det_tolerance,
+            "verdict": "pass" if raw["det_error"] <= det_tolerance else "fail",
+        },
+        "control_count": {
+            "counts": list(raw["control_order"]),
+            "prediction_sha256": [
+                sha256_json(raw["controls"][count]) for count in raw["control_order"]
+            ],
+            "first_300_max_abs_error": raw["cap_error"],
+            "tolerance": control_tolerance,
+            "verdict": "pass" if raw["cap_error"] <= control_tolerance else "fail",
+        },
+        "output_scale": dict(raw["output_scale"]),
+        "output_bridge": {
+            "representation": registration["output_bridge"]["representation"],
+            "verdict": "pass" if raw["bridge_error"] <= bridge_tolerance else "fail",
+            "tolerance": bridge_tolerance,
+            "max_abs_error": raw["bridge_error"],
+        },
+        "raw_samples": [
+            {"path": raw_sample_path, "sha256": _sha(raw_sample_sha256, "raw_sample_sha256")}
+        ],
+    }
+    report = {**body, "self_checksum": sha256_json(body)}
+    validate_probe_a_report(
+        report,
+        registration=registration,
+        registration_sha256=registration_sha256,
+        evidence_root=evidence_root,
+        expected_git_commit=expected_git_commit,
+    )
+    return report
+
+
+def build_evidence_manifest(
+    *, evidence_root: str | Path, expected_git_commit: str
+) -> dict[str, object]:
+    """Build and self-validate the exhaustive pre-admission evidence manifest."""
+    root = Path(evidence_root)
+    inventory = _manifest_inventory(root)
+    singleton_by_path = {path: role for role, path in _SINGLETON_ROLE_PATHS.items()}
+    entries: list[dict[str, object]] = []
+    for relative in sorted(inventory):
+        path = _relative_file(root, relative)
+        role = singleton_by_path.get(relative)
+        parts = Path(relative).parts
+        if role is None and parts and parts[0] == "roster_receipts":
+            role = "roster_receipt"
+        elif role is None and parts and parts[0] == "checkpoints" and path.suffix == ".pt":
+            role = "probe_a_checkpoint"
+        elif role is None and parts and parts[0] == "logs":
+            role = "log"
+        elif role is None and path.suffix == ".json":
+            try:
+                candidate = json.loads(path.read_bytes())
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise ProbeAEvidenceError(
+                    f"cannot classify evidence file {relative}: {exc}"
+                ) from exc
+            if isinstance(candidate, Mapping) and candidate.get("schema") == RAW_SCHEMA:
+                role = "raw_sample"
+        if role is None:
+            raise ProbeAEvidenceError(
+                f"cannot classify evidence file into a manifest role: {relative}"
+            )
+        entries.append(
+            {
+                "role": role,
+                "path": relative,
+                "sha256": sha256_file(path),
+                "bytes": path.stat().st_size,
+            }
+        )
+    body = {
+        "schema": MANIFEST_SCHEMA,
+        "protocol": PROTOCOL,
+        "git_commit": _git_commit(expected_git_commit, "expected Git commit"),
+        "files": entries,
+    }
+    manifest = {**body, "manifest_checksum": sha256_json(body)}
+    validate_evidence_manifest(
+        manifest,
+        evidence_root=root,
+        expected_git_commit=expected_git_commit,
+    )
+    return manifest
 
 
 def validate_probe_a_report(
@@ -583,6 +1086,8 @@ def validate_probe_a_report(
     if not isinstance(samples, list) or len(samples) != 1:
         raise ProbeAEvidenceError("Probe-A requires exactly one complete raw-measurement artifact")
     raw = _load_probe_a_raw(Path(evidence_root), samples[0])
+    if raw["producer"]["registration_sha256"] != registered_sha:
+        raise ProbeAEvidenceError("Probe-A raw measurements are not bound to preregistration")
 
     registered_input = registration["input_scale"]
     input_scale = _exact_keys(
@@ -607,7 +1112,9 @@ def validate_probe_a_report(
     )
     if (
         normalization_target != float(registered_input["normalization_target"])
+        or normalization_target != raw["producer"]["normalization_target"]
         or input_scale["transform"] != registered_input["transform"]
+        or input_scale["transform"] != PROBE_INPUT_TRANSFORM
     ):
         raise ProbeAEvidenceError("Probe-A input scale differs from preregistration")
 
@@ -838,6 +1345,68 @@ def _fit_role_counts(value: object, field: str) -> dict[str, int]:
     return result
 
 
+def _canonical_pair_roster(value: object, field: str, *, allow_empty: bool) -> list[list[str]]:
+    if not isinstance(value, list) or (not value and not allow_empty):
+        qualifier = "a list" if allow_empty else "a non-empty list"
+        raise ProbeAEvidenceError(f"{field} must be {qualifier} of canonical pairs")
+    pairs: list[list[str]] = []
+    for index, raw_pair in enumerate(value):
+        if (
+            not isinstance(raw_pair, list)
+            or len(raw_pair) != 2
+            or any(not isinstance(gene, str) or not gene for gene in raw_pair)
+            or raw_pair[0].encode("utf-8") >= raw_pair[1].encode("utf-8")
+        ):
+            raise ProbeAEvidenceError(f"{field}[{index}] is not one canonical gene pair")
+        pairs.append(list(raw_pair))
+    if pairs != sorted(pairs, key=lambda pair: (pair[0].encode("utf-8"), pair[1].encode("utf-8"))):
+        raise ProbeAEvidenceError(f"{field} must be byte-sorted")
+    if len({tuple(pair) for pair in pairs}) != len(pairs):
+        raise ProbeAEvidenceError(f"{field} must not contain duplicates")
+    return pairs
+
+
+def _validate_role_contract(value: object, field: str) -> dict[str, object]:
+    obj = _exact_keys(value, _ROLE_CONTRACT_KEYS, field)
+    control_token = _nonempty_string(obj["control_token"], f"{field}.control_token")
+    combo_separator = _nonempty_string(obj["combo_separator"], f"{field}.combo_separator")
+    if combo_separator in control_token:
+        raise ProbeAEvidenceError(f"{field} control token contains the combo separator")
+    calibration = _canonical_pair_roster(
+        obj["calibration_pair_ids"], f"{field}.calibration_pair_ids", allow_empty=True
+    )
+    sealed = _canonical_pair_roster(
+        obj["sealed_pair_ids"], f"{field}.sealed_pair_ids", allow_empty=False
+    )
+    if set(map(tuple, calibration)) & set(map(tuple, sealed)):
+        raise ProbeAEvidenceError(f"{field} calibration and sealed pair rosters overlap")
+    singles = obj["single_gene_ids"]
+    if (
+        not isinstance(singles, list)
+        or not singles
+        or any(not isinstance(gene, str) or not gene for gene in singles)
+        or singles != sorted(singles, key=lambda gene: gene.encode("utf-8"))
+        or len(set(singles)) != len(singles)
+    ):
+        raise ProbeAEvidenceError(f"{field}.single_gene_ids must be a unique byte-sorted roster")
+    calibration_tokens = {combo_separator.join(pair) for pair in calibration}
+    sealed_tokens = {combo_separator.join(pair) for pair in sealed}
+    if len(calibration_tokens) != len(calibration) or len(sealed_tokens) != len(sealed):
+        raise ProbeAEvidenceError(f"{field} pair roster has ambiguous serialized tokens")
+    if calibration_tokens & sealed_tokens:
+        raise ProbeAEvidenceError(f"{field} calibration and sealed tokens collide")
+    reserved_tokens = calibration_tokens | sealed_tokens | {control_token}
+    if reserved_tokens & set(singles):
+        raise ProbeAEvidenceError(f"{field} control/combo and single tokens collide")
+    return {
+        "calibration_pair_ids": calibration,
+        "combo_separator": combo_separator,
+        "control_token": control_token,
+        "sealed_pair_ids": sealed,
+        "single_gene_ids": list(singles),
+    }
+
+
 def _timestamp(value: object, field: str) -> datetime:
     text = _nonempty_string(value, field)
     try:
@@ -874,7 +1443,15 @@ def _validate_runtime(payload: Mapping, *, expected_git_commit: str) -> dict:
     if not image_digest.startswith("sha256:") or len(image_digest) != 71:
         raise ProbeAEvidenceError("runtime.image_digest must be sha256:<64 lowercase hex>")
     _sha(image_digest.removeprefix("sha256:"), "runtime.image_digest")
-    _sha(obj["dependency_lock_sha256"], "runtime.dependency_lock_sha256")
+    _sha(
+        obj["preparation_dependency_lock_sha256"],
+        "runtime.preparation_dependency_lock_sha256",
+    )
+    _sha(obj["gears_dependency_lock_sha256"], "runtime.gears_dependency_lock_sha256")
+    _sha(
+        obj["gears_installed_packages_sha256"],
+        "runtime.gears_installed_packages_sha256",
+    )
     _sha(obj["runtime_fingerprint_sha256"], "runtime.runtime_fingerprint_sha256")
     if obj["network_disabled"] is not True:
         raise ProbeAEvidenceError("runtime evidence must attest network_disabled=true")
@@ -910,12 +1487,40 @@ def _validate_role_attestation(payload: Mapping, *, expected_git_commit: str) ->
     if obj["sealed_pair_overlap_count"] != 0 or obj["sealed_row_read_count"] != 0:
         raise ProbeAEvidenceError("role attestation must prove zero sealed overlap and zero reads")
     counts = _fit_role_counts(obj["fit_role_counts"], "role_attestation.fit_role_counts")
-    spy = _exact_keys(obj["reader_spy"], {"status", "observed_row_indices_sha256"}, "reader_spy")
+    spy = _exact_keys(
+        obj["reader_spy"],
+        {
+            "status",
+            "selected_source_row_ids_sha256",
+            "observed_source_row_ids_sha256",
+            "observed_source_row_count",
+            "forbidden_source_row_read_count",
+        },
+        "reader_spy",
+    )
     if spy["status"] != "pass":
         raise ProbeAEvidenceError("role attestation reader-spy did not pass")
-    _sha(spy["observed_row_indices_sha256"], "reader_spy.observed_row_indices_sha256")
+    selected_sha = _sha(
+        spy["selected_source_row_ids_sha256"],
+        "reader_spy.selected_source_row_ids_sha256",
+    )
+    observed_sha = _sha(
+        spy["observed_source_row_ids_sha256"],
+        "reader_spy.observed_source_row_ids_sha256",
+    )
+    if selected_sha != observed_sha:
+        raise ProbeAEvidenceError("reader-spy observed a different row roster than it selected")
+    _positive_int(spy["observed_source_row_count"], "reader_spy.observed_source_row_count")
+    forbidden_count = _positive_int(
+        spy["forbidden_source_row_read_count"],
+        "reader_spy.forbidden_source_row_read_count",
+        allow_zero=True,
+    )
+    if forbidden_count != 0:
+        raise ProbeAEvidenceError("reader-spy observed a forbidden source-row read")
     result = dict(obj)
     result["fit_role_counts"] = counts
+    result["reader_spy"] = dict(spy)
     return result
 
 
@@ -941,6 +1546,14 @@ def _validate_commands(
     runtime_fingerprint_sha256: str,
     raw_sample_path: str,
     raw_sample_sha256: str,
+    probe_input_manifest_path: str,
+    probe_input_manifest_sha256: str,
+    probe_input_h5ad_path: str,
+    registration_path: str,
+    registration_sha256: str,
+    report_path: str,
+    report_sha256: str,
+    expected_git_commit: str,
 ) -> None:
     try:
         data = path.read_bytes()
@@ -953,6 +1566,7 @@ def _validate_commands(
         raise ProbeAEvidenceError("commands evidence is empty")
     observed: Counter[str] = Counter()
     probe_a_primary_sha256: list[str] = []
+    report_primary_sha256: list[str] = []
     for index, line in enumerate(lines):
         try:
             record = json.loads(line)
@@ -992,7 +1606,26 @@ def _validate_commands(
         if any("$(" in token or "`" in token for token in argv):
             raise ProbeAEvidenceError("commands argv must not use shell command substitution")
         if command == "probe-a":
-            for option in ("--measurement-json", "--evidence-root", "--out-raw"):
+            required_options = (
+                "--payload-dir",
+                "--probe-a-registration",
+                "--probe-a-registration-sha256",
+                "--git-commit",
+                "--probe-manifest",
+                "--probe-manifest-sha256",
+                "--h5ad",
+                "--roster",
+                "--roster-receipt",
+                "--approved-root",
+                "--evidence-root",
+                "--out-raw",
+                "--checkpoint-dir",
+            )
+            if "--measurement-json" in argv:
+                raise ProbeAEvidenceError(
+                    "Probe-A command must execute the maintained runner, not publish JSON"
+                )
+            for option in required_options:
                 if argv.count(option) != 1 or argv.index(option) + 1 >= len(argv):
                     raise ProbeAEvidenceError(
                         f"Probe-A measurement command requires exactly one {option} value"
@@ -1003,6 +1636,72 @@ def _validate_commands(
             ):
                 raise ProbeAEvidenceError(
                     "Probe-A measurement command output path differs from the raw manifest path"
+                )
+            probe_manifest = argv[argv.index("--probe-manifest") + 1]
+            registration = argv[argv.index("--probe-a-registration") + 1]
+            h5ad = argv[argv.index("--h5ad") + 1]
+            checkpoint_dir = argv[argv.index("--checkpoint-dir") + 1]
+            if (
+                (
+                    Path(registration).as_posix() != registration_path
+                    and not registration.endswith(f"/{registration_path}")
+                )
+                or argv[argv.index("--probe-a-registration-sha256") + 1] != registration_sha256
+                or argv[argv.index("--git-commit") + 1] != expected_git_commit
+                or (
+                    Path(probe_manifest).as_posix() != probe_input_manifest_path
+                    and not probe_manifest.endswith(f"/{probe_input_manifest_path}")
+                )
+                or (
+                    Path(h5ad).as_posix() != probe_input_h5ad_path
+                    and not h5ad.endswith(f"/{probe_input_h5ad_path}")
+                )
+                or argv[argv.index("--probe-manifest-sha256") + 1] != probe_input_manifest_sha256
+                or (
+                    Path(checkpoint_dir).as_posix() != "checkpoints"
+                    and not checkpoint_dir.endswith("/checkpoints")
+                )
+            ):
+                raise ProbeAEvidenceError(
+                    "Probe-A command is not bound to the canonical prepared input/checkpoints"
+                )
+        elif command == "build-probe-a-report":
+            required_options = (
+                "--evidence-root",
+                "--raw-sample",
+                "--raw-sample-sha256",
+                "--probe-a-registration",
+                "--probe-a-registration-sha256",
+                "--git-commit",
+                "--out-report",
+            )
+            for option in required_options:
+                if argv.count(option) != 1 or argv.index(option) + 1 >= len(argv):
+                    raise ProbeAEvidenceError(
+                        f"Probe-A report command requires exactly one {option} value"
+                    )
+            raw_sample = argv[argv.index("--raw-sample") + 1]
+            registration = argv[argv.index("--probe-a-registration") + 1]
+            output = argv[argv.index("--out-report") + 1]
+            if (
+                (
+                    Path(raw_sample).as_posix() != raw_sample_path
+                    and not raw_sample.endswith(f"/{raw_sample_path}")
+                )
+                or argv[argv.index("--raw-sample-sha256") + 1] != raw_sample_sha256
+                or (
+                    Path(registration).as_posix() != registration_path
+                    and not registration.endswith(f"/{registration_path}")
+                )
+                or argv[argv.index("--probe-a-registration-sha256") + 1] != registration_sha256
+                or argv[argv.index("--git-commit") + 1] != expected_git_commit
+                or (
+                    Path(output).as_posix() != report_path
+                    and not output.endswith(f"/{report_path}")
+                )
+            ):
+                raise ProbeAEvidenceError(
+                    "Probe-A report command is not bound to the raw/registration/report contract"
                 )
         _nonempty_string(obj["cwd"], f"commands record {index}.cwd")
         env = obj["env"]
@@ -1026,6 +1725,8 @@ def _validate_commands(
         )
         if command == "probe-a":
             probe_a_primary_sha256.append(primary_sha256)
+        elif command == "build-probe-a-report":
+            report_primary_sha256.append(primary_sha256)
         if (
             _sha(
                 obj["runtime_fingerprint_sha256"],
@@ -1049,6 +1750,252 @@ def _validate_commands(
         raise ProbeAEvidenceError(
             "Probe-A measurement command primary SHA-256 is not bound to the raw artifact"
         )
+    if observed["build-probe-a-report"] != 1:
+        raise ProbeAEvidenceError(
+            "commands evidence requires exactly one Probe-A report-build command"
+        )
+    if report_primary_sha256 != [_sha(report_sha256, "Probe-A report SHA-256")]:
+        raise ProbeAEvidenceError(
+            "Probe-A report command primary SHA-256 is not bound to the report artifact"
+        )
+
+
+def _validate_prepared_input_chain(
+    *,
+    root: Path,
+    manifest_entry: Mapping,
+    h5ad_entry: Mapping,
+    inputs: Mapping,
+    receipt: Mapping,
+    runtime: Mapping,
+    raw: Mapping,
+    role_attestation: Mapping,
+    registration: Mapping,
+    registration_sha256: str,
+) -> None:
+    manifest = _read_json_entry(
+        root,
+        manifest_entry,
+        label="Probe-A prepared-input manifest",
+        pretty_canonical=True,
+    )
+    _exact_keys(manifest, _PROBE_INPUT_MANIFEST_KEYS, "Probe-A prepared-input manifest")
+    if manifest["schema"] != PROBE_INPUT_MANIFEST_SCHEMA:
+        raise ProbeAEvidenceError("Probe-A prepared-input manifest schema mismatch")
+    for field in (
+        "fit_artifact_content_sha256",
+        "full_var_order_sha256",
+        "ordered_roster_sha256",
+        "output_h5ad_sha256",
+        "payload_sha256",
+        "probe_driver_code_sha256",
+        "probe_runtime_fingerprint_sha256",
+        "response_artifact_sha256",
+        "roster_artifact_checksum",
+        "roster_file_sha256",
+        "roster_receipt_sha256",
+        "row_identity_sha256",
+        "selected_source_row_ids_sha256",
+        "matrix_logical_sha256",
+    ):
+        _sha(manifest[field], f"prepared manifest.{field}")
+    for field in ("n_cells", "n_genes"):
+        _positive_int(manifest[field], f"prepared manifest.{field}")
+    manifest_role_counts = _fit_role_counts(
+        manifest["role_counts"], "prepared manifest.role_counts"
+    )
+    normalization_target = _finite_nonnegative(
+        manifest["normalization_target"], "prepared manifest.normalization_target"
+    )
+    if normalization_target <= 0:
+        raise ProbeAEvidenceError("prepared input normalization target must be positive")
+    if manifest["expression_scale"] != PROBE_INPUT_TRANSFORM:
+        raise ProbeAEvidenceError("Probe-A prepared-input expression scale mismatch")
+    if (
+        manifest["matrix_dtype"] != PROBE_MATRIX_DTYPE
+        or manifest["matrix_format"] != PROBE_MATRIX_FORMAT
+    ):
+        raise ProbeAEvidenceError("Probe-A prepared-input matrix storage contract mismatch")
+    role_contract = _validate_role_contract(
+        manifest["role_contract"], "prepared manifest.role_contract"
+    )
+    if (
+        normalization_target != float(registration["input_scale"]["normalization_target"])
+        or manifest["expression_scale"] != registration["input_scale"]["transform"]
+    ):
+        raise ProbeAEvidenceError("prepared input scale differs from preregistration")
+    manifest_body = {key: value for key, value in manifest.items() if key != "manifest_checksum"}
+    if _sha(manifest["manifest_checksum"], "prepared manifest checksum") != sha256_json(
+        manifest_body
+    ):
+        raise ProbeAEvidenceError("Probe-A prepared-input manifest checksum mismatch")
+    if (
+        inputs["probe_input_manifest_sha256"] != manifest_entry["sha256"]
+        or inputs["probe_input_h5ad_sha256"] != h5ad_entry["sha256"]
+        or manifest["output_h5ad_sha256"] != h5ad_entry["sha256"]
+        or inputs["probe_row_identity_sha256"] != manifest["row_identity_sha256"]
+        or inputs["roster_sha256"] != manifest["roster_file_sha256"]
+        or inputs["roster_receipt_sha256"] != manifest["roster_receipt_sha256"]
+    ):
+        raise ProbeAEvidenceError("input evidence is not bound to the prepared H5AD/manifest")
+    receipt_bindings = {
+        "fit_artifact_content_sha256": "fit_artifact_content_sha256",
+        "ordered_roster_sha256": "ordered_roster_sha256",
+        "payload_sha256": "payload_sha256",
+        "response_artifact_sha256": "response_artifact_sha256",
+        "roster_artifact_checksum": "roster_artifact_checksum",
+        "roster_file_sha256": "roster_file_sha256",
+    }
+    if any(manifest[left] != receipt[right] for left, right in receipt_bindings.items()):
+        raise ProbeAEvidenceError("prepared input manifest differs from its roster receipt lineage")
+    if (
+        manifest["response_artifact_sha256"] != inputs["response_artifact_sha256"]
+        or receipt["preparation_dependency_lock_sha256"]
+        != inputs["preparation_dependency_lock_sha256"]
+        or receipt["gears_dependency_lock_sha256"] != inputs["gears_dependency_lock_sha256"]
+        or manifest["probe_runtime_fingerprint_sha256"] != runtime["runtime_fingerprint_sha256"]
+    ):
+        raise ProbeAEvidenceError("prepared input lineage differs from runtime/input evidence")
+
+    h5ad_path = _relative_file(root, h5ad_entry["path"])
+    if h5ad_path.stat().st_size > _H5AD_ENVELOPE_BYTES:
+        raise ProbeAEvidenceError("prepared Probe-A H5AD exceeds the evidence envelope bound")
+    try:
+        probe = ad.read_h5ad(h5ad_path)
+    except Exception as exc:
+        raise ProbeAEvidenceError(f"cannot read the prepared Probe-A H5AD: {exc}") from exc
+    required_obs = {"source_row_id", "role", "perturbation"}
+    if not required_obs <= set(probe.obs.columns):
+        raise ProbeAEvidenceError("prepared Probe-A H5AD lacks row-identity columns")
+    if (
+        int(probe.n_obs) != manifest["n_cells"]
+        or int(probe.n_vars) != manifest["n_genes"]
+        or not probe.var_names.is_unique
+    ):
+        raise ProbeAEvidenceError("prepared Probe-A H5AD dimensions/gene identity differ")
+    source_ids = probe.obs["source_row_id"].astype(str).tolist()
+    roles = probe.obs["role"].astype(str).tolist()
+    perturbations = probe.obs["perturbation"].astype(str).tolist()
+    if any(not row_id for row_id in source_ids) or len(set(source_ids)) != len(source_ids):
+        raise ProbeAEvidenceError("prepared Probe-A source-row identities are invalid")
+    rows = list(zip(source_ids, roles, perturbations, strict=True))
+    if row_identity_sha256(rows) != manifest["row_identity_sha256"]:
+        raise ProbeAEvidenceError("prepared Probe-A row identity differs from its manifest")
+    observed_counts = {
+        role: roles.count(role) for role in ("control", "singles", "combo_calibration")
+    }
+    if observed_counts != manifest_role_counts or observed_counts != inputs["fit_role_counts"]:
+        raise ProbeAEvidenceError("prepared Probe-A role counts differ from input evidence")
+    selected_source_row_ids_sha256 = sha256_json(source_ids)
+    if selected_source_row_ids_sha256 != manifest["selected_source_row_ids_sha256"]:
+        raise ProbeAEvidenceError("prepared source-row roster differs from its manifest")
+
+    combo_separator = str(role_contract["combo_separator"])
+    calibration_tokens = {
+        combo_separator.join(pair) for pair in role_contract["calibration_pair_ids"]
+    }
+    sealed_tokens = {combo_separator.join(pair) for pair in role_contract["sealed_pair_ids"]}
+    singles = set(role_contract["single_gene_ids"])
+    control_token = str(role_contract["control_token"])
+    recomputed_roles: list[str] = []
+    sealed_pair_overlap_count = 0
+    for perturbation in perturbations:
+        if perturbation == control_token:
+            recomputed_roles.append("control")
+            continue
+        if perturbation in sealed_tokens:
+            sealed_pair_overlap_count += 1
+            recomputed_roles.append("sealed")
+            continue
+        if perturbation in calibration_tokens:
+            recomputed_roles.append("combo_calibration")
+            continue
+        if perturbation not in singles:
+            raise ProbeAEvidenceError("prepared input contains an unregistered perturbation token")
+        recomputed_roles.append("singles")
+    if recomputed_roles != roles:
+        raise ProbeAEvidenceError("prepared fit roles do not match metadata-derived roles")
+    if sealed_pair_overlap_count != 0:
+        raise ProbeAEvidenceError("prepared input overlaps the sealed pair roster")
+    spy = role_attestation["reader_spy"]
+    if (
+        role_attestation["sealed_pair_overlap_count"] != sealed_pair_overlap_count
+        or role_attestation["sealed_row_read_count"] != 0
+        or spy["selected_source_row_ids_sha256"] != selected_source_row_ids_sha256
+        or spy["observed_source_row_ids_sha256"] != selected_source_row_ids_sha256
+        or spy["observed_source_row_count"] != len(source_ids)
+        or spy["forbidden_source_row_read_count"] != 0
+    ):
+        raise ProbeAEvidenceError(
+            "role/reader-spy attestation disagrees with independently derived prepared rows"
+        )
+    ordered_controls = [
+        row_id for row_id, role in zip(source_ids, roles, strict=True) if role == "control"
+    ]
+    if ordered_controls != raw["ordered_control_row_ids"]:
+        raise ProbeAEvidenceError(
+            "raw control-row order is not the order in the archived prepared H5AD"
+        )
+    if sha256_json(ordered_controls) != inputs["ordered_control_row_identity_sha256"]:
+        raise ProbeAEvidenceError("prepared control-row identity differs from input evidence")
+    if not sparse.isspmatrix_csr(probe.X) or np.dtype(probe.X.dtype) != np.dtype("<f4"):
+        raise ProbeAEvidenceError("prepared Probe-A H5AD is not canonical CSR float32")
+    if not probe.X.has_sorted_indices or not probe.X.has_canonical_format:
+        raise ProbeAEvidenceError("prepared Probe-A H5AD CSR storage is not canonical")
+    matrix_identity = _matrix_identity(probe.X, "prepared Probe-A H5AD matrix")
+    if matrix_identity["logical_csr_sha256"] != manifest["matrix_logical_sha256"]:
+        raise ProbeAEvidenceError("prepared Probe-A matrix digest differs from its manifest")
+    if matrix_identity != raw["input_before"]:
+        raise ProbeAEvidenceError("raw input_before is not the archived prepared H5AD matrix")
+    if probe.uns.get("schema") != PROBE_INPUT_ADATA_SCHEMA:
+        raise ProbeAEvidenceError("prepared Probe-A H5AD schema mismatch")
+    if probe.uns.get("normalization_target") != normalization_target:
+        raise ProbeAEvidenceError("prepared Probe-A H5AD normalization target differs")
+    for field in (
+        "fit_artifact_content_sha256",
+        "ordered_roster_sha256",
+        "probe_driver_code_sha256",
+        "probe_runtime_fingerprint_sha256",
+        "response_artifact_sha256",
+        "roster_artifact_checksum",
+        "roster_receipt_sha256",
+        "row_identity_sha256",
+        "selected_source_row_ids_sha256",
+        "matrix_logical_sha256",
+        "matrix_dtype",
+        "matrix_format",
+    ):
+        if probe.uns.get(field) != manifest[field]:
+            raise ProbeAEvidenceError(f"prepared Probe-A H5AD {field} differs from manifest")
+
+    producer = raw["producer"]
+    repository_root = Path(__file__).resolve().parents[3]
+    driver_path = repository_root / "scripts/compose/gears_decision_probe.py"
+    worker_path = repository_root / "scripts/baselines/gears_worker.py"
+    if (
+        producer["registration_sha256"] != registration_sha256
+        or producer["normalization_target"] != normalization_target
+        or producer["input_scale_sha256"] != _input_scale_sha256(normalization_target)
+        or producer["probe_input_manifest_sha256"] != manifest_entry["sha256"]
+        or producer["probe_input_h5ad_sha256"] != h5ad_entry["sha256"]
+        or producer["probe_row_identity_sha256"] != manifest["row_identity_sha256"]
+        or producer["ordered_control_row_identity_sha256"]
+        != inputs["ordered_control_row_identity_sha256"]
+        or producer["roster_sha256"] != inputs["roster_sha256"]
+        or producer["probe_driver_code_sha256"] != sha256_file(driver_path)
+        or producer["probe_driver_code_sha256"] != manifest["probe_driver_code_sha256"]
+        or producer["worker_code_sha256"] != sha256_file(worker_path)
+    ):
+        raise ProbeAEvidenceError(
+            "raw producer is not bound to the maintained runner and prepared-input chain"
+        )
+    if any(
+        manifest["fit_artifact_content_sha256"] not in strings
+        for strings in raw["checkpoint_metadata_strings"]
+    ):
+        raise ProbeAEvidenceError(
+            "Probe-A checkpoint metadata is not bound to the prepared fit artifact"
+        )
 
 
 def validate_evidence_semantics(
@@ -1064,6 +2011,12 @@ def validate_evidence_semantics(
     registration_entry = by_role["probe_a_registration"][0]
     if registration_entry["sha256"] != _sha(registration_sha256, "registration_sha256"):
         raise ProbeAEvidenceError("semantic evidence registration SHA-256 differs from its pin")
+    registration = _read_json_entry(
+        root,
+        registration_entry,
+        label="Probe-A registration",
+    )
+    validate_registration(registration, expected_git_commit=expected_git_commit)
     runtime_entry = by_role["runtime"][0]
     inputs_entry = by_role["inputs"][0]
     runtime = _validate_runtime(
@@ -1084,9 +2037,19 @@ def validate_evidence_semantics(
     )
     if role_attestation["fit_role_counts"] != inputs["fit_role_counts"]:
         raise ProbeAEvidenceError("role attestation counts differ from input evidence")
-    if runtime["dependency_lock_sha256"] != inputs["dependency_lock_sha256"]:
-        raise ProbeAEvidenceError("runtime and input dependency-lock identities differ")
-    receipt_pairs: set[tuple[str, str]] = set()
+    expected_preparation_lock = repository_lock_sha256(PREPARATION_LOCK_PATH)
+    expected_gears_lock = repository_lock_sha256(GEARS_LOCK_PATH)
+    if (
+        runtime["preparation_dependency_lock_sha256"]
+        != inputs["preparation_dependency_lock_sha256"]
+        or runtime["preparation_dependency_lock_sha256"] != expected_preparation_lock
+        or runtime["gears_dependency_lock_sha256"] != inputs["gears_dependency_lock_sha256"]
+        or runtime["gears_dependency_lock_sha256"] != expected_gears_lock
+    ):
+        raise ProbeAEvidenceError(
+            "runtime/input dependency locks differ from the committed preparation/GEARS locks"
+        )
+    matching_receipts: list[dict] = []
     for entry in by_role["roster_receipt"]:
         receipt = _validate_roster_receipt(
             _read_json_entry(
@@ -1096,8 +2059,12 @@ def validate_evidence_semantics(
                 pretty_canonical=True,
             )
         )
-        receipt_pairs.add((entry["sha256"], receipt["roster_file_sha256"]))
-    if (inputs["roster_receipt_sha256"], inputs["roster_sha256"]) not in receipt_pairs:
+        if (entry["sha256"], receipt["roster_file_sha256"]) == (
+            inputs["roster_receipt_sha256"],
+            inputs["roster_sha256"],
+        ):
+            matching_receipts.append(receipt)
+    if len(matching_receipts) != 1:
         raise ProbeAEvidenceError("input evidence is not bound to a manifested roster receipt")
     command_entry = by_role["commands"][0]
     raw_entries = by_role["raw_sample"]
@@ -1110,11 +2077,39 @@ def validate_evidence_semantics(
         runtime_fingerprint_sha256=runtime["runtime_fingerprint_sha256"],
         raw_sample_path=raw_entries[0]["path"],
         raw_sample_sha256=raw_entries[0]["sha256"],
+        probe_input_manifest_path=by_role["probe_input_manifest"][0]["path"],
+        probe_input_manifest_sha256=by_role["probe_input_manifest"][0]["sha256"],
+        probe_input_h5ad_path=by_role["probe_input_h5ad"][0]["path"],
+        registration_path=registration_entry["path"],
+        registration_sha256=registration_entry["sha256"],
+        report_path=by_role["probe_a_report"][0]["path"],
+        report_sha256=by_role["probe_a_report"][0]["sha256"],
+        expected_git_commit=expected_git_commit,
     )
 
     raw = _load_probe_a_raw(
         root,
         {"path": raw_entries[0]["path"], "sha256": raw_entries[0]["sha256"]},
+    )
+    if (
+        raw["producer"]["gears_dependency_lock_sha256"] != expected_gears_lock
+        or raw["producer"]["gears_installed_packages_sha256"]
+        != runtime["gears_installed_packages_sha256"]
+    ):
+        raise ProbeAEvidenceError(
+            "raw producer runtime is not bound to the committed GEARS lock/package roster"
+        )
+    _validate_prepared_input_chain(
+        root=root,
+        manifest_entry=by_role["probe_input_manifest"][0],
+        h5ad_entry=by_role["probe_input_h5ad"][0],
+        inputs=inputs,
+        receipt=matching_receipts[0],
+        runtime=runtime,
+        raw=raw,
+        role_attestation=role_attestation,
+        registration=registration,
+        registration_sha256=registration_entry["sha256"],
     )
     manifested_checkpoints = {
         (entry["path"], entry["sha256"]) for entry in by_role["probe_a_checkpoint"]
