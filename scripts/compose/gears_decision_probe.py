@@ -59,9 +59,13 @@ from alive.compose.fit_role import (
     validate_fit_role_artifact,
 )
 from alive.compose.gears_probe_a import (
+    ALIAS_ARTIFACT_PATH,
+    FIT_ROLE_ARTIFACT_PATH,
     GEARS_LOCK_PATH,
+    INPUTS_SCHEMA,
     MANIFEST_PATH,
     MANIFEST_SCHEMA,
+    PAYLOAD_PATH,
     PREPARATION_LOCK_PATH,
     PROBE_INPUT_ADATA_SCHEMA,
     PROBE_INPUT_MANIFEST_KEYS,
@@ -72,11 +76,15 @@ from alive.compose.gears_probe_a import (
     RAW_SCHEMA,
     REGISTRATION_PATH,
     REPORT_PATH,
+    RESPONSE_PROJECTION_PATH,
+    ROLE_ATTESTATION_SCHEMA,
     ROSTER_RECEIPT_SCHEMA,
     RUNTIME_SCHEMA,
+    SELECTED_ROSTER_PATH,
     assert_clean_approved_checkout,
     build_evidence_manifest,
     build_probe_a_report,
+    canonical_declared_identity_sha256,
     parse_cpuset_cpu_count,
     repository_lock_sha256,
     validate_probe_a_raw_artifact,
@@ -119,7 +127,10 @@ _RECEIPT_KEYS = {
     "preparation_dependency_lock_sha256",
     "gears_dependency_lock_sha256",
     "fit_artifact_content_sha256",
+    "fit_role_file_sha256",
+    "gene2go_manifest_sha256",
     "gene2go_nodes_artifact_sha256",
+    "gene2go_source_sha256",
     "generator_code_sha256",
     "manifest_checksum",
     "n_target",
@@ -169,6 +180,75 @@ def _stable_bytes(path: str | Path, *, label: str) -> bytes:
         return data
     finally:
         os.close(fd)
+
+
+def _atomic_copy_regular_file_once(
+    source: str | Path,
+    destination: str | Path,
+    *,
+    expected_sha256: str,
+    label: str,
+) -> str:
+    """Publish an exact stable source snapshot without replacing any destination."""
+    expected = _require_sha256(expected_sha256, label=f"{label} SHA-256")
+    source_path = Path(source)
+    output = Path(destination)
+    if output.exists() or output.is_symlink():
+        raise GeneUniverseError(f"{label} snapshot destination already exists")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    source_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        source_fd = os.open(source_path, source_flags)
+    except OSError as exc:
+        raise GeneUniverseError(f"cannot open {label} safely: {exc}") from exc
+    temporary_fd, temporary_name = tempfile.mkstemp(
+        prefix=f".{output.name}.", suffix=".tmp", dir=output.parent
+    )
+    temporary = Path(temporary_name)
+    try:
+        before = os.fstat(source_fd)
+        if not stat.S_ISREG(before.st_mode):
+            raise GeneUniverseError(f"{label} must be a regular file")
+        digest = hashlib.sha256()
+        copied = 0
+        with os.fdopen(temporary_fd, "wb") as target:
+            while True:
+                chunk = os.read(source_fd, 8 * 1024 * 1024)
+                if not chunk:
+                    break
+                digest.update(chunk)
+                copied += len(chunk)
+                target.write(chunk)
+            target.flush()
+            os.fsync(target.fileno())
+        after = os.fstat(source_fd)
+        try:
+            path_after = os.stat(source_path, follow_symlinks=False)
+        except OSError as exc:
+            raise GeneUniverseError(f"cannot restat {label}: {exc}") from exc
+        before_identity = (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
+        after_identity = (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+        if before_identity != after_identity or (after.st_dev, after.st_ino) != (
+            path_after.st_dev,
+            path_after.st_ino,
+        ):
+            raise GeneUniverseError(f"{label} changed while it was archived")
+        if copied != before.st_size or digest.hexdigest() != expected:
+            raise GeneUniverseError(f"{label} differs from its expected SHA-256")
+        os.link(temporary, output)
+        directory_fd = os.open(output.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+        return expected
+    finally:
+        os.close(source_fd)
+        try:
+            os.close(temporary_fd)
+        except OSError:
+            pass
+        temporary.unlink(missing_ok=True)
 
 
 def _sha256_fd(fd: int) -> str:
@@ -1624,6 +1704,7 @@ def _assert_runtime_execution_context(command_ledger: str | Path) -> None:
         )
     for field in (
         "method",
+        "network_namespace",
         "interfaces",
         "ipv4_non_loopback_route_count",
         "ipv6_non_loopback_route_count",
@@ -1769,7 +1850,13 @@ def build_roster(
         "gears_dependency_lock_sha256": _gears_dependency_lock_sha256(),
         "driver_code_sha256": driver_code_sha256,
         "fit_artifact_content_sha256": fit_role["content_manifest_sha256"],
+        "fit_role_file_sha256": _require_sha256(
+            str(fit_role["sha256"]).removeprefix("sha256:"),
+            label="fit-role artifact file SHA-256",
+        ),
+        "gene2go_manifest_sha256": resource_manifest_sha256,
         "gene2go_nodes_artifact_sha256": gene2go_nodes_artifact_sha256,
+        "gene2go_source_sha256": gene2go_source_sha256,
         "generator_code_sha256": generator_code_sha256,
         "n_target": n_target,
         "ordered_roster_sha256": roster.ordered_roster_sha256,
@@ -1825,18 +1912,31 @@ def _atomic_write_h5ad(adata: ad.AnnData, destination: Path) -> str:
 
 def prepare_probe_input(
     *,
+    evidence_root: str | Path,
     payload_dir: str | Path,
     roster_path: str | Path,
     roster_receipt_path: str | Path,
     roster_receipt_sha256: str,
+    alias_artifact_path: str | Path,
+    alias_artifact_sha256: str,
     approved_root: str | Path,
+    expected_git_commit: str,
     out_h5ad: str | Path,
     out_manifest: str | Path,
     require_payload_sha256: bool = True,
 ) -> dict[str, object]:
     """Create one full-normalize-then-subset GEARS probe input."""
+    root = Path(evidence_root).resolve(strict=True)
+    if not root.is_dir() or Path(evidence_root).is_symlink():
+        raise GeneUniverseError("Probe-A evidence root must be a real directory")
     if Path(out_h5ad).resolve(strict=False) == Path(out_manifest).resolve(strict=False):
         raise GeneUniverseError("probe input and manifest destinations must be distinct")
+    if Path(out_h5ad).resolve(strict=False) != root / "probe_input.h5ad":
+        raise GeneUniverseError("probe input must be probe_input.h5ad under evidence root")
+    if Path(out_manifest).resolve(strict=False) != root / "probe_input_manifest.json":
+        raise GeneUniverseError(
+            "probe input manifest must be probe_input_manifest.json under evidence root"
+        )
     if Path(out_manifest).exists() or Path(out_manifest).is_symlink():
         raise GeneUniverseError("probe manifest destination already exists")
     receipt = _load_roster_receipt(roster_receipt_path, expected_file_sha256=roster_receipt_sha256)
@@ -1855,6 +1955,8 @@ def prepare_probe_input(
     source = read_verified_fit_role_artifact(
         fit_role["path"], spec=spec, approved_root=str(approved_root)
     )
+    alias_sha = _require_sha256(alias_artifact_sha256, label="alias artifact SHA-256")
+    AliasMap.load(alias_artifact_path, expected_sha256=alias_sha)
     roster_file_sha256 = str(receipt["roster_file_sha256"])
     roster = load_gears_gene_roster(roster_path, expected_file_sha256=roster_file_sha256)
     if roster.provenance["fit_artifact_content_sha256"] != fit_role["content_manifest_sha256"]:
@@ -1963,6 +2065,111 @@ def prepare_probe_input(
     }
     manifest = {**core, "manifest_checksum": sha256_json(core)}
     atomic_write_once(out_manifest, json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+
+    payload_sha256 = canonical_payload_sha256(payload)
+    fit_role_file_sha256 = _require_sha256(
+        str(fit_role["sha256"]).removeprefix("sha256:"),
+        label="fit-role artifact file SHA-256",
+    )
+    _atomic_copy_regular_file_once(
+        Path(payload_dir) / "payload.json",
+        root / PAYLOAD_PATH,
+        expected_sha256=payload_sha256,
+        label="Probe-A payload",
+    )
+    _atomic_copy_regular_file_once(
+        fit_role["path"],
+        root / FIT_ROLE_ARTIFACT_PATH,
+        expected_sha256=fit_role_file_sha256,
+        label="Probe-A fit-role artifact",
+    )
+    _atomic_copy_regular_file_once(
+        alias_artifact_path,
+        root / ALIAS_ARTIFACT_PATH,
+        expected_sha256=alias_sha,
+        label="Probe-A alias artifact",
+    )
+    _atomic_copy_regular_file_once(
+        roster_path,
+        root / SELECTED_ROSTER_PATH,
+        expected_sha256=roster_file_sha256,
+        label="Probe-A selected roster",
+    )
+    response_bytes = canonical_file_bytes(projection)
+    atomic_write_once(
+        root / RESPONSE_PROJECTION_PATH,
+        response_bytes.decode("utf-8"),
+    )
+
+    source_sha256 = canonical_declared_identity_sha256(
+        fit_role["raw_data_sha256"], "fit-role raw source identity"
+    )
+    pair_manifest_sha256 = canonical_declared_identity_sha256(
+        fit_role["pair_manifest_sha256"], "fit-role pair-manifest identity"
+    )
+    inputs_body = {
+        "schema": INPUTS_SCHEMA,
+        "protocol": PROTOCOL,
+        "git_commit": expected_git_commit,
+        "payload_sha256": payload_sha256,
+        "source_sha256": source_sha256,
+        "gene2go_manifest_sha256": receipt["gene2go_manifest_sha256"],
+        "pair_manifest_sha256": pair_manifest_sha256,
+        "alias_artifact_sha256": alias_sha,
+        "fit_role_artifact_sha256": fit_role_file_sha256,
+        "fit_role_artifact_content_sha256": fit_role["content_manifest_sha256"],
+        "response_artifact_sha256": projection["response_artifact_sha256"],
+        "roster_receipt_sha256": roster_receipt_sha256,
+        "roster_sha256": roster_file_sha256,
+        "preparation_dependency_lock_sha256": receipt["preparation_dependency_lock_sha256"],
+        "gears_dependency_lock_sha256": receipt["gears_dependency_lock_sha256"],
+        "fit_role_counts": dict(fit_role["role_counts"]),
+        "probe_input_manifest_sha256": sha256_file(out_manifest),
+        "probe_input_h5ad_sha256": output_h5ad_sha256,
+        "probe_row_identity_sha256": fit_role["row_identity_sha256"],
+        "ordered_control_row_identity_sha256": sha256_json(
+            [
+                str(row_id)
+                for row_id, role in zip(probe.obs["source_row_id"], probe.obs["role"], strict=True)
+                if str(role) == "control"
+            ]
+        ),
+    }
+    atomic_write_once(
+        root / "inputs.json",
+        canonical_file_bytes({**inputs_body, "self_checksum": sha256_json(inputs_body)}).decode(
+            "utf-8"
+        ),
+    )
+
+    sealed_tokens = {
+        "_".join(pair) for pair in _canonical_pair_roster(payload["pair_ids"], label="pair_ids")
+    }
+    prepared_tokens = probe.obs["perturbation"].astype(str).tolist()
+    sealed_overlap = sum(token in sealed_tokens for token in prepared_tokens)
+    if sealed_overlap:
+        raise GeneUniverseError("prepared Probe-A input overlaps the sealed pair roster")
+    role_body = {
+        "schema": ROLE_ATTESTATION_SCHEMA,
+        "protocol": PROTOCOL,
+        "git_commit": expected_git_commit,
+        "fit_role_counts": dict(fit_role["role_counts"]),
+        "sealed_pair_overlap_count": 0,
+        "sealed_row_read_count": 0,
+        "reader_spy": {
+            "status": "pass",
+            "selected_source_row_ids_sha256": selected_source_row_ids_sha256,
+            "observed_source_row_ids_sha256": selected_source_row_ids_sha256,
+            "observed_source_row_count": len(selected_source_row_ids),
+            "forbidden_source_row_read_count": 0,
+        },
+    }
+    atomic_write_once(
+        root / "role_attestation.json",
+        canonical_file_bytes({**role_body, "self_checksum": sha256_json(role_body)}).decode(
+            "utf-8"
+        ),
+    )
     return manifest
 
 
@@ -2372,11 +2579,15 @@ def _parser() -> argparse.ArgumentParser:
     roster.add_argument("--out-receipt", required=True)
     roster.add_argument("--allow-unbound-dev-payload", action="store_true")
     prepare = commands.add_parser("prepare-input")
+    prepare.add_argument("--evidence-root", required=True)
     prepare.add_argument("--payload-dir", required=True)
     prepare.add_argument("--roster", required=True)
     prepare.add_argument("--roster-receipt", required=True)
     prepare.add_argument("--roster-receipt-sha256", required=True)
+    prepare.add_argument("--alias-artifact", required=True)
+    prepare.add_argument("--alias-artifact-sha256", required=True)
     prepare.add_argument("--approved-root", required=True)
+    prepare.add_argument("--git-commit", required=True)
     prepare.add_argument("--out-h5ad", required=True)
     prepare.add_argument("--out-manifest", required=True)
     prepare.add_argument(
@@ -2488,11 +2699,15 @@ def main(argv: list[str] | None = None) -> int:
         )
     elif args.command == "prepare-input":
         manifest = prepare_probe_input(
+            evidence_root=args.evidence_root,
             payload_dir=args.payload_dir,
             roster_path=args.roster,
             roster_receipt_path=args.roster_receipt,
             roster_receipt_sha256=args.roster_receipt_sha256,
+            alias_artifact_path=args.alias_artifact,
+            alias_artifact_sha256=args.alias_artifact_sha256,
             approved_root=args.approved_root,
+            expected_git_commit=args.git_commit,
             out_h5ad=args.out_h5ad,
             out_manifest=args.out_manifest,
             require_payload_sha256=not args.allow_unbound_dev_payload,

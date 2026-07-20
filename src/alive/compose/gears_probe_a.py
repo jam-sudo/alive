@@ -11,11 +11,14 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 import pickletools
 import re
 import subprocess
+import tempfile
 import zipfile
 from collections import Counter
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -37,15 +40,20 @@ from alive.compose.approximation_bias import (
     validate_probe_a_evidence,
     validate_probe_a_registration,
 )
-from alive.compose.fit_role import row_identity_sha256
+from alive.compose.baseline_subprocess import canonical_payload_sha256
+from alive.compose.fit_role import (
+    FitRoleArtifactSpec,
+    row_identity_sha256,
+    validate_fit_role_artifact,
+)
 from alive.provenance import sha256_bytes, sha256_file, sha256_json
 
 REPORT_SCHEMA = "compose_gears_probe_a_report_v8"
 RAW_SCHEMA = "compose_gears_probe_a_raw_measurements_v6"
 REGISTRATION_SCHEMA = PROBE_A_REGISTRATION_SCHEMA
 VERIFICATION_SCHEMA = PROBE_A_VERIFICATION_SCHEMA
-NEGATIVE_VERIFICATION_SCHEMA = "compose_gears_probe_a_negative_verification_v1"
-MANIFEST_SCHEMA = "compose_gears_probe_a_evidence_manifest_v7"
+NEGATIVE_VERIFICATION_SCHEMA = "compose_gears_probe_a_negative_verification_v2"
+MANIFEST_SCHEMA = "compose_gears_probe_a_evidence_manifest_v8"
 # The admission schema and its validation live exactly once, in the sole consumer
 # gate ``approximation_bias.validate_probe_a_evidence``. Re-export the name and
 # reuse that validator here so this producer cannot drift from the consumer.
@@ -58,6 +66,11 @@ REGISTRATION_PATH = "probe_a_registration.json"
 PROVIDER_ATTESTATION_PATH = "provider_runtime_attestation.json"
 ADMISSION_PATH = "probe_a_admission.json"
 VERIFY_PATH = "verify.json"
+PAYLOAD_PATH = "upstream/payload.json"
+FIT_ROLE_ARTIFACT_PATH = "upstream/fit_role.h5ad"
+ALIAS_ARTIFACT_PATH = "upstream/alias.json"
+RESPONSE_PROJECTION_PATH = "upstream/response_projection.json"
+SELECTED_ROSTER_PATH = "upstream/selected_roster.json"
 
 _POST_MANIFEST_PATHS = frozenset({MANIFEST_PATH, ADMISSION_PATH, VERIFY_PATH})
 _REPORT_KEYS = {
@@ -96,6 +109,8 @@ _NEGATIVE_VERIFICATION_KEYS = {
     "status",
     "git_commit",
     "registration_sha256",
+    "payload_sha256",
+    "roster_receipt_sha256",
     "report_sha256",
     "evidence_manifest_sha256",
     "verifier_code_sha256",
@@ -115,6 +130,11 @@ _SINGLETON_ROLE_PATHS = {
     "probe_a_source": "probe_a_source.txt",
     "probe_input_manifest": "probe_input_manifest.json",
     "probe_input_h5ad": "probe_input.h5ad",
+    "payload": PAYLOAD_PATH,
+    "fit_role_artifact": FIT_ROLE_ARTIFACT_PATH,
+    "alias_artifact": ALIAS_ARTIFACT_PATH,
+    "response_projection": RESPONSE_PROJECTION_PATH,
+    "selected_roster": SELECTED_ROSTER_PATH,
 }
 _MULTI_ROLES = frozenset({"roster_receipt", "probe_a_checkpoint", "raw_sample", "log"})
 _KNOWN_ROLES = frozenset(_SINGLETON_ROLE_PATHS) | _MULTI_ROLES
@@ -122,9 +142,9 @@ _KNOWN_ROLES = frozenset(_SINGLETON_ROLE_PATHS) | _MULTI_ROLES
 COMMAND_RECORD_SCHEMA = "compose_gears_probe_command_record_v1"
 RUNTIME_SCHEMA = "compose_gears_probe_runtime_v4"
 PROVIDER_ATTESTATION_SCHEMA = "compose_provider_runtime_attestation_v1"
-INPUTS_SCHEMA = "compose_gears_probe_inputs_v3"
-ROLE_ATTESTATION_SCHEMA = "compose_gears_probe_role_attestation_v2"
-ROSTER_RECEIPT_SCHEMA = "compose_gears_roster_receipt_v2"
+INPUTS_SCHEMA = "compose_gears_probe_inputs_v4"
+ROLE_ATTESTATION_SCHEMA = "compose_gears_probe_role_attestation_v3"
+ROSTER_RECEIPT_SCHEMA = "compose_gears_roster_receipt_v3"
 PROBE_INPUT_MANIFEST_SCHEMA = "compose_gears_probe_input_manifest_v3"
 PROBE_INPUT_ADATA_SCHEMA = "compose_gears_probe_input_v3"
 PROBE_INPUT_TRANSFORM = "full_library_normalize_log1p_then_roster_subset"
@@ -249,11 +269,13 @@ _INPUTS_KEYS = {
     "schema",
     "protocol",
     "git_commit",
+    "payload_sha256",
     "source_sha256",
     "gene2go_manifest_sha256",
     "pair_manifest_sha256",
     "alias_artifact_sha256",
     "fit_role_artifact_sha256",
+    "fit_role_artifact_content_sha256",
     "response_artifact_sha256",
     "roster_receipt_sha256",
     "roster_sha256",
@@ -283,7 +305,10 @@ _ROSTER_RECEIPT_KEYS = {
     "preparation_dependency_lock_sha256",
     "gears_dependency_lock_sha256",
     "fit_artifact_content_sha256",
+    "fit_role_file_sha256",
+    "gene2go_manifest_sha256",
     "gene2go_nodes_artifact_sha256",
+    "gene2go_source_sha256",
     "generator_code_sha256",
     "manifest_checksum",
     "n_target",
@@ -454,6 +479,22 @@ def _sha(value: object, field: str) -> str:
     return value
 
 
+def canonical_declared_identity_sha256(value: object, field: str) -> str:
+    """Normalize a declared provenance identity into one bare SHA-256.
+
+    Production manifests normally carry a bare or ``sha256:``-prefixed digest.
+    Development carriers may use an explicit non-empty sentinel; hashing that
+    exact declared string preserves its identity without misrepresenting it as a
+    raw file digest.
+    """
+    if not isinstance(value, str) or not value:
+        raise ProbeAEvidenceError(f"{field} must be a non-empty declared identity")
+    candidate = value.removeprefix("sha256:")
+    if len(candidate) == 64 and all(c in "0123456789abcdef" for c in candidate):
+        return candidate
+    return sha256_json({"declared_identity": value})
+
+
 def _git_commit(value: object, field: str) -> str:
     if (
         not isinstance(value, str)
@@ -537,6 +578,75 @@ def _relative_file(root: Path, relative: object) -> Path:
     if not candidate.is_relative_to(base) or not candidate.is_file():
         raise ProbeAEvidenceError("evidence path must be a regular file under evidence root")
     return candidate
+
+
+@contextmanager
+def _verified_binary_snapshot(
+    path: Path,
+    *,
+    expected_sha256: str,
+    expected_bytes: int,
+    label: str,
+    suffix: str,
+):
+    """Yield a private snapshot authenticated from one stable open file description."""
+    expected_sha = _sha(expected_sha256, f"{label} SHA-256")
+    if (
+        isinstance(expected_bytes, bool)
+        or not isinstance(expected_bytes, int)
+        or expected_bytes < 0
+    ):
+        raise ProbeAEvidenceError(f"{label} byte count must be a non-negative integer")
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        source_fd = os.open(path, flags)
+    except OSError as exc:
+        raise ProbeAEvidenceError(f"cannot open {label} safely: {exc}") from exc
+    temporary_path: Path | None = None
+    try:
+        before = os.fstat(source_fd)
+        if not os.path.isfile(path) or not (before.st_mode & 0o170000) == 0o100000:
+            raise ProbeAEvidenceError(f"{label} must be a regular file")
+        temporary_fd, temporary_name = tempfile.mkstemp(prefix="alive-probe-a-", suffix=suffix)
+        temporary_path = Path(temporary_name)
+        digest = hashlib.sha256()
+        copied = 0
+        try:
+            with os.fdopen(temporary_fd, "wb") as destination:
+                while True:
+                    chunk = os.read(source_fd, 8 * 1024 * 1024)
+                    if not chunk:
+                        break
+                    copied += len(chunk)
+                    digest.update(chunk)
+                    destination.write(chunk)
+                destination.flush()
+                os.fsync(destination.fileno())
+        except Exception:
+            temporary_path.unlink(missing_ok=True)
+            temporary_path = None
+            raise
+        after = os.fstat(source_fd)
+        try:
+            path_after = os.stat(path, follow_symlinks=False)
+        except OSError as exc:
+            raise ProbeAEvidenceError(f"cannot restat {label}: {exc}") from exc
+        identity_before = (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
+        identity_after = (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+        if identity_before != identity_after or (after.st_dev, after.st_ino) != (
+            path_after.st_dev,
+            path_after.st_ino,
+        ):
+            raise ProbeAEvidenceError(f"{label} changed while it was snapshotted")
+        if copied != expected_bytes or digest.hexdigest() != expected_sha:
+            raise ProbeAEvidenceError(f"{label} bytes differ from the manifested identity")
+        yield temporary_path
+    except OSError as exc:
+        raise ProbeAEvidenceError(f"cannot snapshot {label}: {exc}") from exc
+    finally:
+        os.close(source_fd)
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
 
 
 def _manifest_inventory(root: Path) -> set[str]:
@@ -815,20 +925,23 @@ def _load_probe_a_raw(root: Path, sample: Mapping) -> dict:
         checkpoint_path = run["checkpoint_path"]
         checkpoint_file = _relative_file(root, checkpoint_path)
         checkpoint_sha = _sha(run["checkpoint_sha256"], f"raw run {index} checkpoint")
-        if sha256_file(checkpoint_file) != checkpoint_sha:
-            raise ProbeAEvidenceError(
-                f"raw run {index} checkpoint SHA-256 differs from the archived file"
-            )
         checkpoint_bytes = _positive_int(
             run["checkpoint_bytes"], f"raw run {index} checkpoint_bytes"
         )
         if run["checkpoint_format"] != "pytorch_zip_v1":
             raise ProbeAEvidenceError("Probe-A checkpoint format is not registered")
-        metadata_strings = _validate_pytorch_checkpoint(
+        with _verified_binary_snapshot(
             checkpoint_file,
+            expected_sha256=checkpoint_sha,
             expected_bytes=checkpoint_bytes,
-            field=f"raw run {index} checkpoint",
-        )
+            label=f"raw run {index} checkpoint",
+            suffix=".pt",
+        ) as checkpoint_snapshot:
+            metadata_strings = _validate_pytorch_checkpoint(
+                checkpoint_snapshot,
+                expected_bytes=checkpoint_bytes,
+                field=f"raw run {index} checkpoint",
+            )
         if (
             run["seed"] != seed
             or run["probe_input_h5ad_sha256"] != producer["probe_input_h5ad_sha256"]
@@ -1411,6 +1524,51 @@ def _read_json_entry(
     return payload
 
 
+def _read_payload_entry(root: Path, entry: Mapping, *, expected_sha256: str) -> dict:
+    """Authenticate the compact canonical worker payload against its external pin."""
+    path = _relative_file(root, entry["path"])
+    try:
+        data = path.read_bytes()
+        payload = json.loads(data)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ProbeAEvidenceError(f"cannot parse archived Probe-A payload: {exc}") from exc
+    expected = _sha(expected_sha256, "externally pinned payload SHA-256")
+    if (
+        not isinstance(payload, dict)
+        or len(data) != entry["bytes"]
+        or sha256_bytes(data) != entry["sha256"]
+        or entry["sha256"] != expected
+    ):
+        raise ProbeAEvidenceError("archived Probe-A payload differs from its external pin")
+    try:
+        observed = canonical_payload_sha256(payload)
+    except ValueError as exc:
+        raise ProbeAEvidenceError(f"archived Probe-A payload is invalid: {exc}") from exc
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    if data != canonical.encode("utf-8") or observed != expected:
+        raise ProbeAEvidenceError("archived Probe-A payload is not canonical or correctly pinned")
+    return payload
+
+
+def _fit_role_spec_from_payload(block: Mapping) -> FitRoleArtifactSpec:
+    try:
+        return FitRoleArtifactSpec(
+            path=str(block["path"]),
+            sha256=str(block["sha256"]),
+            content_manifest_sha256=str(block["content_manifest_sha256"]),
+            raw_data_sha256=str(block["raw_data_sha256"]),
+            pair_manifest_sha256=str(block["pair_manifest_sha256"]),
+            eligibility_hash=str(block["eligibility_hash"]),
+            gene_order_sha256=str(block["gene_order_sha256"]),
+            row_identity_sha256=str(block["row_identity_sha256"]),
+            n_cells=int(block["n_cells"]),
+            n_genes=int(block["n_genes"]),
+            role_counts={str(key): int(value) for key, value in block["role_counts"].items()},
+        )
+    except (KeyError, TypeError, ValueError, AttributeError) as exc:
+        raise ProbeAEvidenceError(f"archived fit-role payload block is invalid: {exc}") from exc
+
+
 def _positive_int(value: object, field: str, *, allow_zero: bool = False) -> int:
     minimum = 0 if allow_zero else 1
     if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
@@ -1826,6 +1984,7 @@ def _validate_commands(
     probe_input_h5ad_path: str,
     roster_receipt_path: str,
     roster_receipt_sha256: str,
+    receipt_alias_artifact_sha256: str,
     roster_receipt_paths_by_sha256: Mapping[str, set[str]],
     registration_path: str,
     registration_sha256: str,
@@ -1841,6 +2000,8 @@ def _validate_commands(
         raise ProbeAEvidenceError(f"cannot read commands evidence: {exc}") from exc
     if len(data) != expected_bytes or sha256_bytes(data) != expected_sha256:
         raise ProbeAEvidenceError("commands evidence bytes changed after manifest validation")
+    if not data.endswith(b"\n"):
+        raise ProbeAEvidenceError("commands evidence must end with one complete newline record")
     lines = data.splitlines()
     if not lines:
         raise ProbeAEvidenceError("commands evidence is empty")
@@ -1849,6 +2010,7 @@ def _validate_commands(
     runtime_primary_sha256: list[str] = []
     roster_primary_sha256: list[str] = []
     roster_output_receipts: list[str] = []
+    roster_output_files: list[str] = []
     prepared_primary_sha256: list[str] = []
     verified_primary_sha256: list[str] = []
     registration_primary_sha256: list[str] = []
@@ -1857,6 +2019,10 @@ def _validate_commands(
     previous_ended: datetime | None = None
     recorded_ledger_path: str | None = None
     execution_root: str | None = None
+    payload_directories: list[str] = []
+    approved_roots: list[str] = []
+    alias_paths: list[str] = []
+    prepared_roster_path: str | None = None
 
     def execution_path(relative: str) -> str:
         if execution_root is None:
@@ -1968,12 +2134,17 @@ def _validate_commands(
                 )
         elif command == "build-roster":
             required_options = (
+                "--payload-dir",
                 "--gene2go-nodes-artifact",
                 "--gene2go-nodes-artifact-sha256",
                 "--gears-resource-manifest",
                 "--gears-resource-manifest-sha256",
                 "--gene2go-source",
                 "--gene2go-source-sha256",
+                "--alias-artifact",
+                "--alias-artifact-sha256",
+                "--approved-root",
+                "--out-roster",
                 "--out-receipt",
             )
             for option in required_options:
@@ -1985,6 +2156,10 @@ def _validate_commands(
             resource_manifest = argv[argv.index("--gears-resource-manifest") + 1]
             nodes = argv[argv.index("--gene2go-nodes-artifact") + 1]
             roster_output_receipts.append(argv[argv.index("--out-receipt") + 1])
+            roster_output_files.append(argv[argv.index("--out-roster") + 1])
+            payload_directories.append(Path(argv[argv.index("--payload-dir") + 1]).as_posix())
+            approved_roots.append(Path(argv[argv.index("--approved-root") + 1]).as_posix())
+            alias_paths.append(Path(argv[argv.index("--alias-artifact") + 1]).as_posix())
             matching_node_paths = [
                 relative
                 for relative in manifested_files
@@ -2015,6 +2190,7 @@ def _validate_commands(
                 or manifested_files[matching_node_paths[0]] != gene2go_nodes_artifact_sha256
                 or argv[argv.index("--gene2go-nodes-artifact-sha256") + 1]
                 != gene2go_nodes_artifact_sha256
+                or argv[argv.index("--alias-artifact-sha256") + 1] != receipt_alias_artifact_sha256
             ):
                 raise ProbeAEvidenceError(
                     "GEARS roster command is not bound to the pinned gene2go resources"
@@ -2041,8 +2217,15 @@ def _validate_commands(
                 )
         elif command == "prepare-input":
             required_options = (
+                "--evidence-root",
+                "--payload-dir",
+                "--roster",
                 "--roster-receipt",
                 "--roster-receipt-sha256",
+                "--alias-artifact",
+                "--alias-artifact-sha256",
+                "--approved-root",
+                "--git-commit",
                 "--out-h5ad",
                 "--out-manifest",
             )
@@ -2052,11 +2235,18 @@ def _validate_commands(
                         f"Probe-A input preparation requires exactly one {option} value"
                     )
             receipt_arg = argv[argv.index("--roster-receipt") + 1]
+            prepared_roster_path = Path(argv[argv.index("--roster") + 1]).as_posix()
+            payload_directories.append(Path(argv[argv.index("--payload-dir") + 1]).as_posix())
+            approved_roots.append(Path(argv[argv.index("--approved-root") + 1]).as_posix())
+            alias_paths.append(Path(argv[argv.index("--alias-artifact") + 1]).as_posix())
             h5ad_arg = argv[argv.index("--out-h5ad") + 1]
             manifest_arg = argv[argv.index("--out-manifest") + 1]
             if (
                 Path(receipt_arg).as_posix() != execution_path(roster_receipt_path)
                 or argv[argv.index("--roster-receipt-sha256") + 1] != roster_receipt_sha256
+                or Path(argv[argv.index("--evidence-root") + 1]).as_posix() != execution_root
+                or argv[argv.index("--alias-artifact-sha256") + 1] != receipt_alias_artifact_sha256
+                or argv[argv.index("--git-commit") + 1] != expected_git_commit
                 or Path(h5ad_arg).as_posix() != execution_path(probe_input_h5ad_path)
                 or Path(manifest_arg).as_posix() != execution_path(probe_input_manifest_path)
             ):
@@ -2064,7 +2254,13 @@ def _validate_commands(
                     "Probe-A input preparation is not bound to receipt/canonical outputs"
                 )
         elif command == "verify-input":
-            required_options = ("--manifest", "--manifest-sha256", "--h5ad", "--roster-receipt")
+            required_options = (
+                "--manifest",
+                "--manifest-sha256",
+                "--h5ad",
+                "--roster",
+                "--roster-receipt",
+            )
             for option in required_options:
                 if argv.count(option) != 1 or argv.index(option) + 1 >= len(argv):
                     raise ProbeAEvidenceError(
@@ -2078,6 +2274,7 @@ def _validate_commands(
                 != execution_path(probe_input_h5ad_path)
                 or Path(argv[argv.index("--roster-receipt") + 1]).as_posix()
                 != execution_path(roster_receipt_path)
+                or Path(argv[argv.index("--roster") + 1]).as_posix() != prepared_roster_path
             ):
                 raise ProbeAEvidenceError(
                     "Probe-A input verification is not bound to prepared inputs/receipt"
@@ -2152,6 +2349,8 @@ def _validate_commands(
             registration = argv[argv.index("--probe-a-registration") + 1]
             h5ad = argv[argv.index("--h5ad") + 1]
             receipt = argv[argv.index("--roster-receipt") + 1]
+            payload_directories.append(Path(argv[argv.index("--payload-dir") + 1]).as_posix())
+            approved_roots.append(Path(argv[argv.index("--approved-root") + 1]).as_posix())
             checkpoint_dir = argv[argv.index("--checkpoint-dir") + 1]
             declared_root = Path(argv[argv.index("--evidence-root") + 1]).as_posix()
             if (
@@ -2162,6 +2361,7 @@ def _validate_commands(
                 or Path(probe_manifest).as_posix() != execution_path(probe_input_manifest_path)
                 or Path(h5ad).as_posix() != execution_path(probe_input_h5ad_path)
                 or Path(receipt).as_posix() != execution_path(roster_receipt_path)
+                or Path(argv[argv.index("--roster") + 1]).as_posix() != prepared_roster_path
                 or Path(out_raw).as_posix() != execution_path(raw_sample_path)
                 or argv[argv.index("--probe-manifest-sha256") + 1] != probe_input_manifest_sha256
                 or Path(checkpoint_dir).as_posix() != execution_path("checkpoints")
@@ -2301,6 +2501,19 @@ def _validate_commands(
         raise ProbeAEvidenceError(
             "exactly one roster command must publish the selected manifested receipt"
         )
+    if len(set(payload_directories)) != 1 or len(set(approved_roots)) != 1:
+        raise ProbeAEvidenceError(
+            "roster/preparation/measurement commands disagree on payload or approved root"
+        )
+    if len(set(alias_paths)) != 1:
+        raise ProbeAEvidenceError("roster/preparation commands disagree on alias artifact path")
+    selected_index = roster_primary_sha256.index(roster_receipt_sha256)
+    if prepared_roster_path is None or Path(roster_output_files[selected_index]).as_posix() != (
+        prepared_roster_path
+    ):
+        raise ProbeAEvidenceError(
+            "selected roster publication path differs from preparation/measurement input"
+        )
     for primary_sha256, output in zip(roster_primary_sha256, roster_output_receipts, strict=True):
         allowed_paths = roster_receipt_paths_by_sha256.get(primary_sha256, set())
         if not allowed_paths or not any(
@@ -2350,6 +2563,7 @@ def _validate_prepared_input_chain(
     role_attestation: Mapping,
     registration: Mapping,
     registration_sha256: str,
+    expected_role_contract: Mapping | None = None,
 ) -> None:
     manifest = _read_json_entry(
         root,
@@ -2397,6 +2611,10 @@ def _validate_prepared_input_chain(
     role_contract = _validate_role_contract(
         manifest["role_contract"], "prepared manifest.role_contract"
     )
+    if expected_role_contract is not None and role_contract != dict(expected_role_contract):
+        raise ProbeAEvidenceError(
+            "prepared input role contract differs from the externally pinned payload"
+        )
     if (
         normalization_target != float(registration["input_scale"]["normalization_target"])
         or manifest["expression_scale"] != registration["input_scale"]["transform"]
@@ -2410,6 +2628,8 @@ def _validate_prepared_input_chain(
     if (
         inputs["probe_input_manifest_sha256"] != manifest_entry["sha256"]
         or inputs["probe_input_h5ad_sha256"] != h5ad_entry["sha256"]
+        or inputs["payload_sha256"] != manifest["payload_sha256"]
+        or inputs["fit_role_artifact_content_sha256"] != manifest["fit_artifact_content_sha256"]
         or manifest["output_h5ad_sha256"] != h5ad_entry["sha256"]
         or inputs["probe_row_identity_sha256"] != manifest["row_identity_sha256"]
         or inputs["roster_sha256"] != manifest["roster_file_sha256"]
@@ -2436,10 +2656,19 @@ def _validate_prepared_input_chain(
         raise ProbeAEvidenceError("prepared input lineage differs from runtime/input evidence")
 
     h5ad_path = _relative_file(root, h5ad_entry["path"])
-    if h5ad_path.stat().st_size > _H5AD_ENVELOPE_BYTES:
+    if h5ad_entry["bytes"] > _H5AD_ENVELOPE_BYTES:
         raise ProbeAEvidenceError("prepared Probe-A H5AD exceeds the evidence envelope bound")
     try:
-        probe = ad.read_h5ad(h5ad_path)
+        with _verified_binary_snapshot(
+            h5ad_path,
+            expected_sha256=h5ad_entry["sha256"],
+            expected_bytes=h5ad_entry["bytes"],
+            label="prepared Probe-A H5AD",
+            suffix=".h5ad",
+        ) as h5ad_snapshot:
+            probe = ad.read_h5ad(h5ad_snapshot)
+    except ProbeAEvidenceError:
+        raise
     except Exception as exc:
         raise ProbeAEvidenceError(f"cannot read the prepared Probe-A H5AD: {exc}") from exc
     required_obs = {"source_row_id", "role", "perturbation"}
@@ -2583,6 +2812,8 @@ def validate_evidence_semantics(
     expected_git_commit: str,
     registration_sha256: str,
     provider_attestation_sha256: str,
+    payload_sha256: str,
+    roster_receipt_sha256: str,
 ) -> None:
     """Validate the content and cross-bindings of every decision-bearing evidence role."""
     root = Path(evidence_root)
@@ -2634,6 +2865,19 @@ def validate_evidence_semantics(
         _read_json_entry(root, inputs_entry, label="input evidence"),
         expected_git_commit=expected_git_commit,
     )
+    expected_payload_sha = _sha(payload_sha256, "externally pinned payload SHA-256")
+    expected_roster_receipt_sha = _sha(
+        roster_receipt_sha256, "externally pinned roster receipt SHA-256"
+    )
+    if inputs["payload_sha256"] != expected_payload_sha:
+        raise ProbeAEvidenceError("input evidence payload differs from its external pin")
+    if inputs["roster_receipt_sha256"] != expected_roster_receipt_sha:
+        raise ProbeAEvidenceError("input evidence roster receipt differs from its external pin")
+    payload = _read_payload_entry(
+        root,
+        by_role["payload"][0],
+        expected_sha256=expected_payload_sha,
+    )
     role_attestation = _validate_role_attestation(
         _read_json_entry(
             root,
@@ -2669,12 +2913,74 @@ def validate_evidence_semantics(
             )
         )
         if (entry["sha256"], receipt["roster_file_sha256"]) == (
-            inputs["roster_receipt_sha256"],
+            expected_roster_receipt_sha,
             inputs["roster_sha256"],
         ):
             matching_receipts.append(receipt)
     if len(matching_receipts) != 1:
         raise ProbeAEvidenceError("input evidence is not bound to a manifested roster receipt")
+    receipt = matching_receipts[0]
+    fit_role = payload["fit_role_artifact"]
+    projection = payload["response_projection"]
+    expected_fit_file_sha = _sha(
+        str(fit_role["sha256"]).removeprefix("sha256:"),
+        "payload fit-role file SHA-256",
+    )
+    expected_source_sha = canonical_declared_identity_sha256(
+        fit_role["raw_data_sha256"], "payload source identity"
+    )
+    expected_pair_sha = canonical_declared_identity_sha256(
+        fit_role["pair_manifest_sha256"], "payload pair-manifest identity"
+    )
+    fit_entry = by_role["fit_role_artifact"][0]
+    alias_entry = by_role["alias_artifact"][0]
+    response_entry = by_role["response_projection"][0]
+    roster_entry = by_role["selected_roster"][0]
+    if (
+        inputs["source_sha256"] != expected_source_sha
+        or inputs["pair_manifest_sha256"] != expected_pair_sha
+        or inputs["fit_role_artifact_sha256"] != expected_fit_file_sha
+        or inputs["fit_role_artifact_content_sha256"] != fit_role["content_manifest_sha256"]
+        or fit_entry["sha256"] != expected_fit_file_sha
+        or inputs["alias_artifact_sha256"] != receipt["alias_artifact_sha256"]
+        or alias_entry["sha256"] != receipt["alias_artifact_sha256"]
+        or inputs["response_artifact_sha256"] != receipt["response_artifact_sha256"]
+        or projection["response_artifact_sha256"] != receipt["response_artifact_sha256"]
+        or roster_entry["sha256"] != receipt["roster_file_sha256"]
+        or inputs["gene2go_manifest_sha256"] != receipt["gene2go_manifest_sha256"]
+    ):
+        raise ProbeAEvidenceError(
+            "input evidence differs from archived payload/fit-role/alias/response/roster lineage"
+        )
+    archived_projection = _read_json_entry(
+        root,
+        response_entry,
+        label="archived response projection",
+    )
+    if archived_projection != projection:
+        raise ProbeAEvidenceError("archived response projection differs from the pinned payload")
+    spec = _fit_role_spec_from_payload(fit_role)
+    fit_path = _relative_file(root, fit_entry["path"])
+    try:
+        with _verified_binary_snapshot(
+            fit_path,
+            expected_sha256=fit_entry["sha256"],
+            expected_bytes=fit_entry["bytes"],
+            label="archived fit-role artifact",
+            suffix=".h5ad",
+        ) as fit_snapshot:
+            validate_fit_role_artifact(
+                fit_snapshot,
+                spec=spec,
+                approved_root=str(fit_snapshot.parent),
+                calibration_pair_ids=[tuple(pair) for pair in payload["calibration_pair_ids"]],
+                sealed_pair_ids=[tuple(pair) for pair in payload["pair_ids"]],
+                single_gene_ids=[str(gene) for gene in payload["single_gene_ids"]],
+            )
+    except ProbeAEvidenceError:
+        raise
+    except ValueError as exc:
+        raise ProbeAEvidenceError(f"archived fit-role artifact is invalid: {exc}") from exc
     command_entry = by_role["commands"][0]
     raw_entries = by_role["raw_sample"]
     if len(raw_entries) != 1:
@@ -2709,6 +3015,7 @@ def validate_evidence_semantics(
             if entry["sha256"] == inputs["roster_receipt_sha256"]
         ),
         roster_receipt_sha256=inputs["roster_receipt_sha256"],
+        receipt_alias_artifact_sha256=receipt["alias_artifact_sha256"],
         roster_receipt_paths_by_sha256=roster_receipt_paths_by_sha256,
         registration_path=registration_entry["path"],
         registration_sha256=registration_entry["sha256"],
@@ -2737,6 +3044,16 @@ def validate_evidence_semantics(
         role_attestation=role_attestation,
         registration=registration,
         registration_sha256=registration_entry["sha256"],
+        expected_role_contract={
+            "calibration_pair_ids": payload["calibration_pair_ids"],
+            "combo_separator": "_",
+            "control_token": "control",
+            "sealed_pair_ids": payload["pair_ids"],
+            "single_gene_ids": sorted(
+                [str(gene) for gene in payload["single_gene_ids"]],
+                key=lambda gene: gene.encode("utf-8"),
+            ),
+        },
     )
     manifested_checkpoints = {
         (entry["path"], entry["sha256"]) for entry in by_role["probe_a_checkpoint"]
@@ -2828,6 +3145,8 @@ def _validate_negative_receipt_binding(
     report: Mapping,
     report_sha256: str,
     registration_sha256: str,
+    payload_sha256: str,
+    roster_receipt_sha256: str,
     evidence_manifest_sha256: str,
     verifier_code_sha256: str,
     expected_git_commit: str,
@@ -2857,6 +3176,8 @@ def _validate_negative_receipt_binding(
         raise ProbeAEvidenceError("Probe-A negative verification Git commit mismatch")
     expected_pins = {
         "registration_sha256": _sha(registration_sha256, "registration_sha256"),
+        "payload_sha256": _sha(payload_sha256, "payload_sha256"),
+        "roster_receipt_sha256": _sha(roster_receipt_sha256, "roster_receipt_sha256"),
         "report_sha256": _sha(report_sha256, "report_sha256"),
         "evidence_manifest_sha256": _sha(evidence_manifest_sha256, "evidence_manifest_sha256"),
         "verifier_code_sha256": _sha(verifier_code_sha256, "verifier_code_sha256"),
@@ -2913,6 +3234,8 @@ def build_evidence_outputs(
     evidence_root: str | Path,
     evidence_manifest_sha256: str,
     provider_attestation_sha256: str,
+    payload_sha256: str,
+    roster_receipt_sha256: str,
     expected_git_commit: str,
     verifier_code_sha256: str,
 ) -> ProbeAAdmissionOutputs:
@@ -2956,11 +3279,15 @@ def build_evidence_outputs(
         expected_git_commit=expected_git_commit,
         registration_sha256=registration_sha256,
         provider_attestation_sha256=provider_attestation_sha256,
+        payload_sha256=payload_sha256,
+        roster_receipt_sha256=roster_receipt_sha256,
     )
     common_verification = {
         "protocol": PROTOCOL,
         "git_commit": expected_git_commit,
         "registration_sha256": _sha(registration_sha256, "registration_sha256"),
+        "payload_sha256": _sha(payload_sha256, "payload_sha256"),
+        "roster_receipt_sha256": _sha(roster_receipt_sha256, "roster_receipt_sha256"),
         "report_sha256": _sha(report_sha256, "report_sha256"),
         "evidence_manifest_sha256": _sha(evidence_manifest_sha256, "evidence_manifest_sha256"),
         "verifier_code_sha256": _sha(verifier_code_sha256, "verifier_code_sha256"),
@@ -2995,6 +3322,8 @@ def build_evidence_outputs(
             report=report,
             report_sha256=report_sha256,
             registration_sha256=registration_sha256,
+            payload_sha256=payload_sha256,
+            roster_receipt_sha256=roster_receipt_sha256,
             evidence_manifest_sha256=evidence_manifest_sha256,
             verifier_code_sha256=verifier_code_sha256,
             expected_git_commit=expected_git_commit,
@@ -3043,6 +3372,8 @@ def build_admission(
     evidence_root: str | Path,
     evidence_manifest_sha256: str,
     provider_attestation_sha256: str,
+    payload_sha256: str,
+    roster_receipt_sha256: str,
     expected_git_commit: str,
     verifier_code_sha256: str,
 ) -> dict:
@@ -3056,6 +3387,8 @@ def build_admission(
         evidence_root=evidence_root,
         evidence_manifest_sha256=evidence_manifest_sha256,
         provider_attestation_sha256=provider_attestation_sha256,
+        payload_sha256=payload_sha256,
+        roster_receipt_sha256=roster_receipt_sha256,
         expected_git_commit=expected_git_commit,
         verifier_code_sha256=verifier_code_sha256,
     )

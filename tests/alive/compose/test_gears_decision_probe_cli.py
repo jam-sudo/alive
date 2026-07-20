@@ -196,14 +196,18 @@ def _pinned_gene2go_source(tmp_path: Path, probe, monkeypatch, genes: list[str])
 
 
 def _write_roster_receipt(path: Path, *, probe, payload: dict, roster, roster_path: Path) -> Path:
+    fit_role = payload["fit_role_artifact"]
     core = {
-        "alias_artifact_sha256": _SHA,
+        "alias_artifact_sha256": sha256_file(path.parent / "aliases.json"),
         "candidate_artifact_sha256": _SHA,
         "preparation_dependency_lock_sha256": probe._preparation_dependency_lock_sha256(),
         "gears_dependency_lock_sha256": probe._gears_dependency_lock_sha256(),
         "driver_code_sha256": sha256_file(_PROBE),
-        "fit_artifact_content_sha256": payload["fit_role_artifact"]["content_manifest_sha256"],
+        "fit_artifact_content_sha256": fit_role["content_manifest_sha256"],
+        "fit_role_file_sha256": fit_role["sha256"].removeprefix("sha256:"),
+        "gene2go_manifest_sha256": _SHA,
         "gene2go_nodes_artifact_sha256": _SHA,
+        "gene2go_source_sha256": _SHA,
         "generator_code_sha256": probe._generator_code_sha256(),
         "n_target": roster.n_target,
         "ordered_roster_sha256": roster.ordered_roster_sha256,
@@ -213,7 +217,7 @@ def _write_roster_receipt(path: Path, *, probe, payload: dict, roster, roster_pa
         "runtime_fingerprint_sha256": probe._runtime_fingerprint_sha256(),
         "roster_artifact_checksum": roster.artifact_checksum,
         "roster_file_sha256": sha256_file(roster_path),
-        "schema": "compose_gears_roster_receipt_v2",
+        "schema": probe.ROSTER_RECEIPT_SCHEMA,
     }
     return _write_contract(path, core)
 
@@ -272,13 +276,21 @@ def test_probe_cli_prepares_only_verified_fit_rows_and_verifies_offline(tmp_path
     payload, source, roster, roster_path, receipt_path = _build_inputs(tmp_path, probe)
     output = tmp_path / "probe_input.h5ad"
     manifest_path = tmp_path / "probe_manifest.json"
+    evidence = tmp_path / "evidence"
+    evidence.mkdir()
+    output = evidence / "probe_input.h5ad"
+    manifest_path = evidence / "probe_input_manifest.json"
 
     result = probe.prepare_probe_input(
+        evidence_root=evidence,
         payload_dir=tmp_path / "payload",
         roster_path=roster_path,
         roster_receipt_path=receipt_path,
         roster_receipt_sha256=sha256_file(receipt_path),
         approved_root=tmp_path / "approved",
+        alias_artifact_path=tmp_path / "aliases.json",
+        alias_artifact_sha256=sha256_file(tmp_path / "aliases.json"),
+        expected_git_commit="1" * 40,
         out_h5ad=output,
         out_manifest=manifest_path,
         require_payload_sha256=False,
@@ -464,14 +476,20 @@ def test_gene2go_nodes_must_exactly_match_activation_pinned_source(tmp_path, mon
 def test_probe_cli_refuses_overwrite_and_tampered_roster_binding(tmp_path, monkeypatch):
     probe = _load(_PROBE, "_probe_test_cli_failclosed")
     _payload, _source_snapshot, _roster, roster_path, receipt_path = _build_inputs(tmp_path, probe)
-    output = tmp_path / "probe_input.h5ad"
-    manifest_path = tmp_path / "probe_manifest.json"
+    evidence = tmp_path / "evidence"
+    evidence.mkdir()
+    output = evidence / "probe_input.h5ad"
+    manifest_path = evidence / "probe_input_manifest.json"
     kwargs = {
+        "evidence_root": evidence,
         "payload_dir": tmp_path / "payload",
         "roster_path": roster_path,
         "roster_receipt_path": receipt_path,
         "roster_receipt_sha256": sha256_file(receipt_path),
         "approved_root": tmp_path / "approved",
+        "alias_artifact_path": tmp_path / "aliases.json",
+        "alias_artifact_sha256": sha256_file(tmp_path / "aliases.json"),
+        "expected_git_commit": "1" * 40,
         "out_h5ad": output,
         "out_manifest": manifest_path,
         "require_payload_sha256": False,
@@ -483,11 +501,14 @@ def test_probe_cli_refuses_overwrite_and_tampered_roster_binding(tmp_path, monke
     with monkeypatch.context() as patch:
         patch.setattr(probe, "_preparation_dependency_lock_sha256", lambda: "e" * 64)
         with pytest.raises(GeneUniverseError, match="preparation_dependency_lock_sha256 differs"):
+            wrong_root = tmp_path / "wrong-lock"
+            wrong_root.mkdir()
             probe.prepare_probe_input(
                 **{
                     **kwargs,
-                    "out_h5ad": tmp_path / "wrong-lock.h5ad",
-                    "out_manifest": tmp_path / "wrong-lock.json",
+                    "evidence_root": wrong_root,
+                    "out_h5ad": wrong_root / "probe_input.h5ad",
+                    "out_manifest": wrong_root / "probe_input_manifest.json",
                 }
             )
 
@@ -495,12 +516,15 @@ def test_probe_cli_refuses_overwrite_and_tampered_roster_binding(tmp_path, monke
     # This assertion exercises the loader's tamper wall before any output is written.
     other_path.write_text(roster_path.read_text().replace(_SHA, "e" * 64, 1))
     with pytest.raises(GeneUniverseError):
+        other_root = tmp_path / "other-evidence"
+        other_root.mkdir()
         probe.prepare_probe_input(
             **{
                 **kwargs,
                 "roster_path": other_path,
-                "out_h5ad": tmp_path / "other.h5ad",
-                "out_manifest": tmp_path / "other.json",
+                "evidence_root": other_root,
+                "out_h5ad": other_root / "probe_input.h5ad",
+                "out_manifest": other_root / "probe_input_manifest.json",
             }
         )
 
@@ -515,13 +539,16 @@ def test_probe_cli_refuses_overwrite_and_tampered_roster_binding(tmp_path, monke
         json.dumps(forged_payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
     with pytest.raises(GeneUniverseError, match="receipt file SHA-256 mismatch"):
+        forged_root = tmp_path / "forged-evidence"
+        forged_root.mkdir()
         probe.prepare_probe_input(
             **{
                 **kwargs,
                 "roster_path": other_path,
                 "roster_receipt_path": forged_receipt,
-                "out_h5ad": tmp_path / "forged.h5ad",
-                "out_manifest": tmp_path / "forged.json",
+                "evidence_root": forged_root,
+                "out_h5ad": forged_root / "probe_input.h5ad",
+                "out_manifest": forged_root / "probe_input_manifest.json",
             }
         )
 
@@ -746,11 +773,15 @@ def test_multi_artifact_outputs_require_distinct_destinations(tmp_path):
 
     with pytest.raises(GeneUniverseError, match="destinations must be distinct"):
         probe.prepare_probe_input(
+            evidence_root=tmp_path,
             payload_dir=tmp_path / "missing-payload",
             roster_path=tmp_path / "missing-roster",
             roster_receipt_path=tmp_path / "missing-receipt",
             roster_receipt_sha256=_SHA,
             approved_root=tmp_path,
+            alias_artifact_path=tmp_path / "missing-alias",
+            alias_artifact_sha256=_SHA,
+            expected_git_commit="1" * 40,
             out_h5ad=shared,
             out_manifest=shared,
         )
@@ -769,16 +800,22 @@ def test_prepare_rejects_receipt_that_passes_file_sha_but_is_internally_inconsis
         payload_dir=tmp_path / "payload",
         roster_path=roster_path,
         approved_root=tmp_path / "approved",
+        alias_artifact_path=tmp_path / "aliases.json",
+        alias_artifact_sha256=sha256_file(tmp_path / "aliases.json"),
+        expected_git_commit="1" * 40,
         require_payload_sha256=False,
     )
 
     def _run(name, receipt_file):
+        evidence = tmp_path / f"{name}-evidence"
+        evidence.mkdir()
         probe.prepare_probe_input(
             **base,
+            evidence_root=evidence,
             roster_receipt_path=receipt_file,
             roster_receipt_sha256=sha256_file(receipt_file),
-            out_h5ad=tmp_path / f"{name}.h5ad",
-            out_manifest=tmp_path / f"{name}.json",
+            out_h5ad=evidence / "probe_input.h5ad",
+            out_manifest=evidence / "probe_input_manifest.json",
         )
 
     # (a) manifest_checksum not recomputed after mutating a field -> checksum mismatch.
@@ -898,6 +935,21 @@ def test_runtime_publication_binds_provider_and_cgroup_limits(
         lambda *_args: {**runtime["cgroup_effective"], "memory_limit_bytes": 1},
     )
     with pytest.raises(GeneUniverseError, match="cgroup differs"):
+        probe._assert_runtime_execution_context(evidence / "commands.jsonl")
+    monkeypatch.setattr(
+        probe,
+        "_collect_cgroup_effective",
+        lambda *_args: runtime["cgroup_effective"],
+    )
+    monkeypatch.setattr(
+        probe,
+        "_collect_network_isolation",
+        lambda *_args: {
+            **runtime["network_isolation"],
+            "network_namespace": "net:[99999]",
+        },
+    )
+    with pytest.raises(GeneUniverseError, match="network isolation differs"):
         probe._assert_runtime_execution_context(evidence / "commands.jsonl")
 
 

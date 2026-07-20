@@ -5,7 +5,7 @@
 > **이 문서는 아무것도 정의하지 않는다** — 세부(task)는 plan, claim은 spec, exact param은 config,
 > 시간순 audit는 git이 authoritative다([sources of truth](../../CLAUDE.md#sources)). 상태 행이 authoritative
 > 문서와 어긋나면 **authoritative 문서가 옳다**; 이 인덱스를 갱신한다.
-> **Updated:** 2026-07-20 @ `a8d4af2` (branch `main`)
+> **Updated:** 2026-07-20 @ `844399e` (branch `main`)
 > **갱신 트리거:** sub-project/gate **상태가 바뀔 때만**(커밋마다 아님).
 > **종결 상태:** COMPOSE seal이 정확히 한 번 열리면 이 인덱스는 **frozen/은퇴**한다. 이후 진행상황은
 > seal 결과와 post-hoc analysis가 대신한다.
@@ -151,6 +151,22 @@ branch에서 추적 가능하게 기록한다. `LOCAL` ledger ID만으로는 이
    roster passes 217 tests plus full Ruff check/format and `git diff --check`. The prior candidate pin is therefore
    retired for future runs. A clean implementation commit, full verification, recomputed pin, and independent acceptance
    are mandatory; this correction does not authorize a pod run or alter the archived negative result.
+   **2026-07-20 upstream-custody/runtime-origin correction (candidate, not operationally pinned):** the next
+   verifier revision archives the exact worker payload, fit-role H5AD, alias map, response projection, and selected
+   roster as fixed manifest roles; derives `inputs.json`/role attestation from those bytes; and requires independent
+   payload and selected-receipt pins. It binds the payload/approved-root/alias/roster paths across roster,
+   preparation, verification, and measurement commands; rejects a truncated final JSONL record; includes all
+   `src/alive` Python plus `pyproject.toml`, `uv.lock`, the Python executable identity, and the complete active
+   verifier environment's installed distribution file bytes (not selected version labels alone) in
+   the verifier closure; and rejects `PYTHONPATH`, user-site loading, or an unexpected module origin before ALIVE
+   decision imports; an operational CLI invocation also computes and compares that byte-level closure before
+   importing any ALIVE or scientific dependency. Authenticated private snapshots close pathname replacement races for prepared H5AD,
+   fit-role H5AD, and checkpoint reads. Schemas advance to evidence-manifest v8, inputs v4, role-attestation v3,
+   roster-receipt v3, and positive/negative verification v2. The previous `4c36…` pin is retired. The recomputed
+   candidate closure pin is `dbcb8053a4c4310860792336542751f20c6176349debc85c11be157614204876`; the complete
+   local Compose suite passes 1539 tests with one pre-existing AnnData warning, plus clean Ruff check/format and
+   `git diff --check`. A clean commit and independent exact-commit/pin acceptance remain mandatory; no pod or seal
+   authorization follows from this local correction.
 5. **§2.5 release gate** — worker locked-env integration green + 독립 검토 + **owner의 exact Git SHA 승인** → runbook을 `READY`로.
 6. **A100 sealed-run pod: runbook 실행** — 유효한 `ActivationRecord`(requirement별 non-empty evidence) + clean tree 하에 `phase2a → preflight → phase2b --confirm-seal`. **COMPOSE seal 1회 개봉** — `TG-K562`와 독립.
 

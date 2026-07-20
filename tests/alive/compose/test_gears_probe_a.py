@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import io
 import json
+import os
 import pickle
 import subprocess
 import sys
@@ -28,16 +29,25 @@ from alive.compose.approximation_bias import (
     probe_a_owner_policy_sha256,
     validate_probe_a_evidence,
 )
-from alive.compose.fit_role import row_identity_sha256
+from alive.compose.baseline_subprocess import canonical_payload_sha256, write_payload
+from alive.compose.fit_role import (
+    FitRoleExtraction,
+    build_response_projection,
+    generate_fit_role_artifact,
+    row_identity_sha256,
+)
 from alive.compose.gears_probe_a import (
     ADMISSION_PATH,
     ADMISSION_SCHEMA,
+    ALIAS_ARTIFACT_PATH,
     COMMAND_RECORD_SCHEMA,
+    FIT_ROLE_ARTIFACT_PATH,
     GEARS_LOCK_PATH,
     INPUTS_SCHEMA,
     MANIFEST_PATH,
     MANIFEST_SCHEMA,
     NEGATIVE_VERIFICATION_SCHEMA,
+    PAYLOAD_PATH,
     PREPARATION_LOCK_PATH,
     PROBE_INPUT_ADATA_SCHEMA,
     PROBE_INPUT_MANIFEST_SCHEMA,
@@ -50,30 +60,41 @@ from alive.compose.gears_probe_a import (
     REGISTRATION_SCHEMA,
     REPORT_PATH,
     REPORT_SCHEMA,
+    RESPONSE_PROJECTION_PATH,
     ROLE_ATTESTATION_SCHEMA,
     ROSTER_RECEIPT_SCHEMA,
     RUNTIME_SCHEMA,
+    SELECTED_ROSTER_PATH,
     VERIFY_PATH,
     ProbeAEvidenceError,
     _matrix_identity,
-    _validate_negative_receipt_binding,
     _validate_prepared_input_chain,
     assert_clean_approved_checkout,
     assert_report_manifest_binding,
-    build_admission,
     build_evidence_manifest,
-    build_evidence_outputs,
     build_probe_a_report,
     repository_lock_sha256,
     validate_admission,
     validate_evidence_manifest,
-    validate_evidence_semantics,
     validate_probe_a_report,
     validate_provider_capture_freshness,
     validate_provider_runtime_attestation,
     validate_registration,
     validate_runtime_evidence,
 )
+from alive.compose.gears_probe_a import (
+    _validate_negative_receipt_binding as _core_validate_negative_receipt_binding,
+)
+from alive.compose.gears_probe_a import (
+    build_admission as _core_build_admission,
+)
+from alive.compose.gears_probe_a import (
+    build_evidence_outputs as _core_build_evidence_outputs,
+)
+from alive.compose.gears_probe_a import (
+    validate_evidence_semantics as _core_validate_evidence_semantics,
+)
+from alive.compose.response import fit_response_space
 from alive.provenance import sha256_file, sha256_json
 
 SHA = "a" * 64
@@ -88,6 +109,47 @@ _GEARS_WORKER = _REPO / "scripts/baselines/gears_worker.py"
 
 def _provider_pin(root: Path) -> str:
     return sha256_file(root / PROVIDER_ATTESTATION_PATH)
+
+
+def _external_pins(root: Path) -> dict[str, str]:
+    return {
+        "payload_sha256": sha256_file(root / PAYLOAD_PATH),
+        "roster_receipt_sha256": sha256_file(root / "roster_receipts/receipt.json"),
+    }
+
+
+def validate_evidence_semantics(manifest, *, evidence_root, **kwargs):
+    return _core_validate_evidence_semantics(
+        manifest,
+        evidence_root=evidence_root,
+        **_external_pins(Path(evidence_root)),
+        **kwargs,
+    )
+
+
+def build_evidence_outputs(*, evidence_root, **kwargs):
+    return _core_build_evidence_outputs(
+        evidence_root=evidence_root,
+        **_external_pins(Path(evidence_root)),
+        **kwargs,
+    )
+
+
+def build_admission(*, evidence_root, **kwargs):
+    return _core_build_admission(
+        evidence_root=evidence_root,
+        **_external_pins(Path(evidence_root)),
+        **kwargs,
+    )
+
+
+def _validate_negative_receipt_binding(verification, **kwargs):
+    return _core_validate_negative_receipt_binding(
+        verification,
+        payload_sha256=verification["payload_sha256"],
+        roster_receipt_sha256=verification["roster_receipt_sha256"],
+        **kwargs,
+    )
 
 
 def _load_verifier():
@@ -149,8 +211,8 @@ def _checkpoint_bytes(*, required_strings: set[str] | None = None) -> bytes:
     return buffer.getvalue()
 
 
-def _probe_matrix() -> list[list[float]]:
-    return [[float(index), float(index) + 0.5] for index in range(402)]
+def _probe_matrix(n_rows: int = 405) -> list[list[float]]:
+    return [[float(index), float(index) + 0.5] for index in range(n_rows)]
 
 
 def test_logical_matrix_identity_is_storage_independent_and_value_sensitive():
@@ -458,36 +520,113 @@ def _complete_evidence(root: Path) -> tuple[dict, dict, dict, str, str, str]:
         {"resources": [{"name": "gene2go_all.pkl", "sha256": gene2go_source_sha}]},
     )
 
+    source_row_ids = [f"control-row-{index:04d}" for index in range(400)] + [
+        "single-row-a",
+        "single-row-b",
+        "single-row-c",
+        "single-row-d",
+        "combo-row-ab",
+    ]
+    roles = ["control"] * 400 + ["singles"] * 4 + ["combo_calibration"]
+    perturbations = ["control"] * 400 + [
+        "GENE_A",
+        "GENE_B",
+        "GENE_C",
+        "GENE_D",
+        "GENE_A_GENE_B",
+    ]
+    rows = list(zip(source_row_ids, roles, perturbations, strict=True))
+    fit_counts = sparse.csr_matrix(
+        np.arange(len(rows) * 2, dtype=np.float64).reshape(len(rows), 2) % 11
+    )
+    fit_extraction = FitRoleExtraction(
+        X=fit_counts,
+        var_names=("GENE_A", "GENE_B"),
+        rows=tuple(rows),
+        role_counts={"control": 400, "singles": 4, "combo_calibration": 1},
+        raw_data_sha256="1" * 64,
+        pair_manifest_sha256="3" * 64,
+        eligibility_hash="2" * 64,
+    )
+    fit_path = root / FIT_ROLE_ARTIFACT_PATH
+    fit_path.parent.mkdir(parents=True, exist_ok=True)
+    fit_path.unlink(missing_ok=True)
+    fit_spec = generate_fit_role_artifact(
+        extraction=fit_extraction,
+        out_path=str(fit_path),
+        config_sha256="c" * 64,
+        data_card_sha256="d" * 64,
+        calibration_gene_set_hash="e" * 64,
+        generator_code_sha256="f" * 64,
+        writer_environment_sha256="0" * 64,
+    )
+    control_idx = np.arange(400, dtype=np.int64)
+    single_idx = np.arange(400, 404, dtype=np.int64)
+    response_space = fit_response_space(
+        fit_counts,
+        control_idx=control_idx,
+        eligible_single_idx=single_idx,
+        n_hvg=2,
+        pca_dim=2,
+        seed=11,
+    )
+    control_mean = response_space.project(fit_counts, control_idx).mean(axis=0)
+    response_projection = build_response_projection(
+        response_space,
+        gene_order=fit_extraction.var_names,
+        control_mean=control_mean,
+        raw_data_sha256=fit_extraction.raw_data_sha256,
+    )
+    payload = {
+        "schema_version": 2,
+        "response_dim": 2,
+        "seed": 11,
+        "allowed_roles": ["combo_calibration", "singles"],
+        "pair_ids": [["GENE_C", "GENE_D"]],
+        "single_gene_ids": ["GENE_A", "GENE_B", "GENE_C", "GENE_D"],
+        "singles_response": [[0.0, 0.0]] * 4,
+        "control_mean": response_projection["control_mean"],
+        "calibration_pair_ids": [["GENE_A", "GENE_B"]],
+        "calibration_delta": [[0.0, 0.0]],
+        "pca_components": response_projection["pca_components"],
+        "oof_folds": [0],
+        "fit_role_artifact": fit_spec.to_payload_block(),
+        "response_projection": response_projection,
+    }
+    write_payload(str((root / PAYLOAD_PATH).parent), payload)
+    payload_sha = canonical_payload_sha256(payload)
+    _write_json(root / RESPONSE_PROJECTION_PATH, response_projection)
+    alias_path = root / ALIAS_ARTIFACT_PATH
+    _write_json(alias_path, {"aliases": [], "schema": "compose_gene_aliases_v1"})
+    roster_path = root / SELECTED_ROSTER_PATH
+    _write_pretty_json(roster_path, {"schema": "fixture_roster_v1", "genes": ["GENE_A", "GENE_B"]})
+
     receipt_body = {
-        "alias_artifact_sha256": "1" * 64,
+        "alias_artifact_sha256": sha256_file(alias_path),
         "candidate_artifact_sha256": "2" * 64,
         "driver_code_sha256": sha256_file(_PROBE_CLI),
         "preparation_dependency_lock_sha256": runtime_body["preparation_dependency_lock_sha256"],
         "gears_dependency_lock_sha256": runtime_body["gears_dependency_lock_sha256"],
-        "fit_artifact_content_sha256": "4" * 64,
+        "fit_artifact_content_sha256": fit_spec.content_manifest_sha256,
+        "fit_role_file_sha256": sha256_file(fit_path),
+        "gene2go_manifest_sha256": sha256_file(gene2go_manifest_path),
         "gene2go_nodes_artifact_sha256": sha256_file(root / "logs/gene2go_nodes.json"),
+        "gene2go_source_sha256": gene2go_source_sha,
         "generator_code_sha256": "6" * 64,
         "n_target": 2000,
         "ordered_roster_sha256": "7" * 64,
-        "payload_sha256": "8" * 64,
+        "payload_sha256": payload_sha,
         "report_file_sha256": "9" * 64,
-        "response_artifact_sha256": "a" * 64,
+        "response_artifact_sha256": response_projection["response_artifact_sha256"],
         "runtime_fingerprint_sha256": "8" * 64,
         "roster_artifact_checksum": "b" * 64,
-        "roster_file_sha256": "c" * 64,
+        "roster_file_sha256": sha256_file(roster_path),
         "schema": ROSTER_RECEIPT_SCHEMA,
     }
     receipt = {**receipt_body, "manifest_checksum": sha256_json(receipt_body)}
     receipt_path = root / "roster_receipts/receipt.json"
     _write_pretty_json(receipt_path, receipt)
 
-    source_row_ids = [f"control-row-{index:04d}" for index in range(400)] + [
-        "single-row-0000",
-        "combo-row-0000",
-    ]
-    roles = ["control"] * 400 + ["singles", "combo_calibration"]
-    perturbations = ["control"] * 400 + ["GENE_A", "GENE_A_GENE_B"]
-    rows = list(zip(source_row_ids, roles, perturbations, strict=True))
     row_sha256 = row_identity_sha256(rows)
     selected_source_row_ids_sha256 = sha256_json(source_row_ids)
     matrix_logical_sha256 = _matrix_identity(
@@ -501,7 +640,7 @@ def _complete_evidence(root: Path) -> tuple[dict, dict, dict, str, str, str]:
                 "role": roles,
                 "perturbation": perturbations,
             },
-            index=[f"cell-{index:04d}" for index in range(402)],
+            index=[f"cell-{index:04d}" for index in range(len(rows))],
         ),
         var=pd.DataFrame(index=["GENE_A", "GENE_B"]),
     )
@@ -538,7 +677,7 @@ def _complete_evidence(root: Path) -> tuple[dict, dict, dict, str, str, str]:
         "matrix_dtype": "float32-le",
         "matrix_format": "canonical_csr",
         "matrix_logical_sha256": matrix_logical_sha256,
-        "n_cells": 402,
+        "n_cells": len(rows),
         "n_genes": 2,
         "normalization_target": 10000.0,
         "ordered_roster_sha256": receipt["ordered_roster_sha256"],
@@ -553,9 +692,9 @@ def _complete_evidence(root: Path) -> tuple[dict, dict, dict, str, str, str]:
             "combo_separator": "_",
             "control_token": "control",
             "sealed_pair_ids": [["GENE_C", "GENE_D"]],
-            "single_gene_ids": ["GENE_A"],
+            "single_gene_ids": ["GENE_A", "GENE_B", "GENE_C", "GENE_D"],
         },
-        "role_counts": {"control": 400, "singles": 1, "combo_calibration": 1},
+        "role_counts": {"control": 400, "singles": 4, "combo_calibration": 1},
         "roster_artifact_checksum": receipt["roster_artifact_checksum"],
         "roster_file_sha256": receipt["roster_file_sha256"],
         "roster_receipt_sha256": sha256_file(receipt_path),
@@ -570,16 +709,18 @@ def _complete_evidence(root: Path) -> tuple[dict, dict, dict, str, str, str]:
     probe_manifest_path = root / "probe_input_manifest.json"
     _write_pretty_json(probe_manifest_path, probe_manifest)
 
-    fit_role_counts = {"control": 400, "singles": 1, "combo_calibration": 1}
+    fit_role_counts = {"control": 400, "singles": 4, "combo_calibration": 1}
     inputs_body = {
         "schema": INPUTS_SCHEMA,
         "protocol": PROTOCOL,
         "git_commit": COMMIT,
-        "source_sha256": "1" * 64,
+        "payload_sha256": payload_sha,
+        "source_sha256": fit_extraction.raw_data_sha256,
         "gene2go_manifest_sha256": sha256_file(gene2go_manifest_path),
-        "pair_manifest_sha256": "3" * 64,
-        "alias_artifact_sha256": "4" * 64,
-        "fit_role_artifact_sha256": "5" * 64,
+        "pair_manifest_sha256": fit_extraction.pair_manifest_sha256,
+        "alias_artifact_sha256": sha256_file(alias_path),
+        "fit_role_artifact_sha256": sha256_file(fit_path),
+        "fit_role_artifact_content_sha256": fit_spec.content_manifest_sha256,
         "response_artifact_sha256": receipt["response_artifact_sha256"],
         "roster_receipt_sha256": sha256_file(receipt_path),
         "roster_sha256": receipt["roster_file_sha256"],
@@ -626,6 +767,7 @@ def _complete_evidence(root: Path) -> tuple[dict, dict, dict, str, str, str]:
         probe_input_h5ad_sha256=sha256_file(probe_h5ad_path),
         probe_row_identity_sha256=row_sha256,
         roster_sha256=receipt["roster_file_sha256"],
+        fit_artifact_content_sha256=fit_spec.content_manifest_sha256,
     )
     report["runtime_sha256"] = sha256_file(root / "runtime.json")
     report["input_manifest_sha256"] = sha256_file(root / "inputs.json")
@@ -723,6 +865,8 @@ def _complete_evidence(root: Path) -> tuple[dict, dict, dict, str, str, str]:
             command_body["primary_file_sha256"] = sha256_file(receipt_path)
             command_body["argv"].extend(
                 [
+                    "--payload-dir",
+                    "/workspace/payload",
                     "--gene2go-nodes-artifact",
                     "/workspace/evidence/logs/gene2go_nodes.json",
                     "--gene2go-nodes-artifact-sha256",
@@ -735,6 +879,14 @@ def _complete_evidence(root: Path) -> tuple[dict, dict, dict, str, str, str]:
                     "/workspace/evidence/logs/gene2go_all.pkl",
                     "--gene2go-source-sha256",
                     gene2go_source_sha,
+                    "--alias-artifact",
+                    "/workspace/aliases.json",
+                    "--alias-artifact-sha256",
+                    receipt["alias_artifact_sha256"],
+                    "--approved-root",
+                    "/workspace/approved",
+                    "--out-roster",
+                    "/workspace/roster.json",
                     "--out-receipt",
                     "/workspace/evidence/roster_receipts/receipt.json",
                 ]
@@ -743,6 +895,8 @@ def _complete_evidence(root: Path) -> tuple[dict, dict, dict, str, str, str]:
             command_body["primary_file_sha256"] = sha256_file(probe_manifest_path)
             command_body["argv"].extend(
                 [
+                    "--evidence-root",
+                    "/workspace/evidence",
                     "--payload-dir",
                     "/workspace/payload",
                     "--roster",
@@ -751,8 +905,14 @@ def _complete_evidence(root: Path) -> tuple[dict, dict, dict, str, str, str]:
                     "/workspace/evidence/roster_receipts/receipt.json",
                     "--roster-receipt-sha256",
                     sha256_file(receipt_path),
+                    "--alias-artifact",
+                    "/workspace/aliases.json",
+                    "--alias-artifact-sha256",
+                    receipt["alias_artifact_sha256"],
                     "--approved-root",
                     "/workspace/approved",
+                    "--git-commit",
+                    COMMIT,
                     "--out-h5ad",
                     "/workspace/evidence/probe_input.h5ad",
                     "--out-manifest",
@@ -833,6 +993,11 @@ def _complete_evidence(root: Path) -> tuple[dict, dict, dict, str, str, str]:
         ("commands", "commands.jsonl"),
         ("runtime", "runtime.json"),
         ("provider_runtime_attestation", PROVIDER_ATTESTATION_PATH),
+        ("payload", PAYLOAD_PATH),
+        ("fit_role_artifact", FIT_ROLE_ARTIFACT_PATH),
+        ("alias_artifact", ALIAS_ARTIFACT_PATH),
+        ("response_projection", RESPONSE_PROJECTION_PATH),
+        ("selected_roster", SELECTED_ROSTER_PATH),
         ("inputs", "inputs.json"),
         ("role_attestation", "role_attestation.json"),
         ("probe_a_registration", REGISTRATION_PATH),
@@ -1388,7 +1553,7 @@ def test_report_rejects_checkpoint_identity_without_matching_archived_bytes(tmp_
     registration, registration_sha = _registration(tmp_path)
     report = _report(tmp_path, registration_sha256=registration_sha)
     (tmp_path / "checkpoints/run_1.pt").write_bytes(b"tampered model state\n")
-    with pytest.raises(ProbeAEvidenceError, match="checkpoint SHA-256 differs"):
+    with pytest.raises(ProbeAEvidenceError, match="checkpoint bytes differ"):
         _validate_report(tmp_path, report, registration, registration_sha)
 
 
@@ -1595,7 +1760,7 @@ def test_maintained_probe_a_runner_owns_fit_measurement_graph(tmp_path, monkeypa
     ]
     roles = ["control"] * 400 + ["singles", "combo_calibration"]
     prepared = ad.AnnData(
-        X=sparse.csr_matrix(np.asarray(_probe_matrix(), dtype=np.float32)),
+        X=sparse.csr_matrix(np.asarray(_probe_matrix(402), dtype=np.float32)),
         obs=pd.DataFrame(
             {"source_row_id": source_ids, "role": roles},
             index=[f"cell-{index:04d}" for index in range(402)],
@@ -1850,6 +2015,101 @@ def test_manifest_accepts_only_a_complete_role_typed_inventory(tmp_path):
     )
 
 
+def test_verifier_bootstrap_rejects_pythonpath_before_loading_project_code(tmp_path):
+    fake = tmp_path / "fake"
+    fake.mkdir()
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(fake)
+    observed = subprocess.run(
+        [sys.executable, str(_VERIFY), "--help"],
+        cwd=_REPO,
+        env=env,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert observed.returncode != 0
+    assert "PYTHONPATH" in observed.stderr
+
+
+def test_verifier_bootstrap_rejects_closure_pin_before_argument_parsing():
+    env = dict(os.environ)
+    env.pop("PYTHONPATH", None)
+    env["PYTHONNOUSERSITE"] = "1"
+    observed = subprocess.run(
+        [
+            sys.executable,
+            str(_VERIFY),
+            "--expected-verifier-code-sha256",
+            "0" * 64,
+        ],
+        cwd=_REPO,
+        env=env,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert observed.returncode != 0
+    assert "source/runtime closure differs" in observed.stderr
+    assert "the following arguments are required" not in observed.stderr
+
+
+@pytest.mark.parametrize(
+    ("field", "replacement", "message"),
+    [
+        ("payload_sha256", "0" * 64, "payload differs from its external pin"),
+        ("source_sha256", "0" * 64, "archived payload/fit-role"),
+        ("pair_manifest_sha256", "0" * 64, "archived payload/fit-role"),
+        ("alias_artifact_sha256", "0" * 64, "archived payload/fit-role"),
+        ("fit_role_artifact_sha256", "0" * 64, "archived payload/fit-role"),
+        ("fit_role_artifact_content_sha256", "0" * 64, "archived payload/fit-role"),
+        ("response_artifact_sha256", "0" * 64, "archived payload/fit-role"),
+        ("roster_sha256", "0" * 64, "manifested roster receipt"),
+    ],
+)
+def test_semantic_validator_rejects_resigned_self_reported_upstream_lineage(
+    tmp_path, field, replacement, message
+):
+    _, _, manifest, registration_sha, _, _ = _complete_evidence(tmp_path)
+    inputs_path = tmp_path / "inputs.json"
+    inputs = json.loads(inputs_path.read_text(encoding="utf-8"))
+    inputs[field] = replacement
+    _resign(inputs)
+    _write_json(inputs_path, inputs)
+    _refresh_manifest_entry(manifest, tmp_path, "inputs.json")
+    with pytest.raises(ProbeAEvidenceError, match=message):
+        validate_evidence_semantics(
+            manifest,
+            evidence_root=tmp_path,
+            expected_git_commit=COMMIT,
+            registration_sha256=registration_sha,
+            provider_attestation_sha256=_provider_pin(tmp_path),
+        )
+
+
+@pytest.mark.parametrize(
+    ("artifact", "message"),
+    [
+        ("probe_input.h5ad", "prepared Probe-A H5AD"),
+        ("checkpoints/run_1.pt", "checkpoint"),
+    ],
+)
+def test_semantic_validator_rejects_binary_replacement_after_manifest_validation(
+    tmp_path, artifact, message
+):
+    _, _, manifest, registration_sha, _, _ = _complete_evidence(tmp_path)
+    validate_evidence_manifest(manifest, evidence_root=tmp_path, expected_git_commit=COMMIT)
+    (tmp_path / artifact).write_bytes(b"post-validation replacement")
+    with pytest.raises(ProbeAEvidenceError, match=message):
+        validate_evidence_semantics(
+            manifest,
+            evidence_root=tmp_path,
+            expected_git_commit=COMMIT,
+            registration_sha256=registration_sha,
+            provider_attestation_sha256=_provider_pin(tmp_path),
+        )
+
+
 def test_runtime_validator_rejects_unproved_network_isolation(tmp_path):
     _complete_evidence(tmp_path)
     provider = json.loads((tmp_path / PROVIDER_ATTESTATION_PATH).read_text(encoding="utf-8"))
@@ -1903,7 +2163,56 @@ def test_semantic_validator_rejects_placeholder_commands_and_receipt(tmp_path):
     _, _, manifest, registration_sha, _, _ = _complete_evidence(tmp_path)
     _write_pretty_json(tmp_path / "roster_receipts/receipt.json", {"status": "complete"})
     _refresh_manifest_entry(manifest, tmp_path, "roster_receipts/receipt.json")
-    with pytest.raises(ProbeAEvidenceError, match="roster receipt.*keys"):
+    with pytest.raises(ProbeAEvidenceError, match="roster receipt differs from its external pin"):
+        validate_evidence_semantics(
+            manifest,
+            evidence_root=tmp_path,
+            expected_git_commit=COMMIT,
+            registration_sha256=registration_sha,
+            provider_attestation_sha256=_provider_pin(tmp_path),
+        )
+
+
+def test_semantic_validator_rejects_truncated_final_command_record(tmp_path):
+    _, _, manifest, registration_sha, _, _ = _complete_evidence(tmp_path)
+    commands_path = tmp_path / "commands.jsonl"
+    commands_path.write_bytes(commands_path.read_bytes().removesuffix(b"\n"))
+    _refresh_manifest_entry(manifest, tmp_path, "commands.jsonl")
+    with pytest.raises(ProbeAEvidenceError, match="complete newline record"):
+        validate_evidence_semantics(
+            manifest,
+            evidence_root=tmp_path,
+            expected_git_commit=COMMIT,
+            registration_sha256=registration_sha,
+            provider_attestation_sha256=_provider_pin(tmp_path),
+        )
+
+
+@pytest.mark.parametrize(
+    ("command", "option", "replacement", "message"),
+    [
+        ("prepare-input", "--payload-dir", "/workspace/other-payload", "payload or approved"),
+        ("prepare-input", "--approved-root", "/workspace/other-approved", "payload or approved"),
+        ("prepare-input", "--alias-artifact", "/workspace/other-alias.json", "alias artifact"),
+        ("prepare-input", "--roster", "/workspace/other-roster.json", "prepared inputs/receipt"),
+    ],
+)
+def test_semantic_validator_binds_upstream_command_paths(
+    tmp_path, command, option, replacement, message
+):
+    _, _, manifest, registration_sha, _, _ = _complete_evidence(tmp_path)
+    commands_path = tmp_path / "commands.jsonl"
+    records = [json.loads(line) for line in commands_path.read_text(encoding="utf-8").splitlines()]
+    record = next(item for item in records if item["command"] == command)
+    record["argv"][record["argv"].index(option) + 1] = replacement
+    _resign(record)
+    commands_path.write_text(
+        "\n".join(json.dumps(item, sort_keys=True, separators=(",", ":")) for item in records)
+        + "\n",
+        encoding="utf-8",
+    )
+    _refresh_manifest_entry(manifest, tmp_path, "commands.jsonl")
+    with pytest.raises(ProbeAEvidenceError, match=message):
         validate_evidence_semantics(
             manifest,
             evidence_root=tmp_path,
@@ -2408,6 +2717,10 @@ def _cli_argv(root: Path, *, negative: bool = False) -> tuple[list[str], Path]:
             manifest_sha,
             "--provider-attestation-sha256",
             _provider_pin(root),
+            "--payload-sha256",
+            sha256_file(root / PAYLOAD_PATH),
+            "--roster-receipt-sha256",
+            sha256_file(root / "roster_receipts/receipt.json"),
             "--git-commit",
             COMMIT,
             "--expected-verifier-code-sha256",

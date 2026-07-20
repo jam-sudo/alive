@@ -2074,6 +2074,8 @@ def _probe_a_evidence_snapshot() -> ProbeAEvidence:
         "status": "pass",
         "git_commit": "b" * 40,
         "registration_sha256": registration_sha,
+        "payload_sha256": "6" * 64,
+        "roster_receipt_sha256": "7" * 64,
         "report_sha256": "a" * 64,
         "evidence_manifest_sha256": "d" * 64,
         "verifier_code_sha256": "e" * 64,

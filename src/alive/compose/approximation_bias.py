@@ -24,7 +24,7 @@ APPROXIMATION_BIAS_SCHEMA = "compose_approximation_bias_report_v3"
 PROBE_A_SCHEMA = "compose_gears_probe_a_admission_v3"
 PROBE_A_REGISTRATION_SCHEMA = "compose_gears_probe_a_registration_v2"
 PROBE_A_OWNER_POLICY_SCHEMA = "compose_gears_probe_a_owner_policy_v1"
-PROBE_A_VERIFICATION_SCHEMA = "compose_gears_probe_a_verification_v1"
+PROBE_A_VERIFICATION_SCHEMA = "compose_gears_probe_a_verification_v2"
 PROTOCOL = "COMPOSE-K562-v1"
 REPRESENTATION = "raw_pseudobulk_approximation"
 PROBE_A_REPRESENTATION = "log_normalized_pseudobulk"
@@ -135,6 +135,8 @@ _PROBE_A_VERIFICATION_KEYS = frozenset(
         "status",
         "git_commit",
         "registration_sha256",
+        "payload_sha256",
+        "roster_receipt_sha256",
         "report_sha256",
         "evidence_manifest_sha256",
         "verifier_code_sha256",
@@ -606,7 +608,13 @@ def validate_probe_a_verification(
         field="expected Probe-A registration SHA-256",
     ):
         _fail("Probe-A verification registration SHA-256 does not match the external pin")
-    for field in ("report_sha256", "evidence_manifest_sha256", "verifier_code_sha256"):
+    for field in (
+        "payload_sha256",
+        "roster_receipt_sha256",
+        "report_sha256",
+        "evidence_manifest_sha256",
+        "verifier_code_sha256",
+    ):
         _hex64(obj[field], field=f"Probe-A verification.{field}")
     bridge = _exact_keys(
         obj["output_bridge"],

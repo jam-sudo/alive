@@ -122,6 +122,13 @@ candidate is
 roster passes 217 tests plus full Ruff check/format and `git diff --check`. This value remains diagnostic until it is
 recomputed at the clean implementation commit and independently accepted before pod use.
 
+The 2026-07-20 upstream-custody and pre-import runtime-closure correction supersedes `4c36…`. Its recomputed
+candidate verifier closure pin is
+`dbcb8053a4c4310860792336542751f20c6176349debc85c11be157614204876`. The complete local Compose suite passes
+1539 tests with one pre-existing AnnData warning, plus Ruff check/format and `git diff --check`. This remains a
+non-operational candidate until the clean implementation commit and this exact pin are independently recomputed
+and accepted; it does not authorize a pod or sealed run.
+
 Record the final test counts and exact Git SHA in the pod evidence manifest.
 
 ## 3. Pod admission and identity capture
@@ -315,7 +322,12 @@ manifest.json                 canonical schema, self-checksum, complete file ros
 commands.jsonl                argv/cwd/env allowlist/start/end/exit code per command
 provider_runtime_attestation.json provider allocation + immutable image identity, externally pinned
 runtime.json                  provider/cgroup/host views + GPU/driver/CUDA/package/lock identities
-inputs.json                   source/GO/pair/alias/fit-role/response/roster identities
+inputs.json                   derived source/GO/pair/alias/fit-role/response/roster identities
+upstream/payload.json         exact compact canonical worker payload, externally pinned before verification
+upstream/fit_role.h5ad        exact fit-role bytes named by the payload
+upstream/alias.json           exact alias artifact selected by the roster command
+upstream/response_projection.json exact response projection copied from the pinned payload
+upstream/selected_roster.json exact selected roster consumed by preparation and measurement
 probe_input_manifest.json     canonical prepared-input manifest consumed by Probe A
 probe_input.h5ad              exact prepared, non-sealed H5AD consumed by both fresh fits
 roster_receipts/              receipt-last generation records and their externally anchored SHA-256 values
@@ -342,10 +354,11 @@ probe_a_admission.json        PASS-only promotion object consumed by the bias ad
 A negative result terminates with a failed `verify.json`; `probe_a_admission.json` MUST remain absent.
 
 Every JSON uses canonical serialization and schema versioning. `manifest.json` uses
-`compose_gears_probe_a_evidence_manifest_v7`; every file entry has exactly `{role,path,sha256,bytes}`. It assigns
+`compose_gears_probe_a_evidence_manifest_v8`; every file entry has exactly `{role,path,sha256,bytes}`. It assigns
 exactly one role each to `commands`, `runtime`, `inputs`, `role_attestation`, `probe_a_registration`,
 `provider_runtime_attestation`, `probe_a_report`, `probe_a_source`, `probe_input_manifest`, and
-`probe_input_h5ad`, at least one each to
+`probe_input_h5ad`, plus the fixed `payload`, `fit_role_artifact`, `alias_artifact`, `response_projection`, and
+`selected_roster` upstream roles, at least one each to
 `roster_receipt`, `raw_sample`, and `log`, and exactly the two raw-referenced files under the
 `probe_a_checkpoint` role.
 **Probe B is not a Probe-A manifest role or admission prerequisite.** It receives a separate timestamped archive
@@ -396,20 +409,27 @@ minimum/median/maximum, negative
 fraction, near-integer fraction (distance to the nearest integer `<= 1e-6`), and bridge maximum absolute error.
 A self-reported aggregate or verdict cannot substitute for these raw arrays.
 
-The offline verifier requires both `--expected-verifier-code-sha256` and the independently recorded pre-run
-`--provider-attestation-sha256`. It compares the first with its conservative local source superset **before evidence
-validation**, and requires the second to match the manifested attestation and runtime/command bindings. It always
+The offline verifier requires `--expected-verifier-code-sha256`, `--provider-attestation-sha256`,
+`--payload-sha256`, and `--roster-receipt-sha256` as independently recorded pre-run pins. Before importing ALIVE
+decision code it rejects `PYTHONPATH`, enabled user-site packages, a non-repository `alive` origin, or numerical/
+H5AD dependencies loaded outside the active interpreter prefix; for an operational CLI invocation it then computes
+and compares the complete byte-level verifier closure before those decision imports occur. It requires the provider
+pin to match runtime/command bindings, and requires the payload and selected
+receipt pins to match the archived immutable upstream chain. It always
 emits one canonical, write-once
 `verify.json` receipt. On PASS only, it then emits `probe_a_admission.json` **last**. On a measured gate failure it
 returns `NEGATIVE_RESULT`, leaves admission absent, and the receipt is the terminal artifact. A pre-existing
 receipt or admission is a failed attempt; neither file may be overwritten or reused. The verifier hashes a
-conservative local source superset: its three maintained entrypoints plus every Python source under `src/alive`.
+conservative local source superset: its three maintained entrypoints, `pyproject.toml`, `uv.lock`, every Python
+source under `src/alive`, the active Python executable, and the version plus actual installed non-cache file bytes
+of every distribution in the active verifier environment. A same-version locally modified direct or transitive
+dependency therefore changes the pin.
 This intentionally over-approximates the transitive decision closure rather than trusting a caller-supplied label.
-A passing `verify.json` uses `compose_gears_probe_a_verification_v1` with exactly
-`{schema, protocol, status, git_commit, registration_sha256, report_sha256,
+A passing `verify.json` uses `compose_gears_probe_a_verification_v2` with exactly
+`{schema, protocol, status, git_commit, registration_sha256, payload_sha256, roster_receipt_sha256, report_sha256,
 evidence_manifest_sha256, verifier_code_sha256, output_bridge, self_checksum}`.
 
-A negative `verify.json` uses `compose_gears_probe_a_negative_verification_v1` and adds exactly
+A negative `verify.json` uses `compose_gears_probe_a_negative_verification_v2` and adds exactly
 `gate_verdicts={determinism,control_count,output_bridge}`. Its status is `failed`, at least one gate must be `fail`,
 all three verdicts and the complete bridge object must equal the hash-bound report, and its report, manifest,
 registration, Git, and verifier-closure pins follow the same validation rules as PASS. This receipt is durable
@@ -451,21 +471,23 @@ primary-file SHA values, and one runtime fingerprint. The `probe-a` record must 
 Each argv must contain exactly one maintained driver token and its recorded subcommand must immediately follow
 that token; merely placing a command label elsewhere in argv is rejected.
 `runtime.json`, `inputs.json`, and `role_attestation.json` use respectively
-`compose_gears_probe_runtime_v4`, `compose_gears_probe_inputs_v3`, and
-`compose_gears_probe_role_attestation_v2`; they bind the approved commit, separate preparation/GEARS dependency
+`compose_gears_probe_runtime_v4`, `compose_gears_probe_inputs_v4`, and
+`compose_gears_probe_role_attestation_v3`; they bind the approved commit, separate preparation/GEARS dependency
 locks, the complete installed-package-roster digest, runtime/input
 identities, exact fit-role counts, the prepared-manifest/H5AD/row/control-roster SHA identities, zero sealed
 overlap/read counts, and a passing reader-spy attestation. Every
-`compose_gears_roster_receipt_v2` binds its exact roster and both dependency-lock lineages. Any placeholder JSON
+`compose_gears_roster_receipt_v3` additionally binds the fit-role file, GO manifest, and GO source bytes, while
+binding its exact roster and both dependency-lock lineages. Any placeholder JSON
 that merely occupies a manifest role is rejected. Until the separate Probe-B runner/archive spec defines raw epoch samples,
 the exact CV estimator, extrapolation formula, and cross-roster monotonicity rule, **no Probe-B JSON is
 decision-grade and no Probe-B PASS schema is recognized by this verifier**.
 
 The manifested provider file uses `compose_provider_runtime_attestation_v1` and is revalidated against its
 external file pin. Its source-evidence path must name exactly one manifested `logs/` entry with the same SHA and
-one of the admitted control-plane source types. Runtime v3 must reproduce that provider/pod/image/allocation
+one of the admitted control-plane source types. Runtime v4 must reproduce that provider/pod/image/allocation
 exactly, require one visible GPU whose model equals the allocation, and carry exact nested schemas for
-`provider_allocation`, `cgroup_effective`, and `host_visible`. The verifier recomputes quota cores, canonical
+`provider_allocation`, `cgroup_effective`, and `host_visible`. Runtime v4 also binds the exact network namespace,
+not merely the loopback interface/route shape. The verifier recomputes quota cores, canonical
 cpuset cardinality, and effective CPU cores; requires finite positive cgroup CPU and memory; and rejects cgroup
 values exceeding either provider allocation or host-visible capacity. Provider allocation and host-visible
 capacity are never substituted for one another.

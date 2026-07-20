@@ -728,6 +728,7 @@ def _required_role_for_token(
     *,
     calib: set[tuple[str, str]],
     sealed: set[tuple[str, str]],
+    singles: set[str],
     control_token: str,
     combo_sep: str,
 ) -> str:
@@ -748,6 +749,10 @@ def _required_role_for_token(
         Registered calibration combo pairs (canonical, byte-ordered).
     sealed : set of tuple of str
         Sealed combo pairs; any occurrence in obs is a leak.
+    singles : set of str
+        Registered single-gene tokens. Exact membership is resolved before
+        separator parsing so gene identifiers may contain ``combo_sep``; the
+        caller must reject collisions with serialized pair tokens.
     control_token : str
         The token that denotes a control cell.
     combo_sep : str
@@ -766,6 +771,14 @@ def _required_role_for_token(
     """
     if perturbation == control_token:
         return "control"
+    if perturbation in singles:
+        return "singles"
+    calibration_tokens = {combo_sep.join(pair) for pair in calib}
+    sealed_tokens = {combo_sep.join(pair) for pair in sealed}
+    if perturbation in sealed_tokens:
+        raise FitRoleArtifactError(f"sealed pair present in artifact obs: {perturbation!r}")
+    if perturbation in calibration_tokens:
+        return "combo_calibration"
     if combo_sep in perturbation:
         a, b = _canonical_pair(perturbation, combo_sep)
         if perturbation != f"{a}{combo_sep}{b}":
@@ -895,6 +908,13 @@ def _validate_fit_role_artifact_checks(
     single_set = set(single_list)
     if not single_list or len(single_set) != len(single_list) or any(g == "" for g in single_list):
         raise FitRoleArtifactError("single_gene_ids must be a non-empty unique list of gene ids")
+    serialized_pairs = {combo_sep.join(pair) for pair in calib | sealed}
+    ambiguous_tokens = single_set & serialized_pairs
+    if ambiguous_tokens:
+        raise FitRoleArtifactError(
+            "single-gene ids collide with serialized pair tokens: "
+            f"{sorted(ambiguous_tokens, key=lambda value: value.encode('utf-8'))}"
+        )
 
     # role↔token: classify EVERY row independently of its declared role (spec
     # §7.1; mirrors ComposeFitRoleExtractor._role_of). A sealed combo mislabeled
@@ -902,7 +922,12 @@ def _validate_fit_role_artifact_checks(
     # fail closed here — the check is NOT gated on role == "combo_calibration".
     for role, pert in zip(roles, perts):
         expected = _required_role_for_token(
-            pert, calib=calib, sealed=sealed, control_token=control_token, combo_sep=combo_sep
+            pert,
+            calib=calib,
+            sealed=sealed,
+            singles=single_set,
+            control_token=control_token,
+            combo_sep=combo_sep,
         )
         if role != expected:
             raise FitRoleArtifactError(

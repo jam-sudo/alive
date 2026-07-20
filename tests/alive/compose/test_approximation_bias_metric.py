@@ -126,6 +126,8 @@ def _probe_a_snapshot(*, git_commit: str = "b" * 40) -> ProbeAEvidence:
         "status": "pass",
         "git_commit": git_commit,
         "registration_sha256": registration_sha,
+        "payload_sha256": "6" * 64,
+        "roster_receipt_sha256": "7" * 64,
         "report_sha256": "a" * 64,
         "evidence_manifest_sha256": "d" * 64,
         "verifier_code_sha256": "e" * 64,

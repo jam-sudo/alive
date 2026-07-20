@@ -122,12 +122,13 @@ the exact space the sealed comparison will score in.
 - **Secondary:** `singles` — broader characterization; also the roles from which the operator fits δ_g.
 - Reported **separately**, never pooled (regime mixing would blur the floor).
 
-**Admission prerequisite (before measurement).** A conforming Probe A v3 admission, v1 verifier receipt, exact
+**Admission prerequisite (before measurement).** A conforming Probe A v3 admission, v2 verifier receipt, exact
 owner-frozen registration bytes, and reviewed output-bridge
 contract must establish that the GEARS population vector is a raw-count pseudobulk mean within an externally
 frozen tolerance. The registration and receipt SHA-256 values are independently anchored outside the evidence
 bundle. The admission binds the registration, exhaustive evidence manifest, and receipt; the receipt additionally
-binds the report and verifier-code closure. A tolerance declared only by the observed Probe-A report is not
+binds the report, externally pinned worker payload, externally pinned selected roster receipt, and verifier-code
+closure. A tolerance declared only by the observed Probe-A report is not
 preregistration. A quarantined, missing, failed, legacy, pin-mismatched, or cross-binding-inconsistent probe makes
 this measurement `NOT_ADMISSIBLE`; no report SHA may be inserted into the active config.
 

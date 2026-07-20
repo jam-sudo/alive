@@ -4,11 +4,156 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import importlib.metadata
+import importlib.util
 import json
+import os
+import site
+import sys
 from pathlib import Path
 
-from alive.compose.approximation_bias import canonical_file_bytes
-from alive.compose.gears_probe_a import (
+
+def _bootstrap_runtime_identity() -> None:
+    """Reject import shadowing before any decision-bearing package is imported."""
+    repository = Path(__file__).resolve().parents[2]
+    if os.environ.get("PYTHONPATH"):
+        raise RuntimeError("offline verifier forbids PYTHONPATH import overrides")
+    if site.ENABLE_USER_SITE:
+        raise RuntimeError("offline verifier requires user site-packages to be disabled")
+
+    expected_alive = (repository / "src/alive/__init__.py").resolve(strict=True)
+    alive_spec = importlib.util.find_spec("alive")
+    if alive_spec is None or alive_spec.origin is None:
+        raise RuntimeError("offline verifier cannot resolve the maintained alive package")
+    if Path(alive_spec.origin).resolve(strict=True) != expected_alive:
+        raise RuntimeError("offline verifier alive import does not originate from this checkout")
+
+    environment_root = Path(sys.prefix).resolve(strict=True)
+    for module_name in ("anndata", "h5py", "numpy", "pandas", "scipy"):
+        spec = importlib.util.find_spec(module_name)
+        if spec is None or spec.origin is None:
+            raise RuntimeError(f"offline verifier cannot resolve required module {module_name}")
+        origin = Path(spec.origin)
+        if origin.is_symlink():
+            raise RuntimeError(f"offline verifier module {module_name} must not be a symlink")
+        resolved = origin.resolve(strict=True)
+        if not resolved.is_file() or not resolved.is_relative_to(environment_root):
+            raise RuntimeError(
+                f"offline verifier module {module_name} is outside the active environment"
+            )
+
+
+_bootstrap_runtime_identity()
+
+
+def _verifier_code_sha256() -> str:
+    """Hash source, locks, and the active verifier dependency identity."""
+    repository = Path(__file__).resolve().parents[2]
+    entrypoints = (
+        "scripts/compose/verify_gears_probe_a.py",
+        "scripts/compose/gears_decision_probe.py",
+        "scripts/baselines/gears_worker.py",
+    )
+    alive_sources = tuple(
+        path.relative_to(repository).as_posix()
+        for path in sorted((repository / "src/alive").rglob("*.py"))
+    )
+    closure = (*entrypoints, "pyproject.toml", "uv.lock", *alive_sources)
+    try:
+        source_files = {
+            relative: hashlib.sha256((repository / relative).read_bytes()).hexdigest()
+            for relative in closure
+        }
+        environment_root = Path(sys.prefix).resolve(strict=True)
+        distributions: dict[str, object] = {}
+        installed_distributions = list(importlib.metadata.distributions())
+        if not installed_distributions:
+            raise RuntimeError("verifier environment exposes no installed distributions")
+        for distribution in installed_distributions:
+            declared_name = distribution.metadata.get("Name")
+            if not isinstance(declared_name, str) or not declared_name:
+                raise RuntimeError("verifier environment contains an unnamed distribution")
+            name = declared_name.lower().replace("_", "-").replace(".", "-")
+            while "--" in name:
+                name = name.replace("--", "-")
+            if name in distributions:
+                raise RuntimeError(f"verifier environment contains duplicate distribution {name}")
+            files = distribution.files
+            if not files:
+                raise RuntimeError(
+                    f"verifier dependency {name} exposes no installed-file inventory"
+                )
+            installed_files: dict[str, str] = {}
+            for relative in files:
+                relative_path = Path(relative)
+                if relative_path.suffix == ".pyc" or "__pycache__" in relative_path.parts:
+                    continue
+                candidate = Path(distribution.locate_file(relative))
+                if candidate.is_symlink():
+                    raise RuntimeError(f"verifier dependency {name} contains a symlink: {relative}")
+                resolved = candidate.resolve(strict=True)
+                if not resolved.is_file() or not resolved.is_relative_to(environment_root):
+                    detail = f"{name} file escapes the active environment: {relative}"
+                    raise RuntimeError(f"verifier dependency {detail}")
+                installed_relative = resolved.relative_to(environment_root).as_posix()
+                if installed_relative in installed_files:
+                    raise RuntimeError(
+                        f"verifier dependency {name} has a duplicate installed path: {relative}"
+                    )
+                installed_files[installed_relative] = hashlib.sha256(
+                    resolved.read_bytes()
+                ).hexdigest()
+            if not installed_files:
+                raise RuntimeError(f"verifier dependency {name} has no hashable installed files")
+            distributions[name] = {
+                "files": installed_files,
+                "version": distribution.version,
+            }
+        python_executable = Path(sys.executable).resolve(strict=True)
+        runtime = {
+            "distributions": distributions,
+            "python": {
+                "cache_tag": sys.implementation.cache_tag,
+                "executable_sha256": hashlib.sha256(python_executable.read_bytes()).hexdigest(),
+                "version": sys.version,
+            },
+        }
+        canonical = json.dumps(
+            {"runtime": runtime, "source_files": source_files},
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return hashlib.sha256(canonical).hexdigest()
+    except (OSError, importlib.metadata.PackageNotFoundError) as exc:
+        raise RuntimeError(f"cannot hash verifier source closure: {exc}") from exc
+
+
+def _bootstrap_expected_verifier_pin(argv: list[str]) -> None:
+    """Authenticate the complete closure before importing decision-bearing code."""
+    if "-h" in argv or "--help" in argv:
+        return
+    option = "--expected-verifier-code-sha256"
+    if argv.count(option) != 1:
+        raise RuntimeError(f"offline verifier requires exactly one {option}")
+    index = argv.index(option)
+    if index + 1 >= len(argv):
+        raise RuntimeError(f"offline verifier requires a value for {option}")
+    expected = argv[index + 1]
+    if len(expected) != 64 or any(character not in "0123456789abcdef" for character in expected):
+        raise RuntimeError(f"offline verifier {option} must be one lowercase SHA-256")
+    if _verifier_code_sha256() != expected:
+        raise RuntimeError(
+            "verifier source/runtime closure differs from the independently reviewed pre-run pin"
+        )
+
+
+if __name__ == "__main__":
+    _bootstrap_expected_verifier_pin(sys.argv[1:])
+
+
+from alive.compose.approximation_bias import canonical_file_bytes  # noqa: E402
+from alive.compose.gears_probe_a import (  # noqa: E402
     ADMISSION_PATH,
     MANIFEST_PATH,
     REGISTRATION_PATH,
@@ -18,8 +163,8 @@ from alive.compose.gears_probe_a import (
     assert_clean_approved_checkout,
     build_evidence_outputs,
 )
-from alive.io import atomic_write_once
-from alive.provenance import sha256_bytes, sha256_json
+from alive.io import atomic_write_once  # noqa: E402
+from alive.provenance import sha256_bytes  # noqa: E402
 
 
 def _read_bytes(path: Path, *, label: str) -> bytes:
@@ -57,27 +202,6 @@ def _pinned_output_path(root: Path, supplied: str) -> Path:
     return actual
 
 
-def _verifier_code_sha256() -> str:
-    """Hash a conservative superset of every local source that can decide admission."""
-    repository = Path(__file__).resolve().parents[2]
-    entrypoints = (
-        "scripts/compose/verify_gears_probe_a.py",
-        "scripts/compose/gears_decision_probe.py",
-        "scripts/baselines/gears_worker.py",
-    )
-    alive_sources = tuple(
-        path.relative_to(repository).as_posix()
-        for path in sorted((repository / "src/alive").rglob("*.py"))
-    )
-    closure = (*entrypoints, *alive_sources)
-    try:
-        return sha256_json(
-            {relative: sha256_bytes((repository / relative).read_bytes()) for relative in closure}
-        )
-    except OSError as exc:
-        raise ProbeAEvidenceError(f"cannot hash verifier source closure: {exc}") from exc
-
-
 def main(argv: list[str] | None = None) -> int:
     """Publish one receipt; publish an admission only when every gate passes."""
     parser = argparse.ArgumentParser(description=__doc__)
@@ -92,6 +216,16 @@ def main(argv: list[str] | None = None) -> int:
         "--provider-attestation-sha256",
         required=True,
         help="independently recorded pre-run SHA-256 of provider_runtime_attestation.json",
+    )
+    parser.add_argument(
+        "--payload-sha256",
+        required=True,
+        help="externally recorded pre-fit SHA-256 of upstream/payload.json",
+    )
+    parser.add_argument(
+        "--roster-receipt-sha256",
+        required=True,
+        help="externally recorded pre-prepare SHA-256 of the selected roster receipt",
     )
     parser.add_argument("--git-commit", required=True)
     parser.add_argument(
@@ -139,6 +273,8 @@ def main(argv: list[str] | None = None) -> int:
         evidence_root=root,
         evidence_manifest_sha256=args.manifest_sha256,
         provider_attestation_sha256=args.provider_attestation_sha256,
+        payload_sha256=args.payload_sha256,
+        roster_receipt_sha256=args.roster_receipt_sha256,
         expected_git_commit=args.git_commit,
         verifier_code_sha256=observed_verifier_code_sha256,
     )

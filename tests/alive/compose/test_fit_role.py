@@ -507,6 +507,29 @@ def test_validate_rejects_sealed_combo_mislabeled_as_singles(tmp_path):
         _validate(spec, str(tmp_path))  # calib CEBPE_KLF1; sealed AAA_BBB
 
 
+def test_validate_accepts_registered_single_gene_containing_combo_separator(tmp_path):
+    X = _csr([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
+    spec = _forge_artifact(
+        tmp_path,
+        "underscore_single.h5ad",
+        rows=(("r0", "control", "control"), ("r1", "singles", "GENE_A")),
+        X=X,
+    )
+    _validate(spec, str(tmp_path), single_gene_ids=["GENE_A"])
+
+
+def test_validate_rejects_single_gene_collision_with_serialized_pair(tmp_path):
+    X = _csr([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
+    spec = _forge_artifact(
+        tmp_path,
+        "ambiguous_single_pair.h5ad",
+        rows=(("r0", "control", "control"), ("r1", "singles", "AAA_BBB")),
+        X=X,
+    )
+    with pytest.raises(FitRoleArtifactError, match="collide with serialized pair tokens"):
+        _validate(spec, str(tmp_path), single_gene_ids=["AAA_BBB"])
+
+
 def test_validate_rejects_single_gene_token_mislabeled_as_control(tmp_path):
     # role<->token consistency for non-combo rows: a single-gene token declared
     # `control` must be rejected (control/single token<->role is now checked).
