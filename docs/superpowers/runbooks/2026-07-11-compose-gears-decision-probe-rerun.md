@@ -245,8 +245,8 @@ preregistered.
 
 ## 5. Durable evidence contract
 
-The rerun creates a new timestamped directory; it never modifies the quarantined 2026-07-11 archive. Required
-contents:
+The rerun creates a new timestamped directory; it never modifies the quarantined 2026-07-11 archive. Every
+completed run has these pre-verifier contents:
 
 ```text
 manifest.json                 canonical schema, self-checksum, complete file roster + SHA-256
@@ -261,10 +261,22 @@ probe_a_registration.json     owner-frozen decisions/tolerances + external pre-r
 probe_a_source.txt            combined pinned GEARS source closure named by the report digest
 checkpoints/                  exactly two fresh Probe-A trained-model checkpoint files
 probe_a.json                  P1-P4 measurements + mechanically derived pass/failed status + raw references
-probe_a_admission.json        PASS-only promotion object; MUST be absent for a negative result
 logs/                         stdout/stderr and raw CPU/GPU/RSS samples for every run
-verify.json                   write-once local verifier receipt + verifier-code-closure SHA-256
 ```
+
+Successful offline verification then adds exactly one common post-manifest artifact:
+
+```text
+verify.json                   write-once PASS or failed receipt + verifier-code-closure SHA-256
+```
+
+Only a PASS adds the following second post-manifest artifact:
+
+```text
+probe_a_admission.json        PASS-only promotion object consumed by the bias admission gate
+```
+
+A negative result terminates with a failed `verify.json`; `probe_a_admission.json` MUST remain absent.
 
 Every JSON uses canonical serialization and schema versioning. `manifest.json` uses
 `compose_gears_probe_a_evidence_manifest_v7`; every file entry has exactly `{role,path,sha256,bytes}`. It assigns
