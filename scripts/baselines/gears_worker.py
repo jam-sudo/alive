@@ -79,6 +79,7 @@ _GEARS_UPSTREAM_BEST_MODEL_METRIC = "monitoring_mse_de_ignored"
 _GEARS_PREDICTION_CONTROL_BATCH_SIZE = 300
 _GEARS_PREDICTION_RNG_POLICY = "sha256(payload_seed,canonical_pair)"
 _GEARS_PERTURBATION_GRAPH_POLICY = "method_roster_intersect_gene2go"
+_GEARS_DERIVED_GRAPH_CACHE_POLICY = "private_empty_cwd_no_cache"
 _GEARS_BATCH_SIZE = 32
 _GEARS_TEST_BATCH_SIZE = 128
 _GEARS_VALIDATION_FRACTION = 0.10
@@ -205,6 +206,7 @@ def _registered_worker_config(adapter_version: str) -> dict[str, object]:
             "prediction_control_batch_size": _GEARS_PREDICTION_CONTROL_BATCH_SIZE,
             "prediction_rng_policy": _GEARS_PREDICTION_RNG_POLICY,
             "perturbation_graph_policy": _GEARS_PERTURBATION_GRAPH_POLICY,
+            "derived_graph_cache_policy": _GEARS_DERIVED_GRAPH_CACHE_POLICY,
             "batch_size": _GEARS_BATCH_SIZE,
             "validation_batch_size": _GEARS_TEST_BATCH_SIZE,
             "validation_fraction": _GEARS_VALIDATION_FRACTION,
@@ -972,6 +974,29 @@ def _fit_and_predict(
             if hasattr(module, "zip_data_download_wrapper"):
                 module.zip_data_download_wrapper = _offline_zip_guard
 
+        # Upstream custom-GO construction otherwise reads/writes
+        # ``./data/go_essential_<dataset>.csv`` relative to the caller's cwd.
+        # That path is neither resource-manifested nor safe to reuse across
+        # runs. Execute in a private empty cwd and force the upstream-supported
+        # no-cache mode so the graph is derived solely from the pinned source
+        # bytes and exact method roster.
+        original_make_go = getattr(gears_utils, "make_GO", None)
+        if not callable(original_make_go):
+            raise WorkerUnavailable("GEARS custom GO graph builder is unavailable")
+
+        def _uncached_make_go(data_path, pert_list, data_name, num_workers=25, save=True):
+            if save is not True:
+                raise RuntimeError("GEARS custom GO cache policy was unexpectedly overridden")
+            return original_make_go(
+                data_path,
+                pert_list,
+                data_name,
+                num_workers=num_workers,
+                save=False,
+            )
+
+        gears_utils.make_GO = _uncached_make_go
+
         # ``default_pert_graph=True`` silently intersects the method input with
         # GEARS' legacy ``essential_all_data_pert_genes.pkl`` symbol roster.
         # That contradicts the governed eligibility contract (canonical
@@ -1027,19 +1052,28 @@ def _fit_and_predict(
                 raise ValueError(
                     f"sealed pair ({g!r},{h!r}) has a gene absent from GEARS.pert_list"
                 )
-        model.model_initialize(
-            hidden_size=_GEARS_HIDDEN_SIZE,
-            num_go_gnn_layers=_GEARS_NUM_GO_GNN_LAYERS,
-            num_gene_gnn_layers=_GEARS_NUM_GENE_GNN_LAYERS,
-            decoder_hidden_size=_GEARS_DECODER_HIDDEN_SIZE,
-            num_similar_genes_go_graph=_GEARS_NUM_SIMILAR_GENES_GO_GRAPH,
-            num_similar_genes_co_express_graph=_GEARS_NUM_SIMILAR_GENES_COEXPRESS_GRAPH,
-            coexpress_threshold=_GEARS_COEXPRESS_THRESHOLD,
-            uncertainty=_GEARS_UNCERTAINTY,
-            uncertainty_reg=_GEARS_UNCERTAINTY_REG,
-            direction_lambda=_GEARS_DIRECTION_LAMBDA,
-            no_perturb=_GEARS_NO_PERTURB,
-        )
+        private_cwd = Path(work) / "runtime_cwd"
+        private_cwd.mkdir(mode=0o700)
+        previous_cwd = Path.cwd()
+        try:
+            os.chdir(private_cwd)
+            model.model_initialize(
+                hidden_size=_GEARS_HIDDEN_SIZE,
+                num_go_gnn_layers=_GEARS_NUM_GO_GNN_LAYERS,
+                num_gene_gnn_layers=_GEARS_NUM_GENE_GNN_LAYERS,
+                decoder_hidden_size=_GEARS_DECODER_HIDDEN_SIZE,
+                num_similar_genes_go_graph=_GEARS_NUM_SIMILAR_GENES_GO_GRAPH,
+                num_similar_genes_co_express_graph=_GEARS_NUM_SIMILAR_GENES_COEXPRESS_GRAPH,
+                coexpress_threshold=_GEARS_COEXPRESS_THRESHOLD,
+                uncertainty=_GEARS_UNCERTAINTY,
+                uncertainty_reg=_GEARS_UNCERTAINTY_REG,
+                direction_lambda=_GEARS_DIRECTION_LAMBDA,
+                no_perturb=_GEARS_NO_PERTURB,
+            )
+        finally:
+            os.chdir(previous_cwd)
+        if any(private_cwd.iterdir()):
+            raise RuntimeError("GEARS created an unmanifested relative-path cache artifact")
         model.train(
             epochs=_GEARS_EPOCHS,
             lr=_GEARS_LEARNING_RATE,
@@ -1072,6 +1106,7 @@ def _fit_and_predict(
             "gene_order_sha256": canonical_gene_order_sha256(gene_order),
             "resource_manifest_sha256": snapshot_bundle["manifest_sha256"],
             "perturbation_graph_policy": _GEARS_PERTURBATION_GRAPH_POLICY,
+            "derived_graph_cache_policy": _GEARS_DERIVED_GRAPH_CACHE_POLICY,
             "native_input_scale": input_scale,
             "native_input_scale_status": (
                 "PROBE_ONLY_DECISION_MEASUREMENT"
@@ -1104,6 +1139,7 @@ def _fit_and_predict(
                 "prediction_control_batch_size": _GEARS_PREDICTION_CONTROL_BATCH_SIZE,
                 "prediction_rng_policy": _GEARS_PREDICTION_RNG_POLICY,
                 "perturbation_graph_policy": _GEARS_PERTURBATION_GRAPH_POLICY,
+                "derived_graph_cache_policy": _GEARS_DERIVED_GRAPH_CACHE_POLICY,
                 "negative_prediction_policy": "clip_zero_before_response_projection",
                 "batch_size": _GEARS_BATCH_SIZE,
                 "validation_batch_size": _GEARS_TEST_BATCH_SIZE,

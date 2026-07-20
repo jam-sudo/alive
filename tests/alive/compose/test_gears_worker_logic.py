@@ -137,6 +137,16 @@ def _install_fake_gears(
     fake_utils.tar_data_download_wrapper = _unexpected_download
     fake_utils.zip_data_download_wrapper = _unexpected_download
 
+    def _fake_make_go(_data_path, _pert_list, _data_name, *, num_workers, save):
+        assert num_workers == 25
+        assert save is False
+        assert Path.cwd().name == "runtime_cwd"
+        assert not any(Path.cwd().iterdir())
+        events.append("uncached-private-go")
+        return None
+
+    fake_utils.make_GO = _fake_make_go
+
     class FakePertData:
         def __init__(self, data_path, *, default_pert_graph):
             assert default_pert_graph is False
@@ -210,11 +220,7 @@ def _install_fake_gears(
             self.best_model = None
 
         def model_initialize(self, **kwargs):
-            fake_utils.tar_data_download_wrapper(
-                "https://forbidden.invalid/go",
-                os.path.join(self.pert_data.data_path, "go_essential_all"),
-                self.pert_data.data_path,
-            )
+            fake_utils.make_GO(self.pert_data.data_path, self.pert_list, "compose_fit_role")
             events.append(("initialize", dict(kwargs)))
             # After ``train`` this attribute holds the fixed final-epoch weights.
             self.model = FakeBestModel("final_epoch")
@@ -273,9 +279,11 @@ def _install_fake_gears(
         assert obj["numeric_precision"] == "float32"
         assert obj["training_config"]["model_selection_policy"] == "fixed_final_epoch"
         assert obj["perturbation_graph_policy"] == "method_roster_intersect_gene2go"
+        assert obj["derived_graph_cache_policy"] == "private_empty_cwd_no_cache"
         assert (
             obj["training_config"]["perturbation_graph_policy"] == "method_roster_intersect_gene2go"
         )
+        assert obj["training_config"]["derived_graph_cache_policy"] == "private_empty_cwd_no_cache"
         assert obj["split_manifest"]["monitoring_policy"].endswith("no_holdout")
         events.append("checkpoint")
         file_obj.write(b"actual-trained-state")
@@ -410,6 +418,7 @@ def test_real_fit_is_offline_seeded_role_exact_and_checkpointed_before_predict(
     assert ("cuda-seed", seed) in events
     assert ("deterministic-algorithms", True) in events
     assert "network-download" not in events
+    assert "uncached-private-go" in events
     processed = next(event for event in events if event[0] == "processed-obs")
     assert processed[1] == tuple(f"cell-{index}" for index in range(16))
     assert processed[2] == frozenset({"condition", "cell_type"})

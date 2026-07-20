@@ -131,7 +131,10 @@ consumption. Every step is outcome-free and request-roster-invariant.
    nodes are exactly the canonical method roster intersected with the pinned gene2go mapping. The legacy
    `default_pert_graph=True` path is forbidden because it silently applies the separate, non-canonical
    `essential_all_data_pert_genes.pkl` symbol list and can contradict the registered `var ∩ gene2go`
-   eligibility decision. The graph policy string is frozen in the worker config and every checkpoint. The
+   eligibility decision. Custom GO construction runs in a private empty working directory with upstream
+   `make_GO(..., save=False)` forced: GEARS' implicit `./data/go_essential_<dataset>.csv` cache is neither read
+   nor written, and any other relative-path artifact is fatal. The graph and cache policy strings are frozen in
+   the worker config and every checkpoint. The
    resulting probe/model input and
    GEARS prediction roster must equal `R_gears`; any missing/extra/duplicate gene, order mismatch, response-HVG
    omission, or digest mismatch → `INVALID`. CPA and the response operator do not consume this subset. A reduced

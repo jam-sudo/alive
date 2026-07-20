@@ -63,7 +63,8 @@ identity and overrides.
   and exact manifested `gene2go_all.pkl` bytes/key roster. The worker freezes
   `perturbation_graph_policy=method_roster_intersect_gene2go` and invokes upstream
   `PertData(..., default_pert_graph=False)`; the legacy essential-symbol filter may not silently redefine global
-  eligibility.
+  eligibility. Custom GO graph construction uses a private empty cwd and `save=False`; an ambient or persisted
+  `./data/go_essential_<dataset>.csv` cache must never be read, written, or accepted as evidence.
 - [ ] Before Probe B, extend the same maintained CLI with the reviewed GEARS timing subcommand and complete raw
   command/resource sampling. Do not copy the archived timing harness.
 - [x] The outcome-independent candidate decisions are frozen in the committed canonical
