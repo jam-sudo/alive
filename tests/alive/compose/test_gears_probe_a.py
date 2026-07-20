@@ -43,6 +43,8 @@ from alive.compose.gears_probe_a import (
     PROBE_INPUT_MANIFEST_SCHEMA,
     PROBE_INPUT_TRANSFORM,
     PROTOCOL,
+    PROVIDER_ATTESTATION_PATH,
+    PROVIDER_ATTESTATION_SCHEMA,
     RAW_SCHEMA,
     REGISTRATION_PATH,
     REGISTRATION_SCHEMA,
@@ -79,6 +81,10 @@ _REPO = Path(__file__).resolve().parents[3]
 _VERIFY = _REPO / "scripts/compose/verify_gears_probe_a.py"
 _PROBE_CLI = _REPO / "scripts/compose/gears_decision_probe.py"
 _GEARS_WORKER = _REPO / "scripts/baselines/gears_worker.py"
+
+
+def _provider_pin(root: Path) -> str:
+    return sha256_file(root / PROVIDER_ATTESTATION_PATH)
 
 
 def _load_verifier():
@@ -364,18 +370,61 @@ def _manifest(files: list[dict]) -> dict:
 
 def _complete_evidence(root: Path) -> tuple[dict, dict, dict, str, str, str]:
     registration, registration_sha = _registration(root)
+    provider_source_path = root / "logs/provider_control_plane.json"
+    provider_source_path.parent.mkdir(parents=True, exist_ok=True)
+    provider_source_path.write_text('{"pod":"unit-test-pod"}\n', encoding="utf-8")
+    provider_allocation = {
+        "cpu_count": 8,
+        "ram_bytes": 64 * 1024**3,
+        "gpu_count": 1,
+        "gpu_model": "A100",
+    }
+    provider_body = {
+        "schema": PROVIDER_ATTESTATION_SCHEMA,
+        "protocol": PROTOCOL,
+        "provider": "unit-test-provider",
+        "pod_instance": "unit-test-pod",
+        "attestation_id": "unit-test-attestation",
+        "issued_at_utc": "2026-07-17T00:00:00+00:00",
+        "source_evidence_type": "provider_api_response",
+        "source_evidence_path": "logs/provider_control_plane.json",
+        "source_evidence_sha256": sha256_file(provider_source_path),
+        "image_digest": f"sha256:{'7' * 64}",
+        "allocation": provider_allocation,
+    }
+    provider_attestation = {
+        **provider_body,
+        "self_checksum": sha256_json(provider_body),
+    }
+    _write_json(root / PROVIDER_ATTESTATION_PATH, provider_attestation)
+    provider_attestation_sha = sha256_file(root / PROVIDER_ATTESTATION_PATH)
     runtime_body = {
         "schema": RUNTIME_SCHEMA,
         "protocol": PROTOCOL,
         "git_commit": COMMIT,
+        "provider_attestation_sha256": provider_attestation_sha,
+        "provider": "unit-test-provider",
         "pod_instance": "unit-test-pod",
+        "provider_allocation": provider_allocation,
+        "cgroup_effective": {
+            "version": 2,
+            "cpu_quota_us": 800000,
+            "cpu_period_us": 100000,
+            "cpu_quota_cores": 8.0,
+            "cpuset_cpus": "0-7",
+            "cpuset_cpu_count": 8,
+            "effective_cpu_cores": 8.0,
+            "memory_limit_bytes": 64 * 1024**3,
+        },
+        "host_visible": {
+            "cpu_model": "unit-test-cpu",
+            "cpu_count": 8,
+            "ram_bytes": 64 * 1024**3,
+        },
         "gpu_model": "A100",
         "gpu_uuid": "GPU-unit-test",
         "driver_version": "555.42",
         "cuda_version": "12.4",
-        "cpu_model": "unit-test-cpu",
-        "cpu_count": 8,
-        "ram_bytes": 64 * 1024**3,
         "image_digest": f"sha256:{'7' * 64}",
         "python_version": "3.12.13",
         "preparation_dependency_lock_sha256": repository_lock_sha256(PREPARATION_LOCK_PATH),
@@ -569,6 +618,7 @@ def _complete_evidence(root: Path) -> tuple[dict, dict, dict, str, str, str]:
     command_lines: list[str] = []
     for index, command in enumerate(
         (
+            "capture-runtime",
             "build-roster",
             "prepare-input",
             "verify-input",
@@ -596,21 +646,41 @@ def _complete_evidence(root: Path) -> tuple[dict, dict, dict, str, str, str]:
             "ended_at_utc": f"2026-07-17T00:00:0{index + 1}+00:00",
             "exit_code": 0,
             "primary_file_sha256": (
-                sha256_file(root / "raw.json")
-                if command == "probe-a"
+                sha256_file(root / "runtime.json")
+                if command == "capture-runtime"
                 else (
-                    registration_sha
-                    if command == "build-probe-a-registration"
+                    sha256_file(root / "raw.json")
+                    if command == "probe-a"
                     else (
-                        sha256_file(root / REPORT_PATH)
-                        if command == "build-probe-a-report"
-                        else str(index + 1) * 64
+                        registration_sha
+                        if command == "build-probe-a-registration"
+                        else (
+                            sha256_file(root / REPORT_PATH)
+                            if command == "build-probe-a-report"
+                            else str(index + 1) * 64
+                        )
                     )
                 )
             ),
             "runtime_fingerprint_sha256": runtime_body["runtime_fingerprint_sha256"],
         }
-        if command == "build-probe-a-registration":
+        if command == "capture-runtime":
+            command_body["argv"].extend(
+                [
+                    "--evidence-root",
+                    "/workspace/evidence",
+                    "--provider-attestation",
+                    f"/workspace/evidence/{PROVIDER_ATTESTATION_PATH}",
+                    "--provider-attestation-sha256",
+                    provider_attestation_sha,
+                    "--git-commit",
+                    COMMIT,
+                    "--out-runtime",
+                    "/workspace/evidence/runtime.json",
+                    "--network-disabled",
+                ]
+            )
+        elif command == "build-probe-a-registration":
             command_body["argv"].extend(
                 [
                     "--evidence-root",
@@ -703,6 +773,7 @@ def _complete_evidence(root: Path) -> tuple[dict, dict, dict, str, str, str]:
     role_paths = [
         ("commands", "commands.jsonl"),
         ("runtime", "runtime.json"),
+        ("provider_runtime_attestation", PROVIDER_ATTESTATION_PATH),
         ("inputs", "inputs.json"),
         ("role_attestation", "role_attestation.json"),
         ("probe_a_registration", REGISTRATION_PATH),
@@ -716,6 +787,7 @@ def _complete_evidence(root: Path) -> tuple[dict, dict, dict, str, str, str]:
         ("raw_sample", "raw.json"),
         ("log", "logs/run.log"),
         ("log", "logs/gene2go_nodes.json"),
+        ("log", "logs/provider_control_plane.json"),
     ]
     manifest = _manifest([_file_entry(root, role, path) for role, path in role_paths])
     _write_json(root / MANIFEST_PATH, manifest)
@@ -1047,6 +1119,7 @@ def test_registration_and_report_promote_to_consumer_compatible_admission(tmp_pa
         manifest_bytes=(tmp_path / MANIFEST_PATH).read_bytes(),
         evidence_root=tmp_path,
         evidence_manifest_sha256=manifest_sha,
+        provider_attestation_sha256=_provider_pin(tmp_path),
         expected_git_commit=COMMIT,
         verifier_code_sha256=VERIFIER_SHA,
     )
@@ -1081,6 +1154,7 @@ def test_each_negative_gate_combination_gets_a_receipt_but_never_an_admission(
         "manifest_bytes": (tmp_path / MANIFEST_PATH).read_bytes(),
         "evidence_root": tmp_path,
         "evidence_manifest_sha256": manifest_sha,
+        "provider_attestation_sha256": _provider_pin(tmp_path),
         "expected_git_commit": COMMIT,
         "verifier_code_sha256": VERIFIER_SHA,
     }
@@ -1662,6 +1736,7 @@ def test_admission_round_trips_through_real_consumer_and_rejects_v1_shape(tmp_pa
         manifest_bytes=(tmp_path / MANIFEST_PATH).read_bytes(),
         evidence_root=tmp_path,
         evidence_manifest_sha256=manifest_sha,
+        provider_attestation_sha256=_provider_pin(tmp_path),
         expected_git_commit=COMMIT,
         verifier_code_sha256=VERIFIER_SHA,
     )
@@ -1710,6 +1785,7 @@ def test_manifest_accepts_only_a_complete_role_typed_inventory(tmp_path):
         evidence_root=tmp_path,
         expected_git_commit=COMMIT,
         registration_sha256=sha256_file(tmp_path / REGISTRATION_PATH),
+        provider_attestation_sha256=_provider_pin(tmp_path),
     )
 
 
@@ -1731,6 +1807,7 @@ def test_semantic_validator_rejects_placeholder_evidence(tmp_path, path, payload
             evidence_root=tmp_path,
             expected_git_commit=COMMIT,
             registration_sha256=registration_sha,
+            provider_attestation_sha256=_provider_pin(tmp_path),
         )
 
 
@@ -1744,6 +1821,7 @@ def test_semantic_validator_rejects_placeholder_commands_and_receipt(tmp_path):
             evidence_root=tmp_path,
             expected_git_commit=COMMIT,
             registration_sha256=registration_sha,
+            provider_attestation_sha256=_provider_pin(tmp_path),
         )
 
     _, _, manifest, registration_sha, _, _ = _complete_evidence(tmp_path)
@@ -1755,6 +1833,7 @@ def test_semantic_validator_rejects_placeholder_commands_and_receipt(tmp_path):
             evidence_root=tmp_path,
             expected_git_commit=COMMIT,
             registration_sha256=registration_sha,
+            provider_attestation_sha256=_provider_pin(tmp_path),
         )
 
 
@@ -1776,6 +1855,7 @@ def test_semantic_validator_rejects_command_labels_wrapped_around_unrelated_argv
             evidence_root=tmp_path,
             expected_git_commit=COMMIT,
             registration_sha256=registration_sha,
+            provider_attestation_sha256=_provider_pin(tmp_path),
         )
 
 
@@ -1783,7 +1863,7 @@ def test_semantic_validator_allows_repeated_real_candidate_commands(tmp_path):
     _, _, manifest, registration_sha, _, _ = _complete_evidence(tmp_path)
     commands_path = tmp_path / "commands.jsonl"
     records = [json.loads(line) for line in commands_path.read_text(encoding="utf-8").splitlines()]
-    repeated = dict(records[0])
+    repeated = dict(next(record for record in records if record["command"] == "build-roster"))
     repeated["started_at_utc"] = "2026-07-17T00:01:00+00:00"
     repeated["ended_at_utc"] = "2026-07-17T00:01:01+00:00"
     repeated["primary_file_sha256"] = "e" * 64
@@ -1800,7 +1880,48 @@ def test_semantic_validator_allows_repeated_real_candidate_commands(tmp_path):
         evidence_root=tmp_path,
         expected_git_commit=COMMIT,
         registration_sha256=registration_sha,
+        provider_attestation_sha256=_provider_pin(tmp_path),
     )
+
+
+def test_semantic_validator_requires_runtime_capture_first_and_one_root(tmp_path):
+    _, _, manifest, registration_sha, _, _ = _complete_evidence(tmp_path)
+    commands_path = tmp_path / "commands.jsonl"
+    records = [json.loads(line) for line in commands_path.read_text(encoding="utf-8").splitlines()]
+    records[0], records[1] = records[1], records[0]
+    commands_path.write_text(
+        "\n".join(json.dumps(record, sort_keys=True, separators=(",", ":")) for record in records)
+        + "\n",
+        encoding="utf-8",
+    )
+    _refresh_manifest_entry(manifest, tmp_path, "commands.jsonl")
+    with pytest.raises(ProbeAEvidenceError, match="runtime capture must be the first"):
+        validate_evidence_semantics(
+            manifest,
+            evidence_root=tmp_path,
+            expected_git_commit=COMMIT,
+            registration_sha256=registration_sha,
+            provider_attestation_sha256=_provider_pin(tmp_path),
+        )
+
+    records[0], records[1] = records[1], records[0]
+    capture = records[0]
+    capture["argv"][capture["argv"].index("--evidence-root") + 1] = "/workspace/other"
+    _resign(capture)
+    commands_path.write_text(
+        "\n".join(json.dumps(record, sort_keys=True, separators=(",", ":")) for record in records)
+        + "\n",
+        encoding="utf-8",
+    )
+    _refresh_manifest_entry(manifest, tmp_path, "commands.jsonl")
+    with pytest.raises(ProbeAEvidenceError, match="not bound to provider/commit/output"):
+        validate_evidence_semantics(
+            manifest,
+            evidence_root=tmp_path,
+            expected_git_commit=COMMIT,
+            registration_sha256=registration_sha,
+            provider_attestation_sha256=_provider_pin(tmp_path),
+        )
 
 
 def test_semantic_validator_binds_probe_a_command_to_raw_artifact(tmp_path):
@@ -1822,6 +1943,7 @@ def test_semantic_validator_binds_probe_a_command_to_raw_artifact(tmp_path):
             evidence_root=tmp_path,
             expected_git_commit=COMMIT,
             registration_sha256=registration_sha,
+            provider_attestation_sha256=_provider_pin(tmp_path),
         )
 
 
@@ -1844,6 +1966,7 @@ def test_semantic_validator_binds_report_command_to_its_inputs_and_output(tmp_pa
             evidence_root=tmp_path,
             expected_git_commit=COMMIT,
             registration_sha256=registration_sha,
+            provider_attestation_sha256=_provider_pin(tmp_path),
         )
 
 
@@ -1860,6 +1983,7 @@ def test_semantic_validator_requires_exact_raw_checkpoint_roster(tmp_path):
             evidence_root=tmp_path,
             expected_git_commit=COMMIT,
             registration_sha256=registration_sha,
+            provider_attestation_sha256=_provider_pin(tmp_path),
         )
 
 
@@ -1914,6 +2038,7 @@ def test_semantic_validator_binds_control_rows_to_prepared_h5ad(tmp_path):
             evidence_root=tmp_path,
             expected_git_commit=COMMIT,
             registration_sha256=registration_sha,
+            provider_attestation_sha256=_provider_pin(tmp_path),
         )
 
 
@@ -2004,6 +2129,8 @@ def _cli_argv(root: Path, *, negative: bool = False) -> tuple[list[str], Path]:
             str(root / MANIFEST_PATH),
             "--manifest-sha256",
             manifest_sha,
+            "--provider-attestation-sha256",
+            _provider_pin(root),
             "--git-commit",
             COMMIT,
             "--expected-verifier-code-sha256",
@@ -2065,6 +2192,16 @@ def test_cli_rejects_unreviewed_verifier_code_before_publishing(tmp_path):
     assert not (tmp_path / VERIFY_PATH).exists()
 
 
+def test_cli_rejects_provider_attestation_that_differs_from_pre_run_pin(tmp_path):
+    argv, out = _cli_argv(tmp_path)
+    argv[argv.index("--provider-attestation-sha256") + 1] = "0" * 64
+    verify = _load_verifier()
+    with pytest.raises(ProbeAEvidenceError, match="external pre-run pin"):
+        verify.main(argv)
+    assert not out.exists()
+    assert not (tmp_path / VERIFY_PATH).exists()
+
+
 def test_mapping_level_validator_hashes_mappings_against_external_pins(tmp_path):
     registration, _, _, registration_sha, report_sha, manifest_sha = _complete_evidence(tmp_path)
     outputs = build_evidence_outputs(
@@ -2075,6 +2212,7 @@ def test_mapping_level_validator_hashes_mappings_against_external_pins(tmp_path)
         manifest_bytes=(tmp_path / MANIFEST_PATH).read_bytes(),
         evidence_root=tmp_path,
         evidence_manifest_sha256=manifest_sha,
+        provider_attestation_sha256=_provider_pin(tmp_path),
         expected_git_commit=COMMIT,
         verifier_code_sha256=VERIFIER_SHA,
     )

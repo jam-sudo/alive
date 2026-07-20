@@ -12,6 +12,7 @@ import hashlib
 import json
 import math
 import pickletools
+import re
 import subprocess
 import zipfile
 from collections import Counter
@@ -54,6 +55,7 @@ PROTOCOL = "COMPOSE-K562-v1"
 MANIFEST_PATH = "manifest.json"
 REPORT_PATH = "probe_a.json"
 REGISTRATION_PATH = "probe_a_registration.json"
+PROVIDER_ATTESTATION_PATH = "provider_runtime_attestation.json"
 ADMISSION_PATH = "probe_a_admission.json"
 VERIFY_PATH = "verify.json"
 
@@ -105,6 +107,7 @@ _MANIFEST_ENTRY_KEYS = {"role", "path", "sha256", "bytes"}
 _SINGLETON_ROLE_PATHS = {
     "commands": "commands.jsonl",
     "runtime": "runtime.json",
+    "provider_runtime_attestation": PROVIDER_ATTESTATION_PATH,
     "inputs": "inputs.json",
     "role_attestation": "role_attestation.json",
     "probe_a_registration": REGISTRATION_PATH,
@@ -117,7 +120,8 @@ _MULTI_ROLES = frozenset({"roster_receipt", "probe_a_checkpoint", "raw_sample", 
 _KNOWN_ROLES = frozenset(_SINGLETON_ROLE_PATHS) | _MULTI_ROLES
 
 COMMAND_RECORD_SCHEMA = "compose_gears_probe_command_record_v1"
-RUNTIME_SCHEMA = "compose_gears_probe_runtime_v2"
+RUNTIME_SCHEMA = "compose_gears_probe_runtime_v3"
+PROVIDER_ATTESTATION_SCHEMA = "compose_provider_runtime_attestation_v1"
 INPUTS_SCHEMA = "compose_gears_probe_inputs_v3"
 ROLE_ATTESTATION_SCHEMA = "compose_gears_probe_role_attestation_v2"
 ROSTER_RECEIPT_SCHEMA = "compose_gears_roster_receipt_v2"
@@ -162,6 +166,7 @@ PROBE_INPUT_MANIFEST_KEYS = {
 # separate archive contract and must not gate Probe-A admission.
 _REQUIRED_COMMANDS = frozenset(
     {
+        "capture-runtime",
         "build-roster",
         "prepare-input",
         "verify-input",
@@ -187,14 +192,16 @@ _RUNTIME_KEYS = {
     "schema",
     "protocol",
     "git_commit",
+    "provider_attestation_sha256",
+    "provider",
     "pod_instance",
+    "provider_allocation",
+    "cgroup_effective",
+    "host_visible",
     "gpu_model",
     "gpu_uuid",
     "driver_version",
     "cuda_version",
-    "cpu_model",
-    "cpu_count",
-    "ram_bytes",
     "image_digest",
     "python_version",
     "preparation_dependency_lock_sha256",
@@ -204,6 +211,32 @@ _RUNTIME_KEYS = {
     "network_disabled",
     "self_checksum",
 }
+_PROVIDER_ATTESTATION_KEYS = {
+    "schema",
+    "protocol",
+    "provider",
+    "pod_instance",
+    "attestation_id",
+    "issued_at_utc",
+    "source_evidence_type",
+    "source_evidence_path",
+    "source_evidence_sha256",
+    "image_digest",
+    "allocation",
+    "self_checksum",
+}
+_PROVIDER_ALLOCATION_KEYS = {"cpu_count", "ram_bytes", "gpu_count", "gpu_model"}
+_CGROUP_EFFECTIVE_KEYS = {
+    "version",
+    "cpu_quota_us",
+    "cpu_period_us",
+    "cpu_quota_cores",
+    "cpuset_cpus",
+    "cpuset_cpu_count",
+    "effective_cpu_cores",
+    "memory_limit_bytes",
+}
+_HOST_VISIBLE_KEYS = {"cpu_model", "cpu_count", "ram_bytes"}
 _INPUTS_KEYS = {
     "schema",
     "protocol",
@@ -1469,7 +1502,86 @@ def _timestamp(value: object, field: str) -> datetime:
     return parsed
 
 
-def _validate_runtime(payload: Mapping, *, expected_git_commit: str) -> dict:
+def _image_digest(value: object, field: str) -> str:
+    digest = _nonempty_string(value, field)
+    if not digest.startswith("sha256:") or len(digest) != 71:
+        raise ProbeAEvidenceError(f"{field} must be sha256:<64 lowercase hex>")
+    _sha(digest.removeprefix("sha256:"), field)
+    return digest
+
+
+def parse_cpuset_cpu_count(value: object, field: str = "cpuset") -> int:
+    """Validate one canonical Linux CPU-list string and return its cardinality."""
+    text = _nonempty_string(value, field)
+    ranges: list[tuple[int, int]] = []
+    for token in text.split(","):
+        if re.fullmatch(r"[0-9]+(?:-[0-9]+)?", token) is None:
+            raise ProbeAEvidenceError(f"{field} is not a canonical Linux CPU list")
+        bounds = token.split("-", 1)
+        start = int(bounds[0])
+        end = int(bounds[-1])
+        if start > end or end > 1_000_000:
+            raise ProbeAEvidenceError(f"{field} contains an invalid CPU range")
+        if ranges and start <= ranges[-1][1]:
+            raise ProbeAEvidenceError(f"{field} ranges must be sorted and non-overlapping")
+        ranges.append((start, end))
+    canonical = ",".join(str(start) if start == end else f"{start}-{end}" for start, end in ranges)
+    if text != canonical:
+        raise ProbeAEvidenceError(f"{field} is not canonically serialized")
+    return sum(end - start + 1 for start, end in ranges)
+
+
+def validate_provider_runtime_attestation(payload: Mapping) -> dict:
+    """Validate externally captured provider allocation and immutable image identity."""
+    obj = _exact_keys(payload, _PROVIDER_ATTESTATION_KEYS, "provider runtime attestation")
+    _checksum(obj, "provider runtime attestation")
+    if obj["schema"] != PROVIDER_ATTESTATION_SCHEMA or obj["protocol"] != PROTOCOL:
+        raise ProbeAEvidenceError("provider runtime attestation identity mismatch")
+    for field in ("provider", "pod_instance", "attestation_id"):
+        _nonempty_string(obj[field], f"provider attestation.{field}")
+    _timestamp(obj["issued_at_utc"], "provider attestation.issued_at_utc")
+    if obj["source_evidence_type"] not in {
+        "provider_api_response",
+        "provider_control_plane_export",
+    }:
+        raise ProbeAEvidenceError("provider attestation source evidence type is unsupported")
+    source_path = Path(
+        _nonempty_string(obj["source_evidence_path"], "provider attestation.source_evidence_path")
+    )
+    if (
+        source_path.is_absolute()
+        or ".." in source_path.parts
+        or not source_path.parts
+        or source_path.parts[0] != "logs"
+    ):
+        raise ProbeAEvidenceError("provider attestation source evidence must be under logs/")
+    _sha(obj["source_evidence_sha256"], "provider attestation.source_evidence_sha256")
+    _image_digest(obj["image_digest"], "provider attestation.image_digest")
+    allocation = _exact_keys(
+        obj["allocation"], _PROVIDER_ALLOCATION_KEYS, "provider attestation.allocation"
+    )
+    for field in ("cpu_count", "ram_bytes", "gpu_count"):
+        _positive_int(allocation[field], f"provider attestation.allocation.{field}")
+    if allocation["gpu_count"] != 1:
+        raise ProbeAEvidenceError("Probe-A provider attestation requires exactly one GPU")
+    _nonempty_string(allocation["gpu_model"], "provider attestation.allocation.gpu_model")
+    result = dict(obj)
+    result["allocation"] = dict(allocation)
+    return result
+
+
+def validate_runtime_evidence(
+    payload: Mapping,
+    *,
+    provider_attestation: Mapping,
+    provider_attestation_sha256: str,
+    expected_git_commit: str,
+) -> dict:
+    """Validate runtime evidence against an externally pinned provider attestation."""
+    attestation = validate_provider_runtime_attestation(provider_attestation)
+    attestation_sha = _sha(provider_attestation_sha256, "provider attestation SHA-256")
+    if sha256_bytes(_canonical_file_bytes(attestation)) != attestation_sha:
+        raise ProbeAEvidenceError("provider attestation mapping does not match its external pin")
     obj = _exact_keys(payload, _RUNTIME_KEYS, "runtime evidence")
     _checksum(obj, "runtime evidence")
     if obj["schema"] != RUNTIME_SCHEMA or obj["protocol"] != PROTOCOL:
@@ -1479,21 +1591,75 @@ def _validate_runtime(payload: Mapping, *, expected_git_commit: str) -> dict:
     ):
         raise ProbeAEvidenceError("runtime evidence Git commit mismatch")
     for field in (
+        "provider",
         "pod_instance",
         "gpu_model",
         "gpu_uuid",
         "driver_version",
         "cuda_version",
-        "cpu_model",
         "python_version",
     ):
         _nonempty_string(obj[field], f"runtime.{field}")
-    _positive_int(obj["cpu_count"], "runtime.cpu_count")
-    _positive_int(obj["ram_bytes"], "runtime.ram_bytes")
-    image_digest = _nonempty_string(obj["image_digest"], "runtime.image_digest")
-    if not image_digest.startswith("sha256:") or len(image_digest) != 71:
-        raise ProbeAEvidenceError("runtime.image_digest must be sha256:<64 lowercase hex>")
-    _sha(image_digest.removeprefix("sha256:"), "runtime.image_digest")
+    _image_digest(obj["image_digest"], "runtime.image_digest")
+    if (
+        _sha(obj["provider_attestation_sha256"], "runtime.provider_attestation_sha256")
+        != attestation_sha
+    ):
+        raise ProbeAEvidenceError("runtime evidence is not bound to the provider attestation pin")
+
+    allocation = _exact_keys(
+        obj["provider_allocation"], _PROVIDER_ALLOCATION_KEYS, "runtime.provider_allocation"
+    )
+    host = _exact_keys(obj["host_visible"], _HOST_VISIBLE_KEYS, "runtime.host_visible")
+    cgroup = _exact_keys(
+        obj["cgroup_effective"], _CGROUP_EFFECTIVE_KEYS, "runtime.cgroup_effective"
+    )
+    for field in ("cpu_count", "ram_bytes", "gpu_count"):
+        _positive_int(allocation[field], f"runtime.provider_allocation.{field}")
+    if allocation["gpu_count"] != 1:
+        raise ProbeAEvidenceError("Probe-A runtime requires exactly one allocated GPU")
+    _nonempty_string(allocation["gpu_model"], "runtime.provider_allocation.gpu_model")
+    for field in ("cpu_count", "ram_bytes"):
+        _positive_int(host[field], f"runtime.host_visible.{field}")
+    _nonempty_string(host["cpu_model"], "runtime.host_visible.cpu_model")
+
+    if type(cgroup["version"]) is not int or cgroup["version"] not in {1, 2}:
+        raise ProbeAEvidenceError("runtime.cgroup_effective.version must be 1 or 2")
+    quota = _positive_int(cgroup["cpu_quota_us"], "runtime.cgroup_effective.cpu_quota_us")
+    period = _positive_int(cgroup["cpu_period_us"], "runtime.cgroup_effective.cpu_period_us")
+    quota_cores = _finite(cgroup["cpu_quota_cores"], "runtime.cgroup_effective.cpu_quota_cores")
+    if quota_cores <= 0 or not math.isclose(
+        quota_cores, quota / period, rel_tol=1e-12, abs_tol=1e-15
+    ):
+        raise ProbeAEvidenceError("runtime cgroup CPU quota is internally inconsistent")
+    cpuset_count = parse_cpuset_cpu_count(
+        cgroup["cpuset_cpus"], "runtime.cgroup_effective.cpuset_cpus"
+    )
+    if cgroup["cpuset_cpu_count"] != cpuset_count:
+        raise ProbeAEvidenceError("runtime cgroup cpuset count is internally inconsistent")
+    effective_cores = _finite(
+        cgroup["effective_cpu_cores"], "runtime.cgroup_effective.effective_cpu_cores"
+    )
+    if effective_cores <= 0 or not math.isclose(
+        effective_cores, min(quota_cores, float(cpuset_count)), rel_tol=1e-12, abs_tol=1e-15
+    ):
+        raise ProbeAEvidenceError("runtime effective CPU count is internally inconsistent")
+    memory_limit = _positive_int(
+        cgroup["memory_limit_bytes"], "runtime.cgroup_effective.memory_limit_bytes"
+    )
+
+    if (
+        obj["provider"] != attestation["provider"]
+        or obj["pod_instance"] != attestation["pod_instance"]
+        or obj["image_digest"] != attestation["image_digest"]
+        or dict(allocation) != dict(attestation["allocation"])
+        or obj["gpu_model"] != allocation["gpu_model"]
+    ):
+        raise ProbeAEvidenceError("runtime evidence differs from its provider attestation")
+    if effective_cores > allocation["cpu_count"] or memory_limit > allocation["ram_bytes"]:
+        raise ProbeAEvidenceError("cgroup-effective resources exceed the provider allocation")
+    if memory_limit > host["ram_bytes"] or cpuset_count > host["cpu_count"]:
+        raise ProbeAEvidenceError("cgroup-effective resources exceed host-visible capacity")
     _sha(
         obj["preparation_dependency_lock_sha256"],
         "runtime.preparation_dependency_lock_sha256",
@@ -1506,7 +1672,11 @@ def _validate_runtime(payload: Mapping, *, expected_git_commit: str) -> dict:
     _sha(obj["runtime_fingerprint_sha256"], "runtime.runtime_fingerprint_sha256")
     if obj["network_disabled"] is not True:
         raise ProbeAEvidenceError("runtime evidence must attest network_disabled=true")
-    return dict(obj)
+    result = dict(obj)
+    result["provider_allocation"] = dict(allocation)
+    result["cgroup_effective"] = dict(cgroup)
+    result["host_visible"] = dict(host)
+    return result
 
 
 def _validate_inputs(payload: Mapping, *, expected_git_commit: str) -> dict:
@@ -1595,6 +1765,10 @@ def _validate_commands(
     expected_sha256: str,
     expected_bytes: int,
     runtime_fingerprint_sha256: str,
+    runtime_path: str,
+    runtime_sha256: str,
+    provider_attestation_path: str,
+    provider_attestation_sha256: str,
     gene2go_manifest_sha256: str,
     gene2go_nodes_artifact_sha256: str,
     manifested_files: Mapping[str, str],
@@ -1621,6 +1795,7 @@ def _validate_commands(
         raise ProbeAEvidenceError("commands evidence is empty")
     observed: Counter[str] = Counter()
     command_order: list[str] = []
+    runtime_primary_sha256: list[str] = []
     registration_primary_sha256: list[str] = []
     probe_a_primary_sha256: list[str] = []
     report_primary_sha256: list[str] = []
@@ -1663,7 +1838,38 @@ def _validate_commands(
             )
         if any("$(" in token or "`" in token for token in argv):
             raise ProbeAEvidenceError("commands argv must not use shell command substitution")
-        if command == "build-roster":
+        if command == "capture-runtime":
+            required_options = (
+                "--evidence-root",
+                "--provider-attestation",
+                "--provider-attestation-sha256",
+                "--git-commit",
+                "--out-runtime",
+            )
+            for option in required_options:
+                if argv.count(option) != 1 or argv.index(option) + 1 >= len(argv):
+                    raise ProbeAEvidenceError(
+                        f"runtime capture command requires exactly one {option} value"
+                    )
+            if argv.count("--network-disabled") != 1:
+                raise ProbeAEvidenceError(
+                    "runtime capture command requires one network-disabled attestation"
+                )
+            declared_root = Path(argv[argv.index("--evidence-root") + 1]).as_posix()
+            provider_path = argv[argv.index("--provider-attestation") + 1]
+            output = argv[argv.index("--out-runtime") + 1]
+            if (
+                Path(provider_path).as_posix()
+                != (Path(declared_root) / provider_attestation_path).as_posix()
+                or argv[argv.index("--provider-attestation-sha256") + 1]
+                != provider_attestation_sha256
+                or argv[argv.index("--git-commit") + 1] != expected_git_commit
+                or Path(output).as_posix() != (Path(declared_root) / runtime_path).as_posix()
+            ):
+                raise ProbeAEvidenceError(
+                    "runtime capture command is not bound to provider/commit/output identities"
+                )
+        elif command == "build-roster":
             required_options = (
                 "--gene2go-nodes-artifact",
                 "--gene2go-nodes-artifact-sha256",
@@ -1855,7 +2061,9 @@ def _validate_commands(
         primary_sha256 = _sha(
             obj["primary_file_sha256"], f"commands record {index}.primary_file_sha256"
         )
-        if command == "build-probe-a-registration":
+        if command == "capture-runtime":
+            runtime_primary_sha256.append(primary_sha256)
+        elif command == "build-probe-a-registration":
             registration_primary_sha256.append(primary_sha256)
         elif command == "probe-a":
             probe_a_primary_sha256.append(primary_sha256)
@@ -1881,9 +2089,12 @@ def _validate_commands(
         raise ProbeAEvidenceError(
             "commands evidence must contain each stateful maintained command exactly once"
         )
+    if command_order[0] != "capture-runtime":
+        raise ProbeAEvidenceError("runtime capture must be the first maintained command")
     critical_order = [
         command_order.index(command)
         for command in (
+            "capture-runtime",
             "prepare-input",
             "verify-input",
             "build-probe-a-registration",
@@ -1893,6 +2104,10 @@ def _validate_commands(
     ]
     if critical_order != sorted(critical_order):
         raise ProbeAEvidenceError("commands evidence violates the stateful protocol order")
+    if runtime_primary_sha256 != [_sha(runtime_sha256, "runtime evidence SHA-256")]:
+        raise ProbeAEvidenceError(
+            "runtime capture command primary SHA-256 is not bound to runtime evidence"
+        )
     if registration_primary_sha256 != [_sha(registration_sha256, "Probe-A registration SHA-256")]:
         raise ProbeAEvidenceError(
             "Probe-A registration command primary SHA-256 is not bound to registration"
@@ -2159,6 +2374,7 @@ def validate_evidence_semantics(
     evidence_root: str | Path,
     expected_git_commit: str,
     registration_sha256: str,
+    provider_attestation_sha256: str,
 ) -> None:
     """Validate the content and cross-bindings of every decision-bearing evidence role."""
     root = Path(evidence_root)
@@ -2173,9 +2389,37 @@ def validate_evidence_semantics(
     )
     validate_registration(registration, expected_git_commit=expected_git_commit)
     runtime_entry = by_role["runtime"][0]
+    provider_attestation_entry = by_role["provider_runtime_attestation"][0]
+    expected_provider_sha = _sha(
+        provider_attestation_sha256, "externally pinned provider attestation SHA-256"
+    )
+    if provider_attestation_entry["sha256"] != expected_provider_sha:
+        raise ProbeAEvidenceError(
+            "provider runtime attestation differs from its external pre-run pin"
+        )
     inputs_entry = by_role["inputs"][0]
-    runtime = _validate_runtime(
+    provider_attestation = _read_json_entry(
+        root,
+        provider_attestation_entry,
+        label="provider runtime attestation",
+    )
+    provider_attestation = validate_provider_runtime_attestation(provider_attestation)
+    source_matches = [
+        entry
+        for entry in by_role.get("log", [])
+        if entry["path"] == provider_attestation["source_evidence_path"]
+    ]
+    if (
+        len(source_matches) != 1
+        or source_matches[0]["sha256"] != provider_attestation["source_evidence_sha256"]
+    ):
+        raise ProbeAEvidenceError(
+            "provider attestation source evidence is not bound to one manifested log"
+        )
+    runtime = validate_runtime_evidence(
         _read_json_entry(root, runtime_entry, label="runtime evidence"),
+        provider_attestation=provider_attestation,
+        provider_attestation_sha256=expected_provider_sha,
         expected_git_commit=expected_git_commit,
     )
     inputs = _validate_inputs(
@@ -2230,6 +2474,10 @@ def validate_evidence_semantics(
         expected_sha256=command_entry["sha256"],
         expected_bytes=command_entry["bytes"],
         runtime_fingerprint_sha256=runtime["runtime_fingerprint_sha256"],
+        runtime_path=runtime_entry["path"],
+        runtime_sha256=runtime_entry["sha256"],
+        provider_attestation_path=provider_attestation_entry["path"],
+        provider_attestation_sha256=provider_attestation_entry["sha256"],
         gene2go_manifest_sha256=inputs["gene2go_manifest_sha256"],
         gene2go_nodes_artifact_sha256=matching_receipts[0]["gene2go_nodes_artifact_sha256"],
         manifested_files={
@@ -2446,6 +2694,7 @@ def build_evidence_outputs(
     manifest_bytes: bytes,
     evidence_root: str | Path,
     evidence_manifest_sha256: str,
+    provider_attestation_sha256: str,
     expected_git_commit: str,
     verifier_code_sha256: str,
 ) -> ProbeAAdmissionOutputs:
@@ -2488,6 +2737,7 @@ def build_evidence_outputs(
         evidence_root=evidence_root,
         expected_git_commit=expected_git_commit,
         registration_sha256=registration_sha256,
+        provider_attestation_sha256=provider_attestation_sha256,
     )
     common_verification = {
         "protocol": PROTOCOL,
@@ -2574,6 +2824,7 @@ def build_admission(
     manifest_bytes: bytes,
     evidence_root: str | Path,
     evidence_manifest_sha256: str,
+    provider_attestation_sha256: str,
     expected_git_commit: str,
     verifier_code_sha256: str,
 ) -> dict:
@@ -2586,6 +2837,7 @@ def build_admission(
         manifest_bytes=manifest_bytes,
         evidence_root=evidence_root,
         evidence_manifest_sha256=evidence_manifest_sha256,
+        provider_attestation_sha256=provider_attestation_sha256,
         expected_git_commit=expected_git_commit,
         verifier_code_sha256=verifier_code_sha256,
     )

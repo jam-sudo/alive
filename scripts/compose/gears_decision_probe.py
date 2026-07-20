@@ -22,7 +22,9 @@ import json
 import os
 import pickle
 import platform
+import re
 import stat
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -63,16 +65,21 @@ from alive.compose.gears_probe_a import (
     PROBE_INPUT_MANIFEST_SCHEMA,
     PROBE_MATRIX_DTYPE,
     PROBE_MATRIX_FORMAT,
+    PROVIDER_ATTESTATION_PATH,
     RAW_SCHEMA,
     REGISTRATION_PATH,
     REPORT_PATH,
     ROSTER_RECEIPT_SCHEMA,
+    RUNTIME_SCHEMA,
     assert_clean_approved_checkout,
     build_evidence_manifest,
     build_probe_a_report,
+    parse_cpuset_cpu_count,
     repository_lock_sha256,
     validate_probe_a_raw_artifact,
+    validate_provider_runtime_attestation,
     validate_registration,
+    validate_runtime_evidence,
 )
 from alive.compose.gene_universe import (
     AliasMap,
@@ -920,6 +927,281 @@ def _runtime_fingerprint_sha256() -> str:
     )
 
 
+def _required_text(path: Path, *, label: str) -> str:
+    if path.is_symlink():
+        raise GeneUniverseError(f"{label} must not be a symlink")
+    try:
+        value = path.read_text(encoding="utf-8").strip()
+    except OSError as exc:
+        raise GeneUniverseError(f"cannot read {label}: {exc}") from exc
+    if not value:
+        raise GeneUniverseError(f"{label} is empty")
+    return value
+
+
+def _first_cgroup_file(root: Path, relatives: tuple[str, ...], *, label: str) -> Path:
+    matches = [root / relative for relative in relatives if (root / relative).is_file()]
+    if len(matches) != 1:
+        raise GeneUniverseError(f"{label} requires exactly one recognized cgroup source")
+    return matches[0]
+
+
+def _positive_cgroup_int(value: str, *, label: str) -> int:
+    try:
+        observed = int(value)
+    except ValueError as exc:
+        raise GeneUniverseError(f"{label} must be an integer") from exc
+    if observed <= 0:
+        raise GeneUniverseError(f"{label} must be finite and positive")
+    return observed
+
+
+def _collect_cgroup_effective(cgroup_root: str | Path = "/sys/fs/cgroup") -> dict[str, object]:
+    """Collect bounded effective CPU/memory limits from cgroup v1 or v2."""
+    root = Path(cgroup_root)
+    if root.is_symlink() or not root.is_dir():
+        raise GeneUniverseError("cgroup root must be a real directory")
+    if (root / "cgroup.controllers").is_file():
+        cpu_tokens = _required_text(root / "cpu.max", label="cgroup v2 cpu.max").split()
+        if len(cpu_tokens) != 2 or cpu_tokens[0] == "max":
+            raise GeneUniverseError("cgroup v2 CPU quota must be finite")
+        quota = _positive_cgroup_int(cpu_tokens[0], label="cgroup v2 CPU quota")
+        period = _positive_cgroup_int(cpu_tokens[1], label="cgroup v2 CPU period")
+        cpuset = _required_text(root / "cpuset.cpus.effective", label="cgroup v2 effective cpuset")
+        memory_text = _required_text(root / "memory.max", label="cgroup v2 memory.max")
+        if memory_text == "max":
+            raise GeneUniverseError("cgroup v2 memory limit must be finite")
+        memory_limit = _positive_cgroup_int(memory_text, label="cgroup v2 memory limit")
+        version = 2
+    else:
+        quota_path = _first_cgroup_file(
+            root,
+            ("cpu/cpu.cfs_quota_us", "cpu,cpuacct/cpu.cfs_quota_us", "cpu.cfs_quota_us"),
+            label="cgroup v1 CPU quota",
+        )
+        period_path = quota_path.with_name("cpu.cfs_period_us")
+        quota = _positive_cgroup_int(
+            _required_text(quota_path, label="cgroup v1 CPU quota"),
+            label="cgroup v1 CPU quota",
+        )
+        period = _positive_cgroup_int(
+            _required_text(period_path, label="cgroup v1 CPU period"),
+            label="cgroup v1 CPU period",
+        )
+        cpuset_path = _first_cgroup_file(
+            root,
+            ("cpuset/cpuset.cpus", "cpuset.cpus"),
+            label="cgroup v1 cpuset",
+        )
+        cpuset = _required_text(cpuset_path, label="cgroup v1 cpuset")
+        memory_path = _first_cgroup_file(
+            root,
+            ("memory/memory.limit_in_bytes", "memory.limit_in_bytes"),
+            label="cgroup v1 memory limit",
+        )
+        memory_limit = _positive_cgroup_int(
+            _required_text(memory_path, label="cgroup v1 memory limit"),
+            label="cgroup v1 memory limit",
+        )
+        if memory_limit >= 1 << 60:
+            raise GeneUniverseError("cgroup v1 memory limit is an unlimited sentinel")
+        version = 1
+    try:
+        cpuset_count = parse_cpuset_cpu_count(cpuset, "cgroup effective cpuset")
+    except ValueError as exc:
+        raise GeneUniverseError(str(exc)) from exc
+    quota_cores = quota / period
+    return {
+        "version": version,
+        "cpu_quota_us": quota,
+        "cpu_period_us": period,
+        "cpu_quota_cores": quota_cores,
+        "cpuset_cpus": cpuset,
+        "cpuset_cpu_count": cpuset_count,
+        "effective_cpu_cores": min(quota_cores, float(cpuset_count)),
+        "memory_limit_bytes": memory_limit,
+    }
+
+
+def _collect_host_visible(proc_root: str | Path = "/proc") -> dict[str, object]:
+    root = Path(proc_root)
+    cpuinfo = _required_text(root / "cpuinfo", label="host-visible /proc/cpuinfo")
+    meminfo = _required_text(root / "meminfo", label="host-visible /proc/meminfo")
+    cpu_model = None
+    for line in cpuinfo.splitlines():
+        key, separator, value = line.partition(":")
+        if separator and key.strip() in {"model name", "Hardware", "Processor"} and value.strip():
+            cpu_model = value.strip()
+            break
+    if cpu_model is None:
+        raise GeneUniverseError("host-visible CPU model is unavailable")
+    memory_matches = re.findall(r"^MemTotal:\s*([0-9]+)\s+kB$", meminfo, flags=re.MULTILINE)
+    if len(memory_matches) != 1:
+        raise GeneUniverseError("host-visible MemTotal is unavailable or ambiguous")
+    cpu_count = os.cpu_count()
+    if type(cpu_count) is not int or cpu_count <= 0:
+        raise GeneUniverseError("host-visible CPU count is unavailable")
+    return {
+        "cpu_model": cpu_model,
+        "cpu_count": cpu_count,
+        "ram_bytes": int(memory_matches[0]) * 1024,
+    }
+
+
+def _collect_gpu_identity() -> dict[str, str]:
+    def run(*args: str) -> str:
+        try:
+            result = subprocess.run(
+                ["nvidia-smi", *args],
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise GeneUniverseError(f"cannot execute nvidia-smi: {exc}") from exc
+        if result.returncode != 0:
+            raise GeneUniverseError(f"nvidia-smi failed: {result.stderr.strip()}")
+        return result.stdout
+
+    rows = [
+        line.strip()
+        for line in run(
+            "--query-gpu=name,uuid,driver_version",
+            "--format=csv,noheader,nounits",
+        ).splitlines()
+        if line.strip()
+    ]
+    if len(rows) != 1:
+        raise GeneUniverseError("Probe-A runtime requires exactly one visible GPU")
+    fields = [field.strip() for field in rows[0].split(",")]
+    if len(fields) != 3 or any(not field for field in fields):
+        raise GeneUniverseError("nvidia-smi GPU identity output is malformed")
+    header = run()
+    cuda_matches = re.findall(r"CUDA Version:\s*([0-9]+(?:\.[0-9]+)*)", header)
+    if len(set(cuda_matches)) != 1:
+        raise GeneUniverseError("nvidia-smi CUDA version is unavailable or ambiguous")
+    return {
+        "gpu_model": fields[0],
+        "gpu_uuid": fields[1],
+        "driver_version": fields[2],
+        "cuda_version": cuda_matches[0],
+    }
+
+
+def publish_runtime_evidence(
+    *,
+    evidence_root: str | Path,
+    provider_attestation_path: str | Path,
+    provider_attestation_sha256: str,
+    expected_git_commit: str,
+    out_runtime: str | Path,
+    network_disabled: bool,
+    cgroup_root: str | Path = "/sys/fs/cgroup",
+    proc_root: str | Path = "/proc",
+) -> str:
+    """Publish one provider-bound, cgroup-aware, write-once runtime artifact."""
+    try:
+        assert_clean_approved_checkout(expected_git_commit)
+    except ValueError as exc:
+        raise GeneUniverseError(str(exc)) from exc
+    if network_disabled is not True:
+        raise GeneUniverseError("runtime publication requires network-disabled attestation")
+    root_arg = Path(evidence_root)
+    if root_arg.is_symlink():
+        raise GeneUniverseError("evidence root must not be a symlink")
+    try:
+        root = root_arg.resolve(strict=True)
+    except OSError as exc:
+        raise GeneUniverseError("evidence root is missing or unreadable") from exc
+    if not root.is_dir():
+        raise GeneUniverseError("evidence root must be a directory")
+    provider_path = Path(provider_attestation_path)
+    if provider_path.is_symlink():
+        raise GeneUniverseError("provider runtime attestation must not be a symlink")
+    try:
+        provider_path = provider_path.resolve(strict=True)
+    except OSError as exc:
+        raise GeneUniverseError("provider runtime attestation is missing") from exc
+    if provider_path != root / PROVIDER_ATTESTATION_PATH or not provider_path.is_file():
+        raise GeneUniverseError(
+            f"provider runtime attestation must be {PROVIDER_ATTESTATION_PATH} under evidence root"
+        )
+    expected_provider_sha = _require_sha256(
+        provider_attestation_sha256, label="provider runtime attestation SHA-256"
+    )
+    provider_bytes = _stable_bytes(provider_path, label="provider runtime attestation")
+    if sha256_bytes(provider_bytes) != expected_provider_sha:
+        raise GeneUniverseError("provider runtime attestation file SHA-256 mismatch")
+    try:
+        provider_attestation = json.loads(provider_bytes)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise GeneUniverseError(f"cannot parse provider runtime attestation: {exc}") from exc
+    if not isinstance(provider_attestation, dict) or provider_bytes != canonical_file_bytes(
+        provider_attestation
+    ):
+        raise GeneUniverseError("provider runtime attestation must be canonical JSON")
+    try:
+        provider = validate_provider_runtime_attestation(provider_attestation)
+    except ValueError as exc:
+        raise GeneUniverseError(str(exc)) from exc
+    source_path = root / str(provider["source_evidence_path"])
+    source_bytes = _stable_bytes(source_path, label="provider control-plane source evidence")
+    if sha256_bytes(source_bytes) != provider["source_evidence_sha256"]:
+        raise GeneUniverseError("provider control-plane source evidence SHA-256 mismatch")
+
+    output = Path(out_runtime).resolve(strict=False)
+    if output != root / "runtime.json":
+        raise GeneUniverseError("runtime evidence must be runtime.json under evidence root")
+    if output.exists() or output.is_symlink():
+        raise GeneUniverseError("runtime evidence destination already exists")
+    cgroup = _collect_cgroup_effective(cgroup_root)
+    host = _collect_host_visible(proc_root)
+    gpu = _collect_gpu_identity()
+    allocation = dict(provider["allocation"])
+    worker, _worker_path = _load_gears_worker_module()
+    gears_lock_sha = _gears_dependency_lock_sha256()
+    try:
+        packages_sha = worker.verify_probe_runtime_identity(
+            expected_gears_lock_sha256=gears_lock_sha
+        )
+    except ValueError as exc:
+        raise GeneUniverseError(f"GEARS runtime identity is invalid: {exc}") from exc
+    body = {
+        "schema": RUNTIME_SCHEMA,
+        "protocol": PROTOCOL,
+        "git_commit": expected_git_commit,
+        "provider_attestation_sha256": expected_provider_sha,
+        "provider": provider["provider"],
+        "pod_instance": provider["pod_instance"],
+        "provider_allocation": allocation,
+        "cgroup_effective": cgroup,
+        "host_visible": host,
+        **gpu,
+        "image_digest": provider["image_digest"],
+        "python_version": platform.python_version(),
+        "preparation_dependency_lock_sha256": _preparation_dependency_lock_sha256(),
+        "gears_dependency_lock_sha256": gears_lock_sha,
+        "gears_installed_packages_sha256": _require_sha256(
+            packages_sha, label="installed GEARS package roster SHA-256"
+        ),
+        "runtime_fingerprint_sha256": _runtime_fingerprint_sha256(),
+        "network_disabled": True,
+    }
+    runtime = {**body, "self_checksum": self_checksum(body)}
+    try:
+        validate_runtime_evidence(
+            runtime,
+            provider_attestation=provider,
+            provider_attestation_sha256=expected_provider_sha,
+            expected_git_commit=expected_git_commit,
+        )
+    except ValueError as exc:
+        raise GeneUniverseError(str(exc)) from exc
+    encoded = canonical_file_bytes(runtime)
+    atomic_write_once(output, encoded.decode("utf-8"))
+    return sha256_bytes(encoded)
+
+
 def _fit_spec(block: dict) -> FitRoleArtifactSpec:
     return FitRoleArtifactSpec(
         path=block["path"],
@@ -1588,6 +1870,13 @@ def publish_evidence_manifest(
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
+    runtime = commands.add_parser("capture-runtime")
+    runtime.add_argument("--evidence-root", required=True)
+    runtime.add_argument("--provider-attestation", required=True)
+    runtime.add_argument("--provider-attestation-sha256", required=True)
+    runtime.add_argument("--git-commit", required=True)
+    runtime.add_argument("--out-runtime", required=True)
+    runtime.add_argument("--network-disabled", action="store_true", required=True)
     roster = commands.add_parser("build-roster")
     roster.add_argument("--payload-dir", required=True)
     roster.add_argument("--candidate-artifact", required=True)
@@ -1665,7 +1954,17 @@ def _parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     """Run one maintained probe-preparation command."""
     args = _parser().parse_args(argv)
-    if args.command == "build-roster":
+    if args.command == "capture-runtime":
+        runtime_sha256 = publish_runtime_evidence(
+            evidence_root=args.evidence_root,
+            provider_attestation_path=args.provider_attestation,
+            provider_attestation_sha256=args.provider_attestation_sha256,
+            expected_git_commit=args.git_commit,
+            out_runtime=args.out_runtime,
+            network_disabled=args.network_disabled,
+        )
+        _emit_command_result(command="capture-runtime", primary_file_sha256=runtime_sha256)
+    elif args.command == "build-roster":
         result = build_roster(
             payload_dir=args.payload_dir,
             candidate_artifact=args.candidate_artifact,

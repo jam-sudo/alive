@@ -62,6 +62,10 @@ def _verifier_code_sha256() -> str:
     repository = Path(__file__).resolve().parents[2]
     closure = (
         "scripts/compose/verify_gears_probe_a.py",
+        # The manifested command validator hashes and semantically validates this driver.
+        "scripts/compose/gears_decision_probe.py",
+        # The runtime collector delegates lock/package identity to this maintained worker.
+        "scripts/baselines/gears_worker.py",
         "src/alive/compose/gears_probe_a.py",
         "src/alive/compose/approximation_bias.py",
         # fit_role.row_identity_sha256 participates in the prepared-input admission decision.
@@ -87,6 +91,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--registration-sha256", required=True)
     parser.add_argument("--manifest", required=True)
     parser.add_argument("--manifest-sha256", required=True)
+    parser.add_argument(
+        "--provider-attestation-sha256",
+        required=True,
+        help="independently recorded pre-run SHA-256 of provider_runtime_attestation.json",
+    )
     parser.add_argument("--git-commit", required=True)
     parser.add_argument(
         "--expected-verifier-code-sha256",
@@ -132,6 +141,7 @@ def main(argv: list[str] | None = None) -> int:
         manifest_bytes=_read_bytes(manifest_path, label="evidence manifest"),
         evidence_root=root,
         evidence_manifest_sha256=args.manifest_sha256,
+        provider_attestation_sha256=args.provider_attestation_sha256,
         expected_git_commit=args.git_commit,
         verifier_code_sha256=observed_verifier_code_sha256,
     )

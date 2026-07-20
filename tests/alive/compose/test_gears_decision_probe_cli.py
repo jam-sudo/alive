@@ -7,6 +7,7 @@ import json
 import pickle
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import anndata as ad
 import numpy as np
@@ -64,6 +65,89 @@ def _write_contract(path: Path, core: dict) -> Path:
     payload = {**core, "manifest_checksum": sha256_json(core)}
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return path
+
+
+def _write_provider_attestation(root: Path, probe, **overrides) -> Path:
+    allocation = {
+        "cpu_count": 8,
+        "gpu_count": 1,
+        "gpu_model": "NVIDIA A100-SXM4-80GB",
+        "ram_bytes": 64 * 1024**3,
+    }
+    source_path = root / "logs/provider_control_plane.json"
+    source_path.parent.mkdir(parents=True, exist_ok=True)
+    source_path.write_text('{"pod":"unit-test-pod"}\n', encoding="utf-8")
+    body = {
+        "schema": "compose_provider_runtime_attestation_v1",
+        "protocol": probe.PROTOCOL,
+        "provider": "unit-test-provider",
+        "pod_instance": "unit-test-pod",
+        "attestation_id": "unit-test-attestation",
+        "issued_at_utc": "2026-07-20T00:00:00Z",
+        "source_evidence_type": "provider_api_response",
+        "source_evidence_path": "logs/provider_control_plane.json",
+        "source_evidence_sha256": sha256_file(source_path),
+        "image_digest": "sha256:" + "b" * 64,
+        "allocation": allocation,
+    }
+    for key, value in overrides.items():
+        if key == "allocation":
+            body["allocation"] = {**allocation, **value}
+        else:
+            body[key] = value
+    payload = {**body, "self_checksum": sha256_json(body)}
+    path = root / probe.PROVIDER_ATTESTATION_PATH
+    path.write_text(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+def _write_runtime_sources(tmp_path: Path, *, version: int) -> tuple[Path, Path]:
+    cgroup = tmp_path / f"cgroup-v{version}"
+    cgroup.mkdir()
+    if version == 2:
+        (cgroup / "cgroup.controllers").write_text("cpu cpuset memory\n")
+        (cgroup / "cpu.max").write_text("800000 100000\n")
+        (cgroup / "cpuset.cpus.effective").write_text("0-7\n")
+        (cgroup / "memory.max").write_text(f"{64 * 1024**3}\n")
+    else:
+        for controller in ("cpu", "cpuset", "memory"):
+            (cgroup / controller).mkdir()
+        (cgroup / "cpu/cpu.cfs_quota_us").write_text("800000\n")
+        (cgroup / "cpu/cpu.cfs_period_us").write_text("100000\n")
+        (cgroup / "cpuset/cpuset.cpus").write_text("0-7\n")
+        (cgroup / "memory/memory.limit_in_bytes").write_text(f"{64 * 1024**3}\n")
+    proc = tmp_path / f"proc-v{version}"
+    proc.mkdir()
+    (proc / "cpuinfo").write_text("processor : 0\nmodel name : Unit Test CPU\n")
+    (proc / "meminfo").write_text("MemTotal:       67108864 kB\n")
+    return cgroup, proc
+
+
+def _patch_runtime_dependencies(probe, monkeypatch) -> None:
+    monkeypatch.setattr(probe, "assert_clean_approved_checkout", lambda _commit: None)
+    monkeypatch.setattr(probe.os, "cpu_count", lambda: 8)
+    monkeypatch.setattr(
+        probe,
+        "_collect_gpu_identity",
+        lambda: {
+            "gpu_model": "NVIDIA A100-SXM4-80GB",
+            "gpu_uuid": "GPU-unit-test",
+            "driver_version": "550.54.15",
+            "cuda_version": "12.4",
+        },
+    )
+    worker = SimpleNamespace(verify_probe_runtime_identity=lambda **_kwargs: "e" * 64)
+    monkeypatch.setattr(
+        probe,
+        "_load_gears_worker_module",
+        lambda: (worker, _REPO / "scripts/baselines/gears_worker.py"),
+    )
+    monkeypatch.setattr(probe, "_preparation_dependency_lock_sha256", lambda: "c" * 64)
+    monkeypatch.setattr(probe, "_gears_dependency_lock_sha256", lambda: "d" * 64)
+    monkeypatch.setattr(probe, "_runtime_fingerprint_sha256", lambda: "f" * 64)
 
 
 def _pinned_gene2go_source(tmp_path: Path, probe, monkeypatch, genes: list[str]) -> dict:
@@ -543,3 +627,192 @@ def test_prepare_rejects_receipt_that_passes_file_sha_but_is_internally_inconsis
     )
     with pytest.raises(GeneUniverseError, match="roster_file_sha256"):
         _run("d", bad_sha)
+
+
+@pytest.mark.parametrize("cgroup_version", [1, 2])
+def test_runtime_publication_binds_provider_and_cgroup_limits(
+    tmp_path, monkeypatch, cgroup_version
+):
+    probe = _load(_PROBE, f"_probe_test_runtime_v{cgroup_version}")
+    evidence = tmp_path / "evidence"
+    evidence.mkdir()
+    attestation = _write_provider_attestation(evidence, probe)
+    cgroup, proc = _write_runtime_sources(tmp_path, version=cgroup_version)
+    _patch_runtime_dependencies(probe, monkeypatch)
+
+    output = evidence / "runtime.json"
+    observed_sha = probe.publish_runtime_evidence(
+        evidence_root=evidence,
+        provider_attestation_path=attestation,
+        provider_attestation_sha256=sha256_file(attestation),
+        expected_git_commit="1" * 40,
+        out_runtime=output,
+        network_disabled=True,
+        cgroup_root=cgroup,
+        proc_root=proc,
+    )
+
+    runtime = json.loads(output.read_text())
+    assert observed_sha == sha256_file(output)
+    assert runtime["schema"] == "compose_gears_probe_runtime_v3"
+    assert runtime["provider_attestation_sha256"] == sha256_file(attestation)
+    assert runtime["provider_allocation"]["cpu_count"] == 8
+    assert runtime["cgroup_effective"] == {
+        "version": cgroup_version,
+        "cpu_quota_us": 800000,
+        "cpu_period_us": 100000,
+        "cpu_quota_cores": 8.0,
+        "cpuset_cpus": "0-7",
+        "cpuset_cpu_count": 8,
+        "effective_cpu_cores": 8.0,
+        "memory_limit_bytes": 64 * 1024**3,
+    }
+    assert runtime["host_visible"] == {
+        "cpu_model": "Unit Test CPU",
+        "cpu_count": 8,
+        "ram_bytes": 64 * 1024**3,
+    }
+
+
+@pytest.mark.parametrize(
+    ("version", "relative", "replacement", "message"),
+    [
+        (2, "cpu.max", "max 100000\n", "CPU quota must be finite"),
+        (2, "memory.max", "max\n", "memory limit must be finite"),
+        (1, "cpu/cpu.cfs_quota_us", "-1\n", "CPU quota must be finite and positive"),
+        (
+            1,
+            "memory/memory.limit_in_bytes",
+            f"{1 << 60}\n",
+            "memory limit is an unlimited sentinel",
+        ),
+    ],
+)
+def test_runtime_publication_rejects_unbounded_cgroups(
+    tmp_path, monkeypatch, version, relative, replacement, message
+):
+    probe = _load(_PROBE, f"_probe_test_unbounded_{version}_{Path(relative).name}")
+    evidence = tmp_path / "evidence"
+    evidence.mkdir()
+    attestation = _write_provider_attestation(evidence, probe)
+    cgroup, proc = _write_runtime_sources(tmp_path, version=version)
+    (cgroup / relative).write_text(replacement)
+    _patch_runtime_dependencies(probe, monkeypatch)
+
+    output = evidence / "runtime.json"
+    with pytest.raises(GeneUniverseError, match=message):
+        probe.publish_runtime_evidence(
+            evidence_root=evidence,
+            provider_attestation_path=attestation,
+            provider_attestation_sha256=sha256_file(attestation),
+            expected_git_commit="1" * 40,
+            out_runtime=output,
+            network_disabled=True,
+            cgroup_root=cgroup,
+            proc_root=proc,
+        )
+    assert not output.exists()
+
+
+@pytest.mark.parametrize("cpuset", ["0-3,3-7", "0-03", "1,0", "0-", ""])
+def test_runtime_publication_rejects_noncanonical_cpuset(tmp_path, cpuset):
+    probe = _load(_PROBE, f"_probe_test_cpuset_{len(cpuset)}_{cpuset.count(',')}")
+    cgroup, _proc = _write_runtime_sources(tmp_path, version=2)
+    (cgroup / "cpuset.cpus.effective").write_text(cpuset + "\n")
+
+    with pytest.raises(GeneUniverseError, match="cpuset|CPU list|empty"):
+        probe._collect_cgroup_effective(cgroup)
+
+
+def test_runtime_publication_rejects_unpinned_attestation_and_overwrite(tmp_path, monkeypatch):
+    probe = _load(_PROBE, "_probe_test_runtime_pin_overwrite")
+    evidence = tmp_path / "evidence"
+    evidence.mkdir()
+    attestation = _write_provider_attestation(evidence, probe)
+    cgroup, proc = _write_runtime_sources(tmp_path, version=2)
+    _patch_runtime_dependencies(probe, monkeypatch)
+    output = evidence / "runtime.json"
+
+    with pytest.raises(GeneUniverseError, match="attestation file SHA-256 mismatch"):
+        probe.publish_runtime_evidence(
+            evidence_root=evidence,
+            provider_attestation_path=attestation,
+            provider_attestation_sha256="0" * 64,
+            expected_git_commit="1" * 40,
+            out_runtime=output,
+            network_disabled=True,
+            cgroup_root=cgroup,
+            proc_root=proc,
+        )
+    assert not output.exists()
+
+    provider_source = evidence / "logs/provider_control_plane.json"
+    original_source = provider_source.read_text(encoding="utf-8")
+    provider_source.write_text('{"pod":"different"}\n', encoding="utf-8")
+    with pytest.raises(GeneUniverseError, match="source evidence SHA-256 mismatch"):
+        probe.publish_runtime_evidence(
+            evidence_root=evidence,
+            provider_attestation_path=attestation,
+            provider_attestation_sha256=sha256_file(attestation),
+            expected_git_commit="1" * 40,
+            out_runtime=output,
+            network_disabled=True,
+            cgroup_root=cgroup,
+            proc_root=proc,
+        )
+    provider_source.write_text(original_source, encoding="utf-8")
+    assert not output.exists()
+
+    linked_root = tmp_path / "linked-evidence"
+    linked_root.symlink_to(evidence, target_is_directory=True)
+    with pytest.raises(GeneUniverseError, match="evidence root must not be a symlink"):
+        probe.publish_runtime_evidence(
+            evidence_root=linked_root,
+            provider_attestation_path=linked_root / probe.PROVIDER_ATTESTATION_PATH,
+            provider_attestation_sha256=sha256_file(attestation),
+            expected_git_commit="1" * 40,
+            out_runtime=linked_root / "runtime.json",
+            network_disabled=True,
+            cgroup_root=cgroup,
+            proc_root=proc,
+        )
+    assert not output.exists()
+
+    kwargs = {
+        "evidence_root": evidence,
+        "provider_attestation_path": attestation,
+        "provider_attestation_sha256": sha256_file(attestation),
+        "expected_git_commit": "1" * 40,
+        "out_runtime": output,
+        "network_disabled": True,
+        "cgroup_root": cgroup,
+        "proc_root": proc,
+    }
+    probe.publish_runtime_evidence(**kwargs)
+    with pytest.raises(GeneUniverseError, match="destination already exists"):
+        probe.publish_runtime_evidence(**kwargs)
+
+
+def test_runtime_publication_rejects_provider_gpu_mismatch(tmp_path, monkeypatch):
+    probe = _load(_PROBE, "_probe_test_runtime_gpu_mismatch")
+    evidence = tmp_path / "evidence"
+    evidence.mkdir()
+    attestation = _write_provider_attestation(
+        evidence,
+        probe,
+        allocation={"gpu_model": "NVIDIA H100 80GB HBM3"},
+    )
+    cgroup, proc = _write_runtime_sources(tmp_path, version=2)
+    _patch_runtime_dependencies(probe, monkeypatch)
+
+    with pytest.raises(GeneUniverseError, match="differs from its provider attestation"):
+        probe.publish_runtime_evidence(
+            evidence_root=evidence,
+            provider_attestation_path=attestation,
+            provider_attestation_sha256=sha256_file(attestation),
+            expected_git_commit="1" * 40,
+            out_runtime=evidence / "runtime.json",
+            network_disabled=True,
+            cgroup_root=cgroup,
+            proc_root=proc,
+        )
