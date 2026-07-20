@@ -5,7 +5,7 @@
 > **이 문서는 아무것도 정의하지 않는다** — 세부(task)는 plan, claim은 spec, exact param은 config,
 > 시간순 audit는 git이 authoritative다([sources of truth](../../CLAUDE.md#sources)). 상태 행이 authoritative
 > 문서와 어긋나면 **authoritative 문서가 옳다**; 이 인덱스를 갱신한다.
-> **Updated:** 2026-07-21 @ `3b163a6` (branch `main`)
+> **Updated:** 2026-07-21 @ `f1ccc7c` (branch `main`)
 > **갱신 트리거:** sub-project/gate **상태가 바뀔 때만**(커밋마다 아님).
 > **종결 상태:** COMPOSE seal이 정확히 한 번 열리면 이 인덱스는 **frozen/은퇴**한다. 이후 진행상황은
 > seal 결과와 post-hoc analysis가 대신한다.
@@ -173,8 +173,9 @@ branch에서 추적 가능하게 기록한다. `LOCAL` ledger ID만으로는 이
    with owner-canonical image lock, digest-qualified build images, signed canonical Cosign approval subject,
    pinned Cosign executable and trusted root, no-network/read-only/non-root runtime, one evidence-only writable bind, and positive/negative
    receipt schemas v3 that bind the verifier image digest and external image-lock SHA. The previous `dbcb…` value
-   is retained only as a historical diagnostic candidate. An approved Linux builder must still build, sign,
-   independently verify, preload, and owner-freeze the real image and external lock pin. Until that occurs this is
+   is retained only as a historical diagnostic candidate. An isolated Linux image builder—not a scientific pod's
+   own root filesystem—must still build, sign, independently verify, preload, and owner-freeze the real image and
+   external lock pin. Until that occurs this is
    **RELEASE-BLOCKED** and authorizes neither a Probe-A rerun nor any seal opening. The governing design is
    `specs/2026-07-20-compose-probe-a-verifier-root-of-trust-design.md`.
 5. **§2.5 release gate** — worker locked-env integration green + 독립 검토 + **owner의 exact Git SHA 승인** → runbook을 `READY`로.
