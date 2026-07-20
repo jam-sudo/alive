@@ -54,6 +54,7 @@ from alive.compose.gears_probe_a import (
     VERIFY_PATH,
     ProbeAEvidenceError,
     _matrix_identity,
+    _validate_negative_receipt_binding,
     _validate_prepared_input_chain,
     assert_clean_approved_checkout,
     assert_report_manifest_binding,
@@ -65,7 +66,6 @@ from alive.compose.gears_probe_a import (
     validate_admission,
     validate_evidence_manifest,
     validate_evidence_semantics,
-    validate_negative_verification,
     validate_probe_a_report,
     validate_registration,
 )
@@ -729,17 +729,68 @@ def _complete_evidence(root: Path) -> tuple[dict, dict, dict, str, str, str]:
     )
 
 
-def _negative_evidence(root: Path) -> tuple[dict, dict, dict, str, str, str]:
-    """Convert the complete fixture into a bridge-failed, fully bound evidence tree."""
+# Under the frozen equal tolerances, bridge error is one term in the control
+# cap, so bridge-only failure is unreachable. These are all reachable negative
+# verdict combinations.
+_NEGATIVE_GATE_VERDICTS = {
+    "determinism": {
+        "determinism": "fail",
+        "control_count": "pass",
+        "output_bridge": "pass",
+    },
+    "control": {
+        "determinism": "pass",
+        "control_count": "fail",
+        "output_bridge": "pass",
+    },
+    "determinism_control": {
+        "determinism": "fail",
+        "control_count": "fail",
+        "output_bridge": "pass",
+    },
+    "control_bridge": {
+        "determinism": "pass",
+        "control_count": "fail",
+        "output_bridge": "fail",
+    },
+    "all": {
+        "determinism": "fail",
+        "control_count": "fail",
+        "output_bridge": "fail",
+    },
+}
+
+
+def _negative_evidence(
+    root: Path, *, failure_mode: str = "control_bridge"
+) -> tuple[dict, dict, dict, str, str, str]:
+    """Convert the complete fixture into one fully bound negative evidence tree."""
+    if failure_mode not in _NEGATIVE_GATE_VERDICTS:
+        raise ValueError(f"unknown negative fixture mode: {failure_mode}")
     registration, _, _, registration_sha, _, _ = _complete_evidence(root)
     (root / REPORT_PATH).unlink()
     (root / MANIFEST_PATH).unlink()
 
     raw_path = root / "raw.json"
     raw = json.loads(raw_path.read_text(encoding="utf-8"))
-    count_400 = next(item for item in raw["control_predictions"] if item["count"] == 400)
-    count_400["per_control_prediction"] = [[-0.1, 1.0] for _ in range(400)]
-    raw["bridge_prediction"] = [-0.1, 1.0]
+    if failure_mode in {"determinism", "determinism_control", "all"}:
+        checkpoint_path = root / raw["determinism_runs"][1]["checkpoint_path"]
+        with zipfile.ZipFile(checkpoint_path, "a", compression=zipfile.ZIP_STORED) as archive:
+            info = zipfile.ZipInfo("archive/data/1", date_time=(2026, 1, 1, 0, 0, 0))
+            info.external_attr = 0o100600 << 16
+            archive.writestr(info, b"independent-fit-drift")
+        raw["determinism_runs"][1].update(
+            checkpoint_sha256=sha256_file(checkpoint_path),
+            checkpoint_bytes=checkpoint_path.stat().st_size,
+            prediction=[-0.2, 0.9],
+        )
+    if failure_mode in {"control", "determinism_control", "all"}:
+        count_301 = next(item for item in raw["control_predictions"] if item["count"] == 301)
+        count_301["public_prediction"] = [-0.1, 1.0]
+    if failure_mode in {"control_bridge", "all"}:
+        count_400 = next(item for item in raw["control_predictions"] if item["count"] == 400)
+        count_400["per_control_prediction"] = [[-0.1, 1.0] for _ in range(400)]
+        raw["bridge_prediction"] = [-0.1, 1.0]
     _resign(raw)
     _write_json(raw_path, raw)
 
@@ -882,12 +933,20 @@ def test_report_and_manifest_builders_derive_the_complete_contract(tmp_path):
     }
 
 
-def test_failed_report_is_derived_from_measured_gates_and_remains_verifiable(tmp_path):
-    registration, report, _, registration_sha, _, _ = _negative_evidence(tmp_path)
+@pytest.mark.parametrize(
+    ("failure_mode", "expected_verdicts"),
+    list(_NEGATIVE_GATE_VERDICTS.items()),
+)
+def test_failed_report_is_derived_from_each_measured_gate_combination(
+    tmp_path, failure_mode, expected_verdicts
+):
+    registration, report, _, registration_sha, _, _ = _negative_evidence(
+        tmp_path, failure_mode=failure_mode
+    )
     assert report["status"] == "failed"
-    assert report["determinism"]["verdict"] == "pass"
-    assert report["control_count"]["verdict"] == "fail"
-    assert report["output_bridge"]["verdict"] == "fail"
+    assert {
+        gate: report[gate]["verdict"] for gate in ("determinism", "control_count", "output_bridge")
+    } == expected_verdicts
     _validate_report(tmp_path, report, registration, registration_sha)
 
     report["status"] = "pass"
@@ -1004,9 +1063,15 @@ def test_registration_and_report_promote_to_consumer_compatible_admission(tmp_pa
     )
 
 
-def test_negative_result_gets_verifier_receipt_but_never_an_admission(tmp_path):
+@pytest.mark.parametrize(
+    ("failure_mode", "expected_verdicts"),
+    list(_NEGATIVE_GATE_VERDICTS.items()),
+)
+def test_each_negative_gate_combination_gets_a_receipt_but_never_an_admission(
+    tmp_path, failure_mode, expected_verdicts
+):
     registration, report, _, registration_sha, report_sha, manifest_sha = _negative_evidence(
-        tmp_path
+        tmp_path, failure_mode=failure_mode
     )
     kwargs = {
         "report_bytes": (tmp_path / REPORT_PATH).read_bytes(),
@@ -1023,12 +1088,8 @@ def test_negative_result_gets_verifier_receipt_but_never_an_admission(tmp_path):
     assert outputs.admission is None
     assert outputs.verification["schema"] == NEGATIVE_VERIFICATION_SCHEMA
     assert outputs.verification["status"] == "failed"
-    assert outputs.verification["gate_verdicts"] == {
-        "determinism": "pass",
-        "control_count": "fail",
-        "output_bridge": "fail",
-    }
-    validate_negative_verification(
+    assert outputs.verification["gate_verdicts"] == expected_verdicts
+    _validate_negative_receipt_binding(
         outputs.verification,
         report=report,
         report_sha256=report_sha,
@@ -1041,10 +1102,11 @@ def test_negative_result_gets_verifier_receipt_but_never_an_admission(tmp_path):
         build_admission(**kwargs)
 
     forged = json.loads(json.dumps(outputs.verification))
-    forged["gate_verdicts"]["output_bridge"] = "pass"
+    failed_gate = next(gate for gate, verdict in expected_verdicts.items() if verdict == "fail")
+    forged["gate_verdicts"][failed_gate] = "pass"
     _resign(forged)
     with pytest.raises(ProbeAEvidenceError, match="gate verdicts differ"):
-        validate_negative_verification(
+        _validate_negative_receipt_binding(
             forged,
             report=report,
             report_sha256=report_sha,

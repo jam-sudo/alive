@@ -2356,7 +2356,7 @@ def _canonical_file_bytes(payload: Mapping) -> bytes:
     return canonical_file_bytes(payload)
 
 
-def validate_negative_verification(
+def _validate_negative_receipt_binding(
     verification: Mapping,
     *,
     report: Mapping,
@@ -2366,7 +2366,13 @@ def validate_negative_verification(
     verifier_code_sha256: str,
     expected_git_commit: str,
 ) -> None:
-    """Validate a verifier-bound negative result that grants no admission."""
+    """Validate receipt/report binding after the complete evidence chain has passed.
+
+    This is deliberately an internal helper rather than a standalone evidence
+    validator.  ``build_evidence_outputs`` first validates the registration,
+    report, manifest, raw artifacts, and their semantic bindings, then calls
+    this helper to check the newly constructed negative receipt.
+    """
     receipt = _exact_keys(
         verification,
         _NEGATIVE_VERIFICATION_KEYS,
@@ -2516,7 +2522,7 @@ def build_evidence_outputs(
     verification_bytes = _canonical_file_bytes(verification)
     verification_sha256 = sha256_bytes(verification_bytes)
     if report["status"] == "failed":
-        validate_negative_verification(
+        _validate_negative_receipt_binding(
             verification,
             report=report,
             report_sha256=report_sha256,
