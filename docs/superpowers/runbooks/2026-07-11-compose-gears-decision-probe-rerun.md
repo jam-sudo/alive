@@ -129,6 +129,12 @@ candidate verifier closure pin is
 non-operational candidate until the clean implementation commit and this exact pin are independently recomputed
 and accepted; it does not authorize a pod or sealed run.
 
+The verifier-root correction supersedes `dbcb…` as an operational approval mechanism. That value remains useful
+only for regression diagnosis: Python cannot hash `.pth` startup hooks, stdlib, loader, or native libraries before
+they execute. Future approval therefore requires the clean exact commit **and** a signed, owner-frozen,
+single-platform OCI digest/image-lock pair under
+`specs/2026-07-20-compose-probe-a-verifier-root-of-trust-design.md`. No such real image lock exists yet.
+
 Record the final test counts and exact Git SHA in the pod evidence manifest.
 
 ## 3. Pod admission and identity capture
@@ -342,7 +348,7 @@ logs/                         stdout/stderr and raw CPU/GPU/RSS samples for ever
 Successful offline verification then adds exactly one common post-manifest artifact:
 
 ```text
-verify.json                   write-once PASS or failed receipt + verifier-code-closure SHA-256
+verify.json                   write-once PASS/failed receipt + verifier closure/image digest/image-lock SHA-256
 ```
 
 Only a PASS adds the following second post-manifest artifact:
@@ -409,11 +415,16 @@ minimum/median/maximum, negative
 fraction, near-integer fraction (distance to the nearest integer `<= 1e-6`), and bridge maximum absolute error.
 A self-reported aggregate or verdict cannot substitute for these raw arrays.
 
-The offline verifier requires `--expected-verifier-code-sha256`, `--provider-attestation-sha256`,
-`--payload-sha256`, and `--roster-receipt-sha256` as independently recorded pre-run pins. Before importing ALIVE
-decision code it rejects `PYTHONPATH`, enabled user-site packages, a non-repository `alive` origin, or numerical/
-H5AD dependencies loaded outside the active interpreter prefix; for an operational CLI invocation it then computes
-and compares the complete byte-level verifier closure before those decision imports occur. It requires the provider
+The offline verifier requires `--expected-verifier-code-sha256`, `--verifier-image-digest`,
+`--verifier-image-lock-sha256`, `--provider-attestation-sha256`, `--payload-sha256`, and
+`--roster-receipt-sha256` as independently recorded pre-run pins. **Operational verification must use**
+`scripts/compose/run_gears_probe_a_verifier_oci.py` and an externally pinned
+`compose_probe_a_verifier_image_lock_v1`; direct host-Python execution is diagnostic/test-only. The launcher
+validates the clean commit, canonical external lock SHA, Dockerfile/`uv.lock`, exact OCI digest, canonical signed
+approval subject, Cosign bundle/executable/trusted root, certificate identity, and issuer before starting an already-present image with
+`--pull=never --network=none --read-only --cap-drop=ALL --security-opt=no-new-privileges=true`. The repository is
+not mounted and only the evidence root is writable. Inside that image, before importing ALIVE decision code, the
+verifier rejects startup/environment divergence and compares the complete byte-level verifier closure. It requires the provider
 pin to match runtime/command bindings, and requires the payload and selected
 receipt pins to match the archived immutable upstream chain. It always
 emits one canonical, write-once
@@ -423,13 +434,15 @@ receipt or admission is a failed attempt; neither file may be overwritten or reu
 conservative local source superset: its three maintained entrypoints, `pyproject.toml`, `uv.lock`, every Python
 source under `src/alive`, the active Python executable, and the version plus actual installed non-cache file bytes
 of every distribution in the active verifier environment. A same-version locally modified direct or transitive
-dependency therefore changes the pin.
+dependency therefore changes the diagnostic pin. The image digest additionally authenticates pre-verifier
+startup hooks, stdlib, loader, and native libraries that self-hashing cannot cover.
 This intentionally over-approximates the transitive decision closure rather than trusting a caller-supplied label.
-A passing `verify.json` uses `compose_gears_probe_a_verification_v2` with exactly
+A passing `verify.json` uses `compose_gears_probe_a_verification_v3` with exactly
 `{schema, protocol, status, git_commit, registration_sha256, payload_sha256, roster_receipt_sha256, report_sha256,
-evidence_manifest_sha256, verifier_code_sha256, output_bridge, self_checksum}`.
+evidence_manifest_sha256, verifier_code_sha256, verifier_image_digest, verifier_image_lock_sha256,
+output_bridge, self_checksum}`.
 
-A negative `verify.json` uses `compose_gears_probe_a_negative_verification_v2` and adds exactly
+A negative `verify.json` uses `compose_gears_probe_a_negative_verification_v3` and adds exactly
 `gate_verdicts={determinism,control_count,output_bridge}`. Its status is `failed`, at least one gate must be `fail`,
 all three verdicts and the complete bridge object must equal the hash-bound report, and its report, manifest,
 registration, Git, and verifier-closure pins follow the same validation rules as PASS. This receipt is durable
@@ -451,6 +464,11 @@ the immutable registration and receipt bytes plus both independently anchored pi
 `--probe-a-verification-sha256`; it must not derive either expected value from the evidence it is validating.
 A self-consistent admission/registration/receipt rewrite is not authenticated unless its external pins also
 match.
+
+The image-root design, threat boundary, build/approval sequence, comparison with the retired host-only method,
+and the higher-assurance Nix/Guix reproducible-build candidate are authoritative in
+`docs/superpowers/specs/2026-07-20-compose-probe-a-verifier-root-of-trust-design.md`. No image lock has yet been
+owner-frozen, so this runbook remains `RELEASE-BLOCKED` even when all local tests pass.
 
 Decision-bearing manifest roles are content-validated, not merely inventoried. `commands.jsonl` contains at
 least one successful invocation of each maintained CLI subcommand that actually exists:

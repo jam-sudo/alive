@@ -52,7 +52,7 @@ REPORT_SCHEMA = "compose_gears_probe_a_report_v8"
 RAW_SCHEMA = "compose_gears_probe_a_raw_measurements_v6"
 REGISTRATION_SCHEMA = PROBE_A_REGISTRATION_SCHEMA
 VERIFICATION_SCHEMA = PROBE_A_VERIFICATION_SCHEMA
-NEGATIVE_VERIFICATION_SCHEMA = "compose_gears_probe_a_negative_verification_v2"
+NEGATIVE_VERIFICATION_SCHEMA = "compose_gears_probe_a_negative_verification_v3"
 MANIFEST_SCHEMA = "compose_gears_probe_a_evidence_manifest_v8"
 # The admission schema and its validation live exactly once, in the sole consumer
 # gate ``approximation_bias.validate_probe_a_evidence``. Re-export the name and
@@ -111,6 +111,8 @@ _NEGATIVE_VERIFICATION_KEYS = {
     "registration_sha256",
     "payload_sha256",
     "roster_receipt_sha256",
+    "verifier_image_digest",
+    "verifier_image_lock_sha256",
     "report_sha256",
     "evidence_manifest_sha256",
     "verifier_code_sha256",
@@ -3147,6 +3149,8 @@ def _validate_negative_receipt_binding(
     registration_sha256: str,
     payload_sha256: str,
     roster_receipt_sha256: str,
+    verifier_image_digest: str,
+    verifier_image_lock_sha256: str,
     evidence_manifest_sha256: str,
     verifier_code_sha256: str,
     expected_git_commit: str,
@@ -3178,6 +3182,9 @@ def _validate_negative_receipt_binding(
         "registration_sha256": _sha(registration_sha256, "registration_sha256"),
         "payload_sha256": _sha(payload_sha256, "payload_sha256"),
         "roster_receipt_sha256": _sha(roster_receipt_sha256, "roster_receipt_sha256"),
+        "verifier_image_lock_sha256": _sha(
+            verifier_image_lock_sha256, "verifier_image_lock_sha256"
+        ),
         "report_sha256": _sha(report_sha256, "report_sha256"),
         "evidence_manifest_sha256": _sha(evidence_manifest_sha256, "evidence_manifest_sha256"),
         "verifier_code_sha256": _sha(verifier_code_sha256, "verifier_code_sha256"),
@@ -3185,6 +3192,8 @@ def _validate_negative_receipt_binding(
     for field, expected in expected_pins.items():
         if _sha(receipt[field], f"negative verification.{field}") != expected:
             raise ProbeAEvidenceError(f"Probe-A negative verification {field} mismatch")
+    if receipt["verifier_image_digest"] != verifier_image_digest:
+        raise ProbeAEvidenceError("Probe-A negative verification image digest mismatch")
     if sha256_bytes(_canonical_file_bytes(report)) != expected_pins["report_sha256"]:
         raise ProbeAEvidenceError("Probe-A failed report mapping does not match its external pin")
 
@@ -3236,6 +3245,8 @@ def build_evidence_outputs(
     provider_attestation_sha256: str,
     payload_sha256: str,
     roster_receipt_sha256: str,
+    verifier_image_digest: str,
+    verifier_image_lock_sha256: str,
     expected_git_commit: str,
     verifier_code_sha256: str,
 ) -> ProbeAAdmissionOutputs:
@@ -3288,6 +3299,10 @@ def build_evidence_outputs(
         "registration_sha256": _sha(registration_sha256, "registration_sha256"),
         "payload_sha256": _sha(payload_sha256, "payload_sha256"),
         "roster_receipt_sha256": _sha(roster_receipt_sha256, "roster_receipt_sha256"),
+        "verifier_image_digest": _image_digest(verifier_image_digest, "verifier_image_digest"),
+        "verifier_image_lock_sha256": _sha(
+            verifier_image_lock_sha256, "verifier_image_lock_sha256"
+        ),
         "report_sha256": _sha(report_sha256, "report_sha256"),
         "evidence_manifest_sha256": _sha(evidence_manifest_sha256, "evidence_manifest_sha256"),
         "verifier_code_sha256": _sha(verifier_code_sha256, "verifier_code_sha256"),
@@ -3324,6 +3339,8 @@ def build_evidence_outputs(
             registration_sha256=registration_sha256,
             payload_sha256=payload_sha256,
             roster_receipt_sha256=roster_receipt_sha256,
+            verifier_image_digest=verifier_image_digest,
+            verifier_image_lock_sha256=verifier_image_lock_sha256,
             evidence_manifest_sha256=evidence_manifest_sha256,
             verifier_code_sha256=verifier_code_sha256,
             expected_git_commit=expected_git_commit,
@@ -3374,6 +3391,8 @@ def build_admission(
     provider_attestation_sha256: str,
     payload_sha256: str,
     roster_receipt_sha256: str,
+    verifier_image_digest: str,
+    verifier_image_lock_sha256: str,
     expected_git_commit: str,
     verifier_code_sha256: str,
 ) -> dict:
@@ -3389,6 +3408,8 @@ def build_admission(
         provider_attestation_sha256=provider_attestation_sha256,
         payload_sha256=payload_sha256,
         roster_receipt_sha256=roster_receipt_sha256,
+        verifier_image_digest=verifier_image_digest,
+        verifier_image_lock_sha256=verifier_image_lock_sha256,
         expected_git_commit=expected_git_commit,
         verifier_code_sha256=verifier_code_sha256,
     )

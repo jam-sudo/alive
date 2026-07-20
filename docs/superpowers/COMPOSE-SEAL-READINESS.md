@@ -5,7 +5,7 @@
 > **이 문서는 아무것도 정의하지 않는다** — 세부(task)는 plan, claim은 spec, exact param은 config,
 > 시간순 audit는 git이 authoritative다([sources of truth](../../CLAUDE.md#sources)). 상태 행이 authoritative
 > 문서와 어긋나면 **authoritative 문서가 옳다**; 이 인덱스를 갱신한다.
-> **Updated:** 2026-07-20 @ `844399e` (branch `main`)
+> **Updated:** 2026-07-21 @ `3b163a6` (branch `main`)
 > **갱신 트리거:** sub-project/gate **상태가 바뀔 때만**(커밋마다 아님).
 > **종결 상태:** COMPOSE seal이 정확히 한 번 열리면 이 인덱스는 **frozen/은퇴**한다. 이후 진행상황은
 > seal 결과와 post-hoc analysis가 대신한다.
@@ -120,9 +120,9 @@ branch에서 추적 가능하게 기록한다. `LOCAL` ledger ID만으로는 이
    with altered parameters. The maintained local verifier now derives `pass|failed` from the three frozen gates,
    emits a hash-bound negative `verify.json`, and makes admission structurally absent on failure. This closes the
    negative-result software contract but does not retroactively complete the archived run or clear any activation
-   blocker. The exact current verifier source-closure SHA-256 is
-   `577c754dc72681aed8ad531ae3a3c2671a4c8cd11a1d941ee97ba44b5e4ff036`; it must be independently reviewed,
-   rebound to the final clean implementation commit, and recomputed after any closure edit before future use.
+   blocker. That revision's now-retired verifier source-closure SHA-256 was
+   `577c754dc72681aed8ad531ae3a3c2671a4c8cd11a1d941ee97ba44b5e4ff036`; it was never an operational image pin
+   and must not be reused.
    **2026-07-20 Probe-A runtime-attestation hardening:** commit
    `d8e34bb10160e1825ed526097ce0cdbd141ab495` replaces ambiguous host CPU/RAM evidence with runtime-v3's
    separate provider-allocation, cgroup-effective, and host-visible views. It adds a write-once maintained
@@ -167,6 +167,16 @@ branch에서 추적 가능하게 기록한다. `LOCAL` ledger ID만으로는 이
    local Compose suite passes 1539 tests with one pre-existing AnnData warning, plus clean Ruff check/format and
    `git diff --check`. A clean commit and independent exact-commit/pin acceptance remain mandatory; no pod or seal
    authorization follows from this local correction.
+   **2026-07-20 verifier root-of-trust correction (local implementation; image not frozen):** independent review
+   established that Python self-hashing starts too late to authenticate `.pth` startup hooks, stdlib, loader, and
+   native libraries. The operational verifier is therefore moved to a single-platform digest-qualified OCI image,
+   with owner-canonical image lock, digest-qualified build images, signed canonical Cosign approval subject,
+   pinned Cosign executable and trusted root, no-network/read-only/non-root runtime, one evidence-only writable bind, and positive/negative
+   receipt schemas v3 that bind the verifier image digest and external image-lock SHA. The previous `dbcb…` value
+   is retained only as a historical diagnostic candidate. An approved Linux builder must still build, sign,
+   independently verify, preload, and owner-freeze the real image and external lock pin. Until that occurs this is
+   **RELEASE-BLOCKED** and authorizes neither a Probe-A rerun nor any seal opening. The governing design is
+   `specs/2026-07-20-compose-probe-a-verifier-root-of-trust-design.md`.
 5. **§2.5 release gate** — worker locked-env integration green + 독립 검토 + **owner의 exact Git SHA 승인** → runbook을 `READY`로.
 6. **A100 sealed-run pod: runbook 실행** — 유효한 `ActivationRecord`(requirement별 non-empty evidence) + clean tree 하에 `phase2a → preflight → phase2b --confirm-seal`. **COMPOSE seal 1회 개봉** — `TG-K562`와 독립.
 

@@ -1,0 +1,11 @@
+**
+!pyproject.toml
+!uv.lock
+!src/
+!src/**
+!scripts/
+!scripts/compose/
+!scripts/compose/verify_gears_probe_a.py
+!scripts/compose/gears_decision_probe.py
+!scripts/baselines/
+!scripts/baselines/gears_worker.py

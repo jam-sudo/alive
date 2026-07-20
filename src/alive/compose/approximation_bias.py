@@ -24,7 +24,7 @@ APPROXIMATION_BIAS_SCHEMA = "compose_approximation_bias_report_v3"
 PROBE_A_SCHEMA = "compose_gears_probe_a_admission_v3"
 PROBE_A_REGISTRATION_SCHEMA = "compose_gears_probe_a_registration_v2"
 PROBE_A_OWNER_POLICY_SCHEMA = "compose_gears_probe_a_owner_policy_v1"
-PROBE_A_VERIFICATION_SCHEMA = "compose_gears_probe_a_verification_v2"
+PROBE_A_VERIFICATION_SCHEMA = "compose_gears_probe_a_verification_v3"
 PROTOCOL = "COMPOSE-K562-v1"
 REPRESENTATION = "raw_pseudobulk_approximation"
 PROBE_A_REPRESENTATION = "log_normalized_pseudobulk"
@@ -137,6 +137,8 @@ _PROBE_A_VERIFICATION_KEYS = frozenset(
         "registration_sha256",
         "payload_sha256",
         "roster_receipt_sha256",
+        "verifier_image_digest",
+        "verifier_image_lock_sha256",
         "report_sha256",
         "evidence_manifest_sha256",
         "verifier_code_sha256",
@@ -611,11 +613,20 @@ def validate_probe_a_verification(
     for field in (
         "payload_sha256",
         "roster_receipt_sha256",
+        "verifier_image_lock_sha256",
         "report_sha256",
         "evidence_manifest_sha256",
         "verifier_code_sha256",
     ):
         _hex64(obj[field], field=f"Probe-A verification.{field}")
+    image_digest = obj["verifier_image_digest"]
+    if (
+        not isinstance(image_digest, str)
+        or not image_digest.startswith("sha256:")
+        or len(image_digest) != 71
+    ):
+        _fail("Probe-A verification.verifier_image_digest is malformed")
+    _hex64(image_digest.removeprefix("sha256:"), field="Probe-A verifier image digest")
     bridge = _exact_keys(
         obj["output_bridge"],
         _OUTPUT_BRIDGE_KEYS,

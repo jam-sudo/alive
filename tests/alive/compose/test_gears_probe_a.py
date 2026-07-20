@@ -100,6 +100,8 @@ from alive.provenance import sha256_file, sha256_json
 SHA = "a" * 64
 COMMIT = "b" * 40
 VERIFIER_SHA = "9" * 64
+VERIFIER_IMAGE_DIGEST = f"sha256:{'8' * 64}"
+VERIFIER_IMAGE_LOCK_SHA = "7" * 64
 
 _REPO = Path(__file__).resolve().parents[3]
 _VERIFY = _REPO / "scripts/compose/verify_gears_probe_a.py"
@@ -131,6 +133,8 @@ def build_evidence_outputs(*, evidence_root, **kwargs):
     return _core_build_evidence_outputs(
         evidence_root=evidence_root,
         **_external_pins(Path(evidence_root)),
+        verifier_image_digest=VERIFIER_IMAGE_DIGEST,
+        verifier_image_lock_sha256=VERIFIER_IMAGE_LOCK_SHA,
         **kwargs,
     )
 
@@ -139,6 +143,8 @@ def build_admission(*, evidence_root, **kwargs):
     return _core_build_admission(
         evidence_root=evidence_root,
         **_external_pins(Path(evidence_root)),
+        verifier_image_digest=VERIFIER_IMAGE_DIGEST,
+        verifier_image_lock_sha256=VERIFIER_IMAGE_LOCK_SHA,
         **kwargs,
     )
 
@@ -148,6 +154,8 @@ def _validate_negative_receipt_binding(verification, **kwargs):
         verification,
         payload_sha256=verification["payload_sha256"],
         roster_receipt_sha256=verification["roster_receipt_sha256"],
+        verifier_image_digest=verification["verifier_image_digest"],
+        verifier_image_lock_sha256=verification["verifier_image_lock_sha256"],
         **kwargs,
     )
 
@@ -2725,6 +2733,10 @@ def _cli_argv(root: Path, *, negative: bool = False) -> tuple[list[str], Path]:
             COMMIT,
             "--expected-verifier-code-sha256",
             verifier_code_sha,
+            "--verifier-image-digest",
+            VERIFIER_IMAGE_DIGEST,
+            "--verifier-image-lock-sha256",
+            VERIFIER_IMAGE_LOCK_SHA,
             "--out-admission",
             str(out),
         ],

@@ -146,7 +146,35 @@ def _bootstrap_expected_verifier_pin(argv: list[str]) -> None:
         raise RuntimeError(
             "verifier source/runtime closure differs from the independently reviewed pre-run pin"
         )
+    image_option = "--verifier-image-digest"
+    if argv.count(image_option) != 1 or argv.index(image_option) + 1 >= len(argv):
+        raise RuntimeError(f"offline verifier requires exactly one {image_option}")
+    image_digest = argv[argv.index(image_option) + 1]
+    if (
+        len(image_digest) != 71
+        or not image_digest.startswith("sha256:")
+        or any(character not in "0123456789abcdef" for character in image_digest[7:])
+    ):
+        raise RuntimeError("offline verifier image digest is malformed")
+    if os.environ.get("ALIVE_VERIFIER_IMAGE_DIGEST") != image_digest:
+        raise RuntimeError("offline verifier image digest differs from the launcher boundary")
 
+    commit_option = "--git-commit"
+    if argv.count(commit_option) != 1 or argv.index(commit_option) + 1 >= len(argv):
+        raise RuntimeError(f"offline verifier requires exactly one {commit_option}")
+    expected_commit = argv[argv.index(commit_option) + 1]
+    baked_commit_path = Path(__file__).resolve().parents[2] / ".alive-verifier-git-commit"
+    try:
+        baked_commit = baked_commit_path.read_text(encoding="ascii")
+    except OSError as exc:
+        raise RuntimeError("operational verifier must run from its baked OCI image") from exc
+    if baked_commit != f"{expected_commit}\n":
+        raise RuntimeError("baked verifier commit differs from the owner-approved Git commit")
+
+
+if __name__ == "__main__" and sys.argv[1:] == ["--print-verifier-code-sha256"]:
+    print(_verifier_code_sha256())
+    raise SystemExit(0)
 
 if __name__ == "__main__":
     _bootstrap_expected_verifier_pin(sys.argv[1:])
@@ -202,6 +230,17 @@ def _pinned_output_path(root: Path, supplied: str) -> Path:
     return actual
 
 
+def _assert_approved_source(expected_git_commit: str) -> None:
+    """Accept either a clean checkout or the commit baked into the pinned image."""
+    repository = Path(__file__).resolve().parents[2]
+    baked = repository / ".alive-verifier-git-commit"
+    if baked.exists():
+        if baked.is_symlink() or baked.read_text(encoding="ascii") != f"{expected_git_commit}\n":
+            raise ProbeAEvidenceError("baked verifier Git commit differs from the owner pin")
+        return
+    assert_clean_approved_checkout(expected_git_commit)
+
+
 def main(argv: list[str] | None = None) -> int:
     """Publish one receipt; publish an admission only when every gate passes."""
     parser = argparse.ArgumentParser(description=__doc__)
@@ -233,10 +272,20 @@ def main(argv: list[str] | None = None) -> int:
         required=True,
         help="independently reviewed pre-run SHA-256 of the verifier source closure",
     )
+    parser.add_argument(
+        "--verifier-image-digest",
+        required=True,
+        help="owner-pinned platform-specific OCI manifest digest",
+    )
+    parser.add_argument(
+        "--verifier-image-lock-sha256",
+        required=True,
+        help="external SHA-256 of the signed verifier image lock",
+    )
     parser.add_argument("--out-admission", required=True)
     args = parser.parse_args(argv)
 
-    assert_clean_approved_checkout(args.git_commit)
+    _assert_approved_source(args.git_commit)
 
     observed_verifier_code_sha256 = _verifier_code_sha256()
     if args.expected_verifier_code_sha256 != observed_verifier_code_sha256:
@@ -275,6 +324,8 @@ def main(argv: list[str] | None = None) -> int:
         provider_attestation_sha256=args.provider_attestation_sha256,
         payload_sha256=args.payload_sha256,
         roster_receipt_sha256=args.roster_receipt_sha256,
+        verifier_image_digest=args.verifier_image_digest,
+        verifier_image_lock_sha256=args.verifier_image_lock_sha256,
         expected_git_commit=args.git_commit,
         verifier_code_sha256=observed_verifier_code_sha256,
     )
