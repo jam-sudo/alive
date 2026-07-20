@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Offline verifier and sole admission publisher for GEARS Probe A."""
+"""Offline verifier for GEARS Probe A and sole publisher of passing admissions."""
 
 from __future__ import annotations
 
@@ -78,7 +78,7 @@ def _verifier_code_sha256() -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Verify a complete evidence tree and publish one write-once admission."""
+    """Publish one receipt; publish an admission only when every gate passes."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--evidence-root", required=True)
     parser.add_argument("--report", required=True)
@@ -136,14 +136,23 @@ def main(argv: list[str] | None = None) -> int:
         verifier_code_sha256=observed_verifier_code_sha256,
     )
     atomic_write_once(verify_path, outputs.verification_bytes.decode("utf-8"))
-    admission_bytes = canonical_file_bytes(outputs.admission)
-    atomic_write_once(out_path, admission_bytes.decode("utf-8"))
+    admission_bytes = (
+        canonical_file_bytes(outputs.admission) if outputs.admission is not None else None
+    )
+    if admission_bytes is not None:
+        atomic_write_once(out_path, admission_bytes.decode("utf-8"))
     print(
         json.dumps(
             {
-                "admission_sha256": sha256_bytes(admission_bytes),
-                "schema": outputs.admission["schema"],
-                "status": "OK",
+                "admission_sha256": (
+                    sha256_bytes(admission_bytes) if admission_bytes is not None else None
+                ),
+                "schema": (
+                    outputs.admission["schema"]
+                    if outputs.admission is not None
+                    else outputs.verification["schema"]
+                ),
+                "status": "OK" if outputs.admission is not None else "NEGATIVE_RESULT",
                 "verification_sha256": outputs.verification_sha256,
             },
             sort_keys=True,

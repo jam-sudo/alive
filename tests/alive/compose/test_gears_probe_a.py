@@ -37,6 +37,7 @@ from alive.compose.gears_probe_a import (
     INPUTS_SCHEMA,
     MANIFEST_PATH,
     MANIFEST_SCHEMA,
+    NEGATIVE_VERIFICATION_SCHEMA,
     PREPARATION_LOCK_PATH,
     PROBE_INPUT_ADATA_SCHEMA,
     PROBE_INPUT_MANIFEST_SCHEMA,
@@ -56,6 +57,7 @@ from alive.compose.gears_probe_a import (
     _validate_prepared_input_chain,
     assert_clean_approved_checkout,
     assert_report_manifest_binding,
+    build_admission,
     build_evidence_manifest,
     build_evidence_outputs,
     build_probe_a_report,
@@ -63,6 +65,7 @@ from alive.compose.gears_probe_a import (
     validate_admission,
     validate_evidence_manifest,
     validate_evidence_semantics,
+    validate_negative_verification,
     validate_probe_a_report,
     validate_registration,
 )
@@ -726,6 +729,63 @@ def _complete_evidence(root: Path) -> tuple[dict, dict, dict, str, str, str]:
     )
 
 
+def _negative_evidence(root: Path) -> tuple[dict, dict, dict, str, str, str]:
+    """Convert the complete fixture into a bridge-failed, fully bound evidence tree."""
+    registration, _, _, registration_sha, _, _ = _complete_evidence(root)
+    (root / REPORT_PATH).unlink()
+    (root / MANIFEST_PATH).unlink()
+
+    raw_path = root / "raw.json"
+    raw = json.loads(raw_path.read_text(encoding="utf-8"))
+    count_400 = next(item for item in raw["control_predictions"] if item["count"] == 400)
+    count_400["per_control_prediction"] = [[-0.1, 1.0] for _ in range(400)]
+    raw["bridge_prediction"] = [-0.1, 1.0]
+    _resign(raw)
+    _write_json(raw_path, raw)
+
+    report = build_probe_a_report(
+        evidence_root=root,
+        raw_sample_path="raw.json",
+        raw_sample_sha256=sha256_file(raw_path),
+        registration=registration,
+        registration_sha256=registration_sha,
+        expected_git_commit=COMMIT,
+        runtime_sha256=sha256_file(root / "runtime.json"),
+        inputs_sha256=sha256_file(root / "inputs.json"),
+        source_fingerprint_sha256=sha256_file(root / "probe_a_source.txt"),
+    )
+    _write_json(root / REPORT_PATH, report)
+
+    command_path = root / "commands.jsonl"
+    commands = [json.loads(line) for line in command_path.read_text(encoding="utf-8").splitlines()]
+    for command in commands:
+        if command["command"] == "probe-a":
+            command["primary_file_sha256"] = sha256_file(raw_path)
+        elif command["command"] == "build-probe-a-report":
+            command["primary_file_sha256"] = sha256_file(root / REPORT_PATH)
+            sha_index = command["argv"].index("--raw-sample-sha256") + 1
+            command["argv"][sha_index] = sha256_file(raw_path)
+        _resign(command)
+    command_path.write_text(
+        "\n".join(
+            json.dumps(command, sort_keys=True, separators=(",", ":")) for command in commands
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    manifest = build_evidence_manifest(evidence_root=root, expected_git_commit=COMMIT)
+    _write_json(root / MANIFEST_PATH, manifest)
+    return (
+        registration,
+        report,
+        manifest,
+        registration_sha,
+        sha256_file(root / REPORT_PATH),
+        sha256_file(root / MANIFEST_PATH),
+    )
+
+
 def _validate_report(root: Path, report: dict, registration: dict, registration_sha: str) -> None:
     validate_probe_a_report(
         report,
@@ -820,6 +880,20 @@ def test_report_and_manifest_builders_derive_the_complete_contract(tmp_path):
     assert {entry["path"] for entry in rebuilt_manifest["files"]} == {
         path.relative_to(tmp_path).as_posix() for path in tmp_path.rglob("*") if path.is_file()
     }
+
+
+def test_failed_report_is_derived_from_measured_gates_and_remains_verifiable(tmp_path):
+    registration, report, _, registration_sha, _, _ = _negative_evidence(tmp_path)
+    assert report["status"] == "failed"
+    assert report["determinism"]["verdict"] == "pass"
+    assert report["control_count"]["verdict"] == "fail"
+    assert report["output_bridge"]["verdict"] == "fail"
+    _validate_report(tmp_path, report, registration, registration_sha)
+
+    report["status"] = "pass"
+    _resign(report)
+    with pytest.raises(ProbeAEvidenceError, match="status disagrees"):
+        _validate_report(tmp_path, report, registration, registration_sha)
 
 
 def test_registration_builder_derives_scale_from_manifest_and_is_write_once(tmp_path, monkeypatch):
@@ -928,6 +1002,57 @@ def test_registration_and_report_promote_to_consumer_compatible_admission(tmp_pa
         verification_sha256=outputs.verification_sha256,
         expected_git_commit=COMMIT,
     )
+
+
+def test_negative_result_gets_verifier_receipt_but_never_an_admission(tmp_path):
+    registration, report, _, registration_sha, report_sha, manifest_sha = _negative_evidence(
+        tmp_path
+    )
+    kwargs = {
+        "report_bytes": (tmp_path / REPORT_PATH).read_bytes(),
+        "report_sha256": report_sha,
+        "registration_bytes": (tmp_path / REGISTRATION_PATH).read_bytes(),
+        "registration_sha256": registration_sha,
+        "manifest_bytes": (tmp_path / MANIFEST_PATH).read_bytes(),
+        "evidence_root": tmp_path,
+        "evidence_manifest_sha256": manifest_sha,
+        "expected_git_commit": COMMIT,
+        "verifier_code_sha256": VERIFIER_SHA,
+    }
+    outputs = build_evidence_outputs(**kwargs)
+    assert outputs.admission is None
+    assert outputs.verification["schema"] == NEGATIVE_VERIFICATION_SCHEMA
+    assert outputs.verification["status"] == "failed"
+    assert outputs.verification["gate_verdicts"] == {
+        "determinism": "pass",
+        "control_count": "fail",
+        "output_bridge": "fail",
+    }
+    validate_negative_verification(
+        outputs.verification,
+        report=report,
+        report_sha256=report_sha,
+        registration_sha256=registration_sha,
+        evidence_manifest_sha256=manifest_sha,
+        verifier_code_sha256=VERIFIER_SHA,
+        expected_git_commit=COMMIT,
+    )
+    with pytest.raises(ProbeAEvidenceError, match="admission is forbidden"):
+        build_admission(**kwargs)
+
+    forged = json.loads(json.dumps(outputs.verification))
+    forged["gate_verdicts"]["output_bridge"] = "pass"
+    _resign(forged)
+    with pytest.raises(ProbeAEvidenceError, match="gate verdicts differ"):
+        validate_negative_verification(
+            forged,
+            report=report,
+            report_sha256=report_sha,
+            registration_sha256=registration_sha,
+            evidence_manifest_sha256=manifest_sha,
+            verifier_code_sha256=VERIFIER_SHA,
+            expected_git_commit=COMMIT,
+        )
 
 
 @pytest.mark.parametrize(
@@ -1796,8 +1921,9 @@ def test_binding_covers_report_registration_identities_and_exact_raw_roster(tmp_
         )
 
 
-def _cli_argv(root: Path) -> tuple[list[str], Path]:
-    _, _, _, registration_sha, report_sha, manifest_sha = _complete_evidence(root)
+def _cli_argv(root: Path, *, negative: bool = False) -> tuple[list[str], Path]:
+    evidence_builder = _negative_evidence if negative else _complete_evidence
+    _, _, _, registration_sha, report_sha, manifest_sha = evidence_builder(root)
     verifier_code_sha = _load_verifier()._verifier_code_sha256()
     out = root / ADMISSION_PATH
     return (
@@ -1847,6 +1973,24 @@ def test_cli_publishes_a_registration_and_manifest_bound_admission(tmp_path):
     assert admission["evidence_manifest_sha256"] == argv[argv.index("--manifest-sha256") + 1]
     assert admission["verification_sha256"] == sha256_file(verification_path)
     assert verification["verifier_code_sha256"] == verify._verifier_code_sha256()
+
+
+def test_cli_publishes_negative_receipt_without_admission(tmp_path, capsys):
+    argv, out = _cli_argv(tmp_path, negative=True)
+    verify = _load_verifier()
+    assert verify.main(argv) == 0
+    assert not out.exists()
+    verification_path = tmp_path / VERIFY_PATH
+    verification = json.loads(verification_path.read_text(encoding="utf-8"))
+    assert verification["schema"] == NEGATIVE_VERIFICATION_SCHEMA
+    assert verification["status"] == "failed"
+    published = json.loads(capsys.readouterr().out)
+    assert published == {
+        "admission_sha256": None,
+        "schema": NEGATIVE_VERIFICATION_SCHEMA,
+        "status": "NEGATIVE_RESULT",
+        "verification_sha256": sha256_file(verification_path),
+    }
 
 
 def test_cli_rejects_unreviewed_verifier_code_before_publishing(tmp_path):

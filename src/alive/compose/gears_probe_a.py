@@ -39,10 +39,11 @@ from alive.compose.approximation_bias import (
 from alive.compose.fit_role import row_identity_sha256
 from alive.provenance import sha256_bytes, sha256_file, sha256_json
 
-REPORT_SCHEMA = "compose_gears_probe_a_report_v7"
+REPORT_SCHEMA = "compose_gears_probe_a_report_v8"
 RAW_SCHEMA = "compose_gears_probe_a_raw_measurements_v6"
 REGISTRATION_SCHEMA = PROBE_A_REGISTRATION_SCHEMA
 VERIFICATION_SCHEMA = PROBE_A_VERIFICATION_SCHEMA
+NEGATIVE_VERIFICATION_SCHEMA = "compose_gears_probe_a_negative_verification_v1"
 MANIFEST_SCHEMA = "compose_gears_probe_a_evidence_manifest_v7"
 # The admission schema and its validation live exactly once, in the sole consumer
 # gate ``approximation_bias.validate_probe_a_evidence``. Re-export the name and
@@ -86,6 +87,20 @@ _REGISTRATION_KEYS = {
     "self_checksum",
 }
 _BRIDGE_KEYS = {"representation", "verdict", "tolerance", "max_abs_error"}
+_GATE_VERDICT_KEYS = {"determinism", "control_count", "output_bridge"}
+_NEGATIVE_VERIFICATION_KEYS = {
+    "schema",
+    "protocol",
+    "status",
+    "git_commit",
+    "registration_sha256",
+    "report_sha256",
+    "evidence_manifest_sha256",
+    "verifier_code_sha256",
+    "gate_verdicts",
+    "output_bridge",
+    "self_checksum",
+}
 _MANIFEST_ENTRY_KEYS = {"role", "path", "sha256", "bytes"}
 _SINGLETON_ROLE_PATHS = {
     "commands": "commands.jsonl",
@@ -315,12 +330,16 @@ class ProbeAEvidenceError(ValueError):
 
 @dataclass(frozen=True)
 class ProbeAAdmissionOutputs:
-    """The receipt-first, admission-last outputs of one successful verification."""
+    """Receipt-first outputs; ``admission`` exists only for a passing probe.
+
+    A scientifically valid negative result receives an immutable verifier
+    receipt but can never produce an activation admission.
+    """
 
     verification: dict
     verification_bytes: bytes
     verification_sha256: str
-    admission: dict
+    admission: dict | None
 
 
 def repository_lock_sha256(relative_path: str, *, repository_root: str | Path | None = None) -> str:
@@ -958,10 +977,22 @@ def build_probe_a_report(
     det_tolerance = float(registration["determinism"]["max_abs_error_tolerance"])
     control_tolerance = float(registration["control_count"]["first_300_max_abs_error_tolerance"])
     bridge_tolerance = float(registration["output_bridge"]["max_abs_error_tolerance"])
+    checkpoint_sha256 = list(raw["checkpoints"])
+    prediction_sha256 = [sha256_json(value) for value in raw["run_predictions"]]
+    determinism_passed = (
+        raw["det_error"] <= det_tolerance
+        and checkpoint_sha256[0] == checkpoint_sha256[1]
+        and prediction_sha256[0] == prediction_sha256[1]
+    )
+    control_count_passed = raw["cap_error"] <= control_tolerance
+    output_bridge_passed = raw["bridge_error"] <= bridge_tolerance
+    status = (
+        "pass" if determinism_passed and control_count_passed and output_bridge_passed else "failed"
+    )
     body = {
         "schema": REPORT_SCHEMA,
         "protocol": PROTOCOL,
-        "status": "pass",
+        "status": status,
         "git_commit": _git_commit(expected_git_commit, "expected Git commit"),
         "registration_sha256": _sha(registration_sha256, "registration_sha256"),
         "runtime_sha256": _sha(runtime_sha256, "runtime_sha256"),
@@ -975,11 +1006,11 @@ def build_probe_a_report(
             "transform": PROBE_INPUT_TRANSFORM,
         },
         "determinism": {
-            "checkpoint_sha256": list(raw["checkpoints"]),
-            "prediction_sha256": [sha256_json(value) for value in raw["run_predictions"]],
+            "checkpoint_sha256": checkpoint_sha256,
+            "prediction_sha256": prediction_sha256,
             "max_abs_error": raw["det_error"],
             "tolerance": det_tolerance,
-            "verdict": "pass" if raw["det_error"] <= det_tolerance else "fail",
+            "verdict": "pass" if determinism_passed else "fail",
         },
         "control_count": {
             "counts": list(raw["control_order"]),
@@ -988,12 +1019,12 @@ def build_probe_a_report(
             ],
             "first_300_max_abs_error": raw["cap_error"],
             "tolerance": control_tolerance,
-            "verdict": "pass" if raw["cap_error"] <= control_tolerance else "fail",
+            "verdict": "pass" if control_count_passed else "fail",
         },
         "output_scale": dict(raw["output_scale"]),
         "output_bridge": {
             "representation": registration["output_bridge"]["representation"],
-            "verdict": "pass" if raw["bridge_error"] <= bridge_tolerance else "fail",
+            "verdict": "pass" if output_bridge_passed else "fail",
             "tolerance": bridge_tolerance,
             "max_abs_error": raw["bridge_error"],
         },
@@ -1081,8 +1112,8 @@ def validate_probe_a_report(
     _checksum(report, "Probe-A report")
     if report["schema"] != REPORT_SCHEMA or report["protocol"] != PROTOCOL:
         raise ProbeAEvidenceError("Probe-A report identity mismatch")
-    if report["status"] != "pass":
-        raise ProbeAEvidenceError("Probe-A report did not pass")
+    if report["status"] not in {"pass", "failed"}:
+        raise ProbeAEvidenceError("Probe-A report status must be 'pass' or 'failed'")
     commit = _git_commit(report["git_commit"], "Probe-A report git_commit")
     if commit != _git_commit(expected_git_commit, "expected Git commit"):
         raise ProbeAEvidenceError("Probe-A Git commit differs from the approved commit")
@@ -1148,13 +1179,14 @@ def validate_probe_a_report(
     det_tol = _finite_nonnegative(determinism["tolerance"], "determinism.tolerance")
     if det_tol != float(registered_determinism["max_abs_error_tolerance"]):
         raise ProbeAEvidenceError("Probe-A determinism tolerance differs from preregistration")
-    if (
-        determinism["verdict"] != "pass"
-        or determinism["checkpoint_sha256"][0] != determinism["checkpoint_sha256"][1]
-        or determinism["prediction_sha256"][0] != determinism["prediction_sha256"][1]
-        or det_error > det_tol
-    ):
-        raise ProbeAEvidenceError("Probe-A determinism gate failed")
+    determinism_passed = (
+        determinism["checkpoint_sha256"][0] == determinism["checkpoint_sha256"][1]
+        and determinism["prediction_sha256"][0] == determinism["prediction_sha256"][1]
+        and det_error <= det_tol
+    )
+    expected_determinism_verdict = "pass" if determinism_passed else "fail"
+    if determinism["verdict"] != expected_determinism_verdict:
+        raise ProbeAEvidenceError("Probe-A determinism verdict disagrees with raw measurements")
 
     registered_control = registration["control_count"]
     control = _exact_keys(
@@ -1181,8 +1213,10 @@ def validate_probe_a_report(
     cap_tol = _finite_nonnegative(control["tolerance"], "control_count.tolerance")
     if cap_tol != float(registered_control["first_300_max_abs_error_tolerance"]):
         raise ProbeAEvidenceError("Probe-A control-count tolerance differs from preregistration")
-    if control["verdict"] != "pass" or cap_error > cap_tol:
-        raise ProbeAEvidenceError("Probe-A first-300 control gate failed")
+    control_count_passed = cap_error <= cap_tol
+    expected_control_verdict = "pass" if control_count_passed else "fail"
+    if control["verdict"] != expected_control_verdict:
+        raise ProbeAEvidenceError("Probe-A control-count verdict disagrees with raw measurements")
 
     output_scale = _exact_keys(
         report["output_scale"],
@@ -1211,8 +1245,16 @@ def validate_probe_a_report(
         registered_bridge["max_abs_error_tolerance"]
     ):
         raise ProbeAEvidenceError("Probe-A output bridge differs from preregistration")
-    if bridge["verdict"] != "pass" or bridge_error > bridge_tol:
-        raise ProbeAEvidenceError("Probe-A output-bridge equivalence failed")
+    output_bridge_passed = bridge_error <= bridge_tol
+    expected_bridge_verdict = "pass" if output_bridge_passed else "fail"
+    if bridge["verdict"] != expected_bridge_verdict:
+        raise ProbeAEvidenceError("Probe-A output-bridge verdict disagrees with raw measurements")
+
+    expected_status = (
+        "pass" if determinism_passed and control_count_passed and output_bridge_passed else "failed"
+    )
+    if report["status"] != expected_status:
+        raise ProbeAEvidenceError("Probe-A report status disagrees with its measured gate verdicts")
 
 
 def _validate_role_path(role: str, relative: str) -> None:
@@ -2314,6 +2356,81 @@ def _canonical_file_bytes(payload: Mapping) -> bytes:
     return canonical_file_bytes(payload)
 
 
+def validate_negative_verification(
+    verification: Mapping,
+    *,
+    report: Mapping,
+    report_sha256: str,
+    registration_sha256: str,
+    evidence_manifest_sha256: str,
+    verifier_code_sha256: str,
+    expected_git_commit: str,
+) -> None:
+    """Validate a verifier-bound negative result that grants no admission."""
+    receipt = _exact_keys(
+        verification,
+        _NEGATIVE_VERIFICATION_KEYS,
+        "Probe-A negative verification receipt",
+    )
+    _checksum(receipt, "Probe-A negative verification receipt")
+    if receipt["schema"] != NEGATIVE_VERIFICATION_SCHEMA or receipt["protocol"] != PROTOCOL:
+        raise ProbeAEvidenceError("Probe-A negative verification receipt identity mismatch")
+    if receipt["status"] != "failed":
+        raise ProbeAEvidenceError("Probe-A negative verification receipt status must be 'failed'")
+    if report.get("status") != "failed":
+        raise ProbeAEvidenceError("Probe-A negative verification requires a failed report")
+    if _git_commit(receipt["git_commit"], "negative verification git_commit") != _git_commit(
+        expected_git_commit, "expected Git commit"
+    ):
+        raise ProbeAEvidenceError("Probe-A negative verification Git commit mismatch")
+    expected_pins = {
+        "registration_sha256": _sha(registration_sha256, "registration_sha256"),
+        "report_sha256": _sha(report_sha256, "report_sha256"),
+        "evidence_manifest_sha256": _sha(evidence_manifest_sha256, "evidence_manifest_sha256"),
+        "verifier_code_sha256": _sha(verifier_code_sha256, "verifier_code_sha256"),
+    }
+    for field, expected in expected_pins.items():
+        if _sha(receipt[field], f"negative verification.{field}") != expected:
+            raise ProbeAEvidenceError(f"Probe-A negative verification {field} mismatch")
+    if sha256_bytes(_canonical_file_bytes(report)) != expected_pins["report_sha256"]:
+        raise ProbeAEvidenceError("Probe-A failed report mapping does not match its external pin")
+
+    determinism = _exact_keys(
+        report.get("determinism"),
+        {"checkpoint_sha256", "prediction_sha256", "max_abs_error", "tolerance", "verdict"},
+        "Probe-A failed report determinism",
+    )
+    control_count = _exact_keys(
+        report.get("control_count"),
+        {"counts", "prediction_sha256", "first_300_max_abs_error", "tolerance", "verdict"},
+        "Probe-A failed report control_count",
+    )
+    report_bridge = _exact_keys(
+        report.get("output_bridge"), _BRIDGE_KEYS, "Probe-A failed report output_bridge"
+    )
+    gate_verdicts = _exact_keys(
+        receipt["gate_verdicts"],
+        _GATE_VERDICT_KEYS,
+        "Probe-A negative verification gate_verdicts",
+    )
+    expected_verdicts = {
+        "determinism": determinism["verdict"],
+        "control_count": control_count["verdict"],
+        "output_bridge": report_bridge["verdict"],
+    }
+    if dict(gate_verdicts) != expected_verdicts:
+        raise ProbeAEvidenceError("Probe-A negative verification gate verdicts differ from report")
+    if any(value not in {"pass", "fail"} for value in gate_verdicts.values()):
+        raise ProbeAEvidenceError("Probe-A negative verification contains an invalid gate verdict")
+    if "fail" not in gate_verdicts.values():
+        raise ProbeAEvidenceError("Probe-A negative verification contains no failed gate")
+    bridge = _exact_keys(
+        receipt["output_bridge"], _BRIDGE_KEYS, "Probe-A negative verification output_bridge"
+    )
+    if dict(bridge) != dict(report_bridge):
+        raise ProbeAEvidenceError("Probe-A negative verification output bridge differs from report")
+
+
 def build_evidence_outputs(
     *,
     report_bytes: bytes,
@@ -2326,7 +2443,7 @@ def build_evidence_outputs(
     expected_git_commit: str,
     verifier_code_sha256: str,
 ) -> ProbeAAdmissionOutputs:
-    """Validate all evidence and build a receipt-first, admission-last output pair."""
+    """Validate all evidence, always emit a receipt, and admit passes only."""
     registration = _json_object_from_bytes(
         registration_bytes,
         expected_sha256=registration_sha256,
@@ -2366,10 +2483,8 @@ def build_evidence_outputs(
         expected_git_commit=expected_git_commit,
         registration_sha256=registration_sha256,
     )
-    verification_body = {
-        "schema": VERIFICATION_SCHEMA,
+    common_verification = {
         "protocol": PROTOCOL,
-        "status": "pass",
         "git_commit": expected_git_commit,
         "registration_sha256": _sha(registration_sha256, "registration_sha256"),
         "report_sha256": _sha(report_sha256, "report_sha256"),
@@ -2377,12 +2492,46 @@ def build_evidence_outputs(
         "verifier_code_sha256": _sha(verifier_code_sha256, "verifier_code_sha256"),
         "output_bridge": dict(report["output_bridge"]),
     }
+    if report["status"] == "failed":
+        verification_body = {
+            "schema": NEGATIVE_VERIFICATION_SCHEMA,
+            **common_verification,
+            "status": "failed",
+            "gate_verdicts": {
+                "determinism": report["determinism"]["verdict"],
+                "control_count": report["control_count"]["verdict"],
+                "output_bridge": report["output_bridge"]["verdict"],
+            },
+        }
+    else:
+        verification_body = {
+            "schema": VERIFICATION_SCHEMA,
+            **common_verification,
+            "status": "pass",
+        }
     verification = {
         **verification_body,
         "self_checksum": self_checksum(verification_body),
     }
     verification_bytes = _canonical_file_bytes(verification)
     verification_sha256 = sha256_bytes(verification_bytes)
+    if report["status"] == "failed":
+        validate_negative_verification(
+            verification,
+            report=report,
+            report_sha256=report_sha256,
+            registration_sha256=registration_sha256,
+            evidence_manifest_sha256=evidence_manifest_sha256,
+            verifier_code_sha256=verifier_code_sha256,
+            expected_git_commit=expected_git_commit,
+        )
+        return ProbeAAdmissionOutputs(
+            verification=verification,
+            verification_bytes=verification_bytes,
+            verification_sha256=verification_sha256,
+            admission=None,
+        )
+
     body = {
         "schema": ADMISSION_SCHEMA,
         "protocol": PROTOCOL,
@@ -2423,7 +2572,7 @@ def build_admission(
     verifier_code_sha256: str,
 ) -> dict:
     """Compatibility wrapper returning the admission from a fully bound output pair."""
-    return build_evidence_outputs(
+    outputs = build_evidence_outputs(
         report_bytes=report_bytes,
         report_sha256=report_sha256,
         registration_bytes=registration_bytes,
@@ -2433,7 +2582,12 @@ def build_admission(
         evidence_manifest_sha256=evidence_manifest_sha256,
         expected_git_commit=expected_git_commit,
         verifier_code_sha256=verifier_code_sha256,
-    ).admission
+    )
+    if outputs.admission is None:
+        raise ProbeAEvidenceError(
+            "Probe-A failed; negative receipt verified but admission is forbidden"
+        )
+    return outputs.admission
 
 
 def validate_admission(

@@ -238,7 +238,9 @@ preregistered.
   and environment record. Do not append its result line to the already closed `commands.jsonl`; externally pin
   the emitted manifest SHA instead.
 - Copy evidence back to the MacBook before terminating the pod; verify local bytes against the pod manifest.
-- Re-run the offline verifier locally. Only its PASS output may promote the archive to decision-grade evidence.
+- Re-run the offline verifier locally. A verified gate failure is a successful **negative-result finalization**:
+  it writes a `failed` `verify.json`, writes no admission, and stops Probe B. Only verifier PASS may create an
+  admission or promote the candidate.
 - Shut down the pod and revoke the temporary SSH key after local verification.
 
 ## 5. Durable evidence contract
@@ -258,8 +260,8 @@ role_attestation.json         metadata-derived roles, counts, zero overlap, read
 probe_a_registration.json     owner-frozen decisions/tolerances + external pre-run SHA-256 pin
 probe_a_source.txt            combined pinned GEARS source closure named by the report digest
 checkpoints/                  exactly two fresh Probe-A trained-model checkpoint files
-probe_a.json                  P1-P4 measurements + equivalence verdict + raw-sample references
-probe_a_admission.json        exact promotion object consumed by the bias-metric admission gate
+probe_a.json                  P1-P4 measurements + mechanically derived pass/failed status + raw references
+probe_a_admission.json        PASS-only promotion object; MUST be absent for a negative result
 logs/                         stdout/stderr and raw CPU/GPU/RSS samples for every run
 verify.json                   write-once local verifier receipt + verifier-code-closure SHA-256
 ```
@@ -278,9 +280,12 @@ comparison. Symlinks, missing/extra files, duplicate paths, unknown roles, absol
 identities, non-finite measurements, mismatched rosters, unbound overrides, and evidence produced from a
 different commit or runtime are rejected.
 
-The report uses `compose_gears_probe_a_report_v7` and carries `registration_sha256`. Its runtime, inputs, source,
-registration, report-byte, and complete raw-sample path/SHA identities must match the corresponding manifest
-roles exactly; neither subset-only nor superset-only raw-sample rosters are accepted.
+The report uses `compose_gears_probe_a_report_v8` and carries `registration_sha256`. Its `status` is mechanically
+`pass` iff determinism, control-count, and output-bridge gates all pass; otherwise it is `failed`. A failed gate is
+a valid scientific result only after every identity, raw-array, checkpoint, row/role, leakage, finite-value, and
+manifest invariant still validates. Integrity/protocol violations remain verifier errors, not negative results.
+Its runtime, inputs, source, registration, report-byte, and complete raw-sample path/SHA identities must match the
+corresponding manifest roles exactly; neither subset-only nor superset-only raw-sample rosters are accepted.
 
 The prepared manifest/H5AD use `compose_gears_probe_input_manifest_v3` and
 `compose_gears_probe_input_v3`. The stored matrix is canonical CSR little-endian float32 before H5AD publication,
@@ -316,14 +321,20 @@ fraction, near-integer fraction (distance to the nearest integer `<= 1e-6`), and
 A self-reported aggregate or verdict cannot substitute for these raw arrays.
 
 The offline verifier requires `--expected-verifier-code-sha256` and compares that independently reviewed pre-run
-pin with its actual source closure **before evidence validation**. It first emits a canonical, write-once
-`verify.json` receipt, then emits
-`probe_a_admission.json` **last**. A pre-existing receipt or admission is a failed attempt; neither file may be
-overwritten or reused. The verifier hashes its actual source closure (entrypoint plus the shared producer and
-consumer validators), not a caller-supplied label. `verify.json` uses
-`compose_gears_probe_a_verification_v1` with exactly
+pin with its actual source closure **before evidence validation**. It always emits one canonical, write-once
+`verify.json` receipt. On PASS only, it then emits `probe_a_admission.json` **last**. On a measured gate failure it
+returns `NEGATIVE_RESULT`, leaves admission absent, and the receipt is the terminal artifact. A pre-existing
+receipt or admission is a failed attempt; neither file may be overwritten or reused. The verifier hashes its
+actual source closure (entrypoint plus the shared producer and consumer validators), not a caller-supplied label.
+A passing `verify.json` uses `compose_gears_probe_a_verification_v1` with exactly
 `{schema, protocol, status, git_commit, registration_sha256, report_sha256,
 evidence_manifest_sha256, verifier_code_sha256, output_bridge, self_checksum}`.
+
+A negative `verify.json` uses `compose_gears_probe_a_negative_verification_v1` and adds exactly
+`gate_verdicts={determinism,control_count,output_bridge}`. Its status is `failed`, at least one gate must be `fail`,
+all three verdicts and the complete bridge object must equal the hash-bound report, and its report, manifest,
+registration, Git, and verifier-closure pins follow the same validation rules as PASS. This receipt is durable
+negative evidence but is intentionally incompatible with the approximation-bias admission consumer.
 
 Only after the externally pinned registration, every raw Probe-A artifact, the complete evidence manifest, and
 the receipt verify may the verifier publish `compose_gears_probe_a_admission_v3` with exactly
@@ -359,8 +370,8 @@ primary-file SHA values, and one runtime fingerprint.
 locks, the complete installed-package-roster digest, runtime/input
 identities, exact fit-role counts, the prepared-manifest/H5AD/row/control-roster SHA identities, zero sealed
 overlap/read counts, and a passing reader-spy attestation. Every
-`compose_gears_roster_receipt_v2` binds its exact roster and both dependency-lock lineages. Any placeholder JSON that merely
-occupies a manifest role is rejected. Until the separate Probe-B runner/archive spec defines raw epoch samples,
+`compose_gears_roster_receipt_v2` binds its exact roster and both dependency-lock lineages. Any placeholder JSON
+that merely occupies a manifest role is rejected. Until the separate Probe-B runner/archive spec defines raw epoch samples,
 the exact CV estimator, extrapolation formula, and cross-roster monotonicity rule, **no Probe-B JSON is
 decision-grade and no Probe-B PASS schema is recognized by this verifier**.
 
@@ -373,6 +384,8 @@ decision-grade and no Probe-B PASS schema is recognized by this verifier**.
 - **Immediate STOP:** any sealed row read/materialization, `ComposeOutcomeStore` construction, dirty/mismatched
   identity, attempted download, failed determinism/equivalence gate, OOM, truncated log, missing raw sample,
   unexpected file, or cost-limit breach.
+- A measured gate failure stops all further fitting/probing but does **not** skip evidence closure: finish the
+  canonical failed report, manifest, local verification receipt, and archive copy. It never authorizes Probe B.
 - A STOP or negative result is preserved as evidence. It is never silently rerun with changed parameters.
 
 ## 7. Promotion boundary

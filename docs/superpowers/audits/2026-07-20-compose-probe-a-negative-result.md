@@ -66,6 +66,11 @@ The container's authoritative immutable image digest was not exposed inside the 
 `runtime.json` was fabricated. `logs/runtime_unresolved.json` is diagnostic only and is not admissible runtime
 evidence.
 
+The maintained local contract now supports canonical `failed` reports and verifier-bound negative receipts while
+forbidding admission publication. This does **not** retroactively promote this archive: its missing immutable image
+identity/runtime record and unfinished canonical evidence closure remain historical facts, and no replacement
+artifact may be fabricated after the pod observation.
+
 The diagnostic runtime capture also exposed an implementation requirement for any later probe: host-visible
 `os.cpu_count()`/`MemTotal` reported 252 CPUs and 1,014,082,285,568 bytes, whereas the container cgroup limited
 memory to 116,999,999,488 bytes and CPU quota to 26.35 cores (`RUNPOD_CPU_COUNT=31`). A future maintained runtime
@@ -80,7 +85,7 @@ silently labeling the last as pod resources.
 3. Keep the currently named `raw_pseudobulk_approximation` comparator path activation-blocked. Its next design
    must explicitly define how the public replacement-sampled GEARS condition-level output is projected and how
    approximation bias is measured without claiming exact per-control equivalence.
-4. Before another decision-grade pod attempt, add a reviewed first-class negative-result receipt and a
-   cgroup-aware, provider-image-bound runtime evidence producer. Probe B was not run and remains separately
-   blocked on its maintained timing/archive contract.
+4. Before another decision-grade pod attempt, independently review and pin the new first-class negative-result
+   verifier path, then add a cgroup-aware, provider-image-bound runtime evidence producer. Probe B was not run and
+   remains separately blocked on its maintained timing/archive contract.
 5. The scientific seal remains unopened.
