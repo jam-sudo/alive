@@ -5,7 +5,7 @@
 > **이 문서는 아무것도 정의하지 않는다** — 세부(task)는 plan, claim은 spec, exact param은 config,
 > 시간순 audit는 git이 authoritative다([sources of truth](../../CLAUDE.md#sources)). 상태 행이 authoritative
 > 문서와 어긋나면 **authoritative 문서가 옳다**; 이 인덱스를 갱신한다.
-> **Updated:** 2026-07-20 @ `1150c02` (branch `main`)
+> **Updated:** 2026-07-20 @ `d8e34bb` (branch `main`)
 > **갱신 트리거:** sub-project/gate **상태가 바뀔 때만**(커밋마다 아님).
 > **종결 상태:** COMPOSE seal이 정확히 한 번 열리면 이 인덱스는 **frozen/은퇴**한다. 이후 진행상황은
 > seal 결과와 post-hoc analysis가 대신한다.
@@ -123,6 +123,18 @@ branch에서 추적 가능하게 기록한다. `LOCAL` ledger ID만으로는 이
    blocker. The exact current verifier source-closure SHA-256 is
    `577c754dc72681aed8ad531ae3a3c2671a4c8cd11a1d941ee97ba44b5e4ff036`; it must be independently reviewed,
    rebound to the final clean implementation commit, and recomputed after any closure edit before future use.
+   **2026-07-20 Probe-A runtime-attestation hardening:** commit
+   `d8e34bb10160e1825ed526097ce0cdbd141ab495` replaces ambiguous host CPU/RAM evidence with runtime-v3's
+   separate provider-allocation, cgroup-effective, and host-visible views. It adds a write-once maintained
+   `capture-runtime` command, rejects unlimited/malformed cgroup v1/v2 limits and allocation/GPU/image mismatch,
+   and requires exactly one provider attestation plus its manifested raw control-plane source. Admission now
+   requires the provider attestation SHA as an independent pre-run CLI pin; the verifier closure now includes the
+   runtime producer driver and GEARS worker rather than only downstream validators. Focused/adjacent verification
+   is 195 passing tests with Ruff check/format and `git diff --check` clean. The resulting candidate verifier
+   source-closure SHA-256 is
+   `54540ab4eb913a0fa82c4fb34ccdd2d8ddf27600fe309d990e6a31efa41eb760`; independent review is still mandatory
+   before operational use. This hardening does not validate the archived negative run retroactively, authorize a
+   new Probe-A registration, clear `RELEASE-BLOCKED`, or open the scientific seal.
 5. **§2.5 release gate** — worker locked-env integration green + 독립 검토 + **owner의 exact Git SHA 승인** → runbook을 `READY`로.
 6. **A100 sealed-run pod: runbook 실행** — 유효한 `ActivationRecord`(requirement별 non-empty evidence) + clean tree 하에 `phase2a → preflight → phase2b --confirm-seal`. **COMPOSE seal 1회 개봉** — `TG-K562`와 독립.
 

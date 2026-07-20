@@ -1,6 +1,6 @@
 # COMPOSE GEARS decision probe — conforming A100 rerun
 
-> **Protocol:** `COMPOSE-K562-v1` (ACTIVE). **Status:** LOCAL GENERATOR + FIT-INPUT PREPARATION IMPLEMENTED;
+> **Protocol:** `COMPOSE-K562-v1` (ACTIVE). **Status:** LOCAL GENERATOR + FIT-INPUT + RUNTIME ATTESTATION IMPLEMENTED;
 > Probe A pod admission awaits a clean reviewed Git SHA; Probe B timing runner and scientific output bridge remain
 > blocked as specified below.
 > **Opens NO official seal.** This runbook replaces the superseded
@@ -92,7 +92,8 @@ PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -p no:cacheprovider \
   tests/alive/compose/test_gene_universe.py \
   tests/alive/compose/test_gears_decision_probe_cli.py \
   tests/alive/compose/test_gears_worker_logic.py \
-  tests/alive/compose/test_worker_contract.py
+  tests/alive/compose/test_worker_contract.py \
+  tests/alive/compose/test_gears_probe_a.py
 .venv/bin/ruff check --no-cache .
 .venv/bin/ruff format --check --no-cache .
 git diff --check
@@ -106,6 +107,12 @@ clean commit. Its current local full COMPOSE suite is 1470 passing tests with on
 plus clean Ruff check/format and `git diff --check`. These counts establish local implementation readiness only;
 exact-SHA independent review and the run-specific registration pin remain separate pre-pod gates.
 
+Runtime-attestation hardening commit `d8e34bb10160e1825ed526097ce0cdbd141ab495` passes the updated focused and
+adjacent roster above (195 tests), Ruff check/format, and `git diff --check`. Its candidate verifier source-closure
+pin is `54540ab4eb913a0fa82c4fb34ccdd2d8ddf27600fe309d990e6a31efa41eb760`. The pin includes the maintained
+runtime producer and GEARS worker; it is not operationally approved until an independent exact-commit review
+recomputes and accepts it.
+
 Record the final test counts and exact Git SHA in the pod evidence manifest.
 
 ## 3. Pod admission and identity capture
@@ -114,8 +121,13 @@ The owner supplies a temporary SSH key through a local file/agent, host, port, u
 GPU-hours/cost. Never place credentials in the repository or transcript artifacts. On connection:
 
 1. create a fresh work root on durable storage; abort if only ephemeral storage is available for evidence;
-2. capture provider/pod ID, GPU model/UUID, driver/CUDA, CPU/RAM, filesystem capacity, UTC timestamps, and cost
-   rate/limit;
+2. capture a credential-free provider API response or control-plane export for the exact pod under `logs/`, hash
+   those raw bytes, and derive the canonical owner attestation `provider_runtime_attestation.json` outside the
+   evidence root. Before copying the attestation into the root, independently record its file SHA-256. The
+   attestation must identify provider, pod instance, attestation ID/time, immutable `sha256:<64 hex>` image
+   digest, allocated CPU/RAM/exactly-one-GPU model, and the raw source's type/path/SHA. It is an owner-captured
+   assertion backed by manifested provider control-plane bytes, not a claim of provider cryptographic signature.
+   A document without retained source bytes, or a digest computed only by the consumer, is not sufficient;
 3. transfer a Git bundle or archive from the exact reviewed clean commit; do not develop directly on the pod;
 4. verify bundle commit, clean tree (including untracked files, replacement refs, and recursive submodules),
    `uv.lock`, the separate `docs/activation-evidence/compose/requirements.gears_env.lock`, container/image
@@ -124,6 +136,13 @@ GPU-hours/cost. Never place credentials in the repository or transcript artifact
    and every expected SHA-256;
 5. disable network access for the fit after required immutable resources are present; fail on any attempted
    download or unmanifested resource read.
+
+After network isolation and before `build-roster`, invoke maintained `capture-runtime` exactly once. Supply the
+external attestation pin literally with `--provider-attestation-sha256`; do not compute it inline. The collector
+records three deliberately separate views: provider allocation, effective cgroup v1/v2 CPU/cpuset/memory limits,
+and host-visible `/proc` CPU/RAM. Host-visible values are capacity observations, never pod allocation claims.
+Unlimited/missing cgroup CPU or memory, noncanonical/empty cpuset, multiple visible GPUs, allocation/cgroup/GPU
+disagreement, mutable/missing image identity, network-enabled capture, or any existing `runtime.json` is a STOP.
 
 The roster receipt SHA and later probe-manifest SHA must be captured into the durable command/evidence ledger at
 their publication boundary and read back from that ledger. The maintained CLI emits a canonical one-line
@@ -141,6 +160,9 @@ unavailable reader-spy attestation is a **STOP**, not a warning.
 
 - Render CLI help from the committed maintained probe CLI; commands in the evidence log must come from that help,
   not from this document or memory.
+- Materialize the externally authenticated `provider_runtime_attestation.json`, then run maintained
+  `capture-runtime` once with network disabled. Append its emitted command-result line first in `commands.jsonl`;
+  its primary SHA must equal the eventual manifested `runtime.json` bytes.
 - Run source/manifest/hash validation and metadata-only role resolution.
 - Emit the exact row rosters and a zero-overlap proof without reading expression.
 - Verify the planned sizes satisfy `N_target ≥ |M|` and record the exact ordered roster SHA for each candidate.
@@ -251,7 +273,8 @@ completed run has these pre-verifier contents:
 ```text
 manifest.json                 canonical schema, self-checksum, complete file roster + SHA-256
 commands.jsonl                argv/cwd/env allowlist/start/end/exit code per command
-runtime.json                  pod/GPU/driver/CUDA/CPU/RAM/image/package/lock identities
+provider_runtime_attestation.json provider allocation + immutable image identity, externally pinned
+runtime.json                  provider/cgroup/host views + GPU/driver/CUDA/package/lock identities
 inputs.json                   source/GO/pair/alias/fit-role/response/roster identities
 probe_input_manifest.json     canonical prepared-input manifest consumed by Probe A
 probe_input.h5ad              exact prepared, non-sealed H5AD consumed by both fresh fits
@@ -281,7 +304,8 @@ A negative result terminates with a failed `verify.json`; `probe_a_admission.jso
 Every JSON uses canonical serialization and schema versioning. `manifest.json` uses
 `compose_gears_probe_a_evidence_manifest_v7`; every file entry has exactly `{role,path,sha256,bytes}`. It assigns
 exactly one role each to `commands`, `runtime`, `inputs`, `role_attestation`, `probe_a_registration`,
-`probe_a_report`, `probe_a_source`, `probe_input_manifest`, and `probe_input_h5ad`, at least one each to
+`provider_runtime_attestation`, `probe_a_report`, `probe_a_source`, `probe_input_manifest`, and
+`probe_input_h5ad`, at least one each to
 `roster_receipt`, `raw_sample`, and `log`, and exactly the two raw-referenced files under the
 `probe_a_checkpoint` role.
 **Probe B is not a Probe-A manifest role or admission prerequisite.** It receives a separate timestamped archive
@@ -332,8 +356,10 @@ minimum/median/maximum, negative
 fraction, near-integer fraction (distance to the nearest integer `<= 1e-6`), and bridge maximum absolute error.
 A self-reported aggregate or verdict cannot substitute for these raw arrays.
 
-The offline verifier requires `--expected-verifier-code-sha256` and compares that independently reviewed pre-run
-pin with its actual source closure **before evidence validation**. It always emits one canonical, write-once
+The offline verifier requires both `--expected-verifier-code-sha256` and the independently recorded pre-run
+`--provider-attestation-sha256`. It compares the first with its actual source closure **before evidence
+validation**, and requires the second to match the manifested attestation and runtime/command bindings. It always
+emits one canonical, write-once
 `verify.json` receipt. On PASS only, it then emits `probe_a_admission.json` **last**. On a measured gate failure it
 returns `NEGATIVE_RESULT`, leaves admission absent, and the receipt is the terminal artifact. A pre-existing
 receipt or admission is a failed attempt; neither file may be overwritten or reused. The verifier hashes its
@@ -367,8 +393,11 @@ match.
 
 Decision-bearing manifest roles are content-validated, not merely inventoried. `commands.jsonl` contains at
 least one successful invocation of each maintained CLI subcommand that actually exists:
-`{build-roster, prepare-input, verify-input, build-probe-a-registration, probe-a,
+`{capture-runtime, build-roster, prepare-input, verify-input, build-probe-a-registration, probe-a,
 build-probe-a-report}`. Prep labels may repeat for multiple candidate rosters;
+`capture-runtime` occurs exactly once before every other maintained command, binds the external provider
+attestation SHA, approved commit, canonical runtime path, and network-disabled assertion, and its primary SHA
+equals the manifested runtime SHA;
 `build-probe-a-registration` occurs exactly once after prepared-input verification, binds the owner-policy and
 prepared-manifest pins, and its primary SHA equals the manifested registration SHA; `probe-a` occurs exactly once
 and its primary SHA is the manifested raw artifact SHA;
@@ -377,7 +406,7 @@ canonical report path, and its primary SHA is the manifested report SHA;
 unknown or fictional subcommands are rejected. Records carry secret-free environment allowlists, UTC intervals,
 primary-file SHA values, and one runtime fingerprint.
 `runtime.json`, `inputs.json`, and `role_attestation.json` use respectively
-`compose_gears_probe_runtime_v2`, `compose_gears_probe_inputs_v3`, and
+`compose_gears_probe_runtime_v3`, `compose_gears_probe_inputs_v3`, and
 `compose_gears_probe_role_attestation_v2`; they bind the approved commit, separate preparation/GEARS dependency
 locks, the complete installed-package-roster digest, runtime/input
 identities, exact fit-role counts, the prepared-manifest/H5AD/row/control-roster SHA identities, zero sealed
@@ -386,6 +415,15 @@ overlap/read counts, and a passing reader-spy attestation. Every
 that merely occupies a manifest role is rejected. Until the separate Probe-B runner/archive spec defines raw epoch samples,
 the exact CV estimator, extrapolation formula, and cross-roster monotonicity rule, **no Probe-B JSON is
 decision-grade and no Probe-B PASS schema is recognized by this verifier**.
+
+The manifested provider file uses `compose_provider_runtime_attestation_v1` and is revalidated against its
+external file pin. Its source-evidence path must name exactly one manifested `logs/` entry with the same SHA and
+one of the admitted control-plane source types. Runtime v3 must reproduce that provider/pod/image/allocation
+exactly, require one visible GPU whose model equals the allocation, and carry exact nested schemas for
+`provider_allocation`, `cgroup_effective`, and `host_visible`. The verifier recomputes quota cores, canonical
+cpuset cardinality, and effective CPU cores; requires finite positive cgroup CPU and memory; and rejects cgroup
+values exceeding either provider allocation or host-visible capacity. Provider allocation and host-visible
+capacity are never substituted for one another.
 
 ## 6. Decision and stop rules
 
