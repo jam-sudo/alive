@@ -473,8 +473,32 @@ def test_probe_observer_runs_after_durable_fit_and_skips_scientific_predict(
             "worker_code_sha256": "3" * 64,
         },
     )
+    second_checkpoint = tmp_path / "probe-checkpoint-2.pt"
+    second_result = worker._fit_and_predict(
+        {"seed": 11, "pair_ids": [["AAA", "BBB"]], "response_dim": 2},
+        _fit_adata(),
+        {},
+        ["G0", "G1", "G2", "G3"],
+        "log_normalized_pseudobulk",
+        fit_artifact_content_sha256="c" * 64,
+        checkpoint_path=str(second_checkpoint),
+        fitted_model_observer=observer,
+        observer_only=True,
+        input_scale="full_library_normalize_log1p_then_roster_subset",
+        probe_context={
+            "gears_dependency_lock_sha256": "5" * 64,
+            "gears_installed_packages_sha256": "6" * 64,
+            "mode": "probe_a",
+            "input_scale_sha256": "0" * 64,
+            "probe_input_h5ad_sha256": "1" * 64,
+            "query_sha256": "2" * 64,
+            "registration_sha256": "4" * 64,
+            "worker_code_sha256": "3" * 64,
+        },
+    )
     assert result == {}
-    assert observed == [str(checkpoint)]
+    assert second_result == {}
+    assert observed == [str(checkpoint), str(second_checkpoint)]
     assert not any(isinstance(event, tuple) and event[0] == "predict" for event in events)
     processed = next(event for event in events if event[0] == "processed-obs")
     assert processed[1] == tuple(f"source-row-{index}" for index in range(16))

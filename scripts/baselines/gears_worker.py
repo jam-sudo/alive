@@ -995,8 +995,6 @@ def _fit_and_predict(
                 save=False,
             )
 
-        gears_utils.make_GO = _uncached_make_go
-
         # ``default_pert_graph=True`` silently intersects the method input with
         # GEARS' legacy ``essential_all_data_pert_genes.pkl`` symbol roster.
         # That contradicts the governed eligibility contract (canonical
@@ -1057,6 +1055,7 @@ def _fit_and_predict(
         previous_cwd = Path.cwd()
         try:
             os.chdir(private_cwd)
+            gears_utils.make_GO = _uncached_make_go
             model.model_initialize(
                 hidden_size=_GEARS_HIDDEN_SIZE,
                 num_go_gnn_layers=_GEARS_NUM_GO_GNN_LAYERS,
@@ -1071,6 +1070,7 @@ def _fit_and_predict(
                 no_perturb=_GEARS_NO_PERTURB,
             )
         finally:
+            gears_utils.make_GO = original_make_go
             os.chdir(previous_cwd)
         if any(private_cwd.iterdir()):
             raise RuntimeError("GEARS created an unmanifested relative-path cache artifact")
