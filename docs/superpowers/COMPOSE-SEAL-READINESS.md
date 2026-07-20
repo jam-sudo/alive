@@ -5,7 +5,7 @@
 > **이 문서는 아무것도 정의하지 않는다** — 세부(task)는 plan, claim은 spec, exact param은 config,
 > 시간순 audit는 git이 authoritative다([sources of truth](../../CLAUDE.md#sources)). 상태 행이 authoritative
 > 문서와 어긋나면 **authoritative 문서가 옳다**; 이 인덱스를 갱신한다.
-> **Updated:** 2026-07-20 @ `6a0d277` (branch `main`)
+> **Updated:** 2026-07-20 @ `1a928b3` (branch `main`)
 > **갱신 트리거:** sub-project/gate **상태가 바뀔 때만**(커밋마다 아님).
 > **종결 상태:** COMPOSE seal이 정확히 한 번 열리면 이 인덱스는 **frozen/은퇴**한다. 이후 진행상황은
 > seal 결과와 post-hoc analysis가 대신한다.
@@ -97,6 +97,15 @@ branch에서 추적 가능하게 기록한다. `LOCAL` ledger ID만으로는 이
    `23bff1ff50883dcbe034e88c297088452272cb9bb4228833c251d9d031c74756`; owner-policy bytes remain
    `bca70995117135367f3aadf77a551ba63b40fcbb426095611d0d63de7669a962`. The next registration must bind
    the final clean documentation commit containing this record, not the implementation commit alone.
+   **2026-07-20 Probe-A repeated-fit correction:** the next fresh-root run completed fit 1, exact-prefix
+   observation, and a 3.31 MB checkpoint, then stopped during fit 2 graph initialization before raw publication.
+   The no-cache `make_GO` override had not been restored after fit 1, so fit 2 wrapped the override recursively
+   and failed closed. The failed root remains quarantined and its `probe-a` command is absent from the success-only
+   ledger. Commit `1a928b3fe63ff7c97d4c89c18c6fce2056f277fa` scopes the override to
+   `model_initialize` and restores the exact original callable in `finally`; a same-process two-fit regression
+   test now exercises this boundary. Worker SHA-256 is
+   `716a70f3c86f1d0e51cbf46b54a1f73fd30d6cbb5bdcc67bc61b85a0918b2595`. Verifier and owner-policy pins remain
+   unchanged. Another fresh root and registration bound to the final clean documentation commit are mandatory.
 5. **§2.5 release gate** — worker locked-env integration green + 독립 검토 + **owner의 exact Git SHA 승인** → runbook을 `READY`로.
 6. **A100 sealed-run pod: runbook 실행** — 유효한 `ActivationRecord`(requirement별 non-empty evidence) + clean tree 하에 `phase2a → preflight → phase2b --confirm-seal`. **COMPOSE seal 1회 개봉** — `TG-K562`와 독립.
 
