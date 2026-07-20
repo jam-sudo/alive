@@ -27,8 +27,7 @@ COPY scripts/baselines/gears_worker.py ./scripts/baselines/
 # editable source install so the bootstrap can require /opt/alive/src/alive as
 # the maintained origin; the final OCI manifest digest covers the .pth startup
 # files, interpreter, stdlib, native libraries, and every installed dependency.
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-install-package alive && \
+RUN uv sync --frozen --no-install-package alive && \
     uv sync --frozen
 
 ARG ALIVE_GIT_COMMIT
