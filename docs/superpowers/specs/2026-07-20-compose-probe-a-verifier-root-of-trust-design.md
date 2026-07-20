@@ -68,7 +68,10 @@ launcher and the separately frozen owner lock.
 2. Resolve the Python base and uv build inputs to target-platform digests. Tags alone are forbidden.
 3. Build `containers/compose-probe-a-verifier/Dockerfile` for one platform from the restricted `.dockerignore`
    context with `ALIVE_GIT_COMMIT=<exact SHA>`. Network may be used only at build time; `uv sync --frozen` must
-   consume the committed lock.
+   consume the committed lock. The builder must provide an isolated build root through Docker/BuildKit, a
+   privileged rootful Buildah environment, or an equivalent dedicated build VM. **Never execute Kaniko directly
+   in the scientific pod's own root filesystem**: Kaniko uses the current container root as its build root and can
+   delete or replace that runtime filesystem between stages. A scientific/verification pod is not an image builder.
 4. Inside the candidate image run only `--print-verifier-code-sha256`, record the result, and independently
    compare it with a second computation from the same candidate. This diagnostic does not approve the image.
 5. Push the immutable candidate and record its digest-qualified reference. Use
