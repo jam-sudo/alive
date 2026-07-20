@@ -39,9 +39,11 @@
 ## 1. Probe A — GEARS scale linchpin → owner preference **Option 1**, NOT YET LOCKED
 
 From the installed `cell-gears==0.1.2` source (dumped, fingerprint `f63e48d67616…`):
-- `GEARS.predict` builds **one cell-graph per control** (`create_cell_graph_dataset_for_prediction` over
-  `ctrl_adata`), takes the **first ≤300-control batch** (`DataLoader(cg, 300); next(iter(loader))`), runs the
-  model → per-control rows `p`, then `np.mean(p, axis=0)`. **Confirms the doc §1 structural claim.**
+- `GEARS.predict` asks `create_cell_graph_dataset_for_prediction` for its default 300 graphs, but that helper
+  draws 300 indices **with replacement** from `ctrl_adata`; it does not build one graph for every supplied
+  control exactly once. `predict` then takes the single 300-row batch, runs the model, and returns
+  `np.mean(p, axis=0)`. This corrects the earlier overstatement that the public result was the first ≤300 supplied
+  controls; the old run remains quarantined and this source correction is not decision evidence.
 - `PertData.new_data_process` does **NOT normalize** the caller AnnData (only `get_DE_genes` + dropout metadata,
   graphs from `X` as-is).
 
@@ -59,7 +61,7 @@ registered target, negative policy, full-gene/HVG remap, and frozen PCA. **Owner
 |---|---|---|
 | P1: package normalization/order | Source shows `new_data_process` leaves caller `X` as supplied; no durable processed-`X` measurement is present | **PARTIAL** — retain source finding, recover/redo empirical processed-`X` check |
 | P2: fitted prediction output scale | No min/median/max, near-integer fraction, negative fraction, or `expm1` diagnostic is recorded | **NOT RUN / NOT RECOVERED** |
-| P3: per-control rows + first ≤300 behavior | Source establishes the control graph, one batch, and mean; the planned `n_control ∈ {1,8,300,301,400}` instrumentation is absent | **PARTIAL** |
+| P3: per-control rows + first ≤300 behavior | Source establishes a 300-draw replacement sample, one batch, and mean—not first-prefix semantics; the planned `n_control ∈ {1,8,300,301,400}` instrumentation is absent | **PARTIAL / PREMISE CORRECTED** |
 | P4: `T_gears` | Package does not choose it; it becomes a worker-controlled normalization target, but no exact value is frozen here | **PENDING OWNER RECORD** |
 | Inference equivalence | No adapter-row mean versus public `GEARS.predict` tolerance result | **NOT RUN / NOT RECOVERED** |
 | Negative-output contract | No fitted-output diagnostic or acceptance threshold | **NOT RUN / NOT FROZEN** |

@@ -8,6 +8,7 @@ import json
 import pickle
 import subprocess
 import sys
+import types
 import zipfile
 from pathlib import Path
 from types import SimpleNamespace
@@ -1133,6 +1134,125 @@ def test_maintained_probe_a_command_rejects_arbitrary_measurement_publication():
         )
     assert not hasattr(probe, "publish_probe_a_measurements")
     assert callable(probe.run_probe_a_measurements)
+
+
+def test_direct_control_predictions_use_each_prepared_control_exactly(monkeypatch):
+    probe = _load_probe_cli()
+    control_values = np.asarray([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0], [7.0, 8.0]], dtype=np.float32)
+    adata = ad.AnnData(
+        X=sparse.csr_matrix(control_values),
+        obs=pd.DataFrame(
+            {"condition": ["ctrl"] * 4},
+            index=[f"control-row-{index}" for index in range(4)],
+        ),
+        var=pd.DataFrame(index=["GENE_A", "GENE_B"]),
+    )
+    constructed_rows: list[list[float]] = []
+
+    class FakeGraph:
+        def __init__(self, values):
+            self.values = np.asarray(values, dtype=np.float64)
+
+        def to(self, _device):
+            return self
+
+    def create_cell_graph_for_prediction(values, pert_indices, query):
+        assert pert_indices == [0]
+        assert query == ["GENE_A"]
+        constructed_rows.append(np.asarray(values).tolist())
+        return FakeGraph(values)
+
+    dataset_globals = {
+        "create_cell_graph_for_prediction": create_cell_graph_for_prediction,
+    }
+    exec(
+        "def create_cell_graph_dataset_for_prediction(*args, **kwargs):\n"
+        "    raise AssertionError('random-sampling dataset helper must not be called')\n",
+        dataset_globals,
+    )
+    predict_globals = {
+        "np": np,
+        "create_cell_graph_dataset_for_prediction": dataset_globals[
+            "create_cell_graph_dataset_for_prediction"
+        ],
+    }
+    exec(
+        "def predict(self, queries):\n"
+        "    values = self.adata.X.toarray()\n"
+        "    return {'_'.join(queries[0]): np.mean(values, axis=0)}\n",
+        predict_globals,
+    )
+
+    class FakeTensor:
+        def __init__(self, values):
+            self.values = np.asarray(values, dtype=np.float64)
+
+        def detach(self):
+            return self
+
+        def cpu(self):
+            return self
+
+        def numpy(self):
+            return self.values
+
+    class FakeBatch(list):
+        def to(self, _device):
+            return self
+
+    class FakeDataLoader:
+        def __init__(self, graphs, batch_size, *, shuffle):
+            assert batch_size == 300
+            assert shuffle is False
+            self.graphs = list(graphs)
+
+        def __iter__(self):
+            yield FakeBatch(self.graphs)
+
+    class FakeModelState:
+        def to(self, _device):
+            return self
+
+        def eval(self):
+            return self
+
+        def __call__(self, batch):
+            return FakeTensor([graph.values + 10.0 for graph in batch])
+
+    class NoGrad:
+        def __enter__(self):
+            return None
+
+        def __exit__(self, *_args):
+            return False
+
+    fake_torch_geometric = types.ModuleType("torch_geometric")
+    fake_torch_geometric.__path__ = []
+    fake_loader = types.ModuleType("torch_geometric.loader")
+    fake_loader.DataLoader = FakeDataLoader
+    fake_torch_geometric.loader = fake_loader
+    monkeypatch.setitem(sys.modules, "torch_geometric", fake_torch_geometric)
+    monkeypatch.setitem(sys.modules, "torch_geometric.loader", fake_loader)
+
+    model = SimpleNamespace(
+        adata=adata,
+        saved_pred={},
+        pert_list=["GENE_A"],
+        device="cuda",
+        best_model=FakeModelState(),
+    )
+    model.predict = types.MethodType(predict_globals["predict"], model)
+    public, per_control = probe._direct_control_predictions(
+        model=model,
+        torch_module=SimpleNamespace(no_grad=NoGrad),
+        query=["GENE_A"],
+        count=4,
+        expected_control_row_ids=adata.obs_names.astype(str).tolist(),
+    )
+
+    assert public == [4.0, 5.0]
+    assert per_control == (control_values + 10.0).tolist()
+    assert constructed_rows == control_values.tolist()
 
 
 def test_maintained_probe_a_runner_owns_fit_measurement_graph(tmp_path, monkeypatch):

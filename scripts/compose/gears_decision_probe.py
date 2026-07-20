@@ -573,14 +573,41 @@ def _direct_control_predictions(
             raise GeneUniverseError("GEARS public prediction returned an unexpected key roster")
         public = np.asarray(public_result[key], dtype=np.float64)
 
-        graph_factory = model.predict.__globals__.get("create_cell_graph_dataset_for_prediction")
-        if not callable(graph_factory):
+        dataset_factory = model.predict.__globals__.get("create_cell_graph_dataset_for_prediction")
+        if not callable(dataset_factory):
             raise GeneUniverseError(
                 "pinned GEARS predict no longer exposes its control-graph factory"
             )
+        cell_graph_factory = dataset_factory.__globals__.get("create_cell_graph_for_prediction")
+        if not callable(cell_graph_factory):
+            raise GeneUniverseError(
+                "pinned GEARS control-graph factory no longer exposes its cell constructor"
+            )
         from torch_geometric.loader import DataLoader
 
-        graphs = graph_factory(query, controls, model.pert_list, model.device)
+        pert_names = np.asarray(model.pert_list, dtype=str)
+        pert_indices: list[int] = []
+        for perturbation in query:
+            matches = np.flatnonzero(pert_names == perturbation)
+            if matches.size != 1:
+                raise GeneUniverseError(
+                    "GEARS Probe-A query does not map uniquely into the perturbation graph"
+                )
+            pert_indices.append(int(matches[0]))
+        control_matrix = controls.X
+        if hasattr(control_matrix, "toarray"):
+            control_matrix = control_matrix.toarray()
+        control_matrix = np.asarray(control_matrix)
+        if control_matrix.ndim != 2 or control_matrix.shape[0] != count:
+            raise GeneUniverseError("GEARS Probe-A control matrix shape is invalid")
+        graphs = [
+            cell_graph_factory(
+                np.asarray(control_matrix[index]).reshape(-1),
+                pert_indices,
+                query,
+            ).to(model.device)
+            for index in range(count)
+        ]
         rows: list[np.ndarray] = []
         fitted = model.best_model.to(model.device)
         fitted.eval()

@@ -5,7 +5,7 @@
 > **이 문서는 아무것도 정의하지 않는다** — 세부(task)는 plan, claim은 spec, exact param은 config,
 > 시간순 audit는 git이 authoritative다([sources of truth](../../CLAUDE.md#sources)). 상태 행이 authoritative
 > 문서와 어긋나면 **authoritative 문서가 옳다**; 이 인덱스를 갱신한다.
-> **Updated:** 2026-07-20 @ `a568d0c` (branch `main`)
+> **Updated:** 2026-07-20 @ `dd75886` (branch `main`)
 > **갱신 트리거:** sub-project/gate **상태가 바뀔 때만**(커밋마다 아님).
 > **종결 상태:** COMPOSE seal이 정확히 한 번 열리면 이 인덱스는 **frozen/은퇴**한다. 이후 진행상황은
 > seal 결과와 post-hoc analysis가 대신한다.
@@ -82,6 +82,15 @@ branch에서 추적 가능하게 기록한다. `LOCAL` ledger ID만으로는 이
    registration bound to its final clean Git SHA and prepared manifest. Local verification: 79 core + 193
    focused/adjacent tests green; Ruff check/format and `git diff --check` clean. Seal remains unopened and the
    release state remains `RELEASE-BLOCKED` until the fresh pod evidence and offline verification pass.
+   **2026-07-20 Probe-A direct-control correction:** a subsequent fresh-root attempt completed one 20-epoch fit
+   and checkpoint, then stopped before raw publication because the instrumentation reused GEARS'
+   `create_cell_graph_dataset_for_prediction`. That upstream helper always draws 300 controls with replacement,
+   so it cannot supply the registered exact 1/8/300/301/400 prepared prefixes. The failed evidence root is retained
+   and its command was not appended to the success-only ledger. The maintained direct path now uses the pinned
+   helper's exposed single-cell constructor once per exact ordered prepared row, while public `predict` is left
+   untouched. This preserves the preregistered test: public replacement-sampled output may legitimately fail the
+   frozen first-prefix equivalence tolerance; neither owner policy nor observed values are changed. A new clean
+   Git SHA, verifier-source pin, registration, and fresh evidence root are required before another fit.
 5. **§2.5 release gate** — worker locked-env integration green + 독립 검토 + **owner의 exact Git SHA 승인** → runbook을 `READY`로.
 6. **A100 sealed-run pod: runbook 실행** — 유효한 `ActivationRecord`(requirement별 non-empty evidence) + clean tree 하에 `phase2a → preflight → phase2b --confirm-seal`. **COMPOSE seal 1회 개봉** — `TG-K562`와 독립.
 

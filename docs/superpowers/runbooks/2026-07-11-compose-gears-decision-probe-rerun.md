@@ -171,10 +171,17 @@ unavailable reader-spy attestation is a **STOP**, not a warning.
 - Compare public `predict` with the candidate per-control reconstruction on identical inputs. Record negative
   predictions, control-count sensitivity, output scale, and inference-equivalence error without choosing a bridge
   after seeing downstream scientific outcomes. Freeze one ordered roster of at least 400 unique control-row
-  identities. Every count uses the exact prefix of that roster and retains every per-control prediction; the
-  verifier reconstructs the public prediction from the first `min(n,300)` rows itself.
+  identities. Every count uses the exact prefix of that roster and retains every direct per-control prediction.
+  The pinned public GEARS helper does **not** consume that prefix once each: it constructs 300 graphs by drawing
+  indices with replacement from the supplied control pool (`np.random.randint(0, len(ctrl_adata), 300)`). The
+  maintained direct path must therefore bypass that random-sampling dataset helper and invoke its exposed
+  single-cell graph constructor once for every exact prepared row, in order. The verifier still reconstructs the
+  preregistered first-`min(n,300)` candidate from those direct rows; disagreement with the public resampled mean is
+  a real Probe-A failure and must not be hidden by replaying or post-selecting the public random indices.
 
-Probe A's numerical bridge is specifically the public-vs-first-300 aggregation equivalence check. It does not
+Probe A's preregistered numerical-bridge candidate is specifically the public-vs-first-300 aggregation
+equivalence check; the source-level replacement sampling above makes failure possible and does not authorize a
+post-measurement policy change. It does not
 run a sealed response projection and must not be described as such. The adapter arithmetic
 (`hvg_subset_center_pca_no_renormalization`, including finite signed inputs) is separately covered by local
 known-answer tests; scientific usefulness still requires the post-PASS amendment and later sealed evaluation.
