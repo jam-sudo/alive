@@ -5,7 +5,7 @@
 > **이 문서는 아무것도 정의하지 않는다** — 세부(task)는 plan, claim은 spec, exact param은 config,
 > 시간순 audit는 git이 authoritative다([sources of truth](../../CLAUDE.md#sources)). 상태 행이 authoritative
 > 문서와 어긋나면 **authoritative 문서가 옳다**; 이 인덱스를 갱신한다.
-> **Updated:** 2026-07-20 @ `1a928b3` (branch `main`)
+> **Updated:** 2026-07-20 @ `daff92d` (branch `main`)
 > **갱신 트리거:** sub-project/gate **상태가 바뀔 때만**(커밋마다 아님).
 > **종결 상태:** COMPOSE seal이 정확히 한 번 열리면 이 인덱스는 **frozen/은퇴**한다. 이후 진행상황은
 > seal 결과와 post-hoc analysis가 대신한다.
@@ -106,6 +106,18 @@ branch에서 추적 가능하게 기록한다. `LOCAL` ledger ID만으로는 이
    test now exercises this boundary. Worker SHA-256 is
    `716a70f3c86f1d0e51cbf46b54a1f73fd30d6cbb5bdcc67bc61b85a0918b2595`. Verifier and owner-policy pins remain
    unchanged. Another fresh root and registration bound to the final clean documentation commit are mandatory.
+   **2026-07-20 Probe-A preregistered negative result:** the fresh run bound to clean commit `daff92d` completed
+   both fits, published two byte-identical checkpoints, retained exact ordered per-control observations, and
+   passed the zero-error determinism gate. It then mechanically rejected the frozen Option-1 bridge candidate:
+   control-cap maximum absolute error `0.19060921669006348 > 1e-5`; public-vs-direct-first-300 bridge error
+   `0.13841108322143558 > 1e-5`. Registration SHA is `771cbfd8…`, raw SHA is `ca9dbc16…`, and both checkpoint
+   SHAs are `4b6c1e48…`. No tolerance, registration, public sampling, or transform was changed after observation.
+   No canonical report/admission was published; the provider's immutable image digest was unavailable and was
+   not guessed. Full identities, leakage checks, evidence-custody status, and disposition are recorded in
+   `audits/2026-07-20-compose-probe-a-negative-result.md`. The scientific seal remains unopened. The
+   `log_normalized_pseudobulk` exact-first-300 candidate is rejected; the named raw-pseudobulk comparator remains
+   activation-blocked pending a separately reviewed representation/bias contract. Do not rerun this registration
+   with altered parameters.
 5. **§2.5 release gate** — worker locked-env integration green + 독립 검토 + **owner의 exact Git SHA 승인** → runbook을 `READY`로.
 6. **A100 sealed-run pod: runbook 실행** — 유효한 `ActivationRecord`(requirement별 non-empty evidence) + clean tree 하에 `phase2a → preflight → phase2b --confirm-seal`. **COMPOSE seal 1회 개봉** — `TG-K562`와 독립.
 

@@ -1,5 +1,9 @@
 # COMPOSE dev-pod — GEARS decision-probe RESULTS (2026-07-11)
 
+> **Historical scope:** this file remains the quarantined 2026-07-11 attempt. The separate 2026-07-20 fresh
+> Probe-A attempt and its preregistered negative result are recorded in
+> `audits/2026-07-20-compose-probe-a-negative-result.md`; do not merge the two evidence roots.
+>
 > **STATUS: QUARANTINED PARTIAL OBSERVATIONS — Probe B NONCONFORMING; scientific decisions remain
 > PROVISIONAL.** The official one-time `ComposeOutcomeStore` evaluation gateway was not consumed and no
 > outcome-based selection was demonstrated. However, the as-run prep loaded all source expression before the dev
