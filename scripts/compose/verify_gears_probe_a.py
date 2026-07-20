@@ -58,21 +58,18 @@ def _pinned_output_path(root: Path, supplied: str) -> Path:
 
 
 def _verifier_code_sha256() -> str:
-    """Hash the exact source closure that decides admission."""
+    """Hash a conservative superset of every local source that can decide admission."""
     repository = Path(__file__).resolve().parents[2]
-    closure = (
+    entrypoints = (
         "scripts/compose/verify_gears_probe_a.py",
-        # The manifested command validator hashes and semantically validates this driver.
         "scripts/compose/gears_decision_probe.py",
-        # The runtime collector delegates lock/package identity to this maintained worker.
         "scripts/baselines/gears_worker.py",
-        "src/alive/compose/gears_probe_a.py",
-        "src/alive/compose/approximation_bias.py",
-        # fit_role.row_identity_sha256 participates in the prepared-input admission decision.
-        "src/alive/compose/fit_role.py",
-        "src/alive/io.py",
-        "src/alive/provenance.py",
     )
+    alive_sources = tuple(
+        path.relative_to(repository).as_posix()
+        for path in sorted((repository / "src/alive").rglob("*.py"))
+    )
+    closure = (*entrypoints, *alive_sources)
     try:
         return sha256_json(
             {relative: sha256_bytes((repository / relative).read_bytes()) for relative in closure}

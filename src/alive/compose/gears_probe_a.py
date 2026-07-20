@@ -120,7 +120,7 @@ _MULTI_ROLES = frozenset({"roster_receipt", "probe_a_checkpoint", "raw_sample", 
 _KNOWN_ROLES = frozenset(_SINGLETON_ROLE_PATHS) | _MULTI_ROLES
 
 COMMAND_RECORD_SCHEMA = "compose_gears_probe_command_record_v1"
-RUNTIME_SCHEMA = "compose_gears_probe_runtime_v3"
+RUNTIME_SCHEMA = "compose_gears_probe_runtime_v4"
 PROVIDER_ATTESTATION_SCHEMA = "compose_provider_runtime_attestation_v1"
 INPUTS_SCHEMA = "compose_gears_probe_inputs_v3"
 ROLE_ATTESTATION_SCHEMA = "compose_gears_probe_role_attestation_v2"
@@ -209,6 +209,7 @@ _RUNTIME_KEYS = {
     "gears_installed_packages_sha256",
     "runtime_fingerprint_sha256",
     "network_disabled",
+    "network_isolation",
     "self_checksum",
 }
 _PROVIDER_ATTESTATION_KEYS = {
@@ -237,6 +238,13 @@ _CGROUP_EFFECTIVE_KEYS = {
     "memory_limit_bytes",
 }
 _HOST_VISIBLE_KEYS = {"cpu_model", "cpu_count", "ram_bytes"}
+_NETWORK_ISOLATION_KEYS = {
+    "method",
+    "network_namespace",
+    "interfaces",
+    "ipv4_non_loopback_route_count",
+    "ipv6_non_loopback_route_count",
+}
 _INPUTS_KEYS = {
     "schema",
     "protocol",
@@ -1499,7 +1507,26 @@ def _timestamp(value: object, field: str) -> datetime:
         raise ProbeAEvidenceError(f"{field} must be ISO-8601") from exc
     if parsed.tzinfo is None:
         raise ProbeAEvidenceError(f"{field} must include a timezone")
+    offset = parsed.utcoffset()
+    if offset is None or offset.total_seconds() != 0:
+        raise ProbeAEvidenceError(f"{field} must use UTC")
     return parsed
+
+
+def validate_provider_capture_freshness(
+    provider_attestation_issued_at_utc: object,
+    capture_started_at_utc: object,
+) -> None:
+    """Require a recent, already-issued provider assertion at runtime capture."""
+    provider_issued = _timestamp(
+        provider_attestation_issued_at_utc, "provider attestation issued_at_utc"
+    )
+    capture_started = _timestamp(capture_started_at_utc, "runtime capture started_at_utc")
+    age_seconds = (capture_started - provider_issued).total_seconds()
+    if age_seconds < 0 or age_seconds > 24 * 60 * 60:
+        raise ProbeAEvidenceError(
+            "provider attestation is future-dated or stale at runtime capture"
+        )
 
 
 def _image_digest(value: object, field: str) -> str:
@@ -1672,10 +1699,29 @@ def validate_runtime_evidence(
     _sha(obj["runtime_fingerprint_sha256"], "runtime.runtime_fingerprint_sha256")
     if obj["network_disabled"] is not True:
         raise ProbeAEvidenceError("runtime evidence must attest network_disabled=true")
+    isolation = _exact_keys(
+        obj["network_isolation"], _NETWORK_ISOLATION_KEYS, "runtime.network_isolation"
+    )
+    namespace = _nonempty_string(
+        isolation["network_namespace"], "runtime.network_isolation.network_namespace"
+    )
+    if (
+        isolation["method"] != "linux_network_namespace_loopback_only"
+        or re.fullmatch(r"net:\[[0-9]+\]", namespace) is None
+        or isolation["interfaces"] != ["lo"]
+        or type(isolation["ipv4_non_loopback_route_count"]) is not int
+        or isolation["ipv4_non_loopback_route_count"] != 0
+        or type(isolation["ipv6_non_loopback_route_count"]) is not int
+        or isolation["ipv6_non_loopback_route_count"] != 0
+    ):
+        raise ProbeAEvidenceError(
+            "runtime network isolation is not a loopback-only Linux network namespace"
+        )
     result = dict(obj)
     result["provider_allocation"] = dict(allocation)
     result["cgroup_effective"] = dict(cgroup)
     result["host_visible"] = dict(host)
+    result["network_isolation"] = dict(isolation)
     return result
 
 
@@ -1769,6 +1815,7 @@ def _validate_commands(
     runtime_sha256: str,
     provider_attestation_path: str,
     provider_attestation_sha256: str,
+    provider_attestation_issued_at_utc: str,
     gene2go_manifest_sha256: str,
     gene2go_nodes_artifact_sha256: str,
     manifested_files: Mapping[str, str],
@@ -1777,12 +1824,16 @@ def _validate_commands(
     probe_input_manifest_path: str,
     probe_input_manifest_sha256: str,
     probe_input_h5ad_path: str,
+    roster_receipt_path: str,
+    roster_receipt_sha256: str,
+    roster_receipt_paths_by_sha256: Mapping[str, set[str]],
     registration_path: str,
     registration_sha256: str,
     owner_policy_sha256: str,
     report_path: str,
     report_sha256: str,
     expected_git_commit: str,
+    probe_seed: int,
 ) -> None:
     try:
         data = path.read_bytes()
@@ -1796,9 +1847,22 @@ def _validate_commands(
     observed: Counter[str] = Counter()
     command_order: list[str] = []
     runtime_primary_sha256: list[str] = []
+    roster_primary_sha256: list[str] = []
+    roster_output_receipts: list[str] = []
+    prepared_primary_sha256: list[str] = []
+    verified_primary_sha256: list[str] = []
     registration_primary_sha256: list[str] = []
     probe_a_primary_sha256: list[str] = []
     report_primary_sha256: list[str] = []
+    previous_ended: datetime | None = None
+    recorded_ledger_path: str | None = None
+    execution_root: str | None = None
+
+    def execution_path(relative: str) -> str:
+        if execution_root is None:
+            raise ProbeAEvidenceError("runtime capture did not establish an execution root")
+        return (Path(execution_root) / relative).as_posix()
+
     for index, line in enumerate(lines):
         try:
             record = json.loads(line)
@@ -1823,6 +1887,8 @@ def _validate_commands(
             )
         observed[command] += 1
         command_order.append(command)
+        if index == 0 and command != "capture-runtime":
+            raise ProbeAEvidenceError("runtime capture must be the first maintained command")
         argv = obj["argv"]
         if (
             not isinstance(argv, list)
@@ -1830,14 +1896,40 @@ def _validate_commands(
             or any(not isinstance(token, str) or not token for token in argv)
         ):
             raise ProbeAEvidenceError("commands argv must be a non-empty string list")
-        if command not in argv or not any(
-            token.endswith("scripts/compose/gears_decision_probe.py") for token in argv
+        script_indexes = [
+            position
+            for position, token in enumerate(argv)
+            if token.endswith("scripts/compose/gears_decision_probe.py")
+        ]
+        if (
+            len(script_indexes) != 1
+            or script_indexes[0] + 1 >= len(argv)
+            or argv[script_indexes[0] + 1] != command
         ):
             raise ProbeAEvidenceError(
-                "commands argv must invoke the maintained GEARS probe CLI and named subcommand"
+                "commands argv must invoke one maintained GEARS probe CLI with "
+                "the named subcommand immediately following it"
             )
         if any("$(" in token or "`" in token for token in argv):
             raise ProbeAEvidenceError("commands argv must not use shell command substitution")
+        if "--allow-unbound-dev-payload" in argv:
+            raise ProbeAEvidenceError(
+                "scientific commands must not permit an unbound development payload"
+            )
+        if argv.count("--command-ledger") != 1 or argv.index("--command-ledger") + 1 >= len(argv):
+            raise ProbeAEvidenceError("maintained commands require exactly one command-ledger path")
+        ledger_arg = Path(argv[argv.index("--command-ledger") + 1])
+        normalized_ledger = ledger_arg.as_posix()
+        if (
+            not ledger_arg.is_absolute()
+            or ".." in ledger_arg.parts
+            or ledger_arg.name != "commands.jsonl"
+        ):
+            raise ProbeAEvidenceError("command ledger argv must be one absolute commands.jsonl")
+        if recorded_ledger_path is None:
+            recorded_ledger_path = normalized_ledger
+        elif normalized_ledger != recorded_ledger_path:
+            raise ProbeAEvidenceError("maintained commands disagree on their command-ledger path")
         if command == "capture-runtime":
             required_options = (
                 "--evidence-root",
@@ -1855,16 +1947,21 @@ def _validate_commands(
                 raise ProbeAEvidenceError(
                     "runtime capture command requires one network-disabled attestation"
                 )
-            declared_root = Path(argv[argv.index("--evidence-root") + 1]).as_posix()
+            declared_root_path = Path(argv[argv.index("--evidence-root") + 1])
+            if not declared_root_path.is_absolute() or ".." in declared_root_path.parts:
+                raise ProbeAEvidenceError(
+                    "runtime capture evidence root must be absolute and traversal-free"
+                )
+            execution_root = declared_root_path.as_posix()
             provider_path = argv[argv.index("--provider-attestation") + 1]
             output = argv[argv.index("--out-runtime") + 1]
             if (
-                Path(provider_path).as_posix()
-                != (Path(declared_root) / provider_attestation_path).as_posix()
+                Path(provider_path).as_posix() != execution_path(provider_attestation_path)
                 or argv[argv.index("--provider-attestation-sha256") + 1]
                 != provider_attestation_sha256
                 or argv[argv.index("--git-commit") + 1] != expected_git_commit
-                or Path(output).as_posix() != (Path(declared_root) / runtime_path).as_posix()
+                or Path(output).as_posix() != execution_path(runtime_path)
+                or normalized_ledger != execution_path("commands.jsonl")
             ):
                 raise ProbeAEvidenceError(
                     "runtime capture command is not bound to provider/commit/output identities"
@@ -1877,6 +1974,7 @@ def _validate_commands(
                 "--gears-resource-manifest-sha256",
                 "--gene2go-source",
                 "--gene2go-source-sha256",
+                "--out-receipt",
             )
             for option in required_options:
                 if argv.count(option) != 1 or argv.index(option) + 1 >= len(argv):
@@ -1884,16 +1982,36 @@ def _validate_commands(
                         f"GEARS roster command requires exactly one {option} value"
                     )
             source = argv[argv.index("--gene2go-source") + 1]
+            resource_manifest = argv[argv.index("--gears-resource-manifest") + 1]
             nodes = argv[argv.index("--gene2go-nodes-artifact") + 1]
+            roster_output_receipts.append(argv[argv.index("--out-receipt") + 1])
             matching_node_paths = [
                 relative
                 for relative in manifested_files
-                if Path(nodes).as_posix() == relative or nodes.endswith(f"/{relative}")
+                if Path(nodes).as_posix() == execution_path(relative)
             ]
+            matching_manifest_paths = [
+                relative
+                for relative in manifested_files
+                if Path(resource_manifest).as_posix() == execution_path(relative)
+            ]
+            matching_source_paths = [
+                relative
+                for relative in manifested_files
+                if Path(source).as_posix() == execution_path(relative)
+            ]
+            source_sha = _sha(
+                argv[argv.index("--gene2go-source-sha256") + 1],
+                "GEARS roster gene2go source SHA-256",
+            )
             if (
                 argv[argv.index("--gears-resource-manifest-sha256") + 1] != gene2go_manifest_sha256
                 or Path(source).name != "gene2go_all.pkl"
                 or len(matching_node_paths) != 1
+                or len(matching_manifest_paths) != 1
+                or len(matching_source_paths) != 1
+                or manifested_files[matching_manifest_paths[0]] != gene2go_manifest_sha256
+                or manifested_files[matching_source_paths[0]] != source_sha
                 or manifested_files[matching_node_paths[0]] != gene2go_nodes_artifact_sha256
                 or argv[argv.index("--gene2go-nodes-artifact-sha256") + 1]
                 != gene2go_nodes_artifact_sha256
@@ -1901,10 +2019,69 @@ def _validate_commands(
                 raise ProbeAEvidenceError(
                     "GEARS roster command is not bound to the pinned gene2go resources"
                 )
-            _sha(
-                argv[argv.index("--gene2go-source-sha256") + 1],
-                "GEARS roster gene2go source SHA-256",
+            try:
+                resource_payload = json.loads(
+                    (path.parent / matching_manifest_paths[0]).read_bytes()
+                )
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise ProbeAEvidenceError(
+                    "cannot parse manifested GEARS resource manifest"
+                ) from exc
+            resources = (
+                resource_payload.get("resources") if isinstance(resource_payload, Mapping) else None
             )
+            matching_resources = [
+                item
+                for item in resources or []
+                if isinstance(item, Mapping) and item.get("name") == "gene2go_all.pkl"
+            ]
+            if len(matching_resources) != 1 or matching_resources[0].get("sha256") != source_sha:
+                raise ProbeAEvidenceError(
+                    "manifested GEARS resource manifest does not bind gene2go_all.pkl bytes"
+                )
+        elif command == "prepare-input":
+            required_options = (
+                "--roster-receipt",
+                "--roster-receipt-sha256",
+                "--out-h5ad",
+                "--out-manifest",
+            )
+            for option in required_options:
+                if argv.count(option) != 1 or argv.index(option) + 1 >= len(argv):
+                    raise ProbeAEvidenceError(
+                        f"Probe-A input preparation requires exactly one {option} value"
+                    )
+            receipt_arg = argv[argv.index("--roster-receipt") + 1]
+            h5ad_arg = argv[argv.index("--out-h5ad") + 1]
+            manifest_arg = argv[argv.index("--out-manifest") + 1]
+            if (
+                Path(receipt_arg).as_posix() != execution_path(roster_receipt_path)
+                or argv[argv.index("--roster-receipt-sha256") + 1] != roster_receipt_sha256
+                or Path(h5ad_arg).as_posix() != execution_path(probe_input_h5ad_path)
+                or Path(manifest_arg).as_posix() != execution_path(probe_input_manifest_path)
+            ):
+                raise ProbeAEvidenceError(
+                    "Probe-A input preparation is not bound to receipt/canonical outputs"
+                )
+        elif command == "verify-input":
+            required_options = ("--manifest", "--manifest-sha256", "--h5ad", "--roster-receipt")
+            for option in required_options:
+                if argv.count(option) != 1 or argv.index(option) + 1 >= len(argv):
+                    raise ProbeAEvidenceError(
+                        f"Probe-A input verification requires exactly one {option} value"
+                    )
+            if (
+                Path(argv[argv.index("--manifest") + 1]).as_posix()
+                != execution_path(probe_input_manifest_path)
+                or argv[argv.index("--manifest-sha256") + 1] != probe_input_manifest_sha256
+                or Path(argv[argv.index("--h5ad") + 1]).as_posix()
+                != execution_path(probe_input_h5ad_path)
+                or Path(argv[argv.index("--roster-receipt") + 1]).as_posix()
+                != execution_path(roster_receipt_path)
+            ):
+                raise ProbeAEvidenceError(
+                    "Probe-A input verification is not bound to prepared inputs/receipt"
+                )
         elif command == "build-probe-a-registration":
             required_options = (
                 "--evidence-root",
@@ -1923,11 +2100,10 @@ def _validate_commands(
             probe_manifest = argv[argv.index("--probe-manifest") + 1]
             owner_policy = argv[argv.index("--owner-policy") + 1]
             output = argv[argv.index("--out-registration") + 1]
+            declared_root = Path(argv[argv.index("--evidence-root") + 1]).as_posix()
             if (
-                (
-                    Path(probe_manifest).as_posix() != probe_input_manifest_path
-                    and not probe_manifest.endswith(f"/{probe_input_manifest_path}")
-                )
+                declared_root != execution_root
+                or Path(probe_manifest).as_posix() != execution_path(probe_input_manifest_path)
                 or argv[argv.index("--probe-manifest-sha256") + 1] != probe_input_manifest_sha256
                 or (
                     Path(owner_policy).as_posix() != PROBE_A_OWNER_POLICY_PATH
@@ -1935,10 +2111,7 @@ def _validate_commands(
                 )
                 or argv[argv.index("--owner-policy-sha256") + 1] != owner_policy_sha256
                 or argv[argv.index("--git-commit") + 1] != expected_git_commit
-                or (
-                    Path(output).as_posix() != registration_path
-                    and not output.endswith(f"/{registration_path}")
-                )
+                or Path(output).as_posix() != execution_path(registration_path)
             ):
                 raise ProbeAEvidenceError(
                     "Probe-A registration command is not bound to policy/prepared input/output"
@@ -1978,27 +2151,20 @@ def _validate_commands(
             probe_manifest = argv[argv.index("--probe-manifest") + 1]
             registration = argv[argv.index("--probe-a-registration") + 1]
             h5ad = argv[argv.index("--h5ad") + 1]
+            receipt = argv[argv.index("--roster-receipt") + 1]
             checkpoint_dir = argv[argv.index("--checkpoint-dir") + 1]
+            declared_root = Path(argv[argv.index("--evidence-root") + 1]).as_posix()
             if (
-                (
-                    Path(registration).as_posix() != registration_path
-                    and not registration.endswith(f"/{registration_path}")
-                )
+                declared_root != execution_root
+                or Path(registration).as_posix() != execution_path(registration_path)
                 or argv[argv.index("--probe-a-registration-sha256") + 1] != registration_sha256
                 or argv[argv.index("--git-commit") + 1] != expected_git_commit
-                or (
-                    Path(probe_manifest).as_posix() != probe_input_manifest_path
-                    and not probe_manifest.endswith(f"/{probe_input_manifest_path}")
-                )
-                or (
-                    Path(h5ad).as_posix() != probe_input_h5ad_path
-                    and not h5ad.endswith(f"/{probe_input_h5ad_path}")
-                )
+                or Path(probe_manifest).as_posix() != execution_path(probe_input_manifest_path)
+                or Path(h5ad).as_posix() != execution_path(probe_input_h5ad_path)
+                or Path(receipt).as_posix() != execution_path(roster_receipt_path)
+                or Path(out_raw).as_posix() != execution_path(raw_sample_path)
                 or argv[argv.index("--probe-manifest-sha256") + 1] != probe_input_manifest_sha256
-                or (
-                    Path(checkpoint_dir).as_posix() != "checkpoints"
-                    and not checkpoint_dir.endswith("/checkpoints")
-                )
+                or Path(checkpoint_dir).as_posix() != execution_path("checkpoints")
             ):
                 raise ProbeAEvidenceError(
                     "Probe-A command is not bound to the canonical prepared input/checkpoints"
@@ -2021,22 +2187,15 @@ def _validate_commands(
             raw_sample = argv[argv.index("--raw-sample") + 1]
             registration = argv[argv.index("--probe-a-registration") + 1]
             output = argv[argv.index("--out-report") + 1]
+            declared_root = Path(argv[argv.index("--evidence-root") + 1]).as_posix()
             if (
-                (
-                    Path(raw_sample).as_posix() != raw_sample_path
-                    and not raw_sample.endswith(f"/{raw_sample_path}")
-                )
+                declared_root != execution_root
+                or Path(raw_sample).as_posix() != execution_path(raw_sample_path)
                 or argv[argv.index("--raw-sample-sha256") + 1] != raw_sample_sha256
-                or (
-                    Path(registration).as_posix() != registration_path
-                    and not registration.endswith(f"/{registration_path}")
-                )
+                or Path(registration).as_posix() != execution_path(registration_path)
                 or argv[argv.index("--probe-a-registration-sha256") + 1] != registration_sha256
                 or argv[argv.index("--git-commit") + 1] != expected_git_commit
-                or (
-                    Path(output).as_posix() != report_path
-                    and not output.endswith(f"/{report_path}")
-                )
+                or Path(output).as_posix() != execution_path(report_path)
             ):
                 raise ProbeAEvidenceError(
                     "Probe-A report command is not bound to the raw/registration/report contract"
@@ -2052,10 +2211,25 @@ def _validate_commands(
             for key, value in env.items()
         ):
             raise ProbeAEvidenceError("commands env must be a secret-free string allowlist")
+        if command == "probe-a" and (
+            env.get("CUBLAS_WORKSPACE_CONFIG") != ":4096:8"
+            or env.get("PYTHONHASHSEED") != str(probe_seed)
+        ):
+            raise ProbeAEvidenceError(
+                "Probe-A command environment is not bound to deterministic CUDA/seed settings"
+            )
         started = _timestamp(obj["started_at_utc"], f"commands record {index}.started_at_utc")
         ended = _timestamp(obj["ended_at_utc"], f"commands record {index}.ended_at_utc")
         if ended < started:
             raise ProbeAEvidenceError("commands record ended before it started")
+        if previous_ended is not None and started < previous_ended:
+            raise ProbeAEvidenceError("commands evidence contains overlapping or backdated records")
+        previous_ended = ended
+        if command == "capture-runtime":
+            validate_provider_capture_freshness(
+                provider_attestation_issued_at_utc,
+                obj["started_at_utc"],
+            )
         if obj["exit_code"] != 0:
             raise ProbeAEvidenceError("commands evidence contains a failed command")
         primary_sha256 = _sha(
@@ -2063,6 +2237,12 @@ def _validate_commands(
         )
         if command == "capture-runtime":
             runtime_primary_sha256.append(primary_sha256)
+        elif command == "build-roster":
+            roster_primary_sha256.append(primary_sha256)
+        elif command == "prepare-input":
+            prepared_primary_sha256.append(primary_sha256)
+        elif command == "verify-input":
+            verified_primary_sha256.append(primary_sha256)
         elif command == "build-probe-a-registration":
             registration_primary_sha256.append(primary_sha256)
         elif command == "probe-a":
@@ -2104,9 +2284,37 @@ def _validate_commands(
     ]
     if critical_order != sorted(critical_order):
         raise ProbeAEvidenceError("commands evidence violates the stateful protocol order")
+    prepare_index = command_order.index("prepare-input")
+    if any(
+        index >= prepare_index
+        for index, command in enumerate(command_order)
+        if command == "build-roster"
+    ):
+        raise ProbeAEvidenceError(
+            "all candidate roster builds must complete before canonical input preparation"
+        )
     if runtime_primary_sha256 != [_sha(runtime_sha256, "runtime evidence SHA-256")]:
         raise ProbeAEvidenceError(
             "runtime capture command primary SHA-256 is not bound to runtime evidence"
+        )
+    if roster_primary_sha256.count(roster_receipt_sha256) != 1:
+        raise ProbeAEvidenceError(
+            "exactly one roster command must publish the selected manifested receipt"
+        )
+    for primary_sha256, output in zip(roster_primary_sha256, roster_output_receipts, strict=True):
+        allowed_paths = roster_receipt_paths_by_sha256.get(primary_sha256, set())
+        if not allowed_paths or not any(
+            Path(output).as_posix() == execution_path(relative) for relative in allowed_paths
+        ):
+            raise ProbeAEvidenceError(
+                "roster command primary/output is not bound to a manifested receipt"
+            )
+    expected_prepared_sha = _sha(probe_input_manifest_sha256, "prepared input manifest SHA-256")
+    if prepared_primary_sha256 != [expected_prepared_sha] or verified_primary_sha256 != [
+        expected_prepared_sha
+    ]:
+        raise ProbeAEvidenceError(
+            "prepared-input publication/verification primary SHA-256 differs from its manifest"
         )
     if registration_primary_sha256 != [_sha(registration_sha256, "Probe-A registration SHA-256")]:
         raise ProbeAEvidenceError(
@@ -2449,7 +2657,9 @@ def validate_evidence_semantics(
             "runtime/input dependency locks differ from the committed preparation/GEARS locks"
         )
     matching_receipts: list[dict] = []
+    roster_receipt_paths_by_sha256: dict[str, set[str]] = {}
     for entry in by_role["roster_receipt"]:
+        roster_receipt_paths_by_sha256.setdefault(entry["sha256"], set()).add(entry["path"])
         receipt = _validate_roster_receipt(
             _read_json_entry(
                 root,
@@ -2469,6 +2679,10 @@ def validate_evidence_semantics(
     raw_entries = by_role["raw_sample"]
     if len(raw_entries) != 1:
         raise ProbeAEvidenceError("semantic evidence requires exactly one raw sample")
+    raw = _load_probe_a_raw(
+        root,
+        {"path": raw_entries[0]["path"], "sha256": raw_entries[0]["sha256"]},
+    )
     _validate_commands(
         _relative_file(root, command_entry["path"]),
         expected_sha256=command_entry["sha256"],
@@ -2478,6 +2692,7 @@ def validate_evidence_semantics(
         runtime_sha256=runtime_entry["sha256"],
         provider_attestation_path=provider_attestation_entry["path"],
         provider_attestation_sha256=provider_attestation_entry["sha256"],
+        provider_attestation_issued_at_utc=provider_attestation["issued_at_utc"],
         gene2go_manifest_sha256=inputs["gene2go_manifest_sha256"],
         gene2go_nodes_artifact_sha256=matching_receipts[0]["gene2go_nodes_artifact_sha256"],
         manifested_files={
@@ -2488,17 +2703,20 @@ def validate_evidence_semantics(
         probe_input_manifest_path=by_role["probe_input_manifest"][0]["path"],
         probe_input_manifest_sha256=by_role["probe_input_manifest"][0]["sha256"],
         probe_input_h5ad_path=by_role["probe_input_h5ad"][0]["path"],
+        roster_receipt_path=next(
+            entry["path"]
+            for entry in by_role["roster_receipt"]
+            if entry["sha256"] == inputs["roster_receipt_sha256"]
+        ),
+        roster_receipt_sha256=inputs["roster_receipt_sha256"],
+        roster_receipt_paths_by_sha256=roster_receipt_paths_by_sha256,
         registration_path=registration_entry["path"],
         registration_sha256=registration_entry["sha256"],
         owner_policy_sha256=registration["owner_policy_sha256"],
         report_path=by_role["probe_a_report"][0]["path"],
         report_sha256=by_role["probe_a_report"][0]["sha256"],
         expected_git_commit=expected_git_commit,
-    )
-
-    raw = _load_probe_a_raw(
-        root,
-        {"path": raw_entries[0]["path"], "sha256": raw_entries[0]["sha256"]},
+        probe_seed=raw["producer"]["seed"],
     )
     if (
         raw["producer"]["gears_dependency_lock_sha256"] != expected_gears_lock

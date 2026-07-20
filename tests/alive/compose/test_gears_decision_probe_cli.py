@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import pickle
+import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -120,9 +121,23 @@ def _write_runtime_sources(tmp_path: Path, *, version: int) -> tuple[Path, Path]
         (cgroup / "cpuset/cpuset.cpus").write_text("0-7\n")
         (cgroup / "memory/memory.limit_in_bytes").write_text(f"{64 * 1024**3}\n")
     proc = tmp_path / f"proc-v{version}"
-    proc.mkdir()
+    (proc / "self").mkdir(parents=True)
     (proc / "cpuinfo").write_text("processor : 0\nmodel name : Unit Test CPU\n")
     (proc / "meminfo").write_text("MemTotal:       67108864 kB\n")
+    if version == 2:
+        (proc / "self/cgroup").write_text("0::/\n", encoding="utf-8")
+        (proc / "self/mountinfo").write_text(
+            f"29 23 0:26 / {cgroup} rw - cgroup2 cgroup rw\n", encoding="utf-8"
+        )
+    else:
+        (proc / "self/cgroup").write_text("2:cpu:/\n3:cpuset:/\n4:memory:/\n", encoding="utf-8")
+        (proc / "self/mountinfo").write_text(
+            "".join(
+                f"{index} 23 0:{index} / {cgroup / controller} rw - cgroup cgroup rw,{controller}\n"
+                for index, controller in enumerate(("cpu", "cpuset", "memory"), start=30)
+            ),
+            encoding="utf-8",
+        )
     return cgroup, proc
 
 
@@ -137,6 +152,17 @@ def _patch_runtime_dependencies(probe, monkeypatch) -> None:
             "gpu_uuid": "GPU-unit-test",
             "driver_version": "550.54.15",
             "cuda_version": "12.4",
+        },
+    )
+    monkeypatch.setattr(
+        probe,
+        "_collect_network_isolation",
+        lambda *_args: {
+            "method": "linux_network_namespace_loopback_only",
+            "network_namespace": "net:[12345]",
+            "interfaces": ["lo"],
+            "ipv4_non_loopback_route_count": 0,
+            "ipv6_non_loopback_route_count": 0,
         },
     )
     worker = SimpleNamespace(verify_probe_runtime_identity=lambda **_kwargs: "e" * 64)
@@ -520,6 +546,179 @@ def test_command_result_emits_publication_boundary_digest(tmp_path, capsys):
     }
 
 
+def test_command_recorder_appends_canonical_verifier_records(tmp_path, monkeypatch):
+    probe = _load(_PROBE, "_probe_test_command_recorder")
+    ledger = tmp_path / "commands.jsonl"
+    monkeypatch.setenv("PYTHONHASHSEED", "11")
+    monkeypatch.setenv("UNRELATED_SECRET", "must-not-be-recorded")
+    argv = [
+        str(_PROBE),
+        "verify-input",
+        "--command-ledger",
+        str(ledger),
+    ]
+
+    probe._append_command_record(
+        ledger_path=ledger,
+        command="verify-input",
+        argv=argv,
+        started_at_utc="2026-07-20T00:00:00Z",
+        primary_file_sha256=_SHA,
+    )
+    probe._append_command_record(
+        ledger_path=ledger,
+        command="verify-input",
+        argv=argv,
+        started_at_utc="2026-07-20T00:00:01Z",
+        primary_file_sha256="b" * 64,
+    )
+
+    lines = ledger.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 2
+    records = [json.loads(line) for line in lines]
+    assert records[0]["schema"] == "compose_gears_probe_command_record_v1"
+    assert records[0]["argv"] == argv
+    assert records[0]["env"] == {"PYTHONHASHSEED": "11"}
+    assert records[0]["self_checksum"] == sha256_json(
+        {key: value for key, value in records[0].items() if key != "self_checksum"}
+    )
+    assert records[1]["primary_file_sha256"] == "b" * 64
+
+
+def test_command_recorder_rejects_relative_and_symlink_ledgers(tmp_path):
+    probe = _load(_PROBE, "_probe_test_command_recorder_paths")
+    with pytest.raises(GeneUniverseError, match="absolute non-symlink"):
+        probe._append_command_record(
+            ledger_path="commands.jsonl",
+            command="verify-input",
+            argv=[str(_PROBE), "verify-input"],
+            started_at_utc="2026-07-20T00:00:00Z",
+            primary_file_sha256=_SHA,
+        )
+    target = tmp_path / "target.jsonl"
+    target.write_text("", encoding="utf-8")
+    linked = tmp_path / "commands.jsonl"
+    linked.symlink_to(target)
+    with pytest.raises(GeneUniverseError, match="absolute non-symlink"):
+        probe._append_command_record(
+            ledger_path=linked,
+            command="verify-input",
+            argv=[str(_PROBE), "verify-input"],
+            started_at_utc="2026-07-20T00:00:00Z",
+            primary_file_sha256=_SHA,
+        )
+
+
+def test_command_ledger_cannot_reopen_after_manifest_publication(tmp_path):
+    probe = _load(_PROBE, "_probe_test_closed_command_ledger")
+    ledger = tmp_path / "commands.jsonl"
+    (tmp_path / probe.MANIFEST_PATH).write_text("{}\n", encoding="utf-8")
+
+    with pytest.raises(GeneUniverseError, match="closed after evidence manifest"):
+        probe._append_command_record(
+            ledger_path=ledger,
+            command="verify-input",
+            argv=[str(_PROBE), "verify-input"],
+            started_at_utc="2026-07-20T00:00:00Z",
+            primary_file_sha256=_SHA,
+        )
+    assert not ledger.exists()
+
+
+def test_declared_evidence_root_must_equal_ledger_parent(tmp_path):
+    probe = _load(_PROBE, "_probe_test_declared_evidence_root")
+    other = tmp_path / "other"
+    other.mkdir()
+
+    probe._assert_declared_evidence_root(tmp_path.resolve(), tmp_path)
+    with pytest.raises(GeneUniverseError, match="differs from command-ledger parent"):
+        probe._assert_declared_evidence_root(tmp_path.resolve(), other)
+
+
+def test_command_ledger_rechecks_manifest_after_acquiring_lock(tmp_path, monkeypatch):
+    probe = _load(_PROBE, "_probe_test_command_ledger_lock_recheck")
+    ledger = tmp_path / "commands.jsonl"
+    original_flock = probe.fcntl.flock
+
+    def _publish_manifest_after_lock(fd, operation):
+        original_flock(fd, operation)
+        (tmp_path / probe.MANIFEST_PATH).write_text("{}\n", encoding="utf-8")
+
+    monkeypatch.setattr(probe.fcntl, "flock", _publish_manifest_after_lock)
+    with pytest.raises(GeneUniverseError, match="closed after evidence manifest"):
+        probe._append_command_record(
+            ledger_path=ledger,
+            command="verify-input",
+            argv=[str(_PROBE), "verify-input"],
+            started_at_utc="2026-07-20T00:00:00Z",
+            primary_file_sha256=_SHA,
+        )
+    assert ledger.read_bytes() == b""
+
+
+def test_manifest_publication_holds_command_ledger_lock_through_write(tmp_path, monkeypatch):
+    probe = _load(_PROBE, "_probe_test_manifest_ledger_lock")
+    ledger = tmp_path / "commands.jsonl"
+    ledger.write_text('{"record":"complete"}\n', encoding="utf-8")
+    monkeypatch.setattr(probe, "assert_clean_approved_checkout", lambda _commit: None)
+
+    def _build_while_probing_lock(**_kwargs):
+        code = (
+            "import fcntl, os, sys; "
+            "fd=os.open(sys.argv[1], os.O_RDONLY); "
+            "\ntry:\n fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)\n"
+            "except BlockingIOError:\n sys.exit(0)\n"
+            "else:\n sys.exit(1)\n"
+        )
+        observed = subprocess.run(
+            [sys.executable, "-c", code, str(ledger)],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        assert observed.returncode == 0, observed.stderr
+        return {"schema": probe.MANIFEST_SCHEMA}
+
+    monkeypatch.setattr(probe, "build_evidence_manifest", _build_while_probing_lock)
+    observed_sha = probe.publish_evidence_manifest(
+        evidence_root=tmp_path,
+        expected_git_commit="1" * 40,
+        out_manifest=tmp_path / probe.MANIFEST_PATH,
+    )
+    assert observed_sha == sha256_file(tmp_path / probe.MANIFEST_PATH)
+
+
+def test_command_finalization_rechecks_network_isolation_before_ledger_commit(
+    tmp_path, monkeypatch
+):
+    probe = _load(_PROBE, "_probe_test_command_finalization")
+    observed: list[str] = []
+    monkeypatch.setattr(
+        probe,
+        "_assert_runtime_execution_context",
+        lambda _ledger: observed.append("runtime"),
+    )
+    monkeypatch.setattr(
+        probe,
+        "_append_command_record",
+        lambda **_kwargs: observed.append("ledger"),
+    )
+    monkeypatch.setattr(
+        probe,
+        "_emit_command_result",
+        lambda **_kwargs: observed.append("stdout"),
+    )
+
+    probe._finalize_command(
+        args=SimpleNamespace(command="verify-input", command_ledger=tmp_path / "commands.jsonl"),
+        invocation_argv=[str(_PROBE), "verify-input"],
+        started_at_utc="2026-07-20T00:00:00Z",
+        primary_file_sha256=_SHA,
+    )
+
+    assert observed == ["runtime", "ledger", "stdout"]
+
+
 def test_multi_artifact_outputs_require_distinct_destinations(tmp_path):
     probe = _load(_PROBE, "_probe_test_distinct_outputs")
     shared = tmp_path / "shared-output"
@@ -645,6 +844,7 @@ def test_runtime_publication_binds_provider_and_cgroup_limits(
         evidence_root=evidence,
         provider_attestation_path=attestation,
         provider_attestation_sha256=sha256_file(attestation),
+        capture_started_at_utc="2026-07-20T00:00:00Z",
         expected_git_commit="1" * 40,
         out_runtime=output,
         network_disabled=True,
@@ -654,7 +854,7 @@ def test_runtime_publication_binds_provider_and_cgroup_limits(
 
     runtime = json.loads(output.read_text())
     assert observed_sha == sha256_file(output)
-    assert runtime["schema"] == "compose_gears_probe_runtime_v3"
+    assert runtime["schema"] == "compose_gears_probe_runtime_v4"
     assert runtime["provider_attestation_sha256"] == sha256_file(attestation)
     assert runtime["provider_allocation"]["cpu_count"] == 8
     assert runtime["cgroup_effective"] == {
@@ -672,14 +872,69 @@ def test_runtime_publication_binds_provider_and_cgroup_limits(
         "cpu_count": 8,
         "ram_bytes": 64 * 1024**3,
     }
+    assert runtime["network_isolation"] == {
+        "method": "linux_network_namespace_loopback_only",
+        "network_namespace": "net:[12345]",
+        "interfaces": ["lo"],
+        "ipv4_non_loopback_route_count": 0,
+        "ipv6_non_loopback_route_count": 0,
+    }
+    monkeypatch.setattr(
+        probe,
+        "_collect_cgroup_effective",
+        lambda *_args: runtime["cgroup_effective"],
+    )
+    observed_commits: list[str] = []
+    monkeypatch.setattr(
+        probe,
+        "assert_clean_approved_checkout",
+        lambda commit: observed_commits.append(commit),
+    )
+    probe._assert_runtime_execution_context(evidence / "commands.jsonl")
+    assert observed_commits == ["1" * 40]
+    monkeypatch.setattr(
+        probe,
+        "_collect_cgroup_effective",
+        lambda *_args: {**runtime["cgroup_effective"], "memory_limit_bytes": 1},
+    )
+    with pytest.raises(GeneUniverseError, match="cgroup differs"):
+        probe._assert_runtime_execution_context(evidence / "commands.jsonl")
+
+
+def test_network_isolation_requires_loopback_only_namespace(tmp_path):
+    probe = _load(_PROBE, "_probe_test_network_isolation")
+    proc = tmp_path / "proc"
+    (proc / "self/ns").mkdir(parents=True)
+    (proc / "self/ns/net").symlink_to("net:[12345]")
+    (proc / "net").mkdir()
+    (proc / "net/route").write_text(
+        "Iface Destination Gateway Flags RefCnt Use Metric Mask MTU Window IRTT\n"
+        "lo 0000007F 00000000 0001 0 0 0 000000FF 0 0 0\n",
+        encoding="utf-8",
+    )
+    (proc / "net/ipv6_route").write_text("", encoding="utf-8")
+    interfaces = tmp_path / "net-interfaces"
+    (interfaces / "lo").mkdir(parents=True)
+
+    assert probe._collect_network_isolation(proc, interfaces) == {
+        "method": "linux_network_namespace_loopback_only",
+        "network_namespace": "net:[12345]",
+        "interfaces": ["lo"],
+        "ipv4_non_loopback_route_count": 0,
+        "ipv6_non_loopback_route_count": 0,
+    }
+
+    (interfaces / "eth0").mkdir()
+    with pytest.raises(GeneUniverseError, match="only loopback"):
+        probe._collect_network_isolation(proc, interfaces)
 
 
 @pytest.mark.parametrize(
     ("version", "relative", "replacement", "message"),
     [
-        (2, "cpu.max", "max 100000\n", "CPU quota must be finite"),
-        (2, "memory.max", "max\n", "memory limit must be finite"),
-        (1, "cpu/cpu.cfs_quota_us", "-1\n", "CPU quota must be finite and positive"),
+        (2, "cpu.max", "max 100000\n", "limits must be finite"),
+        (2, "memory.max", "max\n", "limits must be finite"),
+        (1, "cpu/cpu.cfs_quota_us", "-1\n", "CPU quota must be finite"),
         (
             1,
             "memory/memory.limit_in_bytes",
@@ -705,6 +960,7 @@ def test_runtime_publication_rejects_unbounded_cgroups(
             evidence_root=evidence,
             provider_attestation_path=attestation,
             provider_attestation_sha256=sha256_file(attestation),
+            capture_started_at_utc="2026-07-20T00:00:00Z",
             expected_git_commit="1" * 40,
             out_runtime=output,
             network_disabled=True,
@@ -717,11 +973,59 @@ def test_runtime_publication_rejects_unbounded_cgroups(
 @pytest.mark.parametrize("cpuset", ["0-3,3-7", "0-03", "1,0", "0-", ""])
 def test_runtime_publication_rejects_noncanonical_cpuset(tmp_path, cpuset):
     probe = _load(_PROBE, f"_probe_test_cpuset_{len(cpuset)}_{cpuset.count(',')}")
-    cgroup, _proc = _write_runtime_sources(tmp_path, version=2)
+    cgroup, proc = _write_runtime_sources(tmp_path, version=2)
     (cgroup / "cpuset.cpus.effective").write_text(cpuset + "\n")
 
     with pytest.raises(GeneUniverseError, match="cpuset|CPU list|empty"):
-        probe._collect_cgroup_effective(cgroup)
+        probe._collect_cgroup_effective(cgroup, proc)
+
+
+def test_cgroup_v2_uses_process_leaf_and_tightest_ancestor(tmp_path):
+    probe = _load(_PROBE, "_probe_test_cgroup_leaf")
+    cgroup, proc = _write_runtime_sources(tmp_path, version=2)
+    child = cgroup / "pod/worker"
+    child.mkdir(parents=True)
+    (cgroup / "pod/cpu.max").write_text("max 100000\n", encoding="utf-8")
+    (cgroup / "pod/memory.max").write_text("max\n", encoding="utf-8")
+    (child / "cpu.max").write_text("200000 100000\n", encoding="utf-8")
+    (child / "memory.max").write_text(f"{32 * 1024**3}\n", encoding="utf-8")
+    (child / "cpuset.cpus.effective").write_text("2-5\n", encoding="utf-8")
+    (proc / "self/cgroup").write_text("0::/pod/worker\n", encoding="utf-8")
+
+    observed = probe._collect_cgroup_effective(cgroup, proc)
+    assert observed["cpu_quota_cores"] == 2.0
+    assert observed["effective_cpu_cores"] == 2.0
+    assert observed["memory_limit_bytes"] == 32 * 1024**3
+    assert observed["cpuset_cpus"] == "2-5"
+
+
+def test_cgroup_v1_uses_controller_leaves_and_inherited_cpuset(tmp_path):
+    probe = _load(_PROBE, "_probe_test_cgroup_v1_leaf")
+    cgroup, proc = _write_runtime_sources(tmp_path, version=1)
+    for controller in ("cpu", "cpuset", "memory"):
+        (cgroup / controller / "pod/worker").mkdir(parents=True)
+    for relative, value in {
+        "cpu/pod/cpu.cfs_quota_us": "-1\n",
+        "cpu/pod/cpu.cfs_period_us": "100000\n",
+        "cpu/pod/worker/cpu.cfs_quota_us": "200000\n",
+        "cpu/pod/worker/cpu.cfs_period_us": "100000\n",
+        "cpuset/pod/cpuset.cpus": "2-5\n",
+        "cpuset/pod/worker/cpuset.cpus": "\n",
+        "memory/pod/memory.limit_in_bytes": f"{64 * 1024**3}\n",
+        "memory/pod/worker/memory.limit_in_bytes": f"{32 * 1024**3}\n",
+    }.items():
+        (cgroup / relative).write_text(value, encoding="utf-8")
+    (proc / "self/cgroup").write_text(
+        "2:cpu:/pod/worker\n3:cpuset:/pod/worker\n4:memory:/pod/worker\n",
+        encoding="utf-8",
+    )
+
+    observed = probe._collect_cgroup_effective(cgroup, proc)
+    assert observed["version"] == 1
+    assert observed["cpu_quota_cores"] == 2.0
+    assert observed["effective_cpu_cores"] == 2.0
+    assert observed["memory_limit_bytes"] == 32 * 1024**3
+    assert observed["cpuset_cpus"] == "2-5"
 
 
 def test_runtime_publication_rejects_unpinned_attestation_and_overwrite(tmp_path, monkeypatch):
@@ -738,6 +1042,7 @@ def test_runtime_publication_rejects_unpinned_attestation_and_overwrite(tmp_path
             evidence_root=evidence,
             provider_attestation_path=attestation,
             provider_attestation_sha256="0" * 64,
+            capture_started_at_utc="2026-07-20T00:00:00Z",
             expected_git_commit="1" * 40,
             out_runtime=output,
             network_disabled=True,
@@ -754,6 +1059,7 @@ def test_runtime_publication_rejects_unpinned_attestation_and_overwrite(tmp_path
             evidence_root=evidence,
             provider_attestation_path=attestation,
             provider_attestation_sha256=sha256_file(attestation),
+            capture_started_at_utc="2026-07-20T00:00:00Z",
             expected_git_commit="1" * 40,
             out_runtime=output,
             network_disabled=True,
@@ -770,6 +1076,7 @@ def test_runtime_publication_rejects_unpinned_attestation_and_overwrite(tmp_path
             evidence_root=linked_root,
             provider_attestation_path=linked_root / probe.PROVIDER_ATTESTATION_PATH,
             provider_attestation_sha256=sha256_file(attestation),
+            capture_started_at_utc="2026-07-20T00:00:00Z",
             expected_git_commit="1" * 40,
             out_runtime=linked_root / "runtime.json",
             network_disabled=True,
@@ -782,6 +1089,7 @@ def test_runtime_publication_rejects_unpinned_attestation_and_overwrite(tmp_path
         "evidence_root": evidence,
         "provider_attestation_path": attestation,
         "provider_attestation_sha256": sha256_file(attestation),
+        "capture_started_at_utc": "2026-07-20T00:00:00Z",
         "expected_git_commit": "1" * 40,
         "out_runtime": output,
         "network_disabled": True,
@@ -810,6 +1118,33 @@ def test_runtime_publication_rejects_provider_gpu_mismatch(tmp_path, monkeypatch
             evidence_root=evidence,
             provider_attestation_path=attestation,
             provider_attestation_sha256=sha256_file(attestation),
+            capture_started_at_utc="2026-07-20T00:00:00Z",
+            expected_git_commit="1" * 40,
+            out_runtime=evidence / "runtime.json",
+            network_disabled=True,
+            cgroup_root=cgroup,
+            proc_root=proc,
+        )
+
+
+def test_runtime_publication_rejects_stale_provider_assertion(tmp_path, monkeypatch):
+    probe = _load(_PROBE, "_probe_test_runtime_stale_provider")
+    evidence = tmp_path / "evidence"
+    evidence.mkdir()
+    attestation = _write_provider_attestation(
+        evidence,
+        probe,
+        issued_at_utc="2026-07-18T23:59:59Z",
+    )
+    cgroup, proc = _write_runtime_sources(tmp_path, version=2)
+    _patch_runtime_dependencies(probe, monkeypatch)
+
+    with pytest.raises(GeneUniverseError, match="future-dated or stale"):
+        probe.publish_runtime_evidence(
+            evidence_root=evidence,
+            provider_attestation_path=attestation,
+            provider_attestation_sha256=sha256_file(attestation),
+            capture_started_at_utc="2026-07-20T00:00:00Z",
             expected_git_commit="1" * 40,
             out_runtime=evidence / "runtime.json",
             network_disabled=True,

@@ -5,7 +5,7 @@
 > **이 문서는 아무것도 정의하지 않는다** — 세부(task)는 plan, claim은 spec, exact param은 config,
 > 시간순 audit는 git이 authoritative다([sources of truth](../../CLAUDE.md#sources)). 상태 행이 authoritative
 > 문서와 어긋나면 **authoritative 문서가 옳다**; 이 인덱스를 갱신한다.
-> **Updated:** 2026-07-20 @ `d8e34bb` (branch `main`)
+> **Updated:** 2026-07-20 @ `a8d4af2` (branch `main`)
 > **갱신 트리거:** sub-project/gate **상태가 바뀔 때만**(커밋마다 아님).
 > **종결 상태:** COMPOSE seal이 정확히 한 번 열리면 이 인덱스는 **frozen/은퇴**한다. 이후 진행상황은
 > seal 결과와 post-hoc analysis가 대신한다.
@@ -135,6 +135,22 @@ branch에서 추적 가능하게 기록한다. `LOCAL` ledger ID만으로는 이
    `54540ab4eb913a0fa82c4fb34ccdd2d8ddf27600fe309d990e6a31efa41eb760`; independent review is still mandatory
    before operational use. This hardening does not validate the archived negative run retroactively, authorize a
    new Probe-A registration, clear `RELEASE-BLOCKED`, or open the scientific seal.
+   **2026-07-20 recursive-review correction (candidate, not operationally pinned):** the candidate implementation further
+   upgrades runtime evidence to `compose_gears_probe_runtime_v4`; resolves cgroup CPU/memory from the current
+   process leaf plus tighter ancestors; records a replayable network-namespace observation; rechecks loopback-only
+   isolation plus captured cgroup/GPU identity before every stateful command commits its canonical ledger record;
+   linearizes ledger append and manifest closure with a shared exclusive inode lock;
+   independently binds the Probe-A CUDA determinism setting and `PYTHONHASHSEED` to the raw producer seed;
+   validates recorded pod paths against their captured execution root without confusing them with the relocated
+   offline-review path;
+   rechecks the runtime-bound clean exact commit before and after every post-capture stateful command;
+   binds preparation/verification commands, provider-assertion freshness, and the manifested `gene2go_all.pkl`
+   bytes; and expands verifier closure
+   to every `src/alive/**/*.py` decision dependency. Its pre-commit source-closure candidate is
+   `4c36d77d07ea318e443503c5179f39de1dc95367a24aafa5cf5ecdbb7e848330`; the required local/adjacent contract
+   roster passes 217 tests plus full Ruff check/format and `git diff --check`. The prior candidate pin is therefore
+   retired for future runs. A clean implementation commit, full verification, recomputed pin, and independent acceptance
+   are mandatory; this correction does not authorize a pod run or alter the archived negative result.
 5. **§2.5 release gate** — worker locked-env integration green + 독립 검토 + **owner의 exact Git SHA 승인** → runbook을 `READY`로.
 6. **A100 sealed-run pod: runbook 실행** — 유효한 `ActivationRecord`(requirement별 non-empty evidence) + clean tree 하에 `phase2a → preflight → phase2b --confirm-seal`. **COMPOSE seal 1회 개봉** — `TG-K562`와 독립.
 

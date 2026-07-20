@@ -113,6 +113,15 @@ pin is `54540ab4eb913a0fa82c4fb34ccdd2d8ddf27600fe309d990e6a31efa41eb760`. The p
 runtime producer and GEARS worker; it is not operationally approved until an independent exact-commit review
 recomputes and accepts it.
 
+The recursive-review correction supersedes that candidate pin. It upgrades runtime evidence to v4,
+resolves cgroup limits from the current process leaf and all tighter ancestors, replays the manifested
+`gene2go_all.pkl` source binding, requires a recent provider assertion, makes the CLI itself append canonical
+command records, and enforces loopback-only isolation at every stateful command commit. Its pre-commit source-closure
+candidate is
+`4c36d77d07ea318e443503c5179f39de1dc95367a24aafa5cf5ecdbb7e848330`. Its required local/adjacent contract
+roster passes 217 tests plus full Ruff check/format and `git diff --check`. This value remains diagnostic until it is
+recomputed at the clean implementation commit and independently accepted before pod use.
+
 Record the final test counts and exact Git SHA in the pod evidence manifest.
 
 ## 3. Pod admission and identity capture
@@ -137,19 +146,43 @@ GPU-hours/cost. Never place credentials in the repository or transcript artifact
 5. disable network access for the fit after required immutable resources are present; fail on any attempted
    download or unmanifested resource read.
 
-After network isolation and before `build-roster`, invoke maintained `capture-runtime` exactly once. Supply the
-external attestation pin literally with `--provider-attestation-sha256`; do not compute it inline. The collector
-records three deliberately separate views: provider allocation, effective cgroup v1/v2 CPU/cpuset/memory limits,
-and host-visible `/proc` CPU/RAM. Host-visible values are capacity observations, never pod allocation claims.
+After network isolation and before `build-roster`, invoke maintained `capture-runtime` exactly once. Run every
+recorded command in a Linux network namespace that exposes only `lo` and no non-loopback IPv4/IPv6 route (for
+example, an owner-reviewed `unshare --net` wrapper when the pod grants that capability). The collector enumerates
+the namespace interfaces/routes and records its namespace inode; a caller flag without that observation fails.
+Every maintained stateful producer repeats the loopback-only namespace check immediately before committing its
+successful command record, so leaving the namespace after runtime capture is a hard failure rather than an
+unrecorded execution-mode change. The same commit boundary also reopens canonical `runtime.json` and rejects a
+different process-effective cgroup or visible GPU identity. Every post-capture command performs the same context
+and clean-exact-commit check both before work and before committing success.
+Supply the external attestation pin literally with `--provider-attestation-sha256`; do not compute it inline. The
+collector records three deliberately separate views: provider allocation, process-effective cgroup v1/v2
+CPU/cpuset/memory limits resolved from `/proc/self/cgroup` and mountinfo (including tighter ancestors), and
+host-visible `/proc` CPU/RAM. Host-visible values are capacity observations, never pod allocation claims.
 Unlimited/missing cgroup CPU or memory, noncanonical/empty cpuset, multiple visible GPUs, allocation/cgroup/GPU
 disagreement, mutable/missing image identity, network-enabled capture, or any existing `runtime.json` is a STOP.
 
 The roster receipt SHA and later probe-manifest SHA must be captured into the durable command/evidence ledger at
-their publication boundary and read back from that ledger. The maintained CLI emits a canonical one-line
-`compose_gears_probe_command_result_v1` containing the primary artifact SHA after each successful command; capture
-that line directly in `commands.jsonl`. Do **not** pass shell command substitution such as
+their publication boundary and read back from that ledger. Pass the same absolute evidence-root
+`commands.jsonl` as `--command-ledger` to every maintained command before manifest closure. After successful
+publication the CLI atomically appends one canonical `compose_gears_probe_command_record_v1`, including its exact
+argv/cwd/environment allowlist/times and primary SHA. Its stdout
+`compose_gears_probe_command_result_v1` is a convenience receipt and MUST NOT be appended to the ledger. Do
+not invoke any stateful command after `manifest.json` publication: the maintained CLI checks this before work and
+again at append, and treats the ledger as irreversibly closed once the manifest exists. Do
+**not** pass shell command substitution such as
 `$(sha256sum roster.json)` or `$(sha256sum probe_manifest.json)` directly into the corresponding consumer; that
 would merely authenticate a possibly modified candidate against itself.
+
+Manifest closure and command append share an exclusive advisory lock on the exact `commands.jsonl` inode. The
+manifest builder holds that lock across exhaustive hashing and write-once publication; append rechecks both inode
+identity and manifest absence only after acquiring the same lock. A process that ignores the maintained CLI or
+the lock is still detected by the ledger identity/size/mtime and final manifest hashes and invalidates the attempt.
+Recorded absolute paths remain the pod paths after the evidence directory is copied for offline review. The
+verifier therefore does not resolve them against the review host; it requires one absolute ledger path and binds
+it, every evidence-root-bearing command, and all manifested command inputs/outputs to the execution root declared
+by the first `capture-runtime` record. The producer also requires each declared evidence root to resolve to the
+command-ledger parent before doing work. Any cross-record root drift is a failure.
 
 Any hash mismatch, dirty tree, missing image digest, unbounded cost, evidence path on ephemeral-only storage, or
 unavailable reader-spy attestation is a **STOP**, not a warning.
@@ -160,17 +193,24 @@ unavailable reader-spy attestation is a **STOP**, not a warning.
 
 - Render CLI help from the committed maintained probe CLI; commands in the evidence log must come from that help,
   not from this document or memory.
-- Materialize the externally authenticated `provider_runtime_attestation.json`, then run maintained
-  `capture-runtime` once with network disabled. Append its emitted command-result line first in `commands.jsonl`;
-  its primary SHA must equal the eventual manifested `runtime.json` bytes.
+- Materialize the externally reviewed owner assertion `provider_runtime_attestation.json`, then run maintained
+  `capture-runtime` once inside the proved loopback-only namespace. Supply the absolute `--command-ledger`; the
+  CLI appends the first command record itself and its primary SHA must equal the eventual manifested
+  `runtime.json` bytes. The attestation timestamp must precede capture by no more than 24 hours.
 - Run source/manifest/hash validation and metadata-only role resolution.
 - Emit the exact row rosters and a zero-overlap proof without reading expression.
 - Verify the planned sizes satisfy `N_target ≥ |M|` and record the exact ordered roster SHA for each candidate.
 - Pass the activation-pinned GO resource manifest plus its external SHA and the manifested sibling
-  `gene2go_all.pkl` plus its SHA to `build-roster`. A derived node artifact whose source claim or complete key
+  `gene2go_all.pkl` plus its SHA to `build-roster`. Copy both immutable files under `logs/` first and invoke
+  `build-roster` against those manifested copies; the offline verifier replays their manifest/source SHA
+  relationship. A derived node artifact whose source claim or complete key
   roster differs is a STOP; never substitute `essential_all_data_pert_genes.pkl` for this input.
 - Require the receipt-last completion marker, record its externally anchored SHA, and use only that pin for
   `prepare-input`; a roster/report without its receipt is an incomplete failed attempt.
+- Complete every owner-approved candidate `build-roster` attempt before canonical `prepare-input`. Candidate
+  roster generation may repeat, but each command's primary SHA and `--out-receipt` must identify one manifested
+  receipt, the selected receipt must be published exactly once, and a roster generated after input preparation is
+  rejected as protocol drift.
 - Verify the receipt's generator source-closure, `uv.lock`, the separate GEARS environment lock, and generator
   runtime fingerprint; record both lock SHA-256 values and the lock-matched installed-package-roster SHA rather
   than assuming local and pod numerical environments are identical.
@@ -254,8 +294,8 @@ preregistered.
 ### Phase C — collection and independent verification
 
 - Stop all background samplers in a trap and record their exit status.
-- Derive `probe_a.json` only through maintained `build-probe-a-report`; append that command record to
-  `commands.jsonl`, and require its primary SHA to equal the final report bytes.
+- Derive `probe_a.json` only through maintained `build-probe-a-report`; its successful CLI invocation appends the
+  command record atomically to `commands.jsonl`. Require its primary SHA to equal the final report bytes.
 - Run maintained `build-evidence-manifest` last to hash every pre-admission output, raw log, command transcript,
   and environment record. Do not append its result line to the already closed `commands.jsonl`; externally pin
   the emitted manifest SHA instead.
@@ -357,13 +397,14 @@ fraction, near-integer fraction (distance to the nearest integer `<= 1e-6`), and
 A self-reported aggregate or verdict cannot substitute for these raw arrays.
 
 The offline verifier requires both `--expected-verifier-code-sha256` and the independently recorded pre-run
-`--provider-attestation-sha256`. It compares the first with its actual source closure **before evidence
+`--provider-attestation-sha256`. It compares the first with its conservative local source superset **before evidence
 validation**, and requires the second to match the manifested attestation and runtime/command bindings. It always
 emits one canonical, write-once
 `verify.json` receipt. On PASS only, it then emits `probe_a_admission.json` **last**. On a measured gate failure it
 returns `NEGATIVE_RESULT`, leaves admission absent, and the receipt is the terminal artifact. A pre-existing
-receipt or admission is a failed attempt; neither file may be overwritten or reused. The verifier hashes its
-actual source closure (entrypoint plus the shared producer and consumer validators), not a caller-supplied label.
+receipt or admission is a failed attempt; neither file may be overwritten or reused. The verifier hashes a
+conservative local source superset: its three maintained entrypoints plus every Python source under `src/alive`.
+This intentionally over-approximates the transitive decision closure rather than trusting a caller-supplied label.
 A passing `verify.json` uses `compose_gears_probe_a_verification_v1` with exactly
 `{schema, protocol, status, git_commit, registration_sha256, report_sha256,
 evidence_manifest_sha256, verifier_code_sha256, output_bridge, self_checksum}`.
@@ -394,9 +435,10 @@ match.
 Decision-bearing manifest roles are content-validated, not merely inventoried. `commands.jsonl` contains at
 least one successful invocation of each maintained CLI subcommand that actually exists:
 `{capture-runtime, build-roster, prepare-input, verify-input, build-probe-a-registration, probe-a,
-build-probe-a-report}`. Prep labels may repeat for multiple candidate rosters;
+build-probe-a-report}`. `build-roster` may repeat for multiple candidate rosters, but every such attempt must
+finish before the unique canonical `prepare-input` command;
 `capture-runtime` occurs exactly once before every other maintained command, binds the external provider
-attestation SHA, approved commit, canonical runtime path, and network-disabled assertion, and its primary SHA
+attestation SHA, approved commit, canonical runtime path, proved loopback-only namespace, and its primary SHA
 equals the manifested runtime SHA;
 `build-probe-a-registration` occurs exactly once after prepared-input verification, binds the owner-policy and
 prepared-manifest pins, and its primary SHA equals the manifested registration SHA; `probe-a` occurs exactly once
@@ -404,9 +446,12 @@ and its primary SHA is the manifested raw artifact SHA;
 `build-probe-a-report` occurs exactly once, its arguments bind the raw sample, registration, approved commit and
 canonical report path, and its primary SHA is the manifested report SHA;
 unknown or fictional subcommands are rejected. Records carry secret-free environment allowlists, UTC intervals,
-primary-file SHA values, and one runtime fingerprint.
+primary-file SHA values, and one runtime fingerprint. The `probe-a` record must additionally carry
+`CUBLAS_WORKSPACE_CONFIG=:4096:8` and a `PYTHONHASHSEED` equal to the independently reopened raw producer seed.
+Each argv must contain exactly one maintained driver token and its recorded subcommand must immediately follow
+that token; merely placing a command label elsewhere in argv is rejected.
 `runtime.json`, `inputs.json`, and `role_attestation.json` use respectively
-`compose_gears_probe_runtime_v3`, `compose_gears_probe_inputs_v3`, and
+`compose_gears_probe_runtime_v4`, `compose_gears_probe_inputs_v3`, and
 `compose_gears_probe_role_attestation_v2`; they bind the approved commit, separate preparation/GEARS dependency
 locks, the complete installed-package-roster digest, runtime/input
 identities, exact fit-role counts, the prepared-manifest/H5AD/row/control-roster SHA identities, zero sealed

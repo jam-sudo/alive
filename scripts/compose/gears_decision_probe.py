@@ -15,6 +15,7 @@ one.  Scientific GEARS output projection remains blocked pending Probe A.
 from __future__ import annotations
 
 import argparse
+import fcntl
 import hashlib
 import importlib.metadata
 import importlib.util
@@ -27,6 +28,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 
 import anndata as ad
@@ -58,6 +60,7 @@ from alive.compose.fit_role import (
 )
 from alive.compose.gears_probe_a import (
     GEARS_LOCK_PATH,
+    MANIFEST_PATH,
     MANIFEST_SCHEMA,
     PREPARATION_LOCK_PATH,
     PROBE_INPUT_ADATA_SCHEMA,
@@ -77,6 +80,7 @@ from alive.compose.gears_probe_a import (
     parse_cpuset_cpu_count,
     repository_lock_sha256,
     validate_probe_a_raw_artifact,
+    validate_provider_capture_freshness,
     validate_provider_runtime_attestation,
     validate_registration,
     validate_runtime_evidence,
@@ -99,6 +103,14 @@ _ADATA_SCHEMA = PROBE_INPUT_ADATA_SCHEMA
 _CANDIDATE_SCHEMA = "compose_perturbation_candidates_v1"
 _GENE2GO_SCHEMA = "compose_gene2go_nodes_v1"
 _COMMAND_RESULT_SCHEMA = "compose_gears_probe_command_result_v1"
+_COMMAND_RECORD_SCHEMA = "compose_gears_probe_command_record_v1"
+_COMMAND_ENV_ALLOWLIST = (
+    "CUBLAS_WORKSPACE_CONFIG",
+    "CUDA_VISIBLE_DEVICES",
+    "MKL_NUM_THREADS",
+    "OMP_NUM_THREADS",
+    "PYTHONHASHSEED",
+)
 _PROBE_INPUT_TRANSFORM = PROBE_A_INPUT_TRANSFORM
 _RECEIPT_KEYS = {
     "alias_artifact_sha256",
@@ -329,6 +341,159 @@ def _emit_command_result(*, command: str, primary_file_sha256: str) -> None:
         "status": "OK",
     }
     print(json.dumps(payload, sort_keys=True, separators=(",", ":")), flush=True)
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _assert_command_ledger_open(ledger_path: str | Path) -> Path:
+    ledger = Path(ledger_path)
+    if (
+        not ledger.is_absolute()
+        or ledger.name != "commands.jsonl"
+        or ledger.parent.is_symlink()
+        or ledger.is_symlink()
+    ):
+        raise GeneUniverseError(
+            "command ledger must be an absolute non-symlink commands.jsonl path"
+        )
+    try:
+        parent = ledger.parent.resolve(strict=True)
+    except OSError as exc:
+        raise GeneUniverseError(f"command ledger parent is missing: {exc}") from exc
+    if not parent.is_dir():
+        raise GeneUniverseError("command ledger parent must be a directory")
+    manifest = parent / MANIFEST_PATH
+    if manifest.exists() or manifest.is_symlink():
+        raise GeneUniverseError("command ledger is closed after evidence manifest publication")
+    return parent
+
+
+def _assert_declared_evidence_root(ledger_parent: Path, evidence_root: str | Path) -> None:
+    root_arg = Path(evidence_root)
+    if root_arg.is_symlink():
+        raise GeneUniverseError("declared evidence root must not be a symlink")
+    try:
+        declared_root = root_arg.resolve(strict=True)
+    except OSError as exc:
+        raise GeneUniverseError("declared evidence root is missing or unreadable") from exc
+    if declared_root != ledger_parent:
+        raise GeneUniverseError("declared evidence root differs from command-ledger parent")
+
+
+def _append_command_record(
+    *,
+    ledger_path: str | Path,
+    command: str,
+    argv: list[str],
+    started_at_utc: str,
+    primary_file_sha256: str,
+) -> None:
+    """Append one successful maintained invocation to the durable canonical ledger."""
+    ledger = Path(ledger_path)
+    parent = _assert_command_ledger_open(ledger)
+    if any(not isinstance(token, str) or not token for token in argv):
+        raise GeneUniverseError("command ledger argv must be non-empty strings")
+    body = {
+        "schema": _COMMAND_RECORD_SCHEMA,
+        "command": command,
+        "argv": argv,
+        "cwd": os.getcwd(),
+        "env": {key: os.environ[key] for key in _COMMAND_ENV_ALLOWLIST if key in os.environ},
+        "started_at_utc": started_at_utc,
+        "ended_at_utc": _utc_now(),
+        "exit_code": 0,
+        "primary_file_sha256": _require_sha256(
+            primary_file_sha256, label="command record primary file SHA-256"
+        ),
+        "runtime_fingerprint_sha256": _runtime_fingerprint_sha256(),
+    }
+    record = {**body, "self_checksum": sha256_json(body)}
+    encoded = (json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n").encode()
+    directory_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_DIRECTORY", 0)
+    directory_flags |= getattr(os, "O_NOFOLLOW", 0)
+    try:
+        directory_fd = os.open(parent, directory_flags)
+    except OSError as exc:
+        raise GeneUniverseError(f"cannot open command ledger directory safely: {exc}") from exc
+    try:
+        flags = os.O_RDWR | os.O_CREAT | os.O_APPEND | getattr(os, "O_CLOEXEC", 0)
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        try:
+            fd = os.open(ledger.name, flags, 0o600, dir_fd=directory_fd)
+        except OSError as exc:
+            raise GeneUniverseError(f"cannot open command ledger safely: {exc}") from exc
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            metadata = os.fstat(fd)
+            if not stat.S_ISREG(metadata.st_mode):
+                raise GeneUniverseError("command ledger must be a regular file")
+            try:
+                path_metadata = os.stat(ledger.name, dir_fd=directory_fd, follow_symlinks=False)
+            except OSError as exc:
+                raise GeneUniverseError(f"cannot restat command ledger safely: {exc}") from exc
+            if (metadata.st_dev, metadata.st_ino) != (
+                path_metadata.st_dev,
+                path_metadata.st_ino,
+            ):
+                raise GeneUniverseError("command ledger path changed while acquiring its lock")
+            manifest = parent / MANIFEST_PATH
+            if manifest.exists() or manifest.is_symlink():
+                raise GeneUniverseError(
+                    "command ledger is closed after evidence manifest publication"
+                )
+            if metadata.st_size > 16 * 1024 * 1024:
+                raise GeneUniverseError("command ledger exceeds the bounded evidence envelope")
+            if metadata.st_size:
+                os.lseek(fd, -1, os.SEEK_END)
+                if os.read(fd, 1) != b"\n":
+                    raise GeneUniverseError("existing command ledger is not newline terminated")
+            remaining = memoryview(encoded)
+            while remaining:
+                written = os.write(fd, remaining)
+                if written <= 0:
+                    raise GeneUniverseError("command ledger append made no progress")
+                remaining = remaining[written:]
+            os.fsync(fd)
+            try:
+                final_path_metadata = os.stat(
+                    ledger.name, dir_fd=directory_fd, follow_symlinks=False
+                )
+            except OSError as exc:
+                raise GeneUniverseError(
+                    f"cannot verify appended command ledger path: {exc}"
+                ) from exc
+            if (metadata.st_dev, metadata.st_ino) != (
+                final_path_metadata.st_dev,
+                final_path_metadata.st_ino,
+            ):
+                raise GeneUniverseError("command ledger path changed during append")
+            os.fsync(directory_fd)
+        finally:
+            os.close(fd)
+    finally:
+        os.close(directory_fd)
+
+
+def _finalize_command(
+    *,
+    args: argparse.Namespace,
+    invocation_argv: list[str],
+    started_at_utc: str,
+    primary_file_sha256: str,
+) -> None:
+    # Runtime capture alone is insufficient: every stateful producer must still
+    # match the captured cgroup/GPU/network context when it commits success.
+    _assert_runtime_execution_context(args.command_ledger)
+    _append_command_record(
+        ledger_path=args.command_ledger,
+        command=args.command,
+        argv=invocation_argv,
+        started_at_utc=started_at_utc,
+        primary_file_sha256=primary_file_sha256,
+    )
+    _emit_command_result(command=args.command, primary_file_sha256=primary_file_sha256)
 
 
 def _probe_output_path(*, evidence_root: str | Path, out_raw: str | Path) -> str:
@@ -956,53 +1121,202 @@ def _positive_cgroup_int(value: str, *, label: str) -> int:
     return observed
 
 
-def _collect_cgroup_effective(cgroup_root: str | Path = "/sys/fs/cgroup") -> dict[str, object]:
+def _cgroup_quota_int(value: str, *, label: str) -> int:
+    try:
+        observed = int(value)
+    except ValueError as exc:
+        raise GeneUniverseError(f"{label} must be an integer") from exc
+    if observed == 0 or observed < -1:
+        raise GeneUniverseError(f"{label} must be -1 or finite and positive")
+    return observed
+
+
+def _cgroup_text_allow_empty(path: Path, *, label: str) -> str:
+    if path.is_symlink():
+        raise GeneUniverseError(f"{label} must not be a symlink")
+    try:
+        return path.read_text(encoding="utf-8").strip()
+    except OSError as exc:
+        raise GeneUniverseError(f"cannot read {label}: {exc}") from exc
+
+
+def _cgroup_memberships(proc_root: Path) -> dict[str, str]:
+    memberships: dict[str, str] = {}
+    for line in _required_text(
+        proc_root / "self/cgroup", label="process cgroup membership"
+    ).splitlines():
+        parts = line.split(":", 2)
+        if len(parts) != 3 or not parts[2].startswith("/"):
+            raise GeneUniverseError("process cgroup membership is malformed")
+        controllers = parts[1].split(",") if parts[1] else ["__unified__"]
+        for controller in controllers:
+            if not controller or controller in memberships:
+                raise GeneUniverseError("process cgroup membership is ambiguous")
+            memberships[controller] = parts[2]
+    return memberships
+
+
+def _cgroup_mount_root(proc_root: Path, mountpoint: Path, *, filesystem: str) -> str:
+    matches: list[str] = []
+    expected = mountpoint.resolve(strict=True).as_posix()
+    for line in _required_text(
+        proc_root / "self/mountinfo", label="process mountinfo"
+    ).splitlines():
+        fields = line.split()
+        try:
+            separator = fields.index("-")
+        except ValueError as exc:
+            raise GeneUniverseError("process mountinfo row is malformed") from exc
+        if separator < 6 or len(fields) <= separator + 2:
+            raise GeneUniverseError("process mountinfo row is malformed")
+        if fields[separator + 1] == filesystem and Path(fields[4]).as_posix() == expected:
+            matches.append(fields[3])
+    if len(matches) != 1 or not matches[0].startswith("/"):
+        raise GeneUniverseError("cgroup mountpoint is absent or ambiguous in process mountinfo")
+    return matches[0]
+
+
+def _cgroup_leaf(root: Path, *, membership: str, mount_root: str) -> Path:
+    membership_path = Path(membership)
+    mount_path = Path(mount_root)
+    if membership == "/":
+        relative = Path(".")
+    elif mount_root != "/" and membership_path.is_relative_to(mount_path):
+        try:
+            relative = membership_path.relative_to(mount_path)
+        except ValueError as exc:
+            raise GeneUniverseError("process cgroup lies outside its mounted hierarchy") from exc
+    else:
+        relative = membership_path.relative_to("/")
+    leaf = (root / relative).resolve(strict=True)
+    base = root.resolve(strict=True)
+    if not leaf.is_relative_to(base) or not leaf.is_dir():
+        raise GeneUniverseError("process cgroup leaf is outside the mounted hierarchy")
+    return leaf
+
+
+def _cgroup_ancestors(leaf: Path, root: Path) -> list[Path]:
+    base = root.resolve(strict=True)
+    current = leaf.resolve(strict=True)
+    ancestors: list[Path] = []
+    while True:
+        if not current.is_relative_to(base):
+            raise GeneUniverseError("cgroup ancestor escaped the mounted hierarchy")
+        ancestors.append(current)
+        if current == base:
+            return ancestors
+        current = current.parent
+
+
+def _collect_cgroup_effective(
+    cgroup_root: str | Path = "/sys/fs/cgroup",
+    proc_root: str | Path = "/proc",
+) -> dict[str, object]:
     """Collect bounded effective CPU/memory limits from cgroup v1 or v2."""
     root = Path(cgroup_root)
+    proc = Path(proc_root)
     if root.is_symlink() or not root.is_dir():
         raise GeneUniverseError("cgroup root must be a real directory")
+    memberships = _cgroup_memberships(proc)
     if (root / "cgroup.controllers").is_file():
-        cpu_tokens = _required_text(root / "cpu.max", label="cgroup v2 cpu.max").split()
-        if len(cpu_tokens) != 2 or cpu_tokens[0] == "max":
-            raise GeneUniverseError("cgroup v2 CPU quota must be finite")
-        quota = _positive_cgroup_int(cpu_tokens[0], label="cgroup v2 CPU quota")
-        period = _positive_cgroup_int(cpu_tokens[1], label="cgroup v2 CPU period")
-        cpuset = _required_text(root / "cpuset.cpus.effective", label="cgroup v2 effective cpuset")
-        memory_text = _required_text(root / "memory.max", label="cgroup v2 memory.max")
-        if memory_text == "max":
-            raise GeneUniverseError("cgroup v2 memory limit must be finite")
-        memory_limit = _positive_cgroup_int(memory_text, label="cgroup v2 memory limit")
+        membership = memberships.get("__unified__")
+        if membership is None:
+            raise GeneUniverseError("process lacks a unified cgroup v2 membership")
+        mount_root = _cgroup_mount_root(proc, root, filesystem="cgroup2")
+        leaf = _cgroup_leaf(root, membership=membership, mount_root=mount_root)
+        ancestors = _cgroup_ancestors(leaf, root)
+        cpu_limits: list[tuple[float, int, int]] = []
+        memory_limits: list[int] = []
+        for ancestor in ancestors:
+            cpu_tokens = _required_text(ancestor / "cpu.max", label="cgroup v2 cpu.max").split()
+            if len(cpu_tokens) != 2:
+                raise GeneUniverseError("cgroup v2 cpu.max is malformed")
+            period_value = _positive_cgroup_int(cpu_tokens[1], label="cgroup v2 CPU period")
+            if cpu_tokens[0] != "max":
+                quota_value = _positive_cgroup_int(cpu_tokens[0], label="cgroup v2 CPU quota")
+                cpu_limits.append((quota_value / period_value, quota_value, period_value))
+            memory_text = _required_text(ancestor / "memory.max", label="cgroup v2 memory.max")
+            if memory_text != "max":
+                memory_limits.append(
+                    _positive_cgroup_int(memory_text, label="cgroup v2 memory limit")
+                )
+        if not cpu_limits or not memory_limits:
+            raise GeneUniverseError("cgroup v2 CPU and memory limits must be finite")
+        _ratio, quota, period = min(cpu_limits, key=lambda item: item[0])
+        memory_limit = min(memory_limits)
+        cpuset = _required_text(leaf / "cpuset.cpus.effective", label="cgroup v2 effective cpuset")
         version = 2
     else:
+        required_memberships = {name: memberships.get(name) for name in ("cpu", "cpuset", "memory")}
+        if any(value is None for value in required_memberships.values()):
+            raise GeneUniverseError("process lacks required cgroup v1 controller memberships")
         quota_path = _first_cgroup_file(
             root,
             ("cpu/cpu.cfs_quota_us", "cpu,cpuacct/cpu.cfs_quota_us", "cpu.cfs_quota_us"),
             label="cgroup v1 CPU quota",
         )
-        period_path = quota_path.with_name("cpu.cfs_period_us")
-        quota = _positive_cgroup_int(
-            _required_text(quota_path, label="cgroup v1 CPU quota"),
-            label="cgroup v1 CPU quota",
+        cpu_root = quota_path.parent
+        cpu_mount_root = _cgroup_mount_root(proc, cpu_root, filesystem="cgroup")
+        cpu_leaf = _cgroup_leaf(
+            cpu_root, membership=str(required_memberships["cpu"]), mount_root=cpu_mount_root
         )
-        period = _positive_cgroup_int(
-            _required_text(period_path, label="cgroup v1 CPU period"),
-            label="cgroup v1 CPU period",
-        )
+        cpu_limits = []
+        for ancestor in _cgroup_ancestors(cpu_leaf, cpu_root):
+            quota_value = _cgroup_quota_int(
+                _required_text(ancestor / "cpu.cfs_quota_us", label="cgroup v1 CPU quota"),
+                label="cgroup v1 CPU quota",
+            )
+            period_value = _positive_cgroup_int(
+                _required_text(ancestor / "cpu.cfs_period_us", label="cgroup v1 CPU period"),
+                label="cgroup v1 CPU period",
+            )
+            if quota_value > 0:
+                cpu_limits.append((quota_value / period_value, quota_value, period_value))
+            elif quota_value != -1:
+                raise GeneUniverseError("cgroup v1 CPU quota is invalid")
+        if not cpu_limits:
+            raise GeneUniverseError("cgroup v1 CPU quota must be finite")
+        _ratio, quota, period = min(cpu_limits, key=lambda item: item[0])
         cpuset_path = _first_cgroup_file(
             root,
             ("cpuset/cpuset.cpus", "cpuset.cpus"),
             label="cgroup v1 cpuset",
         )
-        cpuset = _required_text(cpuset_path, label="cgroup v1 cpuset")
+        cpuset_root = cpuset_path.parent
+        cpuset_mount_root = _cgroup_mount_root(proc, cpuset_root, filesystem="cgroup")
+        cpuset_leaf = _cgroup_leaf(
+            cpuset_root,
+            membership=str(required_memberships["cpuset"]),
+            mount_root=cpuset_mount_root,
+        )
+        cpuset = ""
+        for ancestor in _cgroup_ancestors(cpuset_leaf, cpuset_root):
+            candidate = _cgroup_text_allow_empty(ancestor / "cpuset.cpus", label="cgroup v1 cpuset")
+            if candidate:
+                cpuset = candidate
+                break
+        if not cpuset:
+            raise GeneUniverseError("cgroup v1 cpuset is empty")
         memory_path = _first_cgroup_file(
             root,
             ("memory/memory.limit_in_bytes", "memory.limit_in_bytes"),
             label="cgroup v1 memory limit",
         )
-        memory_limit = _positive_cgroup_int(
-            _required_text(memory_path, label="cgroup v1 memory limit"),
-            label="cgroup v1 memory limit",
+        memory_root = memory_path.parent
+        memory_mount_root = _cgroup_mount_root(proc, memory_root, filesystem="cgroup")
+        memory_leaf = _cgroup_leaf(
+            memory_root,
+            membership=str(required_memberships["memory"]),
+            mount_root=memory_mount_root,
         )
+        memory_limits = [
+            _positive_cgroup_int(
+                _required_text(ancestor / "memory.limit_in_bytes", label="cgroup v1 memory limit"),
+                label="cgroup v1 memory limit",
+            )
+            for ancestor in _cgroup_ancestors(memory_leaf, memory_root)
+        ]
+        memory_limit = min(memory_limits)
         if memory_limit >= 1 << 60:
             raise GeneUniverseError("cgroup v1 memory limit is an unlimited sentinel")
         version = 1
@@ -1045,6 +1359,58 @@ def _collect_host_visible(proc_root: str | Path = "/proc") -> dict[str, object]:
         "cpu_model": cpu_model,
         "cpu_count": cpu_count,
         "ram_bytes": int(memory_matches[0]) * 1024,
+    }
+
+
+def _collect_network_isolation(
+    proc_root: str | Path = "/proc",
+    net_class_root: str | Path = "/sys/class/net",
+) -> dict[str, object]:
+    """Prove that this process has only loopback network reachability."""
+    proc = Path(proc_root)
+    interfaces_root = Path(net_class_root)
+    if interfaces_root.is_symlink() or not interfaces_root.is_dir():
+        raise GeneUniverseError("network interface root must be a real directory")
+    try:
+        interfaces = sorted(path.name for path in interfaces_root.iterdir())
+    except OSError as exc:
+        raise GeneUniverseError(f"cannot enumerate network interfaces: {exc}") from exc
+    if interfaces != ["lo"]:
+        raise GeneUniverseError("runtime network namespace must expose only loopback")
+    namespace_path = proc / "self/ns/net"
+    try:
+        namespace = os.readlink(namespace_path)
+    except OSError as exc:
+        raise GeneUniverseError(f"cannot read runtime network namespace identity: {exc}") from exc
+    if re.fullmatch(r"net:\[[0-9]+\]", namespace) is None:
+        raise GeneUniverseError("runtime network namespace identity is malformed")
+
+    ipv4 = _required_text(proc / "net/route", label="runtime IPv4 route table").splitlines()
+    if not ipv4 or ipv4[0].split()[:2] != ["Iface", "Destination"]:
+        raise GeneUniverseError("runtime IPv4 route table header is malformed")
+    ipv4_non_loopback = sum(1 for line in ipv4[1:] if line.strip() and line.split()[0] != "lo")
+    ipv6_path = proc / "net/ipv6_route"
+    if ipv6_path.is_symlink():
+        raise GeneUniverseError("runtime IPv6 route table must not be a symlink")
+    try:
+        ipv6 = ipv6_path.read_text(encoding="utf-8").splitlines()
+    except OSError as exc:
+        raise GeneUniverseError(f"cannot read runtime IPv6 route table: {exc}") from exc
+    ipv6_non_loopback = 0
+    for line in ipv6:
+        fields = line.split()
+        if len(fields) < 10:
+            raise GeneUniverseError("runtime IPv6 route table row is malformed")
+        if fields[-1] != "lo":
+            ipv6_non_loopback += 1
+    if ipv4_non_loopback or ipv6_non_loopback:
+        raise GeneUniverseError("runtime network namespace has a non-loopback route")
+    return {
+        "method": "linux_network_namespace_loopback_only",
+        "network_namespace": namespace,
+        "interfaces": interfaces,
+        "ipv4_non_loopback_route_count": ipv4_non_loopback,
+        "ipv6_non_loopback_route_count": ipv6_non_loopback,
     }
 
 
@@ -1093,11 +1459,13 @@ def publish_runtime_evidence(
     evidence_root: str | Path,
     provider_attestation_path: str | Path,
     provider_attestation_sha256: str,
+    capture_started_at_utc: str,
     expected_git_commit: str,
     out_runtime: str | Path,
     network_disabled: bool,
     cgroup_root: str | Path = "/sys/fs/cgroup",
     proc_root: str | Path = "/proc",
+    net_class_root: str | Path = "/sys/class/net",
 ) -> str:
     """Publish one provider-bound, cgroup-aware, write-once runtime artifact."""
     try:
@@ -1142,6 +1510,10 @@ def publish_runtime_evidence(
         raise GeneUniverseError("provider runtime attestation must be canonical JSON")
     try:
         provider = validate_provider_runtime_attestation(provider_attestation)
+        validate_provider_capture_freshness(
+            provider["issued_at_utc"],
+            capture_started_at_utc,
+        )
     except ValueError as exc:
         raise GeneUniverseError(str(exc)) from exc
     source_path = root / str(provider["source_evidence_path"])
@@ -1154,8 +1526,9 @@ def publish_runtime_evidence(
         raise GeneUniverseError("runtime evidence must be runtime.json under evidence root")
     if output.exists() or output.is_symlink():
         raise GeneUniverseError("runtime evidence destination already exists")
-    cgroup = _collect_cgroup_effective(cgroup_root)
+    cgroup = _collect_cgroup_effective(cgroup_root, proc_root)
     host = _collect_host_visible(proc_root)
+    network_isolation = _collect_network_isolation(proc_root, net_class_root)
     gpu = _collect_gpu_identity()
     allocation = dict(provider["allocation"])
     worker, _worker_path = _load_gears_worker_module()
@@ -1186,6 +1559,7 @@ def publish_runtime_evidence(
         ),
         "runtime_fingerprint_sha256": _runtime_fingerprint_sha256(),
         "network_disabled": True,
+        "network_isolation": network_isolation,
     }
     runtime = {**body, "self_checksum": self_checksum(body)}
     try:
@@ -1200,6 +1574,64 @@ def publish_runtime_evidence(
     encoded = canonical_file_bytes(runtime)
     atomic_write_once(output, encoded.decode("utf-8"))
     return sha256_bytes(encoded)
+
+
+def _assert_runtime_execution_context(command_ledger: str | Path) -> None:
+    """Fail unless the current producer still matches its captured runtime context."""
+    root = Path(command_ledger).parent
+    runtime_bytes = _stable_bytes(root / "runtime.json", label="captured runtime evidence")
+    provider_bytes = _stable_bytes(
+        root / PROVIDER_ATTESTATION_PATH,
+        label="captured provider runtime attestation",
+    )
+    try:
+        runtime_payload = json.loads(runtime_bytes)
+        provider_payload = json.loads(provider_bytes)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise GeneUniverseError(f"cannot parse captured runtime context: {exc}") from exc
+    if (
+        not isinstance(runtime_payload, dict)
+        or not isinstance(provider_payload, dict)
+        or runtime_bytes != canonical_file_bytes(runtime_payload)
+        or provider_bytes != canonical_file_bytes(provider_payload)
+    ):
+        raise GeneUniverseError("captured runtime context must be canonical JSON")
+    try:
+        runtime = validate_runtime_evidence(
+            runtime_payload,
+            provider_attestation=provider_payload,
+            provider_attestation_sha256=sha256_bytes(provider_bytes),
+            expected_git_commit=str(runtime_payload.get("git_commit", "")),
+        )
+    except ValueError as exc:
+        raise GeneUniverseError(str(exc)) from exc
+    try:
+        assert_clean_approved_checkout(runtime["git_commit"])
+    except ValueError as exc:
+        raise GeneUniverseError(str(exc)) from exc
+
+    current_cgroup = _collect_cgroup_effective()
+    current_network = _collect_network_isolation()
+    current_gpu = _collect_gpu_identity()
+    expected_gpu = {
+        key: runtime[key] for key in ("gpu_model", "gpu_uuid", "driver_version", "cuda_version")
+    }
+    if current_cgroup != runtime["cgroup_effective"]:
+        raise GeneUniverseError("current command cgroup differs from captured runtime evidence")
+    if current_gpu != expected_gpu:
+        raise GeneUniverseError(
+            "current command GPU identity differs from captured runtime evidence"
+        )
+    for field in (
+        "method",
+        "interfaces",
+        "ipv4_non_loopback_route_count",
+        "ipv6_non_loopback_route_count",
+    ):
+        if current_network[field] != runtime["network_isolation"][field]:
+            raise GeneUniverseError(
+                "current command network isolation differs from captured runtime evidence"
+            )
 
 
 def _fit_spec(block: dict) -> FitRoleArtifactSpec:
@@ -1848,7 +2280,15 @@ def publish_evidence_manifest(
         assert_clean_approved_checkout(expected_git_commit)
     except ValueError as exc:
         raise GeneUniverseError(str(exc)) from exc
-    root = Path(evidence_root).resolve(strict=True)
+    root_arg = Path(evidence_root)
+    if root_arg.is_symlink():
+        raise GeneUniverseError("evidence root must not be a symlink")
+    try:
+        root = root_arg.resolve(strict=True)
+    except OSError as exc:
+        raise GeneUniverseError("evidence root is missing or unreadable") from exc
+    if not root.is_dir():
+        raise GeneUniverseError("evidence root must be a directory")
     output = Path(out_manifest).resolve(strict=False)
     if output != root / "manifest.json":
         raise GeneUniverseError(
@@ -1856,15 +2296,51 @@ def publish_evidence_manifest(
         )
     if output.exists() or output.is_symlink():
         raise GeneUniverseError("Probe-A evidence manifest destination already exists")
-    manifest = build_evidence_manifest(
-        evidence_root=root,
-        expected_git_commit=expected_git_commit,
-    )
-    if manifest["schema"] != MANIFEST_SCHEMA:
-        raise GeneUniverseError("Probe-A evidence manifest schema drifted")
-    encoded = canonical_file_bytes(manifest)
-    atomic_write_once(output, encoded.decode("utf-8"))
-    return sha256_bytes(encoded)
+    ledger = root / "commands.jsonl"
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        ledger_fd = os.open(ledger, flags)
+    except OSError as exc:
+        raise GeneUniverseError(f"cannot open command ledger for manifest closure: {exc}") from exc
+    try:
+        fcntl.flock(ledger_fd, fcntl.LOCK_EX)
+        before = os.fstat(ledger_fd)
+        if not stat.S_ISREG(before.st_mode) or before.st_size <= 0:
+            raise GeneUniverseError("manifest closure requires a non-empty regular command ledger")
+        try:
+            path_metadata = os.stat(ledger, follow_symlinks=False)
+        except OSError as exc:
+            raise GeneUniverseError(f"cannot restat command ledger for closure: {exc}") from exc
+        if (before.st_dev, before.st_ino) != (
+            path_metadata.st_dev,
+            path_metadata.st_ino,
+        ):
+            raise GeneUniverseError("command ledger path changed while closing the manifest")
+        if output.exists() or output.is_symlink():
+            raise GeneUniverseError("Probe-A evidence manifest destination already exists")
+        manifest = build_evidence_manifest(
+            evidence_root=root,
+            expected_git_commit=expected_git_commit,
+        )
+        after = os.fstat(ledger_fd)
+        try:
+            final_path_metadata = os.stat(ledger, follow_symlinks=False)
+        except OSError as exc:
+            raise GeneUniverseError(f"cannot verify command ledger closure path: {exc}") from exc
+        before_identity = (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
+        after_identity = (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+        if before_identity != after_identity or (after.st_dev, after.st_ino) != (
+            final_path_metadata.st_dev,
+            final_path_metadata.st_ino,
+        ):
+            raise GeneUniverseError("command ledger changed while closing the evidence manifest")
+        if manifest["schema"] != MANIFEST_SCHEMA:
+            raise GeneUniverseError("Probe-A evidence manifest schema drifted")
+        encoded = canonical_file_bytes(manifest)
+        atomic_write_once(output, encoded.decode("utf-8"))
+        return sha256_bytes(encoded)
+    finally:
+        os.close(ledger_fd)
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -1944,6 +2420,12 @@ def _parser() -> argparse.ArgumentParser:
     report.add_argument("--probe-a-registration-sha256", required=True)
     report.add_argument("--git-commit", required=True)
     report.add_argument("--out-report", required=True)
+    for recorded in (runtime, roster, prepare, verify, registration, probe_a, report):
+        recorded.add_argument(
+            "--command-ledger",
+            required=True,
+            help="canonical commands.jsonl appended atomically after successful publication",
+        )
     evidence_manifest = commands.add_parser("build-evidence-manifest")
     evidence_manifest.add_argument("--evidence-root", required=True)
     evidence_manifest.add_argument("--git-commit", required=True)
@@ -1953,17 +2435,31 @@ def _parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     """Run one maintained probe-preparation command."""
+    invocation_argv = list(sys.argv) if argv is None else [str(Path(__file__).resolve()), *argv]
     args = _parser().parse_args(argv)
+    started_at_utc = _utc_now()
+    if args.command != "build-evidence-manifest":
+        ledger_parent = _assert_command_ledger_open(args.command_ledger)
+        if hasattr(args, "evidence_root"):
+            _assert_declared_evidence_root(ledger_parent, args.evidence_root)
+    if args.command not in {"capture-runtime", "build-evidence-manifest"}:
+        _assert_runtime_execution_context(args.command_ledger)
     if args.command == "capture-runtime":
         runtime_sha256 = publish_runtime_evidence(
             evidence_root=args.evidence_root,
             provider_attestation_path=args.provider_attestation,
             provider_attestation_sha256=args.provider_attestation_sha256,
+            capture_started_at_utc=started_at_utc,
             expected_git_commit=args.git_commit,
             out_runtime=args.out_runtime,
             network_disabled=args.network_disabled,
         )
-        _emit_command_result(command="capture-runtime", primary_file_sha256=runtime_sha256)
+        _finalize_command(
+            args=args,
+            invocation_argv=invocation_argv,
+            started_at_utc=started_at_utc,
+            primary_file_sha256=runtime_sha256,
+        )
     elif args.command == "build-roster":
         result = build_roster(
             payload_dir=args.payload_dir,
@@ -1984,8 +2480,10 @@ def main(argv: list[str] | None = None) -> int:
             out_receipt=args.out_receipt,
             require_payload_sha256=not args.allow_unbound_dev_payload,
         )
-        _emit_command_result(
-            command="build-roster",
+        _finalize_command(
+            args=args,
+            invocation_argv=invocation_argv,
+            started_at_utc=started_at_utc,
             primary_file_sha256=result["receipt_file_sha256"],
         )
     elif args.command == "prepare-input":
@@ -1999,8 +2497,10 @@ def main(argv: list[str] | None = None) -> int:
             out_manifest=args.out_manifest,
             require_payload_sha256=not args.allow_unbound_dev_payload,
         )
-        _emit_command_result(
-            command="prepare-input",
+        _finalize_command(
+            args=args,
+            invocation_argv=invocation_argv,
+            started_at_utc=started_at_utc,
             primary_file_sha256=sha256_bytes(
                 (json.dumps(manifest, indent=2, sort_keys=True, allow_nan=False) + "\n").encode(
                     "utf-8"
@@ -2015,8 +2515,10 @@ def main(argv: list[str] | None = None) -> int:
             roster_path=args.roster,
             roster_receipt_path=args.roster_receipt,
         )
-        _emit_command_result(
-            command="verify-input",
+        _finalize_command(
+            args=args,
+            invocation_argv=invocation_argv,
+            started_at_utc=started_at_utc,
             primary_file_sha256=args.manifest_sha256,
         )
     elif args.command == "build-probe-a-registration":
@@ -2029,8 +2531,10 @@ def main(argv: list[str] | None = None) -> int:
             expected_git_commit=args.git_commit,
             out_registration=args.out_registration,
         )
-        _emit_command_result(
-            command="build-probe-a-registration",
+        _finalize_command(
+            args=args,
+            invocation_argv=invocation_argv,
+            started_at_utc=started_at_utc,
             primary_file_sha256=registration_sha256,
         )
     elif args.command == "probe-a":
@@ -2049,7 +2553,12 @@ def main(argv: list[str] | None = None) -> int:
             out_raw=args.out_raw,
             checkpoint_dir=args.checkpoint_dir,
         )
-        _emit_command_result(command="probe-a", primary_file_sha256=raw_sha256)
+        _finalize_command(
+            args=args,
+            invocation_argv=invocation_argv,
+            started_at_utc=started_at_utc,
+            primary_file_sha256=raw_sha256,
+        )
     elif args.command == "build-probe-a-report":
         report_sha256 = publish_probe_a_report(
             evidence_root=args.evidence_root,
@@ -2060,7 +2569,12 @@ def main(argv: list[str] | None = None) -> int:
             expected_git_commit=args.git_commit,
             out_report=args.out_report,
         )
-        _emit_command_result(command="build-probe-a-report", primary_file_sha256=report_sha256)
+        _finalize_command(
+            args=args,
+            invocation_argv=invocation_argv,
+            started_at_utc=started_at_utc,
+            primary_file_sha256=report_sha256,
+        )
     else:
         manifest_sha256 = publish_evidence_manifest(
             evidence_root=args.evidence_root,

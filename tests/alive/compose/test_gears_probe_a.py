@@ -69,7 +69,10 @@ from alive.compose.gears_probe_a import (
     validate_evidence_manifest,
     validate_evidence_semantics,
     validate_probe_a_report,
+    validate_provider_capture_freshness,
+    validate_provider_runtime_attestation,
     validate_registration,
+    validate_runtime_evidence,
 )
 from alive.provenance import sha256_file, sha256_json
 
@@ -432,6 +435,13 @@ def _complete_evidence(root: Path) -> tuple[dict, dict, dict, str, str, str]:
         "gears_installed_packages_sha256": "e" * 64,
         "runtime_fingerprint_sha256": "8" * 64,
         "network_disabled": True,
+        "network_isolation": {
+            "method": "linux_network_namespace_loopback_only",
+            "network_namespace": "net:[12345]",
+            "interfaces": ["lo"],
+            "ipv4_non_loopback_route_count": 0,
+            "ipv6_non_loopback_route_count": 0,
+        },
     }
     _write_json(
         root / "runtime.json",
@@ -439,6 +449,14 @@ def _complete_evidence(root: Path) -> tuple[dict, dict, dict, str, str, str]:
     )
     (root / "logs").mkdir(parents=True, exist_ok=True)
     (root / "logs/gene2go_nodes.json").write_text("pinned nodes\n", encoding="utf-8")
+    gene2go_source_path = root / "logs/gene2go_all.pkl"
+    gene2go_source_path.write_bytes(b"pinned gene2go source bytes\n")
+    gene2go_source_sha = sha256_file(gene2go_source_path)
+    gene2go_manifest_path = root / "logs/go_resource_manifest.json"
+    _write_json(
+        gene2go_manifest_path,
+        {"resources": [{"name": "gene2go_all.pkl", "sha256": gene2go_source_sha}]},
+    )
 
     receipt_body = {
         "alias_artifact_sha256": "1" * 64,
@@ -558,7 +576,7 @@ def _complete_evidence(root: Path) -> tuple[dict, dict, dict, str, str, str]:
         "protocol": PROTOCOL,
         "git_commit": COMMIT,
         "source_sha256": "1" * 64,
-        "gene2go_manifest_sha256": "2" * 64,
+        "gene2go_manifest_sha256": sha256_file(gene2go_manifest_path),
         "pair_manifest_sha256": "3" * 64,
         "alias_artifact_sha256": "4" * 64,
         "fit_role_artifact_sha256": "5" * 64,
@@ -636,6 +654,8 @@ def _complete_evidence(root: Path) -> tuple[dict, dict, dict, str, str, str]:
                 "python",
                 "scripts/compose/gears_decision_probe.py",
                 command,
+                "--command-ledger",
+                "/workspace/evidence/commands.jsonl",
             ],
             "cwd": "/workspace/ALIVE",
             "env": {
@@ -700,6 +720,7 @@ def _complete_evidence(root: Path) -> tuple[dict, dict, dict, str, str, str]:
                 ]
             )
         elif command == "build-roster":
+            command_body["primary_file_sha256"] = sha256_file(receipt_path)
             command_body["argv"].extend(
                 [
                     "--gene2go-nodes-artifact",
@@ -707,13 +728,51 @@ def _complete_evidence(root: Path) -> tuple[dict, dict, dict, str, str, str]:
                     "--gene2go-nodes-artifact-sha256",
                     receipt["gene2go_nodes_artifact_sha256"],
                     "--gears-resource-manifest",
-                    "/workspace/gears_data/go_resource_manifest.json",
+                    "/workspace/evidence/logs/go_resource_manifest.json",
                     "--gears-resource-manifest-sha256",
                     inputs_body["gene2go_manifest_sha256"],
                     "--gene2go-source",
-                    "/workspace/gears_data/gene2go_all.pkl",
+                    "/workspace/evidence/logs/gene2go_all.pkl",
                     "--gene2go-source-sha256",
-                    "f" * 64,
+                    gene2go_source_sha,
+                    "--out-receipt",
+                    "/workspace/evidence/roster_receipts/receipt.json",
+                ]
+            )
+        elif command == "prepare-input":
+            command_body["primary_file_sha256"] = sha256_file(probe_manifest_path)
+            command_body["argv"].extend(
+                [
+                    "--payload-dir",
+                    "/workspace/payload",
+                    "--roster",
+                    "/workspace/roster.json",
+                    "--roster-receipt",
+                    "/workspace/evidence/roster_receipts/receipt.json",
+                    "--roster-receipt-sha256",
+                    sha256_file(receipt_path),
+                    "--approved-root",
+                    "/workspace/approved",
+                    "--out-h5ad",
+                    "/workspace/evidence/probe_input.h5ad",
+                    "--out-manifest",
+                    "/workspace/evidence/probe_input_manifest.json",
+                ]
+            )
+        elif command == "verify-input":
+            command_body["primary_file_sha256"] = sha256_file(probe_manifest_path)
+            command_body["argv"].extend(
+                [
+                    "--manifest",
+                    "/workspace/evidence/probe_input_manifest.json",
+                    "--manifest-sha256",
+                    sha256_file(probe_manifest_path),
+                    "--h5ad",
+                    "/workspace/evidence/probe_input.h5ad",
+                    "--roster",
+                    "/workspace/roster.json",
+                    "--roster-receipt",
+                    "/workspace/evidence/roster_receipts/receipt.json",
                 ]
             )
         elif command == "probe-a":
@@ -787,6 +846,8 @@ def _complete_evidence(root: Path) -> tuple[dict, dict, dict, str, str, str]:
         ("raw_sample", "raw.json"),
         ("log", "logs/run.log"),
         ("log", "logs/gene2go_nodes.json"),
+        ("log", "logs/gene2go_all.pkl"),
+        ("log", "logs/go_resource_manifest.json"),
         ("log", "logs/provider_control_plane.json"),
     ]
     manifest = _manifest([_file_entry(root, role, path) for role, path in role_paths])
@@ -1789,6 +1850,21 @@ def test_manifest_accepts_only_a_complete_role_typed_inventory(tmp_path):
     )
 
 
+def test_runtime_validator_rejects_unproved_network_isolation(tmp_path):
+    _complete_evidence(tmp_path)
+    provider = json.loads((tmp_path / PROVIDER_ATTESTATION_PATH).read_text(encoding="utf-8"))
+    runtime = json.loads((tmp_path / "runtime.json").read_text(encoding="utf-8"))
+    runtime["network_isolation"]["interfaces"] = ["eth0", "lo"]
+    _resign(runtime)
+    with pytest.raises(ProbeAEvidenceError, match="loopback-only"):
+        validate_runtime_evidence(
+            runtime,
+            provider_attestation=validate_provider_runtime_attestation(provider),
+            provider_attestation_sha256=sha256_file(tmp_path / PROVIDER_ATTESTATION_PATH),
+            expected_git_commit=COMMIT,
+        )
+
+
 @pytest.mark.parametrize(
     ("path", "payload", "message"),
     [
@@ -1859,7 +1935,73 @@ def test_semantic_validator_rejects_command_labels_wrapped_around_unrelated_argv
         )
 
 
+def test_semantic_validator_requires_recorded_subcommand_at_cli_position(tmp_path):
+    _, _, manifest, registration_sha, _, _ = _complete_evidence(tmp_path)
+    commands_path = tmp_path / "commands.jsonl"
+    records = [json.loads(line) for line in commands_path.read_text(encoding="utf-8").splitlines()]
+    probe = next(record for record in records if record["command"] == "probe-a")
+    script_index = next(
+        index
+        for index, token in enumerate(probe["argv"])
+        if token.endswith("scripts/compose/gears_decision_probe.py")
+    )
+    probe["argv"][script_index + 1] = "verify-input"
+    probe["argv"].append("probe-a")
+    _resign(probe)
+    commands_path.write_text(
+        "\n".join(json.dumps(record, sort_keys=True, separators=(",", ":")) for record in records)
+        + "\n",
+        encoding="utf-8",
+    )
+    _refresh_manifest_entry(manifest, tmp_path, "commands.jsonl")
+    with pytest.raises(ProbeAEvidenceError, match="immediately following"):
+        validate_evidence_semantics(
+            manifest,
+            evidence_root=tmp_path,
+            expected_git_commit=COMMIT,
+            registration_sha256=registration_sha,
+            provider_attestation_sha256=_provider_pin(tmp_path),
+        )
+
+
 def test_semantic_validator_allows_repeated_real_candidate_commands(tmp_path):
+    _, _, manifest, registration_sha, _, _ = _complete_evidence(tmp_path)
+    alternate_path = tmp_path / "roster_receipts/alternate.json"
+    alternate = json.loads((tmp_path / "roster_receipts/receipt.json").read_text(encoding="utf-8"))
+    alternate["n_target"] += 1
+    _resign(alternate, checksum_field="manifest_checksum")
+    _write_pretty_json(alternate_path, alternate)
+    manifest = build_evidence_manifest(evidence_root=tmp_path, expected_git_commit=COMMIT)
+    commands_path = tmp_path / "commands.jsonl"
+    records = [json.loads(line) for line in commands_path.read_text(encoding="utf-8").splitlines()]
+    original = next(record for record in records if record["command"] == "build-roster")
+    original["ended_at_utc"] = "2026-07-17T00:00:01.400000+00:00"
+    _resign(original)
+    repeated = {**original, "argv": list(original["argv"]), "env": dict(original["env"])}
+    repeated["started_at_utc"] = "2026-07-17T00:00:01.500000+00:00"
+    repeated["ended_at_utc"] = "2026-07-17T00:00:01.900000+00:00"
+    repeated["primary_file_sha256"] = sha256_file(alternate_path)
+    repeated["argv"][repeated["argv"].index("--out-receipt") + 1] = (
+        "/workspace/evidence/roster_receipts/alternate.json"
+    )
+    _resign(repeated)
+    records.insert(2, repeated)
+    commands_path.write_text(
+        "\n".join(json.dumps(record, sort_keys=True, separators=(",", ":")) for record in records)
+        + "\n",
+        encoding="utf-8",
+    )
+    _refresh_manifest_entry(manifest, tmp_path, "commands.jsonl")
+    validate_evidence_semantics(
+        manifest,
+        evidence_root=tmp_path,
+        expected_git_commit=COMMIT,
+        registration_sha256=registration_sha,
+        provider_attestation_sha256=_provider_pin(tmp_path),
+    )
+
+
+def test_semantic_validator_rejects_candidate_roster_after_input_preparation(tmp_path):
     _, _, manifest, registration_sha, _, _ = _complete_evidence(tmp_path)
     commands_path = tmp_path / "commands.jsonl"
     records = [json.loads(line) for line in commands_path.read_text(encoding="utf-8").splitlines()]
@@ -1875,6 +2017,73 @@ def test_semantic_validator_allows_repeated_real_candidate_commands(tmp_path):
         encoding="utf-8",
     )
     _refresh_manifest_entry(manifest, tmp_path, "commands.jsonl")
+    with pytest.raises(ProbeAEvidenceError, match="before canonical input preparation"):
+        validate_evidence_semantics(
+            manifest,
+            evidence_root=tmp_path,
+            expected_git_commit=COMMIT,
+            registration_sha256=registration_sha,
+            provider_attestation_sha256=_provider_pin(tmp_path),
+        )
+
+
+def test_semantic_validator_requires_selected_receipt_command_lineage(tmp_path):
+    _, _, manifest, registration_sha, _, _ = _complete_evidence(tmp_path)
+    commands_path = tmp_path / "commands.jsonl"
+    records = [json.loads(line) for line in commands_path.read_text(encoding="utf-8").splitlines()]
+    roster = next(record for record in records if record["command"] == "build-roster")
+    roster["primary_file_sha256"] = "e" * 64
+    _resign(roster)
+    commands_path.write_text(
+        "\n".join(json.dumps(record, sort_keys=True, separators=(",", ":")) for record in records)
+        + "\n",
+        encoding="utf-8",
+    )
+    _refresh_manifest_entry(manifest, tmp_path, "commands.jsonl")
+
+    with pytest.raises(ProbeAEvidenceError, match="selected manifested receipt"):
+        validate_evidence_semantics(
+            manifest,
+            evidence_root=tmp_path,
+            expected_git_commit=COMMIT,
+            registration_sha256=registration_sha,
+            provider_attestation_sha256=_provider_pin(tmp_path),
+        )
+
+
+def test_semantic_validator_binds_probe_environment_to_raw_seed(tmp_path):
+    _, _, manifest, registration_sha, _, _ = _complete_evidence(tmp_path)
+    commands_path = tmp_path / "commands.jsonl"
+    records = [json.loads(line) for line in commands_path.read_text(encoding="utf-8").splitlines()]
+    probe = next(record for record in records if record["command"] == "probe-a")
+    probe["env"]["PYTHONHASHSEED"] = "12"
+    _resign(probe)
+    commands_path.write_text(
+        "\n".join(json.dumps(record, sort_keys=True, separators=(",", ":")) for record in records)
+        + "\n",
+        encoding="utf-8",
+    )
+    _refresh_manifest_entry(manifest, tmp_path, "commands.jsonl")
+
+    with pytest.raises(ProbeAEvidenceError, match="deterministic CUDA/seed"):
+        validate_evidence_semantics(
+            manifest,
+            evidence_root=tmp_path,
+            expected_git_commit=COMMIT,
+            registration_sha256=registration_sha,
+            provider_attestation_sha256=_provider_pin(tmp_path),
+        )
+
+
+def test_semantic_validator_uses_recorded_pod_root_not_local_copy_path(tmp_path):
+    _, _, manifest, registration_sha, _, _ = _complete_evidence(tmp_path)
+    commands_path = tmp_path / "commands.jsonl"
+    records = [json.loads(line) for line in commands_path.read_text(encoding="utf-8").splitlines()]
+    assert all(
+        record["argv"][record["argv"].index("--command-ledger") + 1]
+        == "/workspace/evidence/commands.jsonl"
+        for record in records
+    )
     validate_evidence_semantics(
         manifest,
         evidence_root=tmp_path,
@@ -1882,6 +2091,51 @@ def test_semantic_validator_allows_repeated_real_candidate_commands(tmp_path):
         registration_sha256=registration_sha,
         provider_attestation_sha256=_provider_pin(tmp_path),
     )
+
+    verify = next(record for record in records if record["command"] == "verify-input")
+    verify["argv"][verify["argv"].index("--command-ledger") + 1] = "/workspace/other/commands.jsonl"
+    _resign(verify)
+    commands_path.write_text(
+        "\n".join(json.dumps(record, sort_keys=True, separators=(",", ":")) for record in records)
+        + "\n",
+        encoding="utf-8",
+    )
+    _refresh_manifest_entry(manifest, tmp_path, "commands.jsonl")
+    with pytest.raises(ProbeAEvidenceError, match="disagree on their command-ledger"):
+        validate_evidence_semantics(
+            manifest,
+            evidence_root=tmp_path,
+            expected_git_commit=COMMIT,
+            registration_sha256=registration_sha,
+            provider_attestation_sha256=_provider_pin(tmp_path),
+        )
+
+
+@pytest.mark.parametrize(
+    ("issued_at", "capture_at"),
+    [
+        ("2026-07-17T00:00:01+00:00", "2026-07-17T00:00:00+00:00"),
+        ("2026-07-15T23:59:59+00:00", "2026-07-17T00:00:00+00:00"),
+    ],
+)
+def test_provider_assertion_must_precede_capture_by_at_most_24_hours(issued_at, capture_at):
+    with pytest.raises(ProbeAEvidenceError, match="future-dated or stale"):
+        validate_provider_capture_freshness(issued_at, capture_at)
+
+
+def test_provider_assertion_accepts_exact_24_hour_boundary():
+    validate_provider_capture_freshness(
+        "2026-07-16T00:00:00+00:00",
+        "2026-07-17T00:00:00+00:00",
+    )
+
+
+def test_provider_assertion_requires_utc_not_only_a_timezone():
+    with pytest.raises(ProbeAEvidenceError, match="must use UTC"):
+        validate_provider_capture_freshness(
+            "2026-07-17T09:00:00+09:00",
+            "2026-07-17T09:00:01+09:00",
+        )
 
 
 def test_semantic_validator_requires_runtime_capture_first_and_one_root(tmp_path):
@@ -1938,6 +2192,29 @@ def test_semantic_validator_binds_probe_a_command_to_raw_artifact(tmp_path):
     )
     _refresh_manifest_entry(manifest, tmp_path, "commands.jsonl")
     with pytest.raises(ProbeAEvidenceError, match="not bound to the raw artifact"):
+        validate_evidence_semantics(
+            manifest,
+            evidence_root=tmp_path,
+            expected_git_commit=COMMIT,
+            registration_sha256=registration_sha,
+            provider_attestation_sha256=_provider_pin(tmp_path),
+        )
+
+
+def test_semantic_validator_binds_gene2go_source_bytes_and_manifest(tmp_path):
+    _, _, manifest, registration_sha, _, _ = _complete_evidence(tmp_path)
+    commands_path = tmp_path / "commands.jsonl"
+    records = [json.loads(line) for line in commands_path.read_text(encoding="utf-8").splitlines()]
+    roster = next(record for record in records if record["command"] == "build-roster")
+    roster["argv"][roster["argv"].index("--gene2go-source-sha256") + 1] = "0" * 64
+    _resign(roster)
+    commands_path.write_text(
+        "\n".join(json.dumps(record, sort_keys=True, separators=(",", ":")) for record in records)
+        + "\n",
+        encoding="utf-8",
+    )
+    _refresh_manifest_entry(manifest, tmp_path, "commands.jsonl")
+    with pytest.raises(ProbeAEvidenceError, match="pinned gene2go resources"):
         validate_evidence_semantics(
             manifest,
             evidence_root=tmp_path,
