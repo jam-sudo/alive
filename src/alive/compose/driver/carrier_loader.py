@@ -454,6 +454,8 @@ def _assemble_activation_record(
         owner=evidence["owner"],
         approved_protocol=config.protocol,
         approved_phase=config.phase,
+        approved_git_sha=spec.approved_git_sha,
+        approved_sequence_mapping_sha256=spec.sequence_mapping_digest,
         evidence_hashes={
             req: requirements[req]["sha256"] for req in config.activation_requirements
         },

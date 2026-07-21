@@ -18,7 +18,10 @@ the real ``ε`` split-halves.
 
 from __future__ import annotations
 
+import math
+import re
 from collections.abc import Mapping
+from typing import Any
 
 import numpy as np
 from numpy.typing import NDArray
@@ -31,6 +34,220 @@ _EVAL_REGIMES = ("sealed_double_unseen", "sealed_single_unseen")
 
 #: The headline regime; the other eval regime is a secondary/fallback.
 _HEADLINE_REGIME = "sealed_double_unseen"
+
+# Phase-1 preregistration values consumed by
+# ``scripts/compose_detectable_effect_report.py``. The scientific activation
+# boundary independently checks them rather than trusting serialized booleans.
+REGISTERED_MIN_PAIRS = 20
+REGISTERED_MIN_CELLS = 50
+REGISTERED_CALIBRATION_FRACTION = 0.6
+REGISTERED_PHASE1_CONFIG_SHA256 = "2e044e75d993f20cd693607d5778ef16621de1bb6e5347515dcb7120ae757b63"
+DETECTABLE_EFFECT_ACTIVATION_SCHEMA = "compose_regime_detectable_effect_report_v1"
+
+_ENVELOPE_KEYS = frozenset(
+    {
+        "activation",
+        "calibration_fraction",
+        "config_sha256",
+        "data_sha256",
+        "generated_at_utc",
+        "git_sha",
+        "phase1_config_sha256",
+        "protocol",
+        "regime_cells_per_pair",
+        "regime_pair_counts",
+        "report",
+        "schema",
+        "split_seed",
+    }
+)
+_REPORT_KEYS = frozenset(
+    {
+        "deliverable",
+        "effect_size",
+        "headline_powered",
+        "headline_regime",
+        "measurability",
+        "power_floors",
+        "regimes",
+    }
+)
+_MEASURABILITY_KEYS = frozenset({"ceiling", "passed", "recommendation", "n_calibration_pairs"})
+_EFFECT_SIZE_KEYS = frozenset(
+    {"mean_pair_eps_l2", "median_pair_eps_l2", "split_half_noise_l2", "signal_to_noise"}
+)
+_REGIME_KEYS = frozenset({"n_pairs", "cells_per_pair", "power_passed", "recommendation"})
+
+
+def _require_exact_keys(value: Any, expected: frozenset[str], context: str) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ValueError(f"{context} must be a JSON object")
+    got = set(value)
+    if got != expected:
+        raise ValueError(
+            f"{context} schema mismatch (missing={sorted(expected - got)}, "
+            f"extra={sorted(got - expected)})"
+        )
+    return value
+
+
+def _finite_number(
+    value: Any,
+    context: str,
+    *,
+    minimum: float | None = None,
+    maximum: float | None = None,
+) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{context} must be numeric")
+    result = float(value)
+    if not math.isfinite(result):
+        raise ValueError(f"{context} must be finite")
+    if minimum is not None and result < minimum:
+        raise ValueError(f"{context} must be >= {minimum}")
+    if maximum is not None and result > maximum:
+        raise ValueError(f"{context} must be <= {maximum}")
+    return result
+
+
+def _nonnegative_int(value: Any, context: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(f"{context} must be a non-negative integer")
+    return value
+
+
+def validate_regime_detectable_effect_activation_report(
+    envelope: Any,
+    *,
+    expected_protocol: str,
+    expected_config_sha256: str,
+    expected_git_sha: str,
+    expected_split_seed: int,
+    expected_data_sha256: str,
+    expected_pair_counts: Mapping[str, int],
+) -> None:
+    """Validate a READY detectable-effect artifact at the scientific boundary.
+
+    Every power boolean is re-computed from the registered pair/cell floors.
+    A hash-pinned producer assertion establishes provenance, but does not prove
+    that its statistical conclusion is internally consistent. Outcome-independent
+    split counts are cross-checked against the independent rank report supplied
+    by the caller.
+    """
+    top = _require_exact_keys(envelope, _ENVELOPE_KEYS, "detectable-effect envelope")
+    activation = top["activation"]
+    if not isinstance(activation, str) or not activation.upper().startswith("READY"):
+        raise ValueError("detectable-effect activation must start with 'READY'")
+    if top["protocol"] != expected_protocol:
+        raise ValueError("detectable-effect protocol mismatch")
+    if top["schema"] != DETECTABLE_EFFECT_ACTIVATION_SCHEMA:
+        raise ValueError("detectable-effect schema mismatch")
+    if top["config_sha256"] != expected_config_sha256:
+        raise ValueError("detectable-effect config_sha256 mismatch")
+    if top["phase1_config_sha256"] != REGISTERED_PHASE1_CONFIG_SHA256:
+        raise ValueError("detectable-effect phase1_config_sha256 mismatch")
+    if top["data_sha256"] != expected_data_sha256:
+        raise ValueError("detectable-effect data_sha256 mismatch")
+    if top["split_seed"] != expected_split_seed:
+        raise ValueError("detectable-effect split_seed mismatch")
+    if top["calibration_fraction"] != REGISTERED_CALIBRATION_FRACTION:
+        raise ValueError("detectable-effect calibration_fraction mismatch")
+    if not isinstance(top["generated_at_utc"], str) or not top["generated_at_utc"].strip():
+        raise ValueError("detectable-effect generated_at_utc must be non-empty")
+    if (
+        not isinstance(top["git_sha"], str)
+        or re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", top["git_sha"]) is None
+    ):
+        raise ValueError("detectable-effect git_sha must be full lowercase hex")
+    if top["git_sha"] != expected_git_sha:
+        raise ValueError("detectable-effect git_sha mismatch")
+
+    expected_regime_keys = frozenset({"combo_calibration", *_EVAL_REGIMES})
+    pair_counts = _require_exact_keys(
+        top["regime_pair_counts"], expected_regime_keys, "regime_pair_counts"
+    )
+    cell_counts = _require_exact_keys(
+        top["regime_cells_per_pair"], expected_regime_keys, "regime_cells_per_pair"
+    )
+    for regime in expected_regime_keys:
+        observed = _nonnegative_int(pair_counts[regime], f"regime_pair_counts.{regime}")
+        expected = _nonnegative_int(expected_pair_counts.get(regime), f"expected {regime} count")
+        if observed != expected:
+            raise ValueError(
+                f"detectable-effect {regime} pair count {observed} != independent report {expected}"
+            )
+        _finite_number(cell_counts[regime], f"regime_cells_per_pair.{regime}", minimum=0.0)
+
+    report = _require_exact_keys(top["report"], _REPORT_KEYS, "detectable-effect report")
+    if report["deliverable"] != "regime_specific_detectable_effect_analysis":
+        raise ValueError("detectable-effect deliverable mismatch")
+    if report["headline_regime"] != _HEADLINE_REGIME:
+        raise ValueError("detectable-effect headline_regime mismatch")
+
+    floors = _require_exact_keys(
+        report["power_floors"], frozenset({"min_pairs", "min_cells"}), "power_floors"
+    )
+    min_pairs = _nonnegative_int(floors["min_pairs"], "power_floors.min_pairs")
+    min_cells = _nonnegative_int(floors["min_cells"], "power_floors.min_cells")
+    if (min_pairs, min_cells) != (REGISTERED_MIN_PAIRS, REGISTERED_MIN_CELLS):
+        raise ValueError("detectable-effect power floors do not match the preregistration")
+
+    measurability = _require_exact_keys(
+        report["measurability"], _MEASURABILITY_KEYS, "measurability"
+    )
+    ceiling = _finite_number(
+        measurability["ceiling"], "measurability.ceiling", minimum=-1.0, maximum=1.0
+    )
+    n_calibration = _nonnegative_int(
+        measurability["n_calibration_pairs"], "measurability.n_calibration_pairs"
+    )
+    if n_calibration != pair_counts["combo_calibration"]:
+        raise ValueError("measurability calibration count does not match the split count")
+    if type(measurability["passed"]) is not bool:  # noqa: E721 - reject int-as-bool
+        raise ValueError("measurability.passed must be a boolean")
+    expected_measurable = ceiling > 0.2
+    if measurability["passed"] is not expected_measurable:
+        raise ValueError("measurability.passed is inconsistent with the registered floor")
+    if not expected_measurable:
+        raise ValueError("detectable-effect measurability gate did not pass")
+    if measurability["recommendation"] != "GI signal measurable above noise floor":
+        raise ValueError("detectable-effect measurability recommendation is inconsistent")
+
+    effect = _require_exact_keys(report["effect_size"], _EFFECT_SIZE_KEYS, "effect_size")
+    for field in _EFFECT_SIZE_KEYS:
+        _finite_number(effect[field], f"effect_size.{field}", minimum=0.0)
+
+    regimes = _require_exact_keys(report["regimes"], frozenset(_EVAL_REGIMES), "regimes")
+    recomputed_power: dict[str, bool] = {}
+    for regime in _EVAL_REGIMES:
+        block = _require_exact_keys(regimes[regime], _REGIME_KEYS, f"regimes.{regime}")
+        n_pairs = _nonnegative_int(block["n_pairs"], f"regimes.{regime}.n_pairs")
+        cells = _finite_number(
+            block["cells_per_pair"], f"regimes.{regime}.cells_per_pair", minimum=0.0
+        )
+        if n_pairs != pair_counts[regime] or cells != float(cell_counts[regime]):
+            raise ValueError(f"regimes.{regime} does not match envelope split metadata")
+        expected_power = n_pairs >= REGISTERED_MIN_PAIRS and cells >= REGISTERED_MIN_CELLS
+        if type(block["power_passed"]) is not bool:  # noqa: E721 - reject int-as-bool
+            raise ValueError(f"regimes.{regime}.power_passed must be a boolean")
+        if block["power_passed"] is not expected_power:
+            raise ValueError(
+                f"regimes.{regime}.power_passed is inconsistent with registered floors"
+            )
+        expected_recommendation = _regime_power_recommendation(regime, expected_power)
+        if block["recommendation"] != expected_recommendation:
+            raise ValueError(f"regimes.{regime}.recommendation is inconsistent")
+        recomputed_power[regime] = expected_power
+
+    if type(report["headline_powered"]) is not bool:  # noqa: E721 - reject int-as-bool
+        raise ValueError("headline_powered must be a boolean")
+    if report["headline_powered"] is not recomputed_power[_HEADLINE_REGIME]:
+        raise ValueError("headline_powered is inconsistent with the headline regime")
+    if not report["headline_powered"]:
+        raise ValueError(
+            "registered headline is underpowered; revise and re-register the headline "
+            "before activation"
+        )
 
 
 def _regime_power_recommendation(regime: str, passed: bool) -> str:

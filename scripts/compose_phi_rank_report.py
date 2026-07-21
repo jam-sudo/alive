@@ -23,7 +23,7 @@ Usage
         --config configs/compose_k562_v1_phase2.yaml \
         --h5ad /workspace/alive_data/NormanWeissman2019_filtered.h5ad \
         --sequences seqs.json --out artifacts/compose/phi_rank_report.json \
-        --git-sha e5cfe05
+        --git-sha "$(git rev-parse HEAD)"
 """
 
 from __future__ import annotations
@@ -31,6 +31,7 @@ from __future__ import annotations
 import argparse
 import datetime as _dt
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -38,7 +39,7 @@ import anndata as ad
 import numpy as np
 import yaml
 
-from alive.compose.phi_rank import compute_phi_rank_report
+from alive.compose.phi_rank import PHI_RANK_ACTIVATION_SCHEMA, compute_phi_rank_report
 from alive.compose.response import fit_response_space
 from alive.data.features import Esm2Encoder
 from alive.data.norman import eligible_genes, eligible_pairs, parse_labels
@@ -68,11 +69,13 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--h5ad", required=True, type=Path)
     ap.add_argument("--sequences", required=True, type=Path, help="gene->[seq] JSON")
     ap.add_argument("--out", required=True, type=Path)
-    ap.add_argument("--git-sha", default="UNKNOWN")
+    ap.add_argument("--git-sha", required=True)
     ap.add_argument("--long-seq-policy", default="truncate", choices=("truncate", "error"))
     ap.add_argument("--max-residues", type=int, default=1022)
     ap.add_argument("--max-batch-tokens", type=int, default=16384)
     args = ap.parse_args(argv)
+    if re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", args.git_sha) is None:
+        raise SystemExit("--git-sha must be the full 40- or 64-character lowercase commit")
 
     raw = yaml.safe_load(args.config.read_text(encoding="utf-8"))
     d, el = raw["data"], raw["eligibility"]
@@ -136,10 +139,22 @@ def main(argv: list[str] | None = None) -> int:
         sequence_mapping_hash=seq_mapping_hash,
     )
 
+    rank_ready = all(
+        block["is_full_rank"]
+        and block["rank"] == block["sym_dim"]
+        and block["n_calibration_pairs_skipped"] == 0
+        for block in report["per_k_total"]
+    )
+    activation = (
+        "READY — every registered factor grid is full rank; sealed outcomes remain unread"
+        if rank_ready
+        else "BLOCKED — at least one registered factor grid failed the rank gate; no seal"
+    )
     envelope = {
+        "schema": PHI_RANK_ACTIVATION_SCHEMA,
         "deliverable": "real_norman_phi_rank_and_condition_report",
         "protocol": "COMPOSE-K562-v1",
-        "activation": "BLOCKED — no seal opened, no double/sealed outcomes read for fitting",
+        "activation": activation,
         "generated_at_utc": _dt.datetime.now(_dt.timezone.utc).isoformat(),
         "git_sha": str(args.git_sha),
         "config_sha256": sha256_json(raw),
@@ -157,11 +172,14 @@ def main(argv: list[str] | None = None) -> int:
         "report": report,
     }
 
+    try:
+        serialized = json.dumps(
+            envelope, indent=2, sort_keys=True, ensure_ascii=False, allow_nan=False
+        )
+    except ValueError as exc:
+        raise SystemExit("phi-rank report contains a non-finite numeric value") from exc
     args.out.parent.mkdir(parents=True, exist_ok=True)
-    args.out.write_text(
-        json.dumps(envelope, indent=2, sort_keys=True, ensure_ascii=False) + "\n",
-        encoding="utf-8",
-    )
+    args.out.write_text(serialized + "\n", encoding="utf-8")
     print(f"wrote {args.out}")
     for r in report["per_k_total"]:
         print(

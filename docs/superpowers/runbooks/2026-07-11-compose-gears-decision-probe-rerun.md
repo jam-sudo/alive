@@ -135,6 +135,15 @@ they execute. Future approval therefore requires the clean exact commit **and** 
 single-platform OCI digest/image-lock pair under
 `specs/2026-07-20-compose-probe-a-verifier-root-of-trust-design.md`. No such real image lock exists yet.
 
+Produce that image before opening any new scientific pod. Use the two distinct manual workflows in the governing
+design: build first without OIDC, externally record the canonical candidate-file SHA and build-run ID, review it,
+then separately dispatch signing under the `compose-verifier-signing` environment. Download the signed
+subject/bundle/Cosign/trusted-root material, verify `SHA256SUMS`, construct the owner image lock locally, and record
+its printed external SHA in a separate owner channel. A GitHub artifact, mutable GHCR tag, successful build, or
+successful signature alone is not admission. The A100 scientific pod is never an image builder. If a builder was
+run directly in a pod root filesystem, discard that pod and all root-filesystem outputs; recover only separately
+verified durable evidence whose authoritative copy and SHA were already established elsewhere.
+
 Record the final test counts and exact Git SHA in the pod evidence manifest.
 
 ## 3. Pod admission and identity capture

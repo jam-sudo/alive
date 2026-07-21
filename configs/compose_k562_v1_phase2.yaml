@@ -1,7 +1,8 @@
-# COMPOSE-K562-v1 Phase 2 — ACTIVE (activated 2026-06-30; spec §10.1 blockers satisfied).
-# This config authorizes a real Norman sealed study. The actual sealed run additionally
-# requires a valid ActivationRecord (a non-empty evidence hash per activation requirement)
-# and a clean, committed git tree, and opens the COMPOSE seal exactly once on the A100.
+# COMPOSE-K562-v1 Phase 2 — lifecycle ACTIVE, scientific RELEASE-BLOCKED.
+# `status: active` records the 2026-06-30 lifecycle transition; it does not by itself
+# authorize a real Norman sealed study. Scientific execution additionally requires zero
+# activation blockers, validated byte-pinned evidence, a valid owner ActivationRecord,
+# and a clean committed tree. Only then may the A100 open the COMPOSE seal exactly once.
 # Spec: docs/superpowers/specs/2026-06-22-compose-epistasis-operator-design.md (§10).
 # Flipping status to `active` changes config_sha256 -> a NEW run identity (intended at activation);
 # the pre-activation candidate values are otherwise unchanged.
@@ -135,7 +136,7 @@ seal:                                 # independent of TG-K562 (§6.3)
   artifacts_root: artifacts/compose
   run_id_inputs: [config, data_card, sequence_mapping, raw_data_sha256]
   sealed_access_max: 1
-  minimum_sealed_n: 1                  # pre-registered floor: >=1 sealed pair must be scored
+  minimum_sealed_n: 1                  # structural non-empty result floor; NOT power adequacy
   write_once: true
 
 seeds:

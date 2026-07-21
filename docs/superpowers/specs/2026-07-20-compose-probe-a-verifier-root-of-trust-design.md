@@ -16,6 +16,13 @@ longer sufficient for operational approval. It cannot authenticate `.pth` startu
 library, dynamic loader, or native libraries that may execute before the verifier computes its own hash. The OCI
 digest covers those bytes before Python starts.
 
+Candidate construction and approval are deliberately split across two manual GitHub Actions workflows. The build
+workflow has no OIDC permission and can emit only an unsigned, externally pinned candidate receipt. The signing
+workflow is a separate manual dispatch: it downloads that exact same-repository receipt by build-run ID, verifies
+its external SHA-256 and canonical identity, and recomputes the image labels and verifier closure on a fresh runner
+before requesting an OIDC certificate. Even that signed output is not the owner lock. Lock construction and its
+external registration remain a separate, explicit owner action.
+
 ## 2. Threat model and residual trust
 
 This design closes mutable tag resolution, host Python startup injection, unpinned base images, repository
@@ -57,6 +64,21 @@ Only `cosign_keyless_subject_bundle_v1` is admitted. The subject uses schema
 canonical JSON, and one final LF. The external image-lock SHA is not stored inside the lock; it is recorded
 independently before the verifier is run. Recomputing `self_checksum` never authorizes a changed lock.
 
+The unsigned build-to-sign handoff uses `compose_probe_a_verifier_build_candidate_v1`, canonical compact JSON plus
+one LF, with exactly:
+
+```text
+schema, git_commit, image_reference, image_manifest_digest, platform,
+python_base_image, uv_build_image, dockerfile_sha256, uv_lock_sha256,
+verifier_code_sha256, build_repository, build_workflow_ref, build_run_id,
+self_checksum
+```
+
+The build workflow prints a SHA-256 over those exact bytes. The signing workflow accepts the receipt only from the
+specified run in `jam-sudo/alive`, requires the externally supplied SHA, and validates the fixed main-branch build
+workflow ref. The receipt is intentionally unsigned and cannot substitute for the signed subject, image lock, or
+external owner pin.
+
 Positive receipts use `compose_gears_probe_a_verification_v3`; negative receipts use
 `compose_gears_probe_a_negative_verification_v3`. Both add `verifier_image_digest` and
 `verifier_image_lock_sha256`. Thus a durable receipt identifies both the exact executing image expected by the
@@ -64,22 +86,34 @@ launcher and the separately frozen owner lock.
 
 ## 4. Build, approval, and run sequence
 
-1. Start from the final clean exact Git commit. No scientific output has been inspected for this registration.
-2. Resolve the Python base and uv build inputs to target-platform digests. Tags alone are forbidden.
-3. Build `containers/compose-probe-a-verifier/Dockerfile` for one platform from the restricted `.dockerignore`
-   context with `ALIVE_GIT_COMMIT=<exact SHA>`. Network may be used only at build time; `uv sync --frozen` must
-   consume the committed lock. The builder must provide an isolated build root through Docker/BuildKit, a
-   privileged rootful Buildah environment, or an equivalent dedicated build VM. **Never execute Kaniko directly
-   in the scientific pod's own root filesystem**: Kaniko uses the current container root as its build root and can
-   delete or replace that runtime filesystem between stages. A scientific/verification pod is not an image builder.
-4. Inside the candidate image run only `--print-verifier-code-sha256`, record the result, and independently
-   compare it with a second computation from the same candidate. This diagnostic does not approve the image.
-5. Push the immutable candidate and record its digest-qualified reference. Use
-   `build_probe_a_verifier_signature_subject.py` to create the canonical approval subject, then `cosign sign-blob`
-   that subject and export its bundle. Preserve trusted-root bytes and independently pin the Cosign executable.
-6. Use `scripts/compose/build_probe_a_verifier_image_lock.py` with that exact subject/bundle to construct canonical write-once image-lock bytes,
-   validate every exact key/digest, and record the printed external SHA-256 in the owner registration channel.
-   Freeze the lock; any edit requires a new approval ID and new external pin.
+1. Start from the final clean exact Git commit on `main`. No scientific output has been inspected for this
+   registration. Before signing, configure the `compose-verifier-signing` GitHub Environment with the owner as
+   required reviewer; the second manual dispatch remains mandatory even if repository policy later changes.
+2. Resolve the Python base and uv build inputs to `linux/amd64` digests. Tags alone are forbidden. Record why the
+   selected base revisions are admitted; a workflow input is not itself owner approval.
+3. Manually dispatch `.github/workflows/build-compose-probe-a-verifier.yml` at that exact main-branch SHA. Its
+   `git_commit` input must equal the dispatch event's `GITHUB_SHA`. It builds without cache for exactly
+   `linux/amd64` from the restricted `.dockerignore` context, with digest-qualified bases and `uv sync --frozen`.
+   It pushes to `ghcr.io/jam-sudo/alive-compose-probe-a-verifier`, re-pulls by digest, checks commit/base/source-hash
+   labels, runs only `--print-verifier-code-sha256` under the restricted container boundary, and uploads an unsigned
+   canonical candidate receipt. Record its run ID and printed candidate-file SHA outside the artifact. The build
+   workflow has no `id-token: write` and cannot sign. A scientific or verification pod is never an image builder;
+   in particular, never execute Kaniko directly in such a pod's root filesystem.
+4. Review the candidate receipt, image digest, base choices, logs, and external receipt SHA. Then—and only then—
+   manually dispatch `.github/workflows/sign-compose-probe-a-verifier.yml` at the same exact main SHA with the
+   build run ID and candidate SHA. A fresh runner downloads that exact same-repository artifact, validates its
+   canonical bytes and workflow identity, pulls only its digest reference, independently checks all labels and
+   recomputes `verifier_code_sha256`, and fails on disagreement.
+5. The signing workflow installs Cosign 3.0.6 through an exact-commit-pinned installer, preserves public-good
+   trusted-root bytes, builds the canonical approval subject, signs it with GitHub OIDC, verifies the bundle offline,
+   and uploads the subject, bundle, exact Cosign executable, trusted root, candidate, and `SHA256SUMS`. The admitted
+   identity is `https://github.com/jam-sudo/alive/.github/workflows/sign-compose-probe-a-verifier.yml@refs/heads/main`;
+   the issuer is `https://token.actions.githubusercontent.com`. GitHub artifacts are expiring transport, not durable
+   evidence. Copy and hash the signed material into owner-controlled storage before expiry.
+6. Independently verify `SHA256SUMS`, bundle, subject, candidate pin, image digest, and exact commit outside the
+   signing job. Then use `scripts/compose/build_probe_a_verifier_image_lock.py` with those exact files to construct
+   the canonical write-once image lock. Record its printed external SHA-256 in an owner channel separate from the
+   lock bytes. Any edit requires a new approval ID, signature review, and external pin.
 7. On the review host, preload the exact image. Verify the lock, Cosign material, identity/issuer, and local
    `RepoDigests`; do not pull during the decision-bearing run.
 8. Invoke `scripts/compose/run_gears_probe_a_verifier_oci.py`. It runs the image with no network, read-only root,
@@ -89,8 +123,8 @@ launcher and the separately frozen owner lock.
 9. Independently validate the resulting v3 receipt against the externally recorded image-lock SHA and image
    digest. PASS may publish admission last; a negative result must leave admission absent.
 
-No operational verifier image lock is committed yet. Until steps 2–7 are completed on an approved Linux build
-host, Probe-A remains release-blocked.
+No operational verifier image lock is committed yet. Until steps 2–7 are completed on the separated build/sign
+path, Probe-A remains release-blocked.
 
 ## 5. Comparison with the original and alternatives
 
@@ -126,6 +160,9 @@ alone is not a scientific-integrity gain.
   `no-new-privileges`, non-root identity, limits, one evidence bind, and no repository bind.
 - Assert positive and negative receipts reject either image field when absent, malformed, or inconsistent with
   externally pinned expectations.
+- Assert build and signing are distinct manual workflows; the build job has no OIDC permission; every third-party
+  action is pinned by full commit SHA; signing requires the external candidate SHA and fresh-runner closure
+  recomputation; and no workflow constructs or registers the owner image lock.
 - Execute the full local Compose suite plus Ruff check/format-check without producing caches or changing tracked
   files. An actual OCI build/sign/inspect/run test is a separate Linux build-host gate.
 

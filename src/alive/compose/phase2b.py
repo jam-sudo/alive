@@ -68,6 +68,7 @@ from alive.compose.config2 import (
     ScientificModeError,
     assert_scientific_mode_allowed,
 )
+from alive.compose.detectable_effect import REGISTERED_MIN_PAIRS
 from alive.compose.durable import finalize_phase2b_durable_outputs
 from alive.compose.freeze import FrozenPredictionBundle
 from alive.compose.outcome_store import (
@@ -1749,6 +1750,19 @@ def _run_phase2b_core(
     return result
 
 
+def _minimum_scored_headline_pairs(config: ComposePhase2Config, *, fixture_execution: bool) -> int:
+    """Return the post-access scored-pair floor for verdict integrity.
+
+    ``seal.minimum_sealed_n`` is a structural non-empty-result check. A real
+    scientific verdict must additionally retain the registered power floor after
+    missing/invalid sealed observations are removed. Synthetic fixtures remain
+    bounded by their intentionally small structural floor.
+    """
+    if fixture_execution:
+        return config.sealed_minimum_n
+    return max(config.sealed_minimum_n, REGISTERED_MIN_PAIRS)
+
+
 def _evaluate_inside_boundary(
     *,
     terminal: Phase2bTerminal,
@@ -1812,7 +1826,7 @@ def _evaluate_inside_boundary(
 
     # --- Step 9 + 10: headline = double-unseen bounds; verdict (double ONLY). --
     sealed_n = regime_double.sample_count
-    minimum_sealed = config.sealed_minimum_n
+    minimum_sealed = _minimum_scored_headline_pairs(config, fixture_execution=fixture_execution)
     bounds = regime_double.bounds
     all_finite = bool(
         np.all(np.isfinite(list(bounds.lower.values())))

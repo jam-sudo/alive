@@ -19,7 +19,7 @@ Usage
         --phase1-config configs/compose_k562_v1_phase1.yaml \
         --h5ad /workspace/alive_data/NormanWeissman2019_filtered.h5ad \
         --sequences seqs.json --out artifacts/compose/detectable_effect_report.json \
-        --git-sha 82a9c83
+        --git-sha "$(git rev-parse HEAD)"
 """
 
 from __future__ import annotations
@@ -27,6 +27,7 @@ from __future__ import annotations
 import argparse
 import datetime as _dt
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -34,7 +35,13 @@ import anndata as ad
 import numpy as np
 import yaml
 
-from alive.compose.detectable_effect import compute_regime_detectable_effect_report
+from alive.compose.detectable_effect import (
+    DETECTABLE_EFFECT_ACTIVATION_SCHEMA,
+    REGISTERED_MIN_CELLS,
+    REGISTERED_MIN_PAIRS,
+    REGISTERED_PHASE1_CONFIG_SHA256,
+    compute_regime_detectable_effect_report,
+)
 from alive.compose.response import fit_response_space
 from alive.compose.split import build_pair_split
 from alive.data.norman import eligible_genes, eligible_pairs, parse_labels
@@ -55,8 +62,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--h5ad", required=True, type=Path)
     ap.add_argument("--sequences", required=True, type=Path)
     ap.add_argument("--out", required=True, type=Path)
-    ap.add_argument("--git-sha", default="UNKNOWN")
+    ap.add_argument("--git-sha", required=True)
     args = ap.parse_args(argv)
+    if re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", args.git_sha) is None:
+        raise SystemExit("--git-sha must be the full 40- or 64-character lowercase commit")
 
     raw = yaml.safe_load(args.config.read_text(encoding="utf-8"))
     p1 = yaml.safe_load(args.phase1_config.read_text(encoding="utf-8"))
@@ -65,6 +74,13 @@ def main(argv: list[str] | None = None) -> int:
     split_seed = int(raw["seeds"]["split_seed"])
     min_pairs = int(p1["min_double_unseen_pairs"])
     min_cells = int(p1["min_cells_per_pair"])
+    phase1_config_sha256 = sha256_json(p1)
+    if (
+        min_pairs != REGISTERED_MIN_PAIRS
+        or min_cells != REGISTERED_MIN_CELLS
+        or phase1_config_sha256 != REGISTERED_PHASE1_CONFIG_SHA256
+    ):
+        raise SystemExit("phase1 power contract drifted from the registered 20-pair/50-cell config")
 
     adata = ad.read_h5ad(args.h5ad)
     obs_values = np.asarray(adata.obs[str(d["perturbation_key"])].to_numpy())
@@ -136,13 +152,21 @@ def main(argv: list[str] | None = None) -> int:
         min_cells=min_cells,
     )
 
+    report_ready = report["measurability"]["passed"] and report["headline_powered"]
+    activation = (
+        "READY — registered measurability and headline power gates passed; "
+        "sealed outcomes remain unread"
+        if report_ready
+        else "BLOCKED — measurability or registered headline power gate failed; no seal"
+    )
     envelope = {
+        "schema": DETECTABLE_EFFECT_ACTIVATION_SCHEMA,
         "protocol": "COMPOSE-K562-v1",
-        "activation": "BLOCKED — dev-only ε on combo_calibration; sealed = counts only; no seal",
+        "activation": activation,
         "generated_at_utc": _dt.datetime.now(_dt.timezone.utc).isoformat(),
         "git_sha": str(args.git_sha),
         "config_sha256": sha256_json(raw),
-        "phase1_config_sha256": sha256_json(p1),
+        "phase1_config_sha256": phase1_config_sha256,
         "data_sha256": sha256_file(args.h5ad),
         "split_seed": split_seed,
         "calibration_fraction": float(sp["calibration_fraction"]),
@@ -150,11 +174,14 @@ def main(argv: list[str] | None = None) -> int:
         "regime_cells_per_pair": regime_cells_per_pair,
         "report": report,
     }
+    try:
+        serialized = json.dumps(
+            envelope, indent=2, sort_keys=True, ensure_ascii=False, allow_nan=False
+        )
+    except ValueError as exc:
+        raise SystemExit("detectable-effect report contains a non-finite numeric value") from exc
     args.out.parent.mkdir(parents=True, exist_ok=True)
-    args.out.write_text(
-        json.dumps(envelope, indent=2, sort_keys=True, ensure_ascii=False) + "\n",
-        encoding="utf-8",
-    )
+    args.out.write_text(serialized + "\n", encoding="utf-8")
     print(f"wrote {args.out}")
     m, e = report["measurability"], report["effect_size"]
     print(f"  measurability ceiling={m['ceiling']:.4f} passed={m['passed']}")

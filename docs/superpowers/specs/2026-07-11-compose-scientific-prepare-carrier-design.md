@@ -121,10 +121,32 @@ extra, duplicate-after-parsing, relative, cwd-dependent, or outside-root evidenc
 
 - `owner` from `activation_evidence.owner`;
 - `approved_protocol` / `approved_phase` from the loaded config;
+- `approved_git_sha` from the already runtime-verified exact run-spec commit;
+- `approved_sequence_mapping_sha256` from the run identity's frozen sequence-mapping digest;
 - `evidence_hashes` and `evidence_files` from the exact requirement roster.
 
 `assert_scientific_mode_allowed` re-validates status, blockers, owner, protocol/phase, roster, digest
-syntax, evidence bytes and config-bound report lineage.
+syntax, evidence bytes and config-bound report lineage. Both analytical reports must embed that exact
+owner-approved commit. Their versioned schemas are closed; the guard independently re-computes the
+registered rank, measurability and 20-pair/50-cell power gates and cross-checks split counts and the
+processed-data digest across the rank report, detectable-effect report and pinned data card. The rank
+report must also name the registered ESM model and embed the exact owner-approved sequence-mapping
+digest; a full-rank result produced from a different feature mapping is not reusable.
+
+All production activation paths are absolute normalized paths below the immutable
+`approved_artifacts_root`; tracked `docs/activation-evidence/` paths are never production runtime inputs.
+PREPARE generates dynamic reports directly into a fresh external stage and byte-identically copies the four
+static requirement sources from the clean approved commit into that same stage. The owner-approved
+ResolvedRunSpec and its `scientific.activation_evidence` registration freeze those exact staged bytes, their
+hashes, the exact approved Git commit and finalized config hash; the separate publication manifest records the
+immutable object version. The repository checkout therefore stays clean throughout report generation and
+command-local runtime Git verification remains meaningful.
+
+The approved commit contains the producer code/spec and bias-null basis config. The approximation-bias report
+is generated at that commit, and the final config is a mechanically derived external artifact that changes only
+the report-SHA leaf. The config-bound rank/detectable reports are then generated against that final artifact at
+the same commit. Neither reports nor the derived final config are committed afterward: doing so would move HEAD
+and create an impossible `commit -> report git_sha -> final config/report bytes -> commit` fixed point.
 
 ### 2.2 Sealed-input attestation equality (no source access)
 

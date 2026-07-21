@@ -709,6 +709,15 @@ def test_headline_verdict_uses_double_unseen_only(tmp_path):
     assert recomputed.sealed_axis == res.sealed_verdict.sealed_axis
 
 
+def test_scientific_verdict_requires_registered_power_floor_after_scoring(tmp_path):
+    from alive.compose.phase2b import _minimum_scored_headline_pairs
+
+    kit = _make_run(tmp_path)
+    assert kit["cfg"].sealed_minimum_n == 1
+    assert _minimum_scored_headline_pairs(kit["cfg"], fixture_execution=True) == 1
+    assert _minimum_scored_headline_pairs(kit["cfg"], fixture_execution=False) == 20
+
+
 # ===========================================================================
 # 7. changing the single-unseen OBSERVED outcomes does NOT change the headline
 # ===========================================================================
@@ -1176,6 +1185,12 @@ def _activation_record(cfg):
         owner="owner",
         approved_protocol=cfg.protocol,
         approved_phase=cfg.phase,
+        approved_git_sha="0" * 40,
+        approved_sequence_mapping_sha256=json.loads(
+            Path(_ACTIVATION_EVIDENCE_FILES["real_norman_phi_rank_and_condition_report"]).read_text(
+                encoding="utf-8"
+            )
+        )["sequence_mapping_sha256"],
         evidence_hashes={
             req: "sha256:"
             + hashlib.sha256(Path(_ACTIVATION_EVIDENCE_FILES[req]).read_bytes()).hexdigest()

@@ -5,7 +5,7 @@
 > **이 문서는 아무것도 정의하지 않는다** — 세부(task)는 plan, claim은 spec, exact param은 config,
 > 시간순 audit는 git이 authoritative다([sources of truth](../../CLAUDE.md#sources)). 상태 행이 authoritative
 > 문서와 어긋나면 **authoritative 문서가 옳다**; 이 인덱스를 갱신한다.
-> **Updated:** 2026-07-21 @ `f1ccc7c` (branch `main`)
+> **Updated:** 2026-07-21 @ `bb60407` (branch `main`)
 > **갱신 트리거:** sub-project/gate **상태가 바뀔 때만**(커밋마다 아님).
 > **종결 상태:** COMPOSE seal이 정확히 한 번 열리면 이 인덱스는 **frozen/은퇴**한다. 이후 진행상황은
 > seal 결과와 post-hoc analysis가 대신한다.
@@ -178,8 +178,23 @@ branch에서 추적 가능하게 기록한다. `LOCAL` ledger ID만으로는 이
    external lock pin. Until that occurs this is
    **RELEASE-BLOCKED** and authorizes neither a Probe-A rerun nor any seal opening. The governing design is
    `specs/2026-07-20-compose-probe-a-verifier-root-of-trust-design.md`.
-5. **§2.5 release gate** — worker locked-env integration green + 독립 검토 + **owner의 exact Git SHA 승인** → runbook을 `READY`로.
-6. **A100 sealed-run pod: runbook 실행** — 유효한 `ActivationRecord`(requirement별 non-empty evidence) + clean tree 하에 `phase2a → preflight → phase2b --confirm-seal`. **COMPOSE seal 1회 개봉** — `TG-K562`와 독립.
+   **2026-07-21 separated-builder correction (local implementation; workflows not yet run):** the isolated image
+   path is now a two-dispatch GitHub Actions gate. The first exact-SHA Buildx/GHCR workflow has no OIDC permission
+   and emits only a canonical externally pinned unsigned candidate receipt. The second downloads that exact run's
+   receipt by run ID, requires its external SHA, independently re-pulls the digest and recomputes labels/closure on
+   a fresh runner, then signs a canonical subject under a distinct GitHub OIDC identity. It preserves exact Cosign
+   and trusted-root bytes but deliberately does not create the owner image lock. Targeted local contract tests pass;
+   the workflows have not been pushed or executed, `compose-verifier-signing` environment protection has not been
+   independently confirmed, and no image digest/signature/owner lock/external pin exists. Status remains
+   **RELEASE-BLOCKED**.
+5. **§2.5 release gate** — worker locked-env integration green + 독립 검토 후 exact commit `C`를 마지막
+   repository commit으로 동결한다. Clean detached `C`에서 bias report → single-leaf finalized config →
+   analytical reports를 external durable stage에 게시하고, owner가 `C`·모든 byte hash·immutable object
+   version을 canonical ResolvedRunSpec과 publication manifest로 승인한다. Generated evidence/final config/
+   READY 표기를 후속 commit하지 않는다(HEAD 이동 및 Git/report 자기참조 방지).
+6. **A100 sealed-run pod: runbook 실행** — 유효한 owner-approved external ResolvedRunSpec,
+   `ActivationRecord`(requirement별 non-empty staged evidence), staged finalized config와 clean detached `C`
+   하에 `phase2a → preflight → phase2b --confirm-seal`. **COMPOSE seal 1회 개봉** — `TG-K562`와 독립.
 
 ## 이 문서가 *아닌* 것 (중복 금지)
 

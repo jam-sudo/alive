@@ -7,6 +7,14 @@
 > image digest were not captured. `assert_scientific_mode_allowed` therefore rejects this
 > evidence. No seal was opened and no sealed outcomes were read.
 
+> **Runtime authority notice (2026-07-21):** this tracked directory contains historical development
+> snapshots and committed source contracts. Production PREPARE must not overwrite these files or point an
+> `ActivationRecord` at them. It publishes a fresh, immutable evidence roster under the external approved-
+> artifacts root; the owner-approved ResolvedRunSpec activation block binds those staged bytes and the staged
+> finalized config, while the publication manifest records the immutable object version and one exact clean
+> execution commit. Post-generation evidence commits are forbidden because they
+> would invalidate report `git_sha == approved_git_sha == runtime HEAD`.
+
 Real data: scPerturb `NormanWeissman2019_filtered.h5ad`, sha256
 `efde6f5301fe256725dce1d980f37bd96a13481a9a16135515897368e631affc` (== committed
 data-card). K562 CRISPRa. Generated on a rented A100 (torch 2.6.0+cu124).
@@ -15,8 +23,8 @@ data-card). K562 CRISPRa. Generated on a rented A100 (torch 2.6.0+cu124).
 
 | # | requirement | status | evidence |
 |---|---|---|---|
-| 1 | `real_norman_phi_rank_and_condition_report` | ✅ evidence | `real_norman_phi_rank_report.json` |
-| 2 | `regime_specific_detectable_effect_analysis` | ✅ evidence | `real_norman_detectable_effect_report.json` |
+| 1 | `real_norman_phi_rank_and_condition_report` | ⚠️ historical snapshot only | `real_norman_phi_rank_report.json` |
+| 2 | `regime_specific_detectable_effect_analysis` | ⚠️ historical snapshot only | `real_norman_detectable_effect_report.json` |
 | 3 | `finalized_norman_data_card_and_sha256` | ✅ done | `docs/data-cards/norman_compose_k562_v1.json` |
 | 4 | `gears_cpa_reproducible_dependency_lock` | ⛔ `INCOMPLETE` | `gears_cpa_dependency_lock.json` + `requirements.{gears,cpa}_env.lock` |
 | 5 | `independent_compose_outcome_store_and_access_audit` | ✅ built (Phase 2b) | `src/alive/compose/outcome_store.py` (+ tests) |

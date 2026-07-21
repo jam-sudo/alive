@@ -4,9 +4,12 @@
 >
 > **⚠️ POD-EXECUTION PLAN, not a local-TDD plan.** Unlike the other COMPOSE plans, most of this work runs on an **A100 development pod** — `gears`/`cpa` are installed ONLY in the two locked envs, the GEARS GO-graph and real Norman data live in pod object storage, and the fits need a GPU. The subprocess backend + protocol + leakage guards + stub worker are already **merged and locally-verified** (sub-project A/B). This plan builds the pieces that the design spec (`specs/2026-07-01-compose-deep-baselines-design.md` §0.36, §1.5, §7) explicitly defers to the pod. Verification for pod tasks is a **pod smoke/integration test**, not local `pytest`. Only the worker *scaffold contract test* and the config-schema edits are locally checkable. **This is a DEVELOPMENT pod, NOT the sealed run — it opens NO seal.**
 
-**Goal:** Produce, review, and commit to `main` everything the sealed-run runbook (`runbooks/2026-07-02-compose-k562-pod-sealed-run.md`) §2.2/§4/§2.5 still lists as BLOCKED — the real `gears_worker.py`/`cpa_worker.py`, their pinned locked envs + GO-graph resource manifest, and the activation evidence regenerated under the **active** config with every null activation-requirement established — so a subsequent separate sealed-run pod can open the COMPOSE seal exactly once against a clean, owner-approved Git SHA.
+**Goal:** Commit and review the real worker/code/contracts and bias-null basis config, freeze one owner-candidate
+execution commit `C`, then publish the approximation-bias report, mechanically finalized config, analytical
+activation evidence and owner-approved ResolvedRunSpec to a durable external approved-artifacts root. A subsequent separate
+sealed-run pod may open the COMPOSE seal exactly once only against clean detached `C` and those immutable bytes.
 
-**Architecture:** The real workers are the stub worker's scaffold (`scripts/baselines/stub_worker.py`: `read_payload` → `validate_fit_role_artifact` → load fit-role `.h5ad` → fit on `{singles, combo_calibration}` native cells → `apply_response_projection` → `write_predictions` envelope) with the deterministic stub fit replaced by a real GEARS/CPA fit in the locked env. The controller (`SubprocessBaselineBackend`, merged) and the payload/prediction/manifest contract are UNCHANGED — the workers plug into the existing seam. Evidence regeneration re-runs the two committed report scripts (`scripts/compose_phi_rank_report.py`, `scripts/compose_detectable_effect_report.py`) on real Norman data under the finalized active config, and fills the config's null activation-blocker fields.
+**Architecture:** The real workers are the stub worker's scaffold (`scripts/baselines/stub_worker.py`: `read_payload` → `validate_fit_role_artifact` → load fit-role `.h5ad` → fit on `{singles, combo_calibration}` native cells → `apply_response_projection` → `write_predictions` envelope) with the deterministic stub fit replaced by a real GEARS/CPA fit in the locked env. The controller (`SubprocessBaselineBackend`, merged) and the payload/prediction/manifest contract are UNCHANGED — the workers plug into the existing seam. After `C` is frozen, PREPARE generates the bias report directly outside Git, derives the final config by changing its single report-SHA leaf, then runs the two committed report scripts (`scripts/compose_phi_rank_report.py`, `scripts/compose_detectable_effect_report.py`) against that final config at the same `C`.
 
 **Tech Stack:** Python 3.12 main env (`.venv`); two locked envs `gears_env`/`cpa_env` (from `docs/activation-evidence/compose/requirements.{gears,cpa}_env.lock`); `gears`, `cpa-tools`, torch+CUDA (pod GPU); existing `alive.compose.baseline_subprocess` / `fit_role` contract; `uv` for env sync.
 
@@ -22,8 +25,16 @@ Copied verbatim from the runbook (§1/§2.2/§4/§2.5), the B design spec, and `
 - **Payload contract is frozen (do NOT change the schema).** `read_payload` requires EXACTLY `_REQUIRED_KEYS` (`src/alive/compose/baseline_subprocess.py:31`): `{schema_version, response_dim, seed, allowed_roles, pair_ids, single_gene_ids, singles_response, control_mean, calibration_pair_ids, calibration_delta, pca_components, oof_folds, fit_role_artifact, response_projection}`. A worker that adds/drops a key fails `configure_payload`.
 - **Prediction representation is method-locked in config, not worker-selected.** `gears.prediction_representation = raw_pseudobulk_approximation`; `cpa.prediction_representation = cell_raw_counts` (`configs/compose_k562_v1_phase2.yaml`). The worker receives it via `--prediction-representation` and must honor it.
 - **The execution manifest must mirror the controller lock.** `ExecutionIdentityLock` recomputes `adapter_version`/`adapter_sha256`/`config_sha256`/`resource_sha256`/`environment_lock_sha256` and fails closed on divergence (`_verify_execution_manifest`). Worker-reported digests must equal the committed lock values, not runtime `__version__` (dependency-lock pinned specs are the source of truth; runbook §4 / B spec §2).
-- **⚑ Config finalization precedes evidence regeneration.** `config_sha256 = sha256_json(raw)` over the whole config. Filling the null activation-blocker fields (`regimes.power_status`, `baselines.{gears,cpa}.{revision,environment_status}`, `baselines.gears.approximation_bias_report_sha256`) CHANGES the config digest away from the current active `a47001946f4b74265b29357467bffaef83d8d15bc1ea8868cc46abd51bfbb4f1`. Therefore establish those fields FIRST, commit the finalized config, and ONLY THEN regenerate evidence — so the embedded `config_sha256` binds the FINAL run identity (runbook §2.5 "config digest 바뀌면 evidence 결속 재생성"; §4 lineage note). Regenerating under an intermediate config would repeat the very drift this fixes.
-- **Clean tree + owner-approved exact Git SHA.** `git status --porcelain` empty; the runbook flips to `READY` only after the owner approves the exact SHA (Global §2.5).
+- **⚑ Freeze commit, then one-way external finalization.** `config_sha256 = sha256_json(raw)` over the whole config.
+  Commit `C` contains all established env/revision/power fields but keeps
+  `baselines.gears.approximation_bias_report_sha256: null` as the bias-null basis. At clean detached `C`, generate
+  the bias report into a fresh external stage, derive the final config there by changing only that leaf, and only
+  then generate config-bound evidence. Never commit these generated bytes afterward: report `git_commit`, owner
+  `approved_git_sha`, and runtime HEAD must remain exactly `C`. This avoids both config drift and an impossible
+  Git/report fixed point.
+- **Clean tree + owner-approved exact Git SHA.** `git status --porcelain` empty. Owner approval is an immutable
+  external ResolvedRunSpec whose `scientific.activation_evidence` block is the owner registration; no
+  post-approval READY/evidence commit may move HEAD.
 - **DRY/YAGNI/frequent commits.** Reuse `baseline_subprocess`/`fit_role`/the report scripts. Commit only the named files per task (never `-A`/`.`). No raw/processed data, checkpoints, or credentials committed (`CLAUDE.md` #data-eval).
 
 ---
@@ -63,13 +74,23 @@ Task-0 acceptance condition is recorded.** This is a gate, not a preamble:
 - `docs/activation-evidence/compose/python_artifact_manifest.json` — CREATE in Task 0.1:
   exact wheel/sdist artifact selected for every package in both requirements locks; schema
   `compose_python_artifact_manifest_v1`.
-- `configs/compose_k562_v1_phase2.yaml` — MODIFY: fill `regimes.power_status`, `baselines.{gears,cpa}.{revision,environment_status}`, `baselines.gears.approximation_bias_report_sha256`.
-- `docs/activation-evidence/compose/real_norman_phi_rank_report.json` — REGENERATE under the finalized config.
-- `docs/activation-evidence/compose/real_norman_detectable_effect_report.json` — REGENERATE under the finalized config.
-- `docs/activation-evidence/compose/README.md` — MODIFY: record the regeneration provenance (git SHA, config_sha256, pod instance).
+- `configs/compose_k562_v1_phase2.yaml` — MODIFY before `C`: fill `regimes.power_status` and
+  `baselines.{gears,cpa}.{revision,environment_status}`; retain the GEARS bias-report SHA as null basis.
+- `$APPROVED_ARTIFACTS_ROOT/stage1/configs/compose_k562_v1_phase2.finalized.yaml` — DERIVE after `C`,
+  changing only the GEARS bias-report SHA leaf; never commit.
+- `$APPROVED_ARTIFACTS_ROOT/stage1/activation-evidence/compose/real_norman_approximation_bias_report.json`
+  — GENERATE after `C`; never commit.
+- `$APPROVED_ARTIFACTS_ROOT/stage1/activation-evidence/compose/real_norman_phi_rank_report.json` —
+  GENERATE under the staged finalized config; never commit.
+- `$APPROVED_ARTIFACTS_ROOT/stage1/activation-evidence/compose/real_norman_detectable_effect_report.json`
+  — GENERATE under the staged finalized config; never commit.
+- `docs/activation-evidence/compose/README.md` — MODIFY before `C` only to document that tracked reports are
+  historical snapshots; runtime regeneration provenance belongs in the external manifest/registration.
 - `scripts/compose/measure_pseudobulk_approximation_bias.py` — CREATE (Phase 2): quantify GEARS pseudobulk-approximation bias on non-sealed roles; emit the report whose SHA fills `approximation_bias_report_sha256`.
 - `tests/alive/compose/test_worker_contract.py` — CREATE (Phase 1, LOCAL): assert each real worker's CLI + manifest fields + envelope match the frozen contract, using a tiny synthetic fit-role artifact and a **fake env** (the fit body is import-guarded so the contract surface is testable without `gears`/`cpa`).
-- Runbook `runbooks/2026-07-02-compose-k562-pod-sealed-run.md` — MODIFY (final): flip status BLOCKED → READY at §2.5 owner sign-off.
+- Runbook `runbooks/2026-07-02-compose-k562-pod-sealed-run.md` — MODIFY before `C` to define the external
+  publication contract. Do not make a post-`C` READY commit; the external owner-approved ResolvedRunSpec is
+  authoritative.
 
 ---
 
@@ -199,41 +220,59 @@ Git and bind their bytes by SHA-256 in the dependency lock.
 
 ---
 
-## Phase 2 — finalize config + regenerate activation evidence (pod)
+## Phase 2 — freeze commit + publish finalized config/evidence externally (pod)
 
-### Task 2.1: establish env + revision + power activation-requirements (config edit)
+### Task 2.1: establish env + revision + power in the committed bias-null basis
 
 **Files:** MODIFY `configs/compose_k562_v1_phase2.yaml`; MODIFY `docs/activation-evidence/compose/gears_cpa_dependency_lock.json`.
 
 **Steps:**
 - [ ] Pin `baselines.gears.revision` / `baselines.cpa.revision` to the confirmed env revisions (Task 0.1) in BOTH the config and the dependency lock.
 - [ ] Set `baselines.{gears,cpa}.environment_status` from `unpinned_activation_blocker` → the pinned/established value once both locked envs are fresh-sync-verified (Task 0.1).
-- [ ] Run the detectable-effect report (Task 2.3 tooling) to establish `regimes.power_status`; set it from `unestablished_activation_blocker` → the established value (double-unseen power passed / SNR per the report). **Consistency guard:** this is the SAME computation Task 2.3 regenerates under the finalized config — the `power_status` set here MUST equal what the Task-2.3 regenerated detectable-effect report shows. If they differ, the intermediate config drifted between 2.1 and 2.3; reconcile (re-read power under the finalized config) before committing the finalized config.
-- [ ] **⚑ Do NOT regenerate evidence yet** — Task 2.2 must land the `approximation_bias_report_sha256` first so the config is FULLY finalized before evidence binds it (Global ⚑).
+- [ ] Run the detectable-effect computation (Task 2.3 tooling, scratch output outside Git) to establish
+  `regimes.power_status`; set it from `unestablished_activation_blocker` to the registered established value.
+  **Consistency guard:** Task 2.3 must recompute the same status under the staged finalized config. If it differs,
+  do not publish registration; reconcile the basis and create a new candidate `C`.
+- [ ] Keep `baselines.gears.approximation_bias_report_sha256: null`. Do not regenerate authoritative evidence
+  yet; Task 2.2 creates the report and single-leaf finalized config only after commit `C` is frozen.
 
 ### Task 2.2: GEARS pseudobulk-approximation bias report
 
-**Files:** Create `scripts/compose/measure_pseudobulk_approximation_bias.py`; MODIFY `configs/compose_k562_v1_phase2.yaml` (`baselines.gears.approximation_bias_report_sha256`).
+**Files:** Commit producer code/spec and the bias-null basis config; then generate report/final config only under
+the external approved-artifacts stage.
 
 **Steps:**
 - [ ] **Pre-register the bias metric first** (decision #4): fix what is measured (the `raw_pseudobulk_approximation` vs per-cell discrepancy), on which **non-sealed** roles, and its direction/aggregation — BEFORE running it, so the report SHA that binds the final `config_sha256` is not outcome-shaped (it is an activation requirement, not a tunable).
 - [ ] Author a script that quantifies, on **non-sealed** roles only, the pre-registered bias for GEARS; emit a canonical-JSON report with the bias metric + provenance.
-- [ ] Run it on the pod; set `baselines.gears.approximation_bias_report_sha256` = the report file SHA-256 (CPA stays null — exact representation).
-- [ ] **Acceptance + Commit:** `configs/compose_k562_v1_phase2.yaml` is now fully finalized (no `*_activation_blocker` / null activation field remains for the active roster). Record the new `config_sha256` (`load_compose_phase2_config(...).config_sha256`). Commit `configs/compose_k562_v1_phase2.yaml docs/activation-evidence/compose/gears_cpa_dependency_lock.json scripts/compose/measure_pseudobulk_approximation_bias.py <bias_report>` — `feat(compose): establish activation requirements (env/revision/power/bias) → finalize active config`. **This commit mints the FINAL run identity.**
+- [ ] Complete local/pod tests and review, then commit every execution source, contract, dependency lock and the
+  bias-null basis config. Record this clean full SHA as candidate `C`; detached-checkout `C` and require an empty
+  tracked+untracked status. No repository mutation is permitted after this point.
+- [ ] Set a fresh absolute external `APPROVED_ARTIFACTS_ROOT`, `ACTIVATION_EVIDENCE_STAGE`, and
+  `FINAL_CONFIG_PATH` as defined by the sealed-run runbook §3.1. Prove all resolve outside the repository.
+- [ ] Run the bias measurement on the pod with `git_commit=C`, writing directly to
+  `$ACTIVATION_EVIDENCE_STAGE/real_norman_approximation_bias_report.json` (CPA stays null — exact representation).
+- [ ] Run `finalize_approximation_bias_config.py` with the tracked bias-null config as input and
+  `--out "$FINAL_CONFIG_PATH"`. It must prove exactly one changed leaf and the staged config's GEARS SHA must
+  equal the report bytes.
+- [ ] **Acceptance:** report `git_commit == C`; staged final config passes the normal config loader with no
+  activation blocker attributable to the report; the tracked basis bytes and Git status are unchanged. Upload
+  both to durable storage and read back their byte hashes. Do not commit either artifact.
 
 ### Task 2.3: regenerate the two evidence reports under the finalized config
 
-**Files:** REGENERATE `docs/activation-evidence/compose/real_norman_phi_rank_report.json`, `docs/activation-evidence/compose/real_norman_detectable_effect_report.json`; MODIFY `docs/activation-evidence/compose/README.md`.
+**Files:** GENERATE the two reports under `$ACTIVATION_EVIDENCE_STAGE`; do not modify tracked snapshots.
 
 **Steps:**
-- [ ] `<.venv or pod py> scripts/compose_phi_rank_report.py --config configs/compose_k562_v1_phase2.yaml --h5ad <norman.h5ad> --sequences <seqs.json> --out docs/activation-evidence/compose/real_norman_phi_rank_report.json --git-sha <finalized SHA>` — verify the embedded `config_sha256` equals the **finalized** active digest (NOT `d8c65ac4…`, NOT the pre-Task-2.2 `a4700194…`) and `activation` no longer reads `BLOCKED` for the active roster.
-- [ ] `scripts/compose_detectable_effect_report.py --config configs/compose_k562_v1_phase2.yaml --phase1-config configs/compose_k562_v1_phase1.yaml --h5ad <norman> --sequences <seqs> --out docs/activation-evidence/compose/real_norman_detectable_effect_report.json --git-sha <finalized SHA>` — same config-binding check.
-- [ ] Update `README.md` with the regeneration provenance (finalized git SHA, `config_sha256`, pod instance/date).
-- [ ] **Acceptance:** both evidence files embed the finalized `config_sha256`; the runbook §4 `ActivationRecord.evidence_files` roster (6 files) each now carries a non-empty hash bound to the active run identity. Commit the regenerated evidence + README — `feat(compose): regenerate activation evidence under finalized active config`.
+- [ ] `<pod py> scripts/compose_phi_rank_report.py --config "$FINAL_CONFIG_PATH" --h5ad <norman.h5ad> --sequences <seqs.json> --out "$ACTIVATION_EVIDENCE_STAGE/real_norman_phi_rank_report.json" --git-sha "$APPROVED_GIT_SHA"` — verify the embedded `config_sha256` equals the staged final digest and `activation == READY`.
+- [ ] `<pod py> scripts/compose_detectable_effect_report.py --config "$FINAL_CONFIG_PATH" --phase1-config configs/compose_k562_v1_phase1.yaml --h5ad <norman> --sequences <seqs> --out "$ACTIVATION_EVIDENCE_STAGE/real_norman_detectable_effect_report.json" --git-sha "$APPROVED_GIT_SHA"` — same config/code binding check.
+- [ ] Copy the four static runbook §4 requirement sources byte-identically from clean detached `C` into the
+  fresh stage. Hash all six files, publish the complete stage to an immutable object version, and read it back.
+- [ ] **Acceptance:** both reports embed `C` and the staged final `config_sha256`; the six-file roster has exact
+  non-empty byte hashes; repository status remains empty; no report/final-config/README commit is created.
 
 ---
 
-## Phase 3 — §2.5 release gate + runbook READY
+## Phase 3 — §2.5 release gate + external owner authorization
 
 ### Task 3.1: full-suite + locked-env integration + independent review
 
@@ -241,13 +280,18 @@ Git and bind their bytes by SHA-256 in the dependency lock.
 - [ ] Assemble the complete checksum manifest: fit-role artifact, both workers, worker configs, GO resource, both env locks, dependency lock, regenerated evidence — all SHA-recorded.
 - [ ] Independent reviewer confirms (runbook §2.5): leakage (workers touch no sealed outcome), exact `{singles, combo_calibration}` roster, response projection fidelity, pair alignment, single-seal-open path intact, final-ledger recovery — on the pod state.
 
-### Task 3.2: owner Git-SHA approval → flip runbook to READY
+### Task 3.2: owner Git-SHA approval → freeze external ResolvedRunSpec
 
-**Files:** MODIFY `runbooks/2026-07-02-compose-k562-pod-sealed-run.md` (status line + §2.5).
+**Files:** CREATE the canonical ResolvedRunSpec under the external approved-artifacts root; its
+`scientific.activation_evidence` block is the owner activation registration. Modify no repository file.
 
-- [ ] Owner approves the **exact Git SHA** to run. ONLY at this point:
-- [ ] Change the runbook `현재 실행 상태` from `BLOCKED` to `READY (exact SHA <sha>, owner-approved <date>)`; note that §2.1(A)/§2.2(real workers)/§2.3(C driver)/§2.4(D) are all satisfied and the config/evidence lineage is bound to the finalized run identity.
-- [ ] Commit `runbooks/2026-07-02-compose-k562-pod-sealed-run.md` — `docs(compose): runbook READY — dev-pod blockers cleared, owner-approved SHA`.
+- [ ] Owner approves exact `C`, staged final-config SHA, six-file evidence roster, approximation-bias report SHA,
+  immutable object version, worker/image pins and release review receipts.
+- [ ] Publish the canonical ResolvedRunSpec with owner identity and the exact six-path/hash activation block.
+  Independently rehash the spec and every referenced byte from the immutable snapshot; record storage object
+  versions in the separate PREPARE publication manifest.
+- [ ] Reconfirm repository HEAD is `C` and status is empty. Any post-`C` commit, stage mutation or object-version
+  change invalidates approval and requires a fresh candidate/registration.
 - [ ] **Handoff:** a SEPARATE sealed-run pod session executes the runbook (`phase2a → preflight → phase2b --confirm-seal`) and opens the COMPOSE seal exactly once. That is out of scope for this plan.
 
 ---
@@ -257,15 +301,22 @@ Git and bind their bytes by SHA-256 in the dependency lock.
 - Real `gears_worker.py` + `cpa_worker.py` committed, each passing the local contract test + the pod outcome-free Norman smoke in its locked env, and integrating through the merged controller with `_verify_execution_manifest` accepting the manifest.
 - GO resource manifest + dependency lock committed, with the dependency lock validator
   returning `COMPLETE` (zero-overlap run evidence + wheelhouse manifest + image digest).
-- `configs/compose_k562_v1_phase2.yaml` has NO remaining `*_activation_blocker`/null activation field for the active roster; `power_status`/`environment_status`/`revision`/gears `approximation_bias_report_sha256` all established; the FINAL `config_sha256` recorded.
-- Both evidence reports regenerated so every `ActivationRecord` requirement (runbook §4, 6 files) carries a non-empty hash bound to the FINAL config; no `d8c65ac4…`/`activation=BLOCKED` lineage remains.
-- Full suite + locked-env integration green; independent review passed; owner-approved exact Git SHA; runbook flipped to `READY`.
+- The tracked basis config at `C` has established `power_status`/`environment_status`/`revision` and a null GEARS
+  bias-report leaf; the staged final config changes only that leaf, has no activation blocker, and its canonical
+  SHA is recorded in the owner-approved ResolvedRunSpec/publication manifest.
+- Both analytical reports are generated outside Git so every `ActivationRecord` requirement (runbook §4, 6 files)
+  carries a non-empty staged byte hash bound to `C` and the staged final config; no historical
+  `d8c65ac4…`/`activation=BLOCKED` snapshot is used at runtime.
+- Full suite + locked-env integration green; independent review passed; owner-approved exact `C`; immutable
+  external ResolvedRunSpec and publication manifest reverified; repository still clean at `C`.
 - **No seal opened.** The sealed run is a separate pod session.
 
 ## Self-Review notes (author)
 
 - **Runbook coverage:** §2.2 (Tasks 0.1–0.2, 1.2–1.4), §2.1 fit-role already merged (used by Task 1.x), §2.3 driver merged, §2.4 ledger merged, §4 evidence lineage (Tasks 2.1–2.3), §2.5 release gate (Tasks 3.1–3.2). B spec §7 open questions surfaced as the pre-Phase-1 decisions.
-- **Ordering landmine encoded:** config finalization (Task 2.1–2.2) STRICTLY precedes evidence regeneration (Task 2.3) so the embedded `config_sha256` binds the final run identity — the exact drift the runbook §4 note flags.
+- **Ordering landmine encoded:** commit `C` → external bias report → single-leaf external final config → external
+  analytical evidence → external owner-approved ResolvedRunSpec. This binds the final config without moving HEAD or creating
+  a report/config/Git fixed point.
 - **Contract fidelity:** workers reuse the frozen `read_payload`/`write_predictions`/`validate_fit_role_artifact`/`apply_response_projection` seam and the 14-key `_REQUIRED_KEYS` payload; the stub is the scaffold template; only the fit body is pod-authored.
 - **Local vs pod split honored:** only the contract test (Task 1.1) + config-schema edits are locally checkable; every real fit + evidence regen is pod-verified, per B spec §1.5/§7 and `CLAUDE.md` #compute.
 - **Not a scientific run:** opens no seal; establishes activation lineage only; the single seal opens later on a separate sealed-run pod after owner SHA approval.

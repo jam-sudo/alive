@@ -344,7 +344,13 @@ def _build_dependency_lock_evidence(ev: Path, *, gears_lock: Path, cpa_lock: Pat
 
 
 def _build_activation_evidence(
-    root: Path, stage1: Path, cfg: Any, *, gears_lock: Path, cpa_lock: Path
+    root: Path,
+    stage1: Path,
+    cfg: Any,
+    *,
+    approved_git_sha: str,
+    gears_lock: Path,
+    cpa_lock: Path,
 ) -> dict[str, dict[str, str]]:
     """Build all six activation-requirement evidence files under ``root``.
 
@@ -365,11 +371,66 @@ def _build_activation_evidence(
             _EVIDENCE_ROOT / "real_norman_detectable_effect_report.json"
         ),
     }
+    data_card = json.loads((stage1 / "data_card.json").read_text(encoding="utf-8"))
+    data_sha256 = data_card["processed_analysis_asset"]["sha256"]
+    split_manifest = json.loads((stage1 / "pair_manifest.json").read_text(encoding="utf-8"))
+    pair_counts = {role: len(split_manifest["roles"][role]) for role in ROLE_NAMES}
+    cells_per_pair = {role: 60.0 for role in ROLE_NAMES}
+
     for req in _CONFIG_BOUND:
         payload = json.loads(template[req].read_text(encoding="utf-8"))
         payload["protocol"] = cfg.protocol
         payload["config_sha256"] = cfg.config_sha256
+        payload["data_sha256"] = data_sha256
+        payload["git_sha"] = approved_git_sha
         payload["activation"] = "READY — synthetic scientific-carrier evidence"
+        if req == "real_norman_phi_rank_and_condition_report":
+            from alive.compose.phi_rank import PHI_RANK_ACTIVATION_SCHEMA
+
+            payload["schema"] = PHI_RANK_ACTIVATION_SCHEMA
+            payload["esm_model"] = cfg.esm_model.removesuffix("_mean_pool")
+            payload["sequence_mapping_sha256"] = json.loads(
+                (stage1 / "sequence_mapping.json").read_text(encoding="utf-8")
+            )["digest"]
+            report = payload["report"]
+            report["split_seed"] = cfg.split_seed
+            report["calibration_fraction"] = 0.6
+            report["n_combo_calibration"] = pair_counts["combo_calibration"]
+            report["n_sealed_double_unseen"] = pair_counts["sealed_double_unseen"]
+            report["n_sealed_single_unseen"] = pair_counts["sealed_single_unseen"]
+            report["n_eligible_pairs"] = sum(pair_counts.values())
+            for block in report["per_k_total"]:
+                block["n_calibration_pairs_scored"] = pair_counts["combo_calibration"]
+                block["n_calibration_pairs_skipped"] = 0
+                block["rank"] = block["sym_dim"]
+                block["is_full_rank"] = True
+        else:
+            from alive.compose.detectable_effect import DETECTABLE_EFFECT_ACTIVATION_SCHEMA
+
+            payload["schema"] = DETECTABLE_EFFECT_ACTIVATION_SCHEMA
+            payload["split_seed"] = cfg.split_seed
+            payload["calibration_fraction"] = 0.6
+            payload["regime_pair_counts"] = pair_counts
+            payload["regime_cells_per_pair"] = cells_per_pair
+            report = payload["report"]
+            report["measurability"]["n_calibration_pairs"] = pair_counts["combo_calibration"]
+            for role in ("sealed_double_unseen", "sealed_single_unseen"):
+                powered = pair_counts[role] >= 20 and cells_per_pair[role] >= 50
+                report["regimes"][role] = {
+                    "n_pairs": pair_counts[role],
+                    "cells_per_pair": cells_per_pair[role],
+                    "power_passed": powered,
+                    "recommendation": (
+                        f"{role} adequately powered as "
+                        + ("headline" if role == "sealed_double_unseen" else "secondary regime")
+                        if powered
+                        else (
+                            f"{role} underpowered; downgrade headline to the strongest "
+                            "adequately-powered regime (e.g. single-unseen)"
+                        )
+                    ),
+                }
+            report["headline_powered"] = report["regimes"]["sealed_double_unseen"]["power_passed"]
         p = ev / f"{req}.json"
         p.write_text(json.dumps(payload, sort_keys=True, separators=(",", ":")), encoding="utf-8")
         files[req] = p
@@ -425,9 +486,7 @@ def build_scientific_carrier_fixture(root: Path, *, repo_root: Path) -> Scientif
     eligible = [
         (gene_ids[i], gene_ids[j]) for i in range(fb._N_GENES) for j in range(i + 1, fb._N_GENES)
     ]
-    manifest = build_split_manifest(
-        eligible, seed=cfg.split_seed, calibration_fraction=fb._CALIBRATION_FRACTION
-    )
+    manifest = build_split_manifest(eligible, seed=cfg.split_seed, calibration_fraction=0.6)
     for role in ROLE_NAMES:
         assert manifest["roles"][role], f"empty {role!r} role"
     instance = fb._build_instance(manifest, k_grid=cfg.total_k_grid)
@@ -657,7 +716,12 @@ def build_scientific_carrier_fixture(root: Path, *, repo_root: Path) -> Scientif
     assert set(pre_seal_paths) == set(PRE_SEAL_PATH_FIELDS)
 
     requirements_roster = _build_activation_evidence(
-        root, stage1, cfg, gears_lock=gears_lock, cpa_lock=cpa_lock
+        root,
+        stage1,
+        cfg,
+        approved_git_sha=approved_git_sha,
+        gears_lock=gears_lock,
+        cpa_lock=cpa_lock,
     )
     dependency_path = Path(requirements_roster["gears_cpa_reproducible_dependency_lock"]["path"])
 

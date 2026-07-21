@@ -1,7 +1,7 @@
 # COMPOSE-K562-v1 — A100 Pod Sealed-Run Runbook
 
 > **문서 역할:** COMPOSE-K562-v1의 일회성 sealed evaluation을 위한 운영 계약.
-> **개정일:** 2026-07-19 (status/reference sanitization; execution remains blocked)
+> **개정일:** 2026-07-21 (external evidence publication; execution remains blocked)
 > **protocol 상태:** lifecycle **ACTIVE** · execution **RELEASE-BLOCKED** · seal **UNOPENED**.
 > **현재 실행 상태:** **BLOCKED — §2의 pre-seal release blocker가 모두 해결·검토·commit되기 전에는 실행 금지.**
 > **코드 기준점:** release 시 owner가 승인한 clean exact Git SHA만 사용한다. 과거 snapshot SHA는 실행
@@ -170,12 +170,19 @@ post-seal non-COMPLETE(durable export 미완료 포함), `10` pre-seal rejection
   `approved_git_sha`, bias-null basis config SHA도 독립 재검증한다.
 - 독립 검토자가 leakage, exact roster, response projection, pair alignment, single seal open,
   final-ledger recovery를 확인.
-- 실행할 exact Git SHA를 owner가 승인. 이 시점에만 본 문서 상태를 `READY`로 변경한다.
+- 실행할 exact Git SHA `C`를 owner가 승인한다. `C`는 실행 repository의 **마지막 commit**이다. `C` 이후
+  report, finalized config, owner-approved ResolvedRunSpec 또는 READY 표기를 repository에 commit하면 HEAD가 이동해
+  `approved_git_sha == runtime HEAD == report producer git_sha` 결속이 깨지므로 금지한다.
+- owner 승인은 approved-artifacts root 안의 canonical ResolvedRunSpec으로 게시한다. 그 spec의
+  `scientific.activation_evidence` block이 owner activation registration이고, whole-file SHA는 execution
+  identity에 결속된다. 이 runbook의 repository 상태는 단독 release authority가 아니며, runtime은 run
+  spec, evidence bytes, clean detached `C`를 함께 검증해 release를 결정한다.
 
-## 3. READY 이후 pod provisioning
+## 3. Final PREPARE publication과 sealed-run pod provisioning
 
-1. 승인된 exact Git SHA를 A100 pod에 clone하고 detached checkout한다.
-2. `git rev-parse HEAD`가 승인 SHA와 같은지 확인한다.
+1. owner-candidate exact Git SHA `C`를 PREPARE pod에 clone하고 detached checkout한다. Owner 승인 후
+   sealed-run pod도 정확히 같은 `C`를 사용한다.
+2. `git rev-parse HEAD`가 `C`와 같은지 확인한다.
 3. `git status --porcelain`이 비어 있지 않으면 중단한다.
 4. instance/GPU/image/driver/CUDA/시작 시각을 기록한다.
 5. committed main lock으로 `uv sync --frozen`한다. 승인된 전체 suite 명령을 실행한다.
@@ -185,19 +192,57 @@ post-seal non-COMPLETE(durable export 미완료 포함), `10` pre-seal rejection
    SHA-256과 byte-for-byte 대조한다. 불일치 시 중단한다.
 9. raw/processed data, credentials, checkpoints를 repo에 복사하거나 commit하지 않는다.
 
+### 3.1 External publication root
+
+Production PREPARE 산출물은 Git checkout과 분리된 durable filesystem/object snapshot에만 쓴다. 아래 변수는
+모두 absolute canonical non-symlink path여야 한다.
+
+```bash
+export APPROVED_GIT_SHA="$(git rev-parse HEAD)"
+export APPROVED_ARTIFACTS_ROOT="/absolute/durable/compose-k562-v1/<release-id>"
+export ACTIVATION_EVIDENCE_STAGE="${APPROVED_ARTIFACTS_ROOT}/stage1/activation-evidence/compose"
+export FINAL_CONFIG_PATH="${APPROVED_ARTIFACTS_ROOT}/stage1/configs/compose_k562_v1_phase2.finalized.yaml"
+```
+
+`APPROVED_ARTIFACTS_ROOT`와 `ACTIVATION_EVIDENCE_STAGE`는 repository root 밖이어야 한다. PREPARE 중에는
+fresh staging root에 write-once로 조립하고, manifest와 owner-approved ResolvedRunSpec이 완성되면 immutable object
+version으로 승격한 뒤 byte-for-byte read-back한다. 그 immutable version만 ResolvedRunSpec의
+`approved_artifacts_root`가 될 수 있다. Pod ephemeral disk는 유일본이 될 수 없다.
+
+승인 commit `C`에는 producer code/spec, dependency lock, data card와 **bias-null basis config**가 들어간다.
+clean detached `C`에서 approximation-bias report를 stage에 생성하고, finalizer가 basis config의
+`baselines.gears.approximation_bias_report_sha256` leaf 하나만 바꾼 `FINAL_CONFIG_PATH`를 stage에 생성한다.
+최종 config와 report를 Git에 추가하지 않는다. 이 one-way publication이 report SHA → final config SHA →
+analytical evidence 순서를 보존하면서 Git-SHA 고정점 문제를 피한다.
+
 ## 4. ActivationRecord와 provenance 조립
 
-`ActivationRecord.evidence_files`는 정확히 아래 roster를 사용한다. 각 digest는 파일 bytes의
+`ActivationRecord.evidence_files`는 정확히 아래 **staged runtime roster**를 사용한다. 각 digest는 파일 bytes의
 `"sha256:" + sha256`이며 scientific gate가 파일을 다시 읽어 검증한다.
+`ActivationRecord.approved_git_sha`는 run spec에서 이미 runtime HEAD와 대조한 **full exact commit**을
+사용한다. 두 analytical report의 `git_sha`도 이 값과 정확히 같아야 한다.
+`ActivationRecord.approved_sequence_mapping_sha256`는 같은 run spec의 frozen
+`sequence_mapping_digest`를 사용하며, phi-rank report의 `sequence_mapping_sha256`와 정확히 같아야 한다.
+또한 report의 `esm_model`은 등록 config의 `factor_z.esm_model`에 지정된 mean-pooling encoder와 일치해야 한다.
 
 | requirement | evidence file |
 |---|---|
-| `real_norman_phi_rank_and_condition_report` | `docs/activation-evidence/compose/real_norman_phi_rank_report.json` |
-| `regime_specific_detectable_effect_analysis` | `docs/activation-evidence/compose/real_norman_detectable_effect_report.json` |
-| `finalized_norman_data_card_and_sha256` | `docs/data-cards/norman_compose_k562_v1.json` |
-| `gears_cpa_reproducible_dependency_lock` | `docs/activation-evidence/compose/gears_cpa_dependency_lock.json` |
-| `independent_compose_outcome_store_and_access_audit` | `src/alive/compose/outcome_store.py` |
-| `phase2_plan_metric_leakage_and_seal_integration_tests` | `tests/alive/compose/test_phase2b.py` |
+| `real_norman_phi_rank_and_condition_report` | `$ACTIVATION_EVIDENCE_STAGE/real_norman_phi_rank_report.json` |
+| `regime_specific_detectable_effect_analysis` | `$ACTIVATION_EVIDENCE_STAGE/real_norman_detectable_effect_report.json` |
+| `finalized_norman_data_card_and_sha256` | `$ACTIVATION_EVIDENCE_STAGE/norman_compose_k562_v1.json` |
+| `gears_cpa_reproducible_dependency_lock` | `$ACTIVATION_EVIDENCE_STAGE/gears_cpa_dependency_lock.json` |
+| `independent_compose_outcome_store_and_access_audit` | `$ACTIVATION_EVIDENCE_STAGE/outcome_store.py` |
+| `phase2_plan_metric_leakage_and_seal_integration_tests` | `$ACTIVATION_EVIDENCE_STAGE/test_phase2b.py` |
+
+마지막 네 정적 evidence는 clean detached `C`의 해당 tracked bytes를 stage로 byte-identical 복제한다. 앞의
+두 report는 `--out "$ACTIVATION_EVIDENCE_STAGE/<name>.json" --git-sha "$APPROVED_GIT_SHA"`로 **직접**
+생성한다. 어느 production command도 `docs/activation-evidence/`에 쓰지 않는다. 그 tracked 디렉터리의
+기존 파일은 historical development snapshot이며 runtime source가 아니다.
+
+ResolvedRunSpec의 `scientific.activation_evidence`는 위 여섯 absolute normalized staged path와 각 byte SHA,
+owner identity를 결속하고, spec identity는 `APPROVED_GIT_SHA`, `FINAL_CONFIG_PATH`의 canonical config SHA와
+함께 검증된다. Spec 승인 뒤에는 stage의 어떤 byte도 바꾸지 않는다. 변경이 필요하면 새 fresh root,
+새 spec/approval, 필요 시 새 `C`를 사용한다.
 
 `build_activation_provenance_inputs`는 keyword-only로 호출한다.
 
@@ -217,7 +262,7 @@ provenance_inputs = build_activation_provenance_inputs(
 builder가 생성한 digest/revision 및 `environment.python_version/platform/git_commit`이 upstream ledger와
 일치해야 한다. worker-specific resource/config digest도 §2 구현 후 provenance에 포함돼야 한다.
 
-**Activation evidence lineage 주의 (2026-07-06).** 현재 committed `real_norman_phi_rank_report.json`·
+**Activation evidence lineage 주의 (2026-07-21).** 현재 committed `real_norman_phi_rank_report.json`·
 `real_norman_detectable_effect_report.json`은 canonical `config_sha256=d8c65ac4…`, `activation=BLOCKED`,
 git `79b01e0`/`82a9c83`를 내장한 **pre-activation development snapshot**이다. 최종 실행 config의
 authoritative canonical digest는 `load_compose_phase2_config`가 최종 bytes에서 다시 계산한다.
@@ -227,13 +272,16 @@ digest로 재사용하지 않는다. (GI secondary 정의 정정은 config2 코�
 (`d507a09`) 이후에도 config parsed 구조가 A2 task 5(`42d71ce`: gears/cpa에 `prediction_representation`·
 `approximation_bias_report_sha256` 추가)에서 바뀌어 canonical digest가 재차 이동했다. (raw file-bytes sha는
 canonical `config_sha256`과 다른 값이니 lineage 비교에는 쓰지 않는다.) Scientific guard는 evidence 파일
-*bytes*를 recorded hash에 대조한 뒤 두 config-bound Norman report의 내부 `protocol`·`config_sha256`·
-`activation`도 파싱한다. 따라서 old-config 또는 `activation=BLOCKED` evidence는 런타임에서 fail-closed된다.
+*bytes*를 recorded hash에 대조한 뒤 두 config-bound Norman report의 versioned schema,
+`protocol`·`config_sha256`·owner-approved exact `git_sha`·`activation=READY`를 파싱한다. Rank/full-grid,
+measurability, 20-pair/50-cell power booleans은 재계산하고 data-card digest 및 두 report의 split counts도
+교차 검증한다. 따라서 old-config, old-code 또는 `activation=BLOCKED` evidence는 fail-closed된다.
 §2.5의 "config digest가 바뀌면 evidence 결속 재생성" 규칙은 **이미 발효**됐다:
-pod에서 real Norman data로 두 evidence를 **최종 active config** 하에 재생성하고, 아직 null인
+pod에서 real Norman data로 두 evidence를 **staged final active config** 하에 재생성하고, 아직 null인
 requirement(config `power_status`, GEARS/CPA `environment_status`, GEARS `approximation_bias_report_sha256`)를
 실데이터로 확립해 모든 ActivationRecord requirement가 active run identity에 결속된 non-empty evidence hash를
 갖도록 한다. rank/power/bias는 어차피 pod-only Norman data가 필요하므로 재생성은 자연스러운 pod 단계다.
+재생성한 bytes를 tracked snapshot에 덮어쓰거나 후속 evidence commit을 만들지 않는다.
 
 **Approximation-bias one-way carrier.** Probe-A 통과 후 bias-null config를 canonical hash하고 report를
 생성한다. Finalizer로 config의 GEARS report-SHA leaf 하나만 채운 다음, ResolvedRunSpec에 같은 report의

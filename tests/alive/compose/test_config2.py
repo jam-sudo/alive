@@ -10,6 +10,7 @@ blocked config, and the activated canonical config is checked to pass the gate.
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import json
 import shutil
@@ -68,6 +69,12 @@ def _activation_record() -> ActivationRecord:
         owner="owner@example.org",
         approved_protocol="COMPOSE-K562-v1",
         approved_phase=2,
+        approved_git_sha="0" * 40,
+        approved_sequence_mapping_sha256=json.loads(
+            Path(_EVIDENCE_FILES["real_norman_phi_rank_and_condition_report"]).read_text(
+                encoding="utf-8"
+            )
+        )["sequence_mapping_sha256"],
         evidence_hashes={
             req: "sha256:" + hashlib.sha256(Path(_EVIDENCE_FILES[req]).read_bytes()).hexdigest()
             for req in cfg.activation_requirements
@@ -97,6 +104,7 @@ def _activation_record_for_config(
 ) -> ActivationRecord:
     """Create synthetic READY evidence whose lineage matches ``cfg`` exactly."""
     files = dict(_EVIDENCE_FILES)
+    approved_git_sha = "1" * 40
     for requirement in (
         "real_norman_phi_rank_and_condition_report",
         "regime_specific_detectable_effect_analysis",
@@ -104,7 +112,22 @@ def _activation_record_for_config(
         payload = json.loads(Path(files[requirement]).read_text(encoding="utf-8"))
         payload["protocol"] = cfg.protocol
         payload["config_sha256"] = cfg.config_sha256
+        payload["git_sha"] = approved_git_sha
         payload["activation"] = "READY — synthetic unit-test evidence"
+        if requirement == "regime_specific_detectable_effect_analysis":
+            from alive.compose.detectable_effect import DETECTABLE_EFFECT_ACTIVATION_SCHEMA
+
+            payload["schema"] = DETECTABLE_EFFECT_ACTIVATION_SCHEMA
+            payload["report"]["regimes"]["sealed_double_unseen"]["recommendation"] = (
+                "sealed_double_unseen adequately powered as headline"
+            )
+            payload["report"]["regimes"]["sealed_single_unseen"]["recommendation"] = (
+                "sealed_single_unseen adequately powered as secondary regime"
+            )
+        else:
+            from alive.compose.phi_rank import PHI_RANK_ACTIVATION_SCHEMA
+
+            payload["schema"] = PHI_RANK_ACTIVATION_SCHEMA
         path = tmp_path / f"{requirement}.json"
         path.write_text(json.dumps(payload, sort_keys=True, separators=(",", ":")))
         files[requirement] = str(path)
@@ -247,11 +270,38 @@ def _activation_record_for_config(
         owner="owner@example.org",
         approved_protocol=cfg.protocol,
         approved_phase=cfg.phase,
+        approved_git_sha=approved_git_sha,
+        approved_sequence_mapping_sha256=json.loads(
+            Path(files["real_norman_phi_rank_and_condition_report"]).read_text(encoding="utf-8")
+        )["sequence_mapping_sha256"],
         evidence_hashes={
             req: "sha256:" + hashlib.sha256(Path(files[req]).read_bytes()).hexdigest()
             for req in cfg.activation_requirements
         },
         evidence_files=files,
+    )
+
+
+def _rewrite_json_evidence(
+    record: ActivationRecord,
+    requirement: str,
+    mutate,
+) -> ActivationRecord:
+    """Mutate one synthetic evidence payload and refresh only its external byte pin."""
+    path = Path(record.evidence_files[requirement])
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    mutate(payload)
+    path.write_text(json.dumps(payload, sort_keys=True, separators=(",", ":")), encoding="utf-8")
+    hashes = dict(record.evidence_hashes)
+    hashes[requirement] = "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+    return ActivationRecord(
+        owner=record.owner,
+        approved_protocol=record.approved_protocol,
+        approved_phase=record.approved_phase,
+        approved_git_sha=record.approved_git_sha,
+        approved_sequence_mapping_sha256=record.approved_sequence_mapping_sha256,
+        evidence_hashes=hashes,
+        evidence_files=record.evidence_files,
     )
 
 
@@ -275,11 +325,19 @@ def test_config_is_frozen():
 def test_total_k_grid_and_esm_arithmetic():
     cfg = load_compose_phase2_config(CANON)
     assert cfg.total_k_grid == (4, 6, 8)
+    assert cfg.esm_model == "esm2_t33_650M_UR50D_mean_pool"
     assert cfg.esm_projection_dim == 2
     assert cfg.expression_dims == (2, 4, 6)
     # total_k = expression_dims + esm_projection_dim, element-wise.
     for total, expr in zip(cfg.total_k_grid, cfg.expression_dims):
         assert total == expr + cfg.esm_projection_dim
+
+
+def test_unregistered_esm_model_is_rejected(tmp_path):
+    raw = _raw()
+    raw["factor_z"]["esm_model"] = "esm2_t6_8M_UR50D_mean_pool"
+    with pytest.raises(Phase2ConfigError, match="esm_model"):
+        load_compose_phase2_config(_write(tmp_path, raw))
 
 
 def test_runtime_contract_values_are_exposed_and_hashed():
@@ -309,6 +367,13 @@ def test_minimum_sealed_n_is_strict_registered_positive_int(tmp_path, bad):
     raw = _raw()
     raw["seal"]["minimum_sealed_n"] = bad
     with pytest.raises(Phase2ConfigError):
+        load_compose_phase2_config(_write(tmp_path, raw))
+
+
+def test_power_status_is_closed_to_registered_lifecycle_values(tmp_path):
+    raw = _raw()
+    raw["regimes"]["power_status"] = "established-ish"
+    with pytest.raises(Phase2ConfigError, match="power_status"):
         load_compose_phase2_config(_write(tmp_path, raw))
 
 
@@ -832,6 +897,8 @@ def test_scientific_mode_requires_all_evidence_hashes(tmp_path):
         owner=rec.owner,
         approved_protocol=rec.approved_protocol,
         approved_phase=rec.approved_phase,
+        approved_git_sha=rec.approved_git_sha,
+        approved_sequence_mapping_sha256=rec.approved_sequence_mapping_sha256,
         evidence_hashes=dict(list(rec.evidence_hashes.items())[:-1]),  # drop one
         evidence_files=rec.evidence_files,
     )
@@ -853,6 +920,8 @@ def test_scientific_mode_requires_matching_protocol(tmp_path):
         owner=rec.owner,
         approved_protocol="TG-K562-v1",  # mismatched protocol
         approved_phase=2,
+        approved_git_sha=rec.approved_git_sha,
+        approved_sequence_mapping_sha256=rec.approved_sequence_mapping_sha256,
         evidence_hashes=rec.evidence_hashes,
         evidence_files=rec.evidence_files,
     )
@@ -876,6 +945,122 @@ def test_scientific_mode_allowed_when_fully_activated(tmp_path):
         activation_record=_activation_record_for_config(tmp_path, cfg),
         git_is_clean=True,
     )
+
+
+def test_scientific_mode_recomputes_detectable_effect_power_floor(tmp_path):
+    cfg = load_compose_phase2_config(_write(tmp_path, _fully_activated_raw()))
+    record = _activation_record_for_config(tmp_path, cfg)
+    record = _rewrite_json_evidence(
+        record,
+        "regime_specific_detectable_effect_analysis",
+        lambda payload: payload["report"]["power_floors"].__setitem__("min_pairs", 1),
+    )
+    with pytest.raises(ScientificModeError, match="power floors"):
+        assert_scientific_mode_allowed(cfg, activation_record=record, git_is_clean=True)
+
+
+def test_scientific_mode_rejects_detectable_effect_boolean_substitution(tmp_path):
+    cfg = load_compose_phase2_config(_write(tmp_path, _fully_activated_raw()))
+    record = _activation_record_for_config(tmp_path, cfg)
+    record = _rewrite_json_evidence(
+        record,
+        "regime_specific_detectable_effect_analysis",
+        lambda payload: payload["report"]["regimes"]["sealed_double_unseen"].__setitem__(
+            "power_passed", False
+        ),
+    )
+    with pytest.raises(ScientificModeError, match="power_passed is inconsistent"):
+        assert_scientific_mode_allowed(cfg, activation_record=record, git_is_clean=True)
+
+
+def test_scientific_mode_cross_checks_detectable_counts_with_rank_report(tmp_path):
+    cfg = load_compose_phase2_config(_write(tmp_path, _fully_activated_raw()))
+    record = _activation_record_for_config(tmp_path, cfg)
+    record = _rewrite_json_evidence(
+        record,
+        "regime_specific_detectable_effect_analysis",
+        lambda payload: payload["regime_pair_counts"].__setitem__("sealed_double_unseen", 23),
+    )
+    with pytest.raises(ScientificModeError, match="independent report"):
+        assert_scientific_mode_allowed(cfg, activation_record=record, git_is_clean=True)
+
+
+def test_scientific_mode_rejects_stale_regime_recommendation(tmp_path):
+    cfg = load_compose_phase2_config(_write(tmp_path, _fully_activated_raw()))
+    record = _activation_record_for_config(tmp_path, cfg)
+    record = _rewrite_json_evidence(
+        record,
+        "regime_specific_detectable_effect_analysis",
+        lambda payload: payload["report"]["regimes"]["sealed_single_unseen"].__setitem__(
+            "recommendation", "double-unseen adequately powered as headline"
+        ),
+    )
+    with pytest.raises(ScientificModeError, match="recommendation is inconsistent"):
+        assert_scientific_mode_allowed(cfg, activation_record=record, git_is_clean=True)
+
+
+def test_scientific_mode_binds_detectable_effect_to_data_card_digest(tmp_path):
+    cfg = load_compose_phase2_config(_write(tmp_path, _fully_activated_raw()))
+    record = _activation_record_for_config(tmp_path, cfg)
+    record = _rewrite_json_evidence(
+        record,
+        "regime_specific_detectable_effect_analysis",
+        lambda payload: payload.__setitem__("data_sha256", "0" * 64),
+    )
+    with pytest.raises(ScientificModeError, match="data_sha256 mismatch"):
+        assert_scientific_mode_allowed(cfg, activation_record=record, git_is_clean=True)
+
+
+def test_scientific_mode_recomputes_rank_gate_before_release(tmp_path):
+    cfg = load_compose_phase2_config(_write(tmp_path, _fully_activated_raw()))
+    record = _activation_record_for_config(tmp_path, cfg)
+    record = _rewrite_json_evidence(
+        record,
+        "real_norman_phi_rank_and_condition_report",
+        lambda payload: payload["report"]["per_k_total"][0].__setitem__("is_full_rank", False),
+    )
+    with pytest.raises(ScientificModeError, match="non-full-rank.*k_total=4"):
+        assert_scientific_mode_allowed(cfg, activation_record=record, git_is_clean=True)
+
+
+def test_scientific_mode_rejects_rank_report_schema_extension(tmp_path):
+    cfg = load_compose_phase2_config(_write(tmp_path, _fully_activated_raw()))
+    record = _activation_record_for_config(tmp_path, cfg)
+    record = _rewrite_json_evidence(
+        record,
+        "real_norman_phi_rank_and_condition_report",
+        lambda payload: payload.__setitem__("unregistered_claim", True),
+    )
+    with pytest.raises(ScientificModeError, match="phi-rank.*schema mismatch"):
+        assert_scientific_mode_allowed(cfg, activation_record=record, git_is_clean=True)
+
+
+def test_scientific_mode_binds_rank_report_to_approved_sequence_mapping(tmp_path):
+    cfg = load_compose_phase2_config(_write(tmp_path, _fully_activated_raw()))
+    record = _activation_record_for_config(tmp_path, cfg)
+    wrong_mapping = dataclasses.replace(record, approved_sequence_mapping_sha256="f" * 64)
+    with pytest.raises(ScientificModeError, match="sequence mapping SHA mismatch"):
+        assert_scientific_mode_allowed(
+            cfg,
+            activation_record=wrong_mapping,
+            git_is_clean=True,
+        )
+
+
+def test_scientific_mode_binds_reports_to_owner_approved_commit(tmp_path):
+    cfg = load_compose_phase2_config(_write(tmp_path, _fully_activated_raw()))
+    record = _activation_record_for_config(tmp_path, cfg)
+    wrong_commit = ActivationRecord(
+        owner=record.owner,
+        approved_protocol=record.approved_protocol,
+        approved_phase=record.approved_phase,
+        approved_git_sha="2" * 40,
+        approved_sequence_mapping_sha256=record.approved_sequence_mapping_sha256,
+        evidence_hashes=record.evidence_hashes,
+        evidence_files=record.evidence_files,
+    )
+    with pytest.raises(ScientificModeError, match="evidence git_sha mismatch"):
+        assert_scientific_mode_allowed(cfg, activation_record=wrong_commit, git_is_clean=True)
 
 
 def test_scientific_mode_rejects_honest_but_incomplete_dependency_evidence(tmp_path):
@@ -928,6 +1113,8 @@ def test_scientific_mode_recomputes_pair_roster_overlap(tmp_path):
         owner=record.owner,
         approved_protocol=record.approved_protocol,
         approved_phase=record.approved_phase,
+        approved_git_sha=record.approved_git_sha,
+        approved_sequence_mapping_sha256=record.approved_sequence_mapping_sha256,
         evidence_hashes=evidence_hashes,
         evidence_files=record.evidence_files,
     )
@@ -972,6 +1159,8 @@ def test_scientific_mode_rejects_ephemeral_smoke_artifact_uri(tmp_path):
         owner=record.owner,
         approved_protocol=record.approved_protocol,
         approved_phase=record.approved_phase,
+        approved_git_sha=record.approved_git_sha,
+        approved_sequence_mapping_sha256=record.approved_sequence_mapping_sha256,
         evidence_hashes=evidence_hashes,
         evidence_files=record.evidence_files,
     )
@@ -1032,6 +1221,8 @@ def test_empty_evidence_hashes_blocks_scientific_mode(tmp_path):
         owner="owner@example.org",
         approved_protocol="COMPOSE-K562-v1",
         approved_phase=2,
+        approved_git_sha="0" * 40,
+        approved_sequence_mapping_sha256="0" * 64,
         evidence_hashes={},
         evidence_files={},
     )
@@ -1056,6 +1247,8 @@ def test_malformed_evidence_hash_blocks_scientific_mode():
                 owner=rec.owner,
                 approved_protocol=rec.approved_protocol,
                 approved_phase=rec.approved_phase,
+                approved_git_sha=rec.approved_git_sha,
+                approved_sequence_mapping_sha256=rec.approved_sequence_mapping_sha256,
                 evidence_hashes=malformed,
                 evidence_files=rec.evidence_files,
             ),
@@ -1075,6 +1268,8 @@ def test_extra_evidence_requirement_blocks_scientific_mode():
                 owner=rec.owner,
                 approved_protocol=rec.approved_protocol,
                 approved_phase=rec.approved_phase,
+                approved_git_sha=rec.approved_git_sha,
+                approved_sequence_mapping_sha256=rec.approved_sequence_mapping_sha256,
                 evidence_hashes=extra,
                 evidence_files={**rec.evidence_files, "unregistered_requirement": CANON},
             ),

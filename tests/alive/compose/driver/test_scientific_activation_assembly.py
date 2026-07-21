@@ -92,6 +92,8 @@ def test_stale_config_bound_report_rejects(tmp_path):
         owner="owner@example.org",
         approved_protocol=config.protocol,
         approved_phase=config.phase,
+        approved_git_sha=spec.approved_git_sha,
+        approved_sequence_mapping_sha256=spec.sequence_mapping_digest,
         evidence_hashes=evidence_hashes,
         evidence_files={r: reqs[r]["path"] for r in config.activation_requirements},
     )

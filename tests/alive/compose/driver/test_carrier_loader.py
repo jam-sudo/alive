@@ -297,6 +297,8 @@ def _valid_scientific_fields() -> dict[str, object]:
             owner="dummy-owner",
             approved_protocol="COMPOSE-K562-v1",
             approved_phase=2,
+            approved_git_sha="0" * 40,
+            approved_sequence_mapping_sha256="0" * 64,
             evidence_hashes={},
             evidence_files={},
         ),

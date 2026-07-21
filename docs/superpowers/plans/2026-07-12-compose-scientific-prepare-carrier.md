@@ -1666,6 +1666,7 @@ Steps:
               owner="owner@example.org",
               approved_protocol=config.protocol,
               approved_phase=config.phase,
+              approved_git_sha=spec.approved_git_sha,
               evidence_hashes={
                   r: reqs[r]["sha256"] for r in config.activation_requirements
               },
@@ -1708,6 +1709,7 @@ Steps:
           owner=evidence["owner"],
           approved_protocol=config.protocol,
           approved_phase=config.phase,
+          approved_git_sha=spec.approved_git_sha,
           evidence_hashes={req: requirements[req]["sha256"] for req in config.activation_requirements},
           evidence_files={req: requirements[req]["path"] for req in config.activation_requirements},
       )

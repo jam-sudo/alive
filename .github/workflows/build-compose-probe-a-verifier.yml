@@ -1,0 +1,185 @@
+name: Build COMPOSE Probe-A verifier candidate
+
+on:
+  workflow_dispatch:
+    inputs:
+      git_commit:
+        description: Exact 40-character main-branch commit to build
+        required: true
+        type: string
+      python_base_image:
+        description: Target-platform Python image as name@sha256:digest
+        required: true
+        type: string
+      uv_build_image:
+        description: Target-platform uv image as name@sha256:digest
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: compose-probe-a-verifier-build-${{ inputs.git_commit }}
+  cancel-in-progress: false
+
+env:
+  IMAGE_REPOSITORY: ghcr.io/jam-sudo/alive-compose-probe-a-verifier
+  TARGET_PLATFORM: linux/amd64
+  EXPECTED_REPOSITORY: jam-sudo/alive
+  EXPECTED_WORKFLOW_REF: jam-sudo/alive/.github/workflows/build-compose-probe-a-verifier.yml@refs/heads/main
+
+jobs:
+  build:
+    name: Build unsigned candidate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Check out the exact candidate commit
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ inputs.git_commit }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Validate immutable build inputs
+        env:
+          REQUESTED_COMMIT: ${{ inputs.git_commit }}
+          PYTHON_BASE_IMAGE: ${{ inputs.python_base_image }}
+          UV_BUILD_IMAGE: ${{ inputs.uv_build_image }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = "$EXPECTED_REPOSITORY"
+          test "$GITHUB_REF" = refs/heads/main
+          test "$GITHUB_WORKFLOW_REF" = "$EXPECTED_WORKFLOW_REF"
+          [[ "$REQUESTED_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+          test "$REQUESTED_COMMIT" = "$GITHUB_SHA"
+          test "$(git rev-parse HEAD)" = "$REQUESTED_COMMIT"
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+          digest_ref='^[a-z0-9]+([._-][a-z0-9]+)*(:[0-9]+)?(/[a-z0-9]+([._-][a-z0-9]+)*)+@sha256:[0-9a-f]{64}$'
+          [[ "$PYTHON_BASE_IMAGE" =~ $digest_ref ]]
+          [[ "$UV_BUILD_IMAGE" =~ $digest_ref ]]
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
+
+      - name: Log in to GHCR
+        uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Hash decision-bearing source inputs
+        id: source
+        run: |
+          set -euo pipefail
+          echo "dockerfile_sha256=$(sha256sum containers/compose-probe-a-verifier/Dockerfile | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          echo "uv_lock_sha256=$(sha256sum uv.lock | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push the single-platform candidate
+        id: image
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
+        with:
+          context: .
+          file: containers/compose-probe-a-verifier/Dockerfile
+          platforms: ${{ env.TARGET_PLATFORM }}
+          push: true
+          pull: true
+          no-cache: true
+          provenance: false
+          sbom: false
+          tags: ${{ env.IMAGE_REPOSITORY }}:candidate-${{ inputs.git_commit }}
+          build-args: |
+            ALIVE_GIT_COMMIT=${{ inputs.git_commit }}
+            ALIVE_DOCKERFILE_SHA256=${{ steps.source.outputs.dockerfile_sha256 }}
+            ALIVE_UV_LOCK_SHA256=${{ steps.source.outputs.uv_lock_sha256 }}
+            PYTHON_BASE_IMAGE=${{ inputs.python_base_image }}
+            UV_IMAGE=${{ inputs.uv_build_image }}
+
+      - name: Inspect the pushed digest and compute the diagnostic closure
+        id: candidate
+        env:
+          IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
+          REQUESTED_COMMIT: ${{ inputs.git_commit }}
+          PYTHON_BASE_IMAGE: ${{ inputs.python_base_image }}
+          UV_BUILD_IMAGE: ${{ inputs.uv_build_image }}
+          DOCKERFILE_SHA256: ${{ steps.source.outputs.dockerfile_sha256 }}
+          UV_LOCK_SHA256: ${{ steps.source.outputs.uv_lock_sha256 }}
+        run: |
+          set -euo pipefail
+          [[ "$IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          image_reference="$IMAGE_REPOSITORY@$IMAGE_DIGEST"
+          docker pull --platform "$TARGET_PLATFORM" "$image_reference"
+          test "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$image_reference")" = "$TARGET_PLATFORM"
+          labels="$(docker image inspect --format '{{json .Config.Labels}}' "$image_reference")"
+          test "$(jq -r '."org.opencontainers.image.revision"' <<<"$labels")" = "$REQUESTED_COMMIT"
+          test "$(jq -r '."org.opencontainers.image.base.name"' <<<"$labels")" = "$PYTHON_BASE_IMAGE"
+          test "$(jq -r '."dev.alive.uv-build-image"' <<<"$labels")" = "$UV_BUILD_IMAGE"
+          test "$(jq -r '."dev.alive.dockerfile-sha256"' <<<"$labels")" = "$DOCKERFILE_SHA256"
+          test "$(jq -r '."dev.alive.uv-lock-sha256"' <<<"$labels")" = "$UV_LOCK_SHA256"
+          docker image inspect --format '{{json .RepoDigests}}' "$image_reference" |
+            jq -e --arg reference "$image_reference" 'index($reference) != null'
+          verifier_code_sha256="$(docker run --rm --pull=never --platform "$TARGET_PLATFORM" \
+            --network=none --read-only --cap-drop=ALL \
+            --security-opt=no-new-privileges=true --user 65532:65532 \
+            "$image_reference" --print-verifier-code-sha256)"
+          [[ "$verifier_code_sha256" =~ ^[0-9a-f]{64}$ ]]
+          echo "image_reference=$image_reference" >> "$GITHUB_OUTPUT"
+          echo "verifier_code_sha256=$verifier_code_sha256" >> "$GITHUB_OUTPUT"
+
+      - name: Create the canonical unsigned handoff receipt
+        id: receipt
+        env:
+          REQUESTED_COMMIT: ${{ inputs.git_commit }}
+          IMAGE_REFERENCE: ${{ steps.candidate.outputs.image_reference }}
+          PYTHON_BASE_IMAGE: ${{ inputs.python_base_image }}
+          UV_BUILD_IMAGE: ${{ inputs.uv_build_image }}
+          DOCKERFILE_SHA256: ${{ steps.source.outputs.dockerfile_sha256 }}
+          UV_LOCK_SHA256: ${{ steps.source.outputs.uv_lock_sha256 }}
+          VERIFIER_CODE_SHA256: ${{ steps.candidate.outputs.verifier_code_sha256 }}
+        run: |
+          set -euo pipefail
+          mkdir candidate
+          candidate_sha256="$(PYTHONPATH=src python scripts/compose/build_probe_a_verifier_image_candidate.py \
+            --git-commit "$REQUESTED_COMMIT" \
+            --image-reference "$IMAGE_REFERENCE" \
+            --platform "$TARGET_PLATFORM" \
+            --python-base-image "$PYTHON_BASE_IMAGE" \
+            --uv-build-image "$UV_BUILD_IMAGE" \
+            --dockerfile-sha256 "$DOCKERFILE_SHA256" \
+            --uv-lock-sha256 "$UV_LOCK_SHA256" \
+            --verifier-code-sha256 "$VERIFIER_CODE_SHA256" \
+            --build-repository "$GITHUB_REPOSITORY" \
+            --build-workflow-ref "$GITHUB_WORKFLOW_REF" \
+            --build-run-id "$GITHUB_RUN_ID" \
+            --out candidate/verifier-image-candidate.json)"
+          [[ "$candidate_sha256" =~ ^[0-9a-f]{64}$ ]]
+          echo "candidate_sha256=$candidate_sha256" >> "$GITHUB_OUTPUT"
+
+      - name: Upload the unsigned candidate receipt
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: compose-probe-a-verifier-candidate-${{ inputs.git_commit }}
+          path: candidate/verifier-image-candidate.json
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
+
+      - name: Publish review coordinates
+        env:
+          CANDIDATE_SHA256: ${{ steps.receipt.outputs.candidate_sha256 }}
+          IMAGE_REFERENCE: ${{ steps.candidate.outputs.image_reference }}
+          VERIFIER_CODE_SHA256: ${{ steps.candidate.outputs.verifier_code_sha256 }}
+        run: |
+          {
+            echo '## Unsigned Probe-A verifier candidate'
+            echo
+            echo "- build run ID: \`$GITHUB_RUN_ID\`"
+            echo "- candidate SHA-256: \`$CANDIDATE_SHA256\`"
+            echo "- image: \`$IMAGE_REFERENCE\`"
+            echo "- diagnostic closure: \`$VERIFIER_CODE_SHA256\`"
+            echo '- status: unsigned; not owner-approved and not runnable'
+          } >> "$GITHUB_STEP_SUMMARY"

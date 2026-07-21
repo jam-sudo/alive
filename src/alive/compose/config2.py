@@ -24,16 +24,18 @@ requirements.
 The guard (:func:`assert_scientific_mode_allowed`) is scientific-only.
 ``fixture_mode=True`` is rejected so a caller-controlled boolean cannot bypass
 activation; fixture execution has a separate bounded entry point in
-``phase2a``. Scientific mode requires **all** of: config ``status == "active"``, a matching owner
-:class:`ActivationRecord`, a clean committed Git state, and an evidence hash for
-every activation requirement. The current candidate config carries
-``status: preregistered_activation_blocked``, so a real-data pipeline cannot be
-started from it.
+``phase2a``. Scientific mode requires **all** of: config ``status == "active"``,
+no unresolved activation blockers, a matching owner :class:`ActivationRecord`,
+a clean committed Git state, and validated, byte-pinned evidence for every
+activation requirement. The canonical config is lifecycle-active but remains
+scientific-release-blocked until its explicit power, baseline-environment and
+approximation-bias blockers are resolved.
 """
 
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -96,15 +98,18 @@ _EXPECTED_INFERENCE_METHOD = "max_deviation_bootstrap"
 _EXPECTED_RESAMPLING_UNIT = "perturbation_pair"
 _EXPECTED_FAMILY_CONFIDENCE = 0.95
 _EXPECTED_BOOTSTRAP_REPLICATES = 10000
+_EXPECTED_ESM_MODEL = "esm2_t33_650M_UR50D_mean_pool"
+_EXPECTED_ESTABLISHED_POWER_STATUS = "established_from_registered_report"
+_BLOCKED_POWER_STATUS = "unestablished_activation_blocker"
 _EXPECTED_ROLE_NAMES: tuple[str, ...] = (
     "combo_calibration",
     "sealed_double_unseen",
     "sealed_single_unseen",
 )
-#: Pre-registered floor on the number of sealed pairs that must be scored before
-#: a sealed verdict is trusted (config ``seal.minimum_sealed_n``). The
-#: orchestrator sources its ``minimum_sealed`` integrity input from here rather
-#: than a literal so the floor is versioned with the config.
+#: Structural non-empty-result floor on the number of sealed pairs that must be
+#: scored before a sealed artifact can be accepted. This is deliberately NOT
+#: the statistical power floor: the registered 20-pair/50-cell adequacy gate is
+#: independently re-computed from the detectable-effect activation evidence.
 _EXPECTED_MINIMUM_SEALED_N = 1
 _EXPECTED_FUTILITY_CONDITIONS = (
     "dev_oof_delta_below_threshold",
@@ -395,6 +400,12 @@ class ActivationRecord:
         Protocol name the owner approved; must match the config's protocol.
     approved_phase
         Phase the owner approved; must match the config's phase.
+    approved_git_sha
+        Exact full Git commit approved by the owner. Config-bound analytical
+        reports must embed the same commit.
+    approved_sequence_mapping_sha256
+        Exact sequence-mapping bytes approved for the run. The rank report must
+        have been generated from this same mapping.
     evidence_hashes
         Mapping from each activation requirement to its evidence hash. Scientific
         mode requires a present hash for every requirement the config declares.
@@ -406,6 +417,8 @@ class ActivationRecord:
     owner: str
     approved_protocol: str
     approved_phase: int
+    approved_git_sha: str
+    approved_sequence_mapping_sha256: str = ""
     evidence_hashes: dict[str, str] = field(default_factory=dict)
     evidence_files: dict[str, str] = field(default_factory=dict)
 
@@ -424,6 +437,7 @@ class ComposePhase2Config:
     activation_requirements: tuple[str, ...]
     total_k_grid: tuple[int, ...]
     expression_dims: tuple[int, ...]
+    esm_model: str
     esm_projection_dim: int
     lambda_grid: tuple[float, ...]
     oof_folds: int
@@ -486,7 +500,7 @@ class ComposePhase2Config:
         scientific boundary rejects them fail-closed.
         """
         blockers: list[str] = []
-        if not self.power_status or self.power_status.endswith("_activation_blocker"):
+        if self.power_status != _EXPECTED_ESTABLISHED_POWER_STATUS:
             blockers.append("regimes.power_status")
         for method, revision, environment_status in self.baseline_activation_statuses:
             if revision is None or not revision.strip():
@@ -664,7 +678,7 @@ def load_compose_phase2_config(path: str | Path) -> ComposePhase2Config:
     activation_requirements = _validate_activation_requirements(
         _require(raw, "activation_requirements", "top-level")
     )
-    total_k_grid, expression_dims, esm_projection_dim = _validate_factor_z(
+    total_k_grid, expression_dims, esm_model, esm_projection_dim = _validate_factor_z(
         _require(raw, "factor_z", "top-level")
     )
     lambda_grid, oof_folds, uncovered_tolerance = _validate_identification(
@@ -679,8 +693,10 @@ def load_compose_phase2_config(path: str | Path) -> ComposePhase2Config:
         _require(raw, "baselines", "top-level")
     )
     power_status = _require(_require(raw, "regimes", "top-level"), "power_status", "regimes")
-    if not isinstance(power_status, str) or not power_status.strip():
-        raise Phase2ConfigError("regimes.power_status must be a non-empty string")
+    if power_status not in {_BLOCKED_POWER_STATUS, _EXPECTED_ESTABLISHED_POWER_STATUS}:
+        raise Phase2ConfigError(
+            "regimes.power_status must be exactly the registered blocked or established value"
+        )
     (
         metric_primary,
         metric_formula,
@@ -709,6 +725,7 @@ def load_compose_phase2_config(path: str | Path) -> ComposePhase2Config:
         activation_requirements=activation_requirements,
         total_k_grid=total_k_grid,
         expression_dims=expression_dims,
+        esm_model=esm_model,
         esm_projection_dim=esm_projection_dim,
         lambda_grid=lambda_grid,
         oof_folds=oof_folds,
@@ -829,7 +846,9 @@ def _validate_activation_requirements(value: Any) -> tuple[str, ...]:
     return got
 
 
-def _validate_factor_z(block: dict[str, Any]) -> tuple[tuple[int, ...], tuple[int, ...], int]:
+def _validate_factor_z(
+    block: dict[str, Any],
+) -> tuple[tuple[int, ...], tuple[int, ...], str, int]:
     """Validate factor dimensions and the total_k = expression + ESM arithmetic."""
     _close_schema(block, _KNOWN_FACTOR_Z, "factor_z")
 
@@ -843,6 +862,11 @@ def _validate_factor_z(block: dict[str, Any]) -> tuple[tuple[int, ...], tuple[in
     expression_dims = tuple(
         _strict_int(x, "factor_z.expression_dims entry") for x in expression_raw
     )
+    esm_model = _require(block, "esm_model", "factor_z")
+    if esm_model != _EXPECTED_ESM_MODEL:
+        raise Phase2ConfigError(
+            f"factor_z.esm_model must be {_EXPECTED_ESM_MODEL!r}, got {esm_model!r}"
+        )
     esm_projection_dim = _strict_int(
         _require(block, "esm_projection_dim", "factor_z"), "factor_z.esm_projection_dim"
     )
@@ -868,7 +892,7 @@ def _validate_factor_z(block: dict[str, Any]) -> tuple[tuple[int, ...], tuple[in
                 "ESM dimension arithmetic violated: total_k "
                 f"({total}) != expression_dim ({expr}) + esm_projection_dim ({esm_projection_dim})"
             )
-    return total_k_grid, expression_dims, esm_projection_dim
+    return total_k_grid, expression_dims, esm_model, esm_projection_dim
 
 
 def _validate_identification(block: dict[str, Any]) -> tuple[tuple[float, ...], int, float]:
@@ -921,12 +945,10 @@ def _validate_seeds(block: dict[str, Any]) -> tuple[int, tuple[int, ...]]:
 def _validate_seal(block: dict[str, Any]) -> int:
     """Validate the seal block and return the pre-registered minimum-sealed floor.
 
-    The ``minimum_sealed_n`` floor is the pre-registered number of sealed pairs
-    that must have been scored before a sealed verdict is trusted (the
-    orchestrator sources its integrity ``minimum_sealed`` input from this rather
-    than a literal). It is parsed with strict int typing (``bool`` and string
-    ints rejected) and must be a strictly positive integer matching the
-    pre-registration.
+    ``minimum_sealed_n`` is the pre-registered structural non-empty-result floor,
+    not the statistical power floor. The latter is checked independently from
+    the detectable-effect activation report. The orchestrator sources its
+    integrity ``minimum_sealed`` input from this value rather than a literal.
 
     Parameters
     ----------
@@ -1235,8 +1257,9 @@ def assert_scientific_mode_allowed(
     Raises
     ------
     ScientificModeError
-        If scientific mode is requested but any precondition fails. The current
-        ``preregistered_activation_blocked`` config always fails here.
+        If scientific mode is requested but any precondition fails. A
+        lifecycle-active config still fails while any explicit release blocker
+        or activation-evidence contract remains unresolved.
     """
     if fixture_mode:
         raise ScientificModeError(
@@ -1266,6 +1289,10 @@ def assert_scientific_mode_allowed(
             "scientific mode blocked: activation record phase "
             f"{activation_record.approved_phase!r} != config phase {config.phase!r}"
         )
+    if re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", activation_record.approved_git_sha) is None:
+        raise ScientificModeError(
+            "scientific mode blocked: activation record approved_git_sha must be full lowercase hex"
+        )
 
     if git_is_clean is not True:
         raise ScientificModeError(
@@ -1282,8 +1309,6 @@ def assert_scientific_mode_allowed(
             "scientific mode blocked: activation evidence roster mismatch "
             f"(missing={missing}, extra={extra})"
         )
-    import re
-
     malformed = [
         req
         for req, digest in activation_record.evidence_hashes.items()
@@ -1337,6 +1362,7 @@ def assert_scientific_mode_allowed(
     # stale, pre-activation report whose embedded config identity no longer
     # matches this run.  Parse only this explicitly registered subset and bind it
     # to the finalized config/protocol before scientific execution is allowed.
+    config_bound_reports: dict[str, dict[str, Any]] = {}
     for requirement in sorted(_CONFIG_BOUND_EVIDENCE_REQUIREMENTS):
         if requirement not in expected_requirements:
             continue
@@ -1363,11 +1389,101 @@ def assert_scientific_mode_allowed(
                 "scientific mode blocked: activation evidence config_sha256 mismatch for "
                 f"{requirement!r}"
             )
-        activation = report.get("activation")
-        if not isinstance(activation, str) or "BLOCKED" in activation.upper():
+        if report.get("git_sha") != activation_record.approved_git_sha:
             raise ScientificModeError(
-                f"scientific mode blocked: activation evidence remains BLOCKED for {requirement!r}"
+                f"scientific mode blocked: activation evidence git_sha mismatch for {requirement!r}"
             )
+        activation = report.get("activation")
+        if not isinstance(activation, str) or not activation.upper().startswith("READY"):
+            raise ScientificModeError(
+                "scientific mode blocked: activation evidence must explicitly start with "
+                f"'READY' for {requirement!r}"
+            )
+        config_bound_reports[requirement] = report
+
+    # Bind the detectable-effect conclusion to independently pinned inputs and
+    # recompute its statistical gates. Hash equality alone cannot establish that
+    # a producer's booleans, floors, counts, or headline claim are coherent.
+    detectable_requirement = "regime_specific_detectable_effect_analysis"
+    rank_requirement = "real_norman_phi_rank_and_condition_report"
+    data_card_requirement = "finalized_norman_data_card_and_sha256"
+    if {
+        detectable_requirement,
+        rank_requirement,
+        data_card_requirement,
+    }.issubset(expected_requirements):
+        data_card_path = Path(activation_record.evidence_files[data_card_requirement])
+        try:
+            data_card = json.loads(data_card_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, ValueError) as exc:
+            raise ScientificModeError(
+                f"scientific mode blocked: Norman data card is not readable JSON: {exc}"
+            ) from exc
+        if not isinstance(data_card, dict):
+            raise ScientificModeError("scientific mode blocked: Norman data card must be an object")
+        data_sha256 = data_card.get("processed_sha256")
+        processed_asset = data_card.get("processed_analysis_asset")
+        if data_sha256 is None and isinstance(processed_asset, dict):
+            if processed_asset.get("role") == "processed":
+                data_sha256 = processed_asset.get("sha256")
+        raw_source = data_card.get("raw_or_source")
+        if (
+            not isinstance(data_sha256, str)
+            or len(data_sha256) != 64
+            or any(char not in "0123456789abcdef" for char in data_sha256)
+            or not isinstance(raw_source, dict)
+            or raw_source.get("kind") not in {"raw_sha256", "declared_source_digest"}
+            or not isinstance(raw_source.get("digest"), str)
+            or len(raw_source["digest"]) != 64
+            or any(char not in "0123456789abcdef" for char in raw_source["digest"])
+            or (raw_source.get("kind") == "raw_sha256" and raw_source["digest"] != data_sha256)
+        ):
+            raise ScientificModeError(
+                "scientific mode blocked: Norman data card source digest is malformed "
+                "or inconsistent"
+            )
+
+        from alive.compose.phi_rank import validate_phi_rank_activation_report
+
+        try:
+            independent_pair_counts = validate_phi_rank_activation_report(
+                config_bound_reports[rank_requirement],
+                expected_protocol=config.protocol,
+                expected_config_sha256=config.config_sha256,
+                expected_git_sha=activation_record.approved_git_sha,
+                expected_data_sha256=data_sha256,
+                expected_sequence_mapping_sha256=(
+                    activation_record.approved_sequence_mapping_sha256
+                ),
+                expected_split_seed=config.split_seed,
+                expected_calibration_fraction=0.6,
+                expected_total_k_grid=config.total_k_grid,
+                expected_esm_model=config.esm_model.removesuffix("_mean_pool"),
+                expected_esm_dim=config.esm_projection_dim,
+            )
+        except ValueError as exc:
+            raise ScientificModeError(
+                f"scientific mode blocked: phi-rank evidence is invalid: {exc}"
+            ) from exc
+
+        from alive.compose.detectable_effect import (
+            validate_regime_detectable_effect_activation_report,
+        )
+
+        try:
+            validate_regime_detectable_effect_activation_report(
+                config_bound_reports[detectable_requirement],
+                expected_protocol=config.protocol,
+                expected_config_sha256=config.config_sha256,
+                expected_git_sha=activation_record.approved_git_sha,
+                expected_split_seed=config.split_seed,
+                expected_data_sha256=data_sha256,
+                expected_pair_counts=independent_pair_counts,
+            )
+        except ValueError as exc:
+            raise ScientificModeError(
+                f"scientific mode blocked: detectable-effect evidence is invalid: {exc}"
+            ) from exc
 
     dependency_requirement = "gears_cpa_reproducible_dependency_lock"
     if dependency_requirement in expected_requirements:

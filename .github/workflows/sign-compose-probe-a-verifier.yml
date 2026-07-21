@@ -1,0 +1,201 @@
+name: Sign reviewed COMPOSE Probe-A verifier candidate
+
+on:
+  workflow_dispatch:
+    inputs:
+      git_commit:
+        description: Exact 40-character commit recorded by the build receipt
+        required: true
+        type: string
+      build_run_id:
+        description: GitHub Actions run ID that uploaded the candidate receipt
+        required: true
+        type: string
+      candidate_sha256:
+        description: External SHA-256 printed by the candidate build
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: compose-probe-a-verifier-sign-${{ inputs.git_commit }}
+  cancel-in-progress: false
+
+env:
+  EXPECTED_REPOSITORY: jam-sudo/alive
+  EXPECTED_BUILD_WORKFLOW_REF: jam-sudo/alive/.github/workflows/build-compose-probe-a-verifier.yml@refs/heads/main
+  EXPECTED_SIGN_WORKFLOW_REF: jam-sudo/alive/.github/workflows/sign-compose-probe-a-verifier.yml@refs/heads/main
+  CERTIFICATE_IDENTITY: https://github.com/jam-sudo/alive/.github/workflows/sign-compose-probe-a-verifier.yml@refs/heads/main
+  OIDC_ISSUER: https://token.actions.githubusercontent.com
+
+jobs:
+  sign:
+    name: Recompute and sign reviewed candidate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    environment: compose-verifier-signing
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+      packages: read
+    steps:
+      - name: Check out the exact signing commit
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ inputs.git_commit }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Validate the owner signing request
+        env:
+          REQUESTED_COMMIT: ${{ inputs.git_commit }}
+          BUILD_RUN_ID: ${{ inputs.build_run_id }}
+          CANDIDATE_SHA256: ${{ inputs.candidate_sha256 }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = "$EXPECTED_REPOSITORY"
+          test "$GITHUB_REF" = refs/heads/main
+          test "$GITHUB_WORKFLOW_REF" = "$EXPECTED_SIGN_WORKFLOW_REF"
+          [[ "$REQUESTED_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$BUILD_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$CANDIDATE_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          test "$REQUESTED_COMMIT" = "$GITHUB_SHA"
+          test "$(git rev-parse HEAD)" = "$REQUESTED_COMMIT"
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+
+      - name: Download the externally pinned build receipt
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: compose-probe-a-verifier-candidate-${{ inputs.git_commit }}
+          path: candidate
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.build_run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Validate the canonical build-to-sign handoff
+        env:
+          REQUESTED_COMMIT: ${{ inputs.git_commit }}
+          CANDIDATE_SHA256: ${{ inputs.candidate_sha256 }}
+        run: |
+          set -euo pipefail
+          PYTHONPATH=src python scripts/compose/validate_probe_a_verifier_image_candidate.py \
+            --candidate candidate/verifier-image-candidate.json \
+            --candidate-sha256 "$CANDIDATE_SHA256" \
+            --expected-git-commit "$REQUESTED_COMMIT" \
+            --expected-build-repository "$EXPECTED_REPOSITORY" \
+            --expected-build-workflow-ref "$EXPECTED_BUILD_WORKFLOW_REF"
+
+      - name: Log in to GHCR for digest-only retrieval
+        uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Independently verify the candidate image
+        id: review
+        env:
+          REQUESTED_COMMIT: ${{ inputs.git_commit }}
+        run: |
+          set -euo pipefail
+          candidate=candidate/verifier-image-candidate.json
+          image_reference="$(jq -r .image_reference "$candidate")"
+          platform="$(jq -r .platform "$candidate")"
+          python_base_image="$(jq -r .python_base_image "$candidate")"
+          uv_build_image="$(jq -r .uv_build_image "$candidate")"
+          dockerfile_sha256="$(jq -r .dockerfile_sha256 "$candidate")"
+          uv_lock_sha256="$(jq -r .uv_lock_sha256 "$candidate")"
+          expected_code_sha256="$(jq -r .verifier_code_sha256 "$candidate")"
+          test "$(sha256sum containers/compose-probe-a-verifier/Dockerfile | cut -d' ' -f1)" = "$dockerfile_sha256"
+          test "$(sha256sum uv.lock | cut -d' ' -f1)" = "$uv_lock_sha256"
+          docker pull --platform "$platform" "$image_reference"
+          test "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$image_reference")" = "$platform"
+          labels="$(docker image inspect --format '{{json .Config.Labels}}' "$image_reference")"
+          test "$(jq -r '."org.opencontainers.image.revision"' <<<"$labels")" = "$REQUESTED_COMMIT"
+          test "$(jq -r '."org.opencontainers.image.base.name"' <<<"$labels")" = "$python_base_image"
+          test "$(jq -r '."dev.alive.uv-build-image"' <<<"$labels")" = "$uv_build_image"
+          test "$(jq -r '."dev.alive.dockerfile-sha256"' <<<"$labels")" = "$dockerfile_sha256"
+          test "$(jq -r '."dev.alive.uv-lock-sha256"' <<<"$labels")" = "$uv_lock_sha256"
+          docker image inspect --format '{{json .RepoDigests}}' "$image_reference" |
+            jq -e --arg reference "$image_reference" 'index($reference) != null'
+          observed_code_sha256="$(docker run --rm --pull=never --platform "$platform" \
+            --network=none --read-only --cap-drop=ALL \
+            --security-opt=no-new-privileges=true --user 65532:65532 \
+            "$image_reference" --print-verifier-code-sha256)"
+          test "$observed_code_sha256" = "$expected_code_sha256"
+          echo "image_reference=$image_reference" >> "$GITHUB_OUTPUT"
+          echo "verifier_code_sha256=$observed_code_sha256" >> "$GITHUB_OUTPUT"
+
+      - name: Install the exact Cosign release
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: v3.0.6
+
+      - name: Build and sign the canonical approval subject
+        env:
+          REQUESTED_COMMIT: ${{ inputs.git_commit }}
+          IMAGE_REFERENCE: ${{ steps.review.outputs.image_reference }}
+          VERIFIER_CODE_SHA256: ${{ steps.review.outputs.verifier_code_sha256 }}
+        run: |
+          set -euo pipefail
+          candidate=candidate/verifier-image-candidate.json
+          mkdir signed
+          cp "$candidate" signed/verifier-image-candidate.json
+          PYTHONPATH=src python scripts/compose/build_probe_a_verifier_signature_subject.py \
+            --git-commit "$REQUESTED_COMMIT" \
+            --image-reference "$IMAGE_REFERENCE" \
+            --platform "$(jq -r .platform "$candidate")" \
+            --python-base-image "$(jq -r .python_base_image "$candidate")" \
+            --uv-build-image "$(jq -r .uv_build_image "$candidate")" \
+            --dockerfile-sha256 "$(jq -r .dockerfile_sha256 "$candidate")" \
+            --uv-lock-sha256 "$(jq -r .uv_lock_sha256 "$candidate")" \
+            --verifier-code-sha256 "$VERIFIER_CODE_SHA256" \
+            --out signed/verifier-signature-subject.json
+          cosign initialize
+          trusted_root="$HOME/.sigstore/root/tuf-repo-cdn.sigstore.dev/targets/trusted_root.json"
+          test -f "$trusted_root"
+          test ! -L "$trusted_root"
+          cp "$trusted_root" signed/sigstore-trusted-root.json
+          cosign_path="$(readlink -f "$(command -v cosign)")"
+          test -f "$cosign_path"
+          cp "$cosign_path" signed/cosign-linux-amd64
+          chmod 0555 signed/cosign-linux-amd64
+          cosign sign-blob --yes \
+            --bundle signed/verifier-signature.bundle.json \
+            signed/verifier-signature-subject.json
+          cosign verify-blob --offline \
+            --bundle signed/verifier-signature.bundle.json \
+            --trusted-root signed/sigstore-trusted-root.json \
+            --certificate-identity "$CERTIFICATE_IDENTITY" \
+            --certificate-oidc-issuer "$OIDC_ISSUER" \
+            signed/verifier-signature-subject.json
+          (cd signed && LC_ALL=C sha256sum \
+            cosign-linux-amd64 \
+            sigstore-trusted-root.json \
+            verifier-image-candidate.json \
+            verifier-signature-subject.json \
+            verifier-signature.bundle.json > SHA256SUMS)
+
+      - name: Upload signed material for separate owner lock construction
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: compose-probe-a-verifier-signed-${{ inputs.git_commit }}
+          path: signed/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
+
+      - name: Publish the non-final signing result
+        env:
+          IMAGE_REFERENCE: ${{ steps.review.outputs.image_reference }}
+        run: |
+          {
+            echo '## Signed Probe-A verifier candidate'
+            echo
+            echo "- image: \`$IMAGE_REFERENCE\`"
+            echo "- certificate identity: \`$CERTIFICATE_IDENTITY\`"
+            echo "- OIDC issuer: \`$OIDC_ISSUER\`"
+            echo '- status: signed candidate only; owner image lock and external lock pin are still absent'
+          } >> "$GITHUB_STEP_SUMMARY"

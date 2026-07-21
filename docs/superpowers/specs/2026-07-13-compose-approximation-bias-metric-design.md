@@ -239,6 +239,12 @@ The finalization tool must mechanically prove that step 3 changed only
 `baselines.gears.approximation_bias_report_sha256`; otherwise it fails closed and a fresh measurement lineage
 is required.
 
+The bias-null basis config and producer code/spec are committed at the owner-candidate execution commit `C`.
+Steps 2–4 publish to a fresh durable stage **outside the Git worktree**. The derived final config is an immutable
+runtime artifact, not a follow-up tracked edit. The report's `git_commit`, owner-approved ResolvedRunSpec's
+`approved_git_sha`, and clean runtime HEAD therefore all remain exactly `C`. Committing either the report or
+derived final config after generation would move HEAD and make the equality impossible; it is forbidden.
+
 The scientific `ResolvedRunSpec` additionally carries
 `scientific.approximation_bias_report = {path, sha256}` (or `null` exactly while the config field is null).
 Before runtime identity capture and again before any sealed-store construction, the carrier/driver require:
@@ -324,11 +330,12 @@ a synthetic frozen projection block (no `gears`, no Norman):
   reads non-sealed role cells + frozen projection block, emits `compose_approximation_bias_report_v3`, and
   uses `cell_raw_counts` for the exact path. Pure library calls
   (`fit_role.apply_response_projection`); import-light so its contract is unit-tested locally.
-- **CREATE** `docs/activation-evidence/compose/real_norman_approximation_bias_report.json` — the
-  regenerated report (pod, under the finalized config); its SHA fills the config field.
-- **MODIFY** `configs/compose_k562_v1_phase2.yaml::baselines.gears.approximation_bias_report_sha256`
-  — null → the report SHA (part of dev-pod Task 2.2, BEFORE evidence regeneration per the plan's ⚑
-  config-finalization-precedes-evidence ordering).
+- **PUBLISH externally**
+  `$APPROVED_ARTIFACTS_ROOT/stage1/activation-evidence/compose/real_norman_approximation_bias_report.json`;
+  its SHA fills the staged final config field. The tracked activation-evidence directory is historical only.
+- **DERIVE externally** `$APPROVED_ARTIFACTS_ROOT/stage1/configs/compose_k562_v1_phase2.finalized.yaml`
+  from the committed bias-null `configs/compose_k562_v1_phase2.yaml`, changing only
+  `baselines.gears.approximation_bias_report_sha256`. Do not edit/commit the basis config after commit `C`.
 - **CREATE** `tests/alive/compose/test_approximation_bias_metric.py` — the §6 known-answer + seal-safety
   tests (LOCAL).
 - **MODIFY** the durable summary/interpretation path to carry (not decide from) the registered

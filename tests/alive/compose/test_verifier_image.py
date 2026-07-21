@@ -10,11 +10,14 @@ from pathlib import Path
 import pytest
 
 from alive.compose.verifier_image import (
+    VERIFIER_IMAGE_BUILD_CANDIDATE_SCHEMA,
     VERIFIER_IMAGE_LOCK_SCHEMA,
     VERIFIER_IMAGE_SIGNATURE_SCHEMA,
     VerifierImageLockError,
+    build_verifier_image_candidate,
     build_verifier_signature_subject,
     canonical_json,
+    load_verifier_image_candidate,
     load_verifier_image_lock,
     self_checksum,
     validate_verifier_image_lock,
@@ -25,6 +28,7 @@ ROOT = Path(__file__).resolve().parents[3]
 LAUNCHER = ROOT / "scripts/compose/run_gears_probe_a_verifier_oci.py"
 LOCK_BUILDER = ROOT / "scripts/compose/build_probe_a_verifier_image_lock.py"
 SUBJECT_BUILDER = ROOT / "scripts/compose/build_probe_a_verifier_signature_subject.py"
+CANDIDATE_BUILDER = ROOT / "scripts/compose/build_probe_a_verifier_image_candidate.py"
 COMMIT = "1" * 40
 CODE_SHA = "2" * 64
 IMAGE_DIGEST = "sha256:" + "3" * 64
@@ -51,6 +55,17 @@ def _load_lock_builder():
 def _load_subject_builder():
     spec = importlib.util.spec_from_file_location(
         "build_probe_a_verifier_signature_subject", SUBJECT_BUILDER
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _load_candidate_builder():
+    spec = importlib.util.spec_from_file_location(
+        "build_probe_a_verifier_image_candidate", CANDIDATE_BUILDER
     )
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
@@ -94,6 +109,24 @@ def _write_lock(path: Path, payload: dict[str, object]) -> str:
     data = (canonical_json(payload) + "\n").encode()
     path.write_bytes(data)
     return hashlib.sha256(data).hexdigest()
+
+
+def _candidate() -> dict[str, str]:
+    return build_verifier_image_candidate(
+        git_commit=COMMIT,
+        image_reference=f"ghcr.io/example/alive-verifier@{IMAGE_DIGEST}",
+        platform="linux/amd64",
+        python_base_image="docker.io/library/python@sha256:" + "4" * 64,
+        uv_build_image="ghcr.io/astral-sh/uv@sha256:" + "5" * 64,
+        dockerfile_sha256="6" * 64,
+        uv_lock_sha256="7" * 64,
+        verifier_code_sha256=CODE_SHA,
+        build_repository="example/alive",
+        build_workflow_ref=(
+            "example/alive/.github/workflows/build-compose-probe-a-verifier.yml@refs/heads/main"
+        ),
+        build_run_id="123456",
+    )
 
 
 def test_loads_canonical_owner_frozen_image_lock(tmp_path):
@@ -188,6 +221,16 @@ def test_symlink_lock_is_rejected(tmp_path):
         load_verifier_image_lock(
             link,
             expected_sha256=external_sha,
+            expected_git_commit=COMMIT,
+            expected_verifier_code_sha256=CODE_SHA,
+        )
+
+
+def test_non_regular_lock_is_rejected(tmp_path):
+    with pytest.raises(VerifierImageLockError, match="must be a regular file"):
+        load_verifier_image_lock(
+            tmp_path,
+            expected_sha256="0" * 64,
             expected_git_commit=COMMIT,
             expected_verifier_code_sha256=CODE_SHA,
         )
@@ -347,5 +390,104 @@ def test_subject_builder_writes_exact_signed_identity_once(tmp_path, capsys):
     subject = json.loads(output.read_bytes())
     assert subject["image_manifest_digest"] == IMAGE_DIGEST
     assert output.read_bytes() == (canonical_json(subject) + "\n").encode()
+    with pytest.raises(FileExistsError):
+        builder.main(argv)
+
+
+def test_build_candidate_handoff_is_canonical_externally_pinned_and_unsigned(tmp_path):
+    candidate = _candidate()
+    assert candidate["schema"] == VERIFIER_IMAGE_BUILD_CANDIDATE_SCHEMA
+    assert "signature" not in candidate
+    path = tmp_path / "candidate.json"
+    data = (canonical_json(candidate) + "\n").encode()
+    path.write_bytes(data)
+    loaded = load_verifier_image_candidate(
+        path,
+        expected_sha256=hashlib.sha256(data).hexdigest(),
+        expected_git_commit=COMMIT,
+        expected_build_repository="example/alive",
+        expected_build_workflow_ref=(
+            "example/alive/.github/workflows/build-compose-probe-a-verifier.yml@refs/heads/main"
+        ),
+    )
+    assert loaded == candidate
+
+
+def test_non_regular_candidate_is_rejected(tmp_path):
+    with pytest.raises(VerifierImageLockError, match="must be a regular file"):
+        load_verifier_image_candidate(
+            tmp_path,
+            expected_sha256="0" * 64,
+            expected_git_commit=COMMIT,
+            expected_build_repository="example/alive",
+            expected_build_workflow_ref=(
+                "example/alive/.github/workflows/build-compose-probe-a-verifier.yml@refs/heads/main"
+            ),
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("git_commit", "0" * 40, "Git commit mismatch"),
+        ("build_repository", "attacker/alive", "repository mismatch"),
+        (
+            "build_workflow_ref",
+            "example/alive/.github/workflows/other.yml@refs/heads/main",
+            "workflow ref mismatch",
+        ),
+        ("build_run_id", "0", "run ID is malformed"),
+    ],
+)
+def test_build_candidate_rejects_identity_substitution(tmp_path, field, value, message):
+    candidate = _candidate()
+    candidate[field] = value
+    candidate["self_checksum"] = self_checksum(candidate)
+    path = tmp_path / "candidate.json"
+    data = (canonical_json(candidate) + "\n").encode()
+    path.write_bytes(data)
+    with pytest.raises(VerifierImageLockError, match=message):
+        load_verifier_image_candidate(
+            path,
+            expected_sha256=hashlib.sha256(data).hexdigest(),
+            expected_git_commit=COMMIT,
+            expected_build_repository="example/alive",
+            expected_build_workflow_ref=(
+                "example/alive/.github/workflows/build-compose-probe-a-verifier.yml@refs/heads/main"
+            ),
+        )
+
+
+def test_candidate_builder_writes_once_and_prints_external_pin(tmp_path, capsys):
+    builder = _load_candidate_builder()
+    output = tmp_path / "candidate.json"
+    argv = [
+        "--git-commit",
+        COMMIT,
+        "--image-reference",
+        f"ghcr.io/example/alive-verifier@{IMAGE_DIGEST}",
+        "--platform",
+        "linux/amd64",
+        "--python-base-image",
+        "docker.io/library/python@sha256:" + "4" * 64,
+        "--uv-build-image",
+        "ghcr.io/astral-sh/uv@sha256:" + "5" * 64,
+        "--dockerfile-sha256",
+        "6" * 64,
+        "--uv-lock-sha256",
+        "7" * 64,
+        "--verifier-code-sha256",
+        CODE_SHA,
+        "--build-repository",
+        "example/alive",
+        "--build-workflow-ref",
+        "example/alive/.github/workflows/build.yml@refs/heads/main",
+        "--build-run-id",
+        "123456",
+        "--out",
+        str(output),
+    ]
+    assert builder.main(argv) == 0
+    assert capsys.readouterr().out.strip() == hashlib.sha256(output.read_bytes()).hexdigest()
     with pytest.raises(FileExistsError):
         builder.main(argv)
