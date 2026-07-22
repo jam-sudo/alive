@@ -15,6 +15,22 @@ on:
         description: External SHA-256 printed by the candidate build
         required: true
         type: string
+      owner_approval_sha256:
+        description: External SHA-256 of the canonical owner approval statement
+        required: true
+        type: string
+      owner_approval_b64:
+        description: Base64 of the canonical owner approval statement bytes
+        required: true
+        type: string
+      owner_signature_sha256:
+        description: External SHA-256 of the detached OpenSSH owner signature
+        required: true
+        type: string
+      owner_signature_b64:
+        description: Base64 of the detached OpenSSH owner signature bytes
+        required: true
+        type: string
 
 permissions: {}
 
@@ -28,17 +44,16 @@ env:
   EXPECTED_SIGN_WORKFLOW_REF: jam-sudo/alive/.github/workflows/sign-compose-probe-a-verifier.yml@refs/heads/main
   CERTIFICATE_IDENTITY: https://github.com/jam-sudo/alive/.github/workflows/sign-compose-probe-a-verifier.yml@refs/heads/main
   OIDC_ISSUER: https://token.actions.githubusercontent.com
+  OWNER_PUBLIC_KEY: configs/compose_probe_a_verifier_owner_approval.pub
 
 jobs:
-  sign:
-    name: Recompute and sign reviewed candidate
+  review:
+    name: Verify owner approval without OIDC
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
-    environment: compose-verifier-signing
+    timeout-minutes: 35
     permissions:
       actions: read
       contents: read
-      id-token: write
       packages: read
     steps:
       - name: Check out the exact signing commit
@@ -87,6 +102,38 @@ jobs:
             --expected-build-repository "$EXPECTED_REPOSITORY" \
             --expected-build-workflow-ref "$EXPECTED_BUILD_WORKFLOW_REF"
 
+      - name: Verify the offline owner approval before OIDC signing
+        env:
+          REQUESTED_COMMIT: ${{ inputs.git_commit }}
+          CANDIDATE_SHA256: ${{ inputs.candidate_sha256 }}
+          OWNER_APPROVAL_SHA256: ${{ inputs.owner_approval_sha256 }}
+          OWNER_APPROVAL_B64: ${{ inputs.owner_approval_b64 }}
+          OWNER_SIGNATURE_SHA256: ${{ inputs.owner_signature_sha256 }}
+          OWNER_SIGNATURE_B64: ${{ inputs.owner_signature_b64 }}
+        run: |
+          set -euo pipefail
+          [[ "$OWNER_APPROVAL_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$OWNER_SIGNATURE_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          test -f "$OWNER_PUBLIC_KEY"
+          test ! -L "$OWNER_PUBLIC_KEY"
+          mkdir owner-approval
+          printf '%s' "$OWNER_APPROVAL_B64" | base64 --decode > owner-approval/approval.json
+          printf '%s' "$OWNER_SIGNATURE_B64" | base64 --decode > owner-approval/approval.sig
+          test "$(sha256sum owner-approval/approval.json | cut -d' ' -f1)" = "$OWNER_APPROVAL_SHA256"
+          test "$(sha256sum owner-approval/approval.sig | cut -d' ' -f1)" = "$OWNER_SIGNATURE_SHA256"
+          cp "$OWNER_PUBLIC_KEY" owner-approval/owner.pub
+          PYTHONPATH=src python scripts/compose/verify_probe_a_verifier_owner_approval.py \
+            --candidate candidate/verifier-image-candidate.json \
+            --candidate-sha256 "$CANDIDATE_SHA256" \
+            --expected-git-commit "$REQUESTED_COMMIT" \
+            --expected-build-repository "$EXPECTED_REPOSITORY" \
+            --expected-build-workflow-ref "$EXPECTED_BUILD_WORKFLOW_REF" \
+            --owner-approval owner-approval/approval.json \
+            --owner-approval-sha256 "$OWNER_APPROVAL_SHA256" \
+            --owner-signature owner-approval/approval.sig \
+            --owner-signature-sha256 "$OWNER_SIGNATURE_SHA256" \
+            --owner-public-key owner-approval/owner.pub
+
       - name: Log in to GHCR for digest-only retrieval
         uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
         with:
@@ -128,6 +175,103 @@ jobs:
           echo "image_reference=$image_reference" >> "$GITHUB_OUTPUT"
           echo "verifier_code_sha256=$observed_code_sha256" >> "$GITHUB_OUTPUT"
 
+      - name: Freeze the no-OIDC review handoff
+        run: |
+          set -euo pipefail
+          mkdir reviewed
+          cp candidate/verifier-image-candidate.json reviewed/
+          cp owner-approval/approval.json reviewed/verifier-owner-approval.json
+          cp owner-approval/approval.sig reviewed/verifier-owner-approval.sig
+          cp owner-approval/owner.pub reviewed/verifier-owner-approval.pub
+          cp "$(readlink -f "$(command -v ssh-keygen)")" reviewed/ssh-keygen-linux-amd64
+          chmod 0555 reviewed/ssh-keygen-linux-amd64
+          (cd reviewed && LC_ALL=C sha256sum \
+            ssh-keygen-linux-amd64 \
+            verifier-image-candidate.json \
+            verifier-owner-approval.json \
+            verifier-owner-approval.pub \
+            verifier-owner-approval.sig > REVIEW_SHA256SUMS)
+
+      - name: Upload the reviewed handoff
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: compose-probe-a-verifier-reviewed-${{ inputs.git_commit }}
+          path: reviewed/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+
+  sign:
+    name: Sign only after owner-approved review
+    needs: review
+    if: ${{ needs.review.result == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+    steps:
+      - name: Check out the exact signing commit
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ inputs.git_commit }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Revalidate the gated signing request
+        env:
+          REQUESTED_COMMIT: ${{ inputs.git_commit }}
+          BUILD_RUN_ID: ${{ inputs.build_run_id }}
+          CANDIDATE_SHA256: ${{ inputs.candidate_sha256 }}
+          OWNER_APPROVAL_SHA256: ${{ inputs.owner_approval_sha256 }}
+          OWNER_SIGNATURE_SHA256: ${{ inputs.owner_signature_sha256 }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = "$EXPECTED_REPOSITORY"
+          test "$GITHUB_REF" = refs/heads/main
+          test "$GITHUB_WORKFLOW_REF" = "$EXPECTED_SIGN_WORKFLOW_REF"
+          test "$REQUESTED_COMMIT" = "$GITHUB_SHA"
+          test "$(git rev-parse HEAD)" = "$REQUESTED_COMMIT"
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+          [[ "$BUILD_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$CANDIDATE_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$OWNER_APPROVAL_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$OWNER_SIGNATURE_SHA256" =~ ^[0-9a-f]{64}$ ]]
+
+      - name: Download the successful no-OIDC review handoff
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: compose-probe-a-verifier-reviewed-${{ inputs.git_commit }}
+          path: reviewed
+
+      - name: Revalidate reviewed bytes before using OIDC
+        env:
+          REQUESTED_COMMIT: ${{ inputs.git_commit }}
+          CANDIDATE_SHA256: ${{ inputs.candidate_sha256 }}
+          OWNER_APPROVAL_SHA256: ${{ inputs.owner_approval_sha256 }}
+          OWNER_SIGNATURE_SHA256: ${{ inputs.owner_signature_sha256 }}
+        run: |
+          set -euo pipefail
+          (cd reviewed && sha256sum --check --strict REVIEW_SHA256SUMS)
+          PYTHONPATH=src python scripts/compose/validate_probe_a_verifier_image_candidate.py \
+            --candidate reviewed/verifier-image-candidate.json \
+            --candidate-sha256 "$CANDIDATE_SHA256" \
+            --expected-git-commit "$REQUESTED_COMMIT" \
+            --expected-build-repository "$EXPECTED_REPOSITORY" \
+            --expected-build-workflow-ref "$EXPECTED_BUILD_WORKFLOW_REF"
+          PYTHONPATH=src python scripts/compose/verify_probe_a_verifier_owner_approval.py \
+            --candidate reviewed/verifier-image-candidate.json \
+            --candidate-sha256 "$CANDIDATE_SHA256" \
+            --expected-git-commit "$REQUESTED_COMMIT" \
+            --expected-build-repository "$EXPECTED_REPOSITORY" \
+            --expected-build-workflow-ref "$EXPECTED_BUILD_WORKFLOW_REF" \
+            --owner-approval reviewed/verifier-owner-approval.json \
+            --owner-approval-sha256 "$OWNER_APPROVAL_SHA256" \
+            --owner-signature reviewed/verifier-owner-approval.sig \
+            --owner-signature-sha256 "$OWNER_SIGNATURE_SHA256" \
+            --owner-public-key reviewed/verifier-owner-approval.pub
+
       - name: Install the exact Cosign release
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
         with:
@@ -136,22 +280,30 @@ jobs:
       - name: Build and sign the canonical approval subject
         env:
           REQUESTED_COMMIT: ${{ inputs.git_commit }}
-          IMAGE_REFERENCE: ${{ steps.review.outputs.image_reference }}
-          VERIFIER_CODE_SHA256: ${{ steps.review.outputs.verifier_code_sha256 }}
         run: |
           set -euo pipefail
-          candidate=candidate/verifier-image-candidate.json
+          candidate=reviewed/verifier-image-candidate.json
+          image_reference="$(jq -r .image_reference "$candidate")"
+          verifier_code_sha256="$(jq -r .verifier_code_sha256 "$candidate")"
           mkdir signed
           cp "$candidate" signed/verifier-image-candidate.json
+          cp reviewed/verifier-owner-approval.json signed/
+          cp reviewed/verifier-owner-approval.sig signed/
+          cp reviewed/verifier-owner-approval.pub signed/
+          cp reviewed/ssh-keygen-linux-amd64 signed/
+          chmod 0555 signed/ssh-keygen-linux-amd64
           PYTHONPATH=src python scripts/compose/build_probe_a_verifier_signature_subject.py \
             --git-commit "$REQUESTED_COMMIT" \
-            --image-reference "$IMAGE_REFERENCE" \
+            --image-reference "$image_reference" \
             --platform "$(jq -r .platform "$candidate")" \
             --python-base-image "$(jq -r .python_base_image "$candidate")" \
             --uv-build-image "$(jq -r .uv_build_image "$candidate")" \
             --dockerfile-sha256 "$(jq -r .dockerfile_sha256 "$candidate")" \
             --uv-lock-sha256 "$(jq -r .uv_lock_sha256 "$candidate")" \
-            --verifier-code-sha256 "$VERIFIER_CODE_SHA256" \
+            --verifier-code-sha256 "$verifier_code_sha256" \
+            --owner-approval-sha256 "$(sha256sum reviewed/verifier-owner-approval.json | cut -d' ' -f1)" \
+            --owner-signature-sha256 "$(sha256sum reviewed/verifier-owner-approval.sig | cut -d' ' -f1)" \
+            --owner-key-fingerprint "$(jq -r .owner_key_fingerprint reviewed/verifier-owner-approval.json)" \
             --out signed/verifier-signature-subject.json
           cosign initialize
           trusted_root="$HOME/.sigstore/root/tuf-repo-cdn.sigstore.dev/targets/trusted_root.json"
@@ -173,8 +325,12 @@ jobs:
             signed/verifier-signature-subject.json
           (cd signed && LC_ALL=C sha256sum \
             cosign-linux-amd64 \
+            ssh-keygen-linux-amd64 \
             sigstore-trusted-root.json \
             verifier-image-candidate.json \
+            verifier-owner-approval.json \
+            verifier-owner-approval.pub \
+            verifier-owner-approval.sig \
             verifier-signature-subject.json \
             verifier-signature.bundle.json > SHA256SUMS)
 
@@ -188,13 +344,12 @@ jobs:
           retention-days: 30
 
       - name: Publish the non-final signing result
-        env:
-          IMAGE_REFERENCE: ${{ steps.review.outputs.image_reference }}
         run: |
+          image_reference="$(jq -r .image_reference signed/verifier-image-candidate.json)"
           {
             echo '## Signed Probe-A verifier candidate'
             echo
-            echo "- image: \`$IMAGE_REFERENCE\`"
+            echo "- image: \`$image_reference\`"
             echo "- certificate identity: \`$CERTIFICATE_IDENTITY\`"
             echo "- OIDC issuer: \`$OIDC_ISSUER\`"
             echo '- status: signed candidate only; owner image lock and external lock pin are still absent'

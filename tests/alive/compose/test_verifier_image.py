@@ -4,24 +4,33 @@ import argparse
 import hashlib
 import importlib.util
 import json
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
 import pytest
 
 from alive.compose.verifier_image import (
+    OWNER_APPROVAL_MODE,
+    OWNER_APPROVAL_NAMESPACE,
     VERIFIER_IMAGE_BUILD_CANDIDATE_SCHEMA,
     VERIFIER_IMAGE_LOCK_SCHEMA,
+    VERIFIER_IMAGE_OWNER_APPROVAL_EVIDENCE_SCHEMA,
     VERIFIER_IMAGE_SIGNATURE_SCHEMA,
     VerifierImageLockError,
     build_verifier_image_candidate,
+    build_verifier_owner_approval,
     build_verifier_signature_subject,
     canonical_json,
     load_verifier_image_candidate,
     load_verifier_image_lock,
+    load_verifier_owner_approval,
+    owner_public_key_identity,
     self_checksum,
     validate_verifier_image_lock,
     validate_verifier_signature_subject,
+    verify_verifier_owner_approval_signature,
 )
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -29,9 +38,11 @@ LAUNCHER = ROOT / "scripts/compose/run_gears_probe_a_verifier_oci.py"
 LOCK_BUILDER = ROOT / "scripts/compose/build_probe_a_verifier_image_lock.py"
 SUBJECT_BUILDER = ROOT / "scripts/compose/build_probe_a_verifier_signature_subject.py"
 CANDIDATE_BUILDER = ROOT / "scripts/compose/build_probe_a_verifier_image_candidate.py"
+OWNER_APPROVAL_BUILDER = ROOT / "scripts/compose/build_probe_a_verifier_owner_approval.py"
 COMMIT = "1" * 40
 CODE_SHA = "2" * 64
 IMAGE_DIGEST = "sha256:" + "3" * 64
+OWNER_FINGERPRINT = "SHA256:" + "A" * 43
 
 
 def _load_launcher():
@@ -74,6 +85,17 @@ def _load_candidate_builder():
     return module
 
 
+def _load_owner_approval_builder():
+    spec = importlib.util.spec_from_file_location(
+        "build_probe_a_verifier_owner_approval", OWNER_APPROVAL_BUILDER
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
 def _lock() -> dict[str, object]:
     payload: dict[str, object] = {
         "schema": VERIFIER_IMAGE_LOCK_SCHEMA,
@@ -87,6 +109,18 @@ def _lock() -> dict[str, object]:
         "dockerfile_sha256": "6" * 64,
         "uv_lock_sha256": "7" * 64,
         "verifier_code_sha256": CODE_SHA,
+        "owner_approval": {
+            "schema": VERIFIER_IMAGE_OWNER_APPROVAL_EVIDENCE_SCHEMA,
+            "mode": OWNER_APPROVAL_MODE,
+            "namespace": OWNER_APPROVAL_NAMESPACE,
+            "candidate_sha256": "c" * 64,
+            "statement_sha256": "d" * 64,
+            "signature_sha256": "e" * 64,
+            "public_key_sha256": "f" * 64,
+            "public_key_fingerprint": OWNER_FINGERPRINT,
+            "ssh_keygen_executable_sha256": "0" * 64,
+            "build_run_id": "123456",
+        },
         "signature": {
             "schema": VERIFIER_IMAGE_SIGNATURE_SCHEMA,
             "mode": "cosign_keyless_subject_bundle_v1",
@@ -129,6 +163,61 @@ def _candidate() -> dict[str, str]:
     )
 
 
+def _write_candidate(path: Path, candidate: dict[str, str]) -> str:
+    data = (canonical_json(candidate) + "\n").encode()
+    path.write_bytes(data)
+    return hashlib.sha256(data).hexdigest()
+
+
+def _owner_material(
+    tmp_path: Path, candidate: dict[str, str], candidate_sha256: str
+) -> dict[str, Path | str]:
+    private_key = tmp_path / "test-owner-key"
+    subprocess.run(
+        ["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "", "-f", str(private_key)],
+        check=True,
+    )
+    public_key = private_key.with_suffix(".pub")
+    fields = public_key.read_text(encoding="ascii").split()
+    public_key.write_text(f"{fields[0]} {fields[1]}\n", encoding="ascii")
+    key = owner_public_key_identity(public_key)
+    approval = build_verifier_owner_approval(
+        candidate=candidate,
+        candidate_sha256=candidate_sha256,
+        approved_at_utc="2026-07-20T00:00:00Z",
+        approval_id="probe-a-verifier-2026-07-20",
+        owner_key_fingerprint=key["public_key_fingerprint"],
+    )
+    approval_path = tmp_path / "owner-approval.json"
+    approval_path.write_text(canonical_json(approval) + "\n", encoding="utf-8")
+    subprocess.run(
+        [
+            "ssh-keygen",
+            "-Y",
+            "sign",
+            "-f",
+            str(private_key),
+            "-n",
+            OWNER_APPROVAL_NAMESPACE,
+            str(approval_path),
+        ],
+        check=True,
+        capture_output=True,
+    )
+    signature = Path(str(approval_path) + ".sig")
+    return {
+        "private_key": private_key,
+        "approval": approval_path,
+        "approval_sha256": hashlib.sha256(approval_path.read_bytes()).hexdigest(),
+        "signature": signature,
+        "signature_sha256": hashlib.sha256(signature.read_bytes()).hexdigest(),
+        "public_key": public_key,
+        "public_key_sha256": key["public_key_sha256"],
+        "fingerprint": key["public_key_fingerprint"],
+        "ssh_keygen": str(Path(shutil.which("ssh-keygen") or "").resolve(strict=True)),
+    }
+
+
 def test_loads_canonical_owner_frozen_image_lock(tmp_path):
     path = tmp_path / "verifier-image-lock.json"
     external_sha = _write_lock(path, _lock())
@@ -137,6 +226,7 @@ def test_loads_canonical_owner_frozen_image_lock(tmp_path):
         expected_sha256=external_sha,
         expected_git_commit=COMMIT,
         expected_verifier_code_sha256=CODE_SHA,
+        expected_owner_key_fingerprint=OWNER_FINGERPRINT,
     )
     assert loaded["image_manifest_digest"] == IMAGE_DIGEST
     assert loaded["platform"] == "linux/amd64"
@@ -160,6 +250,7 @@ def test_rejects_mutable_or_ambiguous_image_identity(field, value, message):
             payload,
             expected_git_commit=COMMIT,
             expected_verifier_code_sha256=CODE_SHA,
+            expected_owner_key_fingerprint=OWNER_FINGERPRINT,
         )
 
 
@@ -172,6 +263,7 @@ def test_rejects_digest_mismatch_even_with_recomputed_checksum():
             payload,
             expected_git_commit=COMMIT,
             expected_verifier_code_sha256=CODE_SHA,
+            expected_owner_key_fingerprint=OWNER_FINGERPRINT,
         )
 
 
@@ -186,6 +278,7 @@ def test_rejects_unsigned_owner_assertion():
             payload,
             expected_git_commit=COMMIT,
             expected_verifier_code_sha256=CODE_SHA,
+            expected_owner_key_fingerprint=OWNER_FINGERPRINT,
         )
 
 
@@ -199,6 +292,7 @@ def test_external_pin_and_canonical_bytes_are_mandatory(tmp_path):
             expected_sha256="0" * 64,
             expected_git_commit=COMMIT,
             expected_verifier_code_sha256=CODE_SHA,
+            expected_owner_key_fingerprint=OWNER_FINGERPRINT,
         )
     path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
     pretty_sha = hashlib.sha256(path.read_bytes()).hexdigest()
@@ -209,6 +303,7 @@ def test_external_pin_and_canonical_bytes_are_mandatory(tmp_path):
             expected_sha256=pretty_sha,
             expected_git_commit=COMMIT,
             expected_verifier_code_sha256=CODE_SHA,
+            expected_owner_key_fingerprint=OWNER_FINGERPRINT,
         )
 
 
@@ -223,6 +318,7 @@ def test_symlink_lock_is_rejected(tmp_path):
             expected_sha256=external_sha,
             expected_git_commit=COMMIT,
             expected_verifier_code_sha256=CODE_SHA,
+            expected_owner_key_fingerprint=OWNER_FINGERPRINT,
         )
 
 
@@ -233,6 +329,7 @@ def test_non_regular_lock_is_rejected(tmp_path):
             expected_sha256="0" * 64,
             expected_git_commit=COMMIT,
             expected_verifier_code_sha256=CODE_SHA,
+            expected_owner_key_fingerprint=OWNER_FINGERPRINT,
         )
 
 
@@ -292,6 +389,9 @@ def test_signed_subject_must_equal_every_decision_bearing_lock_field():
         dockerfile_sha256="6" * 64,
         uv_lock_sha256="7" * 64,
         verifier_code_sha256=CODE_SHA,
+        owner_approval_sha256="d" * 64,
+        owner_signature_sha256="e" * 64,
+        owner_key_fingerprint=OWNER_FINGERPRINT,
     )
     subject["git_commit"] = "0" * 40
     with pytest.raises(VerifierImageLockError, match="differs from the owner image lock"):
@@ -306,35 +406,70 @@ def test_lock_builder_writes_canonical_bytes_once_and_prints_external_pin(tmp_pa
         path.write_bytes(f"{name}\n".encode())
         inputs[name] = path
     output = tmp_path / "verifier-image-lock.json"
+    dockerfile_sha256 = hashlib.sha256(inputs["Dockerfile"].read_bytes()).hexdigest()
+    uv_lock_sha256 = hashlib.sha256(inputs["uv.lock"].read_bytes()).hexdigest()
+    candidate = build_verifier_image_candidate(
+        git_commit=COMMIT,
+        image_reference=f"registry.example/alive/probe-a@{IMAGE_DIGEST}",
+        platform="linux/amd64",
+        python_base_image="docker.io/library/python@sha256:" + "4" * 64,
+        uv_build_image="ghcr.io/astral-sh/uv@sha256:" + "5" * 64,
+        dockerfile_sha256=dockerfile_sha256,
+        uv_lock_sha256=uv_lock_sha256,
+        verifier_code_sha256=CODE_SHA,
+        build_repository="example/alive",
+        build_workflow_ref=(
+            "example/alive/.github/workflows/build-compose-probe-a-verifier.yml@refs/heads/main"
+        ),
+        build_run_id="123456",
+    )
+    candidate_path = tmp_path / "candidate.json"
+    candidate_sha256 = _write_candidate(candidate_path, candidate)
+    owner = _owner_material(tmp_path, candidate, candidate_sha256)
     subject = build_verifier_signature_subject(
         git_commit=COMMIT,
         image_reference=f"registry.example/alive/probe-a@{IMAGE_DIGEST}",
         platform="linux/amd64",
         python_base_image="docker.io/library/python@sha256:" + "4" * 64,
         uv_build_image="ghcr.io/astral-sh/uv@sha256:" + "5" * 64,
-        dockerfile_sha256=hashlib.sha256(inputs["Dockerfile"].read_bytes()).hexdigest(),
-        uv_lock_sha256=hashlib.sha256(inputs["uv.lock"].read_bytes()).hexdigest(),
+        dockerfile_sha256=dockerfile_sha256,
+        uv_lock_sha256=uv_lock_sha256,
         verifier_code_sha256=CODE_SHA,
+        owner_approval_sha256=str(owner["approval_sha256"]),
+        owner_signature_sha256=str(owner["signature_sha256"]),
+        owner_key_fingerprint=str(owner["fingerprint"]),
     )
     subject_path = tmp_path / "signature-subject.json"
     subject_path.write_text(canonical_json(subject) + "\n", encoding="utf-8")
     argv = [
-        "--git-commit",
+        "--candidate",
+        str(candidate_path),
+        "--candidate-sha256",
+        candidate_sha256,
+        "--expected-git-commit",
         COMMIT,
-        "--image-reference",
-        f"registry.example/alive/probe-a@{IMAGE_DIGEST}",
-        "--platform",
-        "linux/amd64",
-        "--python-base-image",
-        "docker.io/library/python@sha256:" + "4" * 64,
-        "--uv-build-image",
-        "ghcr.io/astral-sh/uv@sha256:" + "5" * 64,
+        "--expected-build-repository",
+        "example/alive",
+        "--expected-build-workflow-ref",
+        "example/alive/.github/workflows/build-compose-probe-a-verifier.yml@refs/heads/main",
         "--dockerfile",
         str(inputs["Dockerfile"]),
         "--uv-lock",
         str(inputs["uv.lock"]),
-        "--verifier-code-sha256",
-        CODE_SHA,
+        "--owner-approval",
+        str(owner["approval"]),
+        "--owner-approval-sha256",
+        str(owner["approval_sha256"]),
+        "--owner-signature",
+        str(owner["signature"]),
+        "--owner-signature-sha256",
+        str(owner["signature_sha256"]),
+        "--owner-public-key",
+        str(owner["public_key"]),
+        "--expected-owner-key-fingerprint",
+        str(owner["fingerprint"]),
+        "--ssh-keygen-executable",
+        str(owner["ssh_keygen"]),
         "--cosign-bundle",
         str(inputs["bundle"]),
         "--cosign-subject",
@@ -347,6 +482,66 @@ def test_lock_builder_writes_canonical_bytes_once_and_prints_external_pin(tmp_pa
         "https://github.com/example/alive/.github/workflows/build.yml@refs/heads/main",
         "--oidc-issuer",
         "https://token.actions.githubusercontent.com",
+        "--out",
+        str(output),
+    ]
+    assert builder.main(argv) == 0
+    external_pin = capsys.readouterr().out.strip()
+    assert external_pin == hashlib.sha256(output.read_bytes()).hexdigest()
+    assert output.read_bytes().endswith(b"\n")
+    lock = json.loads(output.read_bytes())
+    assert lock["owner_approval"]["candidate_sha256"] == candidate_sha256
+    assert lock["owner_approval"]["public_key_fingerprint"] == owner["fingerprint"]
+    with pytest.raises(FileExistsError):
+        builder.main(argv)
+
+
+def test_owner_approval_is_canonical_candidate_bound_and_cryptographically_verified(tmp_path):
+    candidate = _candidate()
+    candidate_path = tmp_path / "candidate.json"
+    candidate_sha256 = _write_candidate(candidate_path, candidate)
+    owner = _owner_material(tmp_path, candidate, candidate_sha256)
+    loaded = load_verifier_owner_approval(
+        owner["approval"],
+        expected_sha256=str(owner["approval_sha256"]),
+        expected_candidate=candidate,
+        expected_candidate_sha256=candidate_sha256,
+        expected_owner_key_fingerprint=str(owner["fingerprint"]),
+    )
+    assert loaded["candidate_sha256"] == candidate_sha256
+    evidence = verify_verifier_owner_approval_signature(
+        statement=owner["approval"],
+        signature=owner["signature"],
+        public_key=owner["public_key"],
+        expected_statement_sha256=str(owner["approval_sha256"]),
+        expected_signature_sha256=str(owner["signature_sha256"]),
+        expected_public_key_sha256=str(owner["public_key_sha256"]),
+        expected_owner_key_fingerprint=str(owner["fingerprint"]),
+        ssh_keygen=str(owner["ssh_keygen"]),
+    )
+    assert evidence["public_key_fingerprint"] == owner["fingerprint"]
+
+
+def test_owner_approval_builder_writes_once_and_reproduces_exact_statement(tmp_path, capsys):
+    builder = _load_owner_approval_builder()
+    candidate = _candidate()
+    candidate_path = tmp_path / "candidate.json"
+    candidate_sha256 = _write_candidate(candidate_path, candidate)
+    owner = _owner_material(tmp_path, candidate, candidate_sha256)
+    output = tmp_path / "rebuilt-owner-approval.json"
+    argv = [
+        "--candidate",
+        str(candidate_path),
+        "--candidate-sha256",
+        candidate_sha256,
+        "--expected-git-commit",
+        COMMIT,
+        "--expected-build-repository",
+        "example/alive",
+        "--expected-build-workflow-ref",
+        "example/alive/.github/workflows/build-compose-probe-a-verifier.yml@refs/heads/main",
+        "--owner-public-key",
+        str(owner["public_key"]),
         "--approved-at-utc",
         "2026-07-20T00:00:00Z",
         "--approval-id",
@@ -355,11 +550,111 @@ def test_lock_builder_writes_canonical_bytes_once_and_prints_external_pin(tmp_pa
         str(output),
     ]
     assert builder.main(argv) == 0
-    external_pin = capsys.readouterr().out.strip()
-    assert external_pin == hashlib.sha256(output.read_bytes()).hexdigest()
-    assert output.read_bytes().endswith(b"\n")
+    assert output.read_bytes() == Path(str(owner["approval"])).read_bytes()
+    assert capsys.readouterr().out.strip() == hashlib.sha256(output.read_bytes()).hexdigest()
     with pytest.raises(FileExistsError):
         builder.main(argv)
+
+
+def test_owner_approval_rejects_candidate_substitution_even_when_json_is_canonical(tmp_path):
+    candidate = _candidate()
+    candidate_path = tmp_path / "candidate.json"
+    candidate_sha256 = _write_candidate(candidate_path, candidate)
+    owner = _owner_material(tmp_path, candidate, candidate_sha256)
+    substituted = dict(candidate)
+    substituted["image_manifest_digest"] = "sha256:" + "9" * 64
+    with pytest.raises(VerifierImageLockError, match="image_manifest_digest mismatch"):
+        load_verifier_owner_approval(
+            owner["approval"],
+            expected_sha256=str(owner["approval_sha256"]),
+            expected_candidate=substituted,
+            expected_candidate_sha256=candidate_sha256,
+            expected_owner_key_fingerprint=str(owner["fingerprint"]),
+        )
+
+
+def test_owner_approval_rejects_wrong_signature(tmp_path):
+    candidate = _candidate()
+    candidate_path = tmp_path / "candidate.json"
+    candidate_sha256 = _write_candidate(candidate_path, candidate)
+    owner = _owner_material(tmp_path, candidate, candidate_sha256)
+    signature_path = Path(str(owner["signature"]))
+    signature_path.write_bytes(signature_path.read_bytes().replace(b"A", b"B", 1))
+    tampered_sha256 = hashlib.sha256(signature_path.read_bytes()).hexdigest()
+    with pytest.raises(VerifierImageLockError, match="signature verification failed"):
+        verify_verifier_owner_approval_signature(
+            statement=owner["approval"],
+            signature=signature_path,
+            public_key=owner["public_key"],
+            expected_statement_sha256=str(owner["approval_sha256"]),
+            expected_signature_sha256=tampered_sha256,
+            expected_public_key_sha256=str(owner["public_key_sha256"]),
+            expected_owner_key_fingerprint=str(owner["fingerprint"]),
+            ssh_keygen=str(owner["ssh_keygen"]),
+        )
+
+
+def test_owner_approval_rejects_another_valid_ed25519_key(tmp_path):
+    candidate = _candidate()
+    candidate_path = tmp_path / "candidate.json"
+    candidate_sha256 = _write_candidate(candidate_path, candidate)
+    owner = _owner_material(tmp_path, candidate, candidate_sha256)
+    other_root = tmp_path / "other"
+    other_root.mkdir()
+    other = _owner_material(other_root, candidate, candidate_sha256)
+    with pytest.raises(VerifierImageLockError, match="signature verification failed"):
+        verify_verifier_owner_approval_signature(
+            statement=owner["approval"],
+            signature=owner["signature"],
+            public_key=other["public_key"],
+            expected_statement_sha256=str(owner["approval_sha256"]),
+            expected_signature_sha256=str(owner["signature_sha256"]),
+            expected_public_key_sha256=str(other["public_key_sha256"]),
+            expected_owner_key_fingerprint=str(other["fingerprint"]),
+            ssh_keygen=str(owner["ssh_keygen"]),
+        )
+
+
+def test_owner_approval_rejects_signature_from_wrong_namespace(tmp_path):
+    candidate = _candidate()
+    candidate_path = tmp_path / "candidate.json"
+    candidate_sha256 = _write_candidate(candidate_path, candidate)
+    owner = _owner_material(tmp_path, candidate, candidate_sha256)
+    wrong_statement = tmp_path / "wrong-namespace-approval.json"
+    wrong_statement.write_bytes(Path(str(owner["approval"])).read_bytes())
+    subprocess.run(
+        [
+            "ssh-keygen",
+            "-Y",
+            "sign",
+            "-f",
+            str(owner["private_key"]),
+            "-n",
+            "wrong-alive-namespace",
+            str(wrong_statement),
+        ],
+        check=True,
+        capture_output=True,
+    )
+    wrong_signature = Path(str(wrong_statement) + ".sig")
+    with pytest.raises(VerifierImageLockError, match="signature verification failed"):
+        verify_verifier_owner_approval_signature(
+            statement=wrong_statement,
+            signature=wrong_signature,
+            public_key=owner["public_key"],
+            expected_statement_sha256=hashlib.sha256(wrong_statement.read_bytes()).hexdigest(),
+            expected_signature_sha256=hashlib.sha256(wrong_signature.read_bytes()).hexdigest(),
+            expected_public_key_sha256=str(owner["public_key_sha256"]),
+            expected_owner_key_fingerprint=str(owner["fingerprint"]),
+            ssh_keygen=str(owner["ssh_keygen"]),
+        )
+
+
+def test_owner_approval_public_key_must_be_comment_free_ed25519(tmp_path):
+    key = tmp_path / "owner.pub"
+    key.write_text("ssh-rsa invalid comment\n", encoding="ascii")
+    with pytest.raises(VerifierImageLockError, match="comment-free canonical ssh-ed25519"):
+        owner_public_key_identity(key)
 
 
 def test_subject_builder_writes_exact_signed_identity_once(tmp_path, capsys):
@@ -382,6 +677,12 @@ def test_subject_builder_writes_exact_signed_identity_once(tmp_path, capsys):
         "7" * 64,
         "--verifier-code-sha256",
         CODE_SHA,
+        "--owner-approval-sha256",
+        "d" * 64,
+        "--owner-signature-sha256",
+        "e" * 64,
+        "--owner-key-fingerprint",
+        OWNER_FINGERPRINT,
         "--out",
         str(output),
     ]

@@ -137,12 +137,16 @@ single-platform OCI digest/image-lock pair under
 
 Produce that image before opening any new scientific pod. Use the two distinct manual workflows in the governing
 design: build first without OIDC, externally record the canonical candidate-file SHA and build-run ID, review it,
-then separately dispatch signing under the `compose-verifier-signing` environment. Download the signed
-subject/bundle/Cosign/trusted-root material, verify `SHA256SUMS`, construct the owner image lock locally, and record
-its printed external SHA in a separate owner channel. A GitHub artifact, mutable GHCR tag, successful build, or
-successful signature alone is not admission. The A100 scientific pod is never an image builder. If a builder was
-run directly in a pod root filesystem, discard that pod and all root-filesystem outputs; recover only separately
-verified durable evidence whose authoritative copy and SHA were already established elsewhere.
+then construct and inspect the canonical owner statement offline and sign it with the dedicated owner Ed25519 key.
+The private key must not enter GitHub, a pod, the repository, or transcript artifacts. Separately dispatch signing
+with the statement/signature bytes and their external SHAs; the workflow must validate the exact candidate, pinned
+public key, fixed namespace, and detached signature before OIDC signing. Download the signed subject/bundle,
+owner-approval evidence, exact Cosign/`ssh-keygen` executables, and trusted-root material, verify `SHA256SUMS`,
+construct the v2 owner image lock locally, and record its printed external SHA and owner-key fingerprint in separate
+owner channels. A GitHub artifact, mutable GHCR tag, successful build, or successful signature alone is not
+admission. The A100 scientific pod is never an image builder. If a builder was run directly in a pod root
+filesystem, discard that pod and all root-filesystem outputs; recover only separately verified durable evidence
+whose authoritative copy and SHA were already established elsewhere.
 
 Record the final test counts and exact Git SHA in the pod evidence manifest.
 
@@ -428,9 +432,10 @@ The offline verifier requires `--expected-verifier-code-sha256`, `--verifier-ima
 `--verifier-image-lock-sha256`, `--provider-attestation-sha256`, `--payload-sha256`, and
 `--roster-receipt-sha256` as independently recorded pre-run pins. **Operational verification must use**
 `scripts/compose/run_gears_probe_a_verifier_oci.py` and an externally pinned
-`compose_probe_a_verifier_image_lock_v1`; direct host-Python execution is diagnostic/test-only. The launcher
-validates the clean commit, canonical external lock SHA, Dockerfile/`uv.lock`, exact OCI digest, canonical signed
-approval subject, Cosign bundle/executable/trusted root, certificate identity, and issuer before starting an already-present image with
+`compose_probe_a_verifier_image_lock_v2`; direct host-Python execution is diagnostic/test-only. The launcher
+validates the clean commit, canonical external lock SHA, externally registered owner-key fingerprint, detached
+owner signature and statement, Dockerfile/`uv.lock`, exact OCI digest, canonical Cosign subject,
+Cosign bundle/executable/trusted root, certificate identity, and issuer before starting an already-present image with
 `--pull=never --network=none --read-only --cap-drop=ALL --security-opt=no-new-privileges=true`. The repository is
 not mounted and only the evidence root is writable. Inside that image, before importing ALIVE decision code, the
 verifier rejects startup/environment divergence and compares the complete byte-level verifier closure. It requires the provider

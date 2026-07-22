@@ -21,6 +21,9 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--dockerfile-sha256", required=True)
     parser.add_argument("--uv-lock-sha256", required=True)
     parser.add_argument("--verifier-code-sha256", required=True)
+    parser.add_argument("--owner-approval-sha256", required=True)
+    parser.add_argument("--owner-signature-sha256", required=True)
+    parser.add_argument("--owner-key-fingerprint", required=True)
     parser.add_argument("--out", required=True)
     return parser
 
@@ -36,6 +39,9 @@ def main(argv: list[str] | None = None) -> int:
         dockerfile_sha256=args.dockerfile_sha256,
         uv_lock_sha256=args.uv_lock_sha256,
         verifier_code_sha256=args.verifier_code_sha256,
+        owner_approval_sha256=args.owner_approval_sha256,
+        owner_signature_sha256=args.owner_signature_sha256,
+        owner_key_fingerprint=args.owner_key_fingerprint,
     )
     data = (canonical_json(subject) + "\n").encode()
     output = Path(args.out)

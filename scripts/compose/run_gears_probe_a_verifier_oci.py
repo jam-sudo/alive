@@ -15,7 +15,10 @@ from alive.compose.verifier_image import (
     VerifierImageLockError,
     canonical_json,
     load_verifier_image_lock,
+    owner_public_key_identity,
+    validate_verifier_owner_approval_against_lock,
     validate_verifier_signature_subject,
+    verify_verifier_owner_approval_signature,
 )
 
 _DOCKERFILE = "containers/compose-probe-a-verifier/Dockerfile"
@@ -156,8 +159,13 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--engine", default="docker")
     parser.add_argument("--cosign", default="cosign")
+    parser.add_argument("--ssh-keygen", default="ssh-keygen")
     parser.add_argument("--image-lock", required=True)
     parser.add_argument("--image-lock-sha256", required=True)
+    parser.add_argument("--owner-approval", required=True)
+    parser.add_argument("--owner-signature", required=True)
+    parser.add_argument("--owner-public-key", required=True)
+    parser.add_argument("--expected-owner-key-fingerprint", required=True)
     parser.add_argument("--cosign-bundle", required=True)
     parser.add_argument("--cosign-subject", required=True)
     parser.add_argument("--cosign-trusted-root", required=True)
@@ -183,11 +191,56 @@ def main(argv: list[str] | None = None) -> int:
         expected_sha256=args.image_lock_sha256,
         expected_git_commit=args.git_commit,
         expected_verifier_code_sha256=args.expected_verifier_code_sha256,
+        expected_owner_key_fingerprint=args.expected_owner_key_fingerprint,
     )
     if _sha256_file(repository / _DOCKERFILE) != lock["dockerfile_sha256"]:
         raise VerifierImageLockError("current Dockerfile differs from the owner image lock")
     if _sha256_file(repository / "uv.lock") != lock["uv_lock_sha256"]:
         raise VerifierImageLockError("current uv.lock differs from the owner image lock")
+
+    owner_evidence = lock["owner_approval"]
+    owner_approval = Path(args.owner_approval)
+    if owner_approval.is_symlink() or not owner_approval.resolve(strict=True).is_file():
+        raise VerifierImageLockError("owner approval statement must be a real regular file")
+    owner_approval_bytes = owner_approval.read_bytes()
+    if _sha256_file(owner_approval) != owner_evidence["statement_sha256"]:
+        raise VerifierImageLockError("owner approval statement differs from the image lock")
+    try:
+        owner_approval_payload = json.loads(owner_approval_bytes)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise VerifierImageLockError("cannot parse owner approval statement") from exc
+    if (
+        not isinstance(owner_approval_payload, dict)
+        or owner_approval_bytes != (canonical_json(owner_approval_payload) + "\n").encode()
+    ):
+        raise VerifierImageLockError(
+            "owner approval statement must be canonical JSON with final LF"
+        )
+    validate_verifier_owner_approval_against_lock(owner_approval_payload, expected_lock=lock)
+    owner_signature = Path(args.owner_signature)
+    if owner_signature.is_symlink() or not owner_signature.resolve(strict=True).is_file():
+        raise VerifierImageLockError("owner approval signature must be a real regular file")
+    if _sha256_file(owner_signature) != owner_evidence["signature_sha256"]:
+        raise VerifierImageLockError("owner approval signature differs from the image lock")
+    owner_public_key = Path(args.owner_public_key)
+    key_identity = owner_public_key_identity(owner_public_key)
+    if key_identity["public_key_sha256"] != owner_evidence["public_key_sha256"]:
+        raise VerifierImageLockError("owner approval public key differs from the image lock")
+    if key_identity["public_key_fingerprint"] != args.expected_owner_key_fingerprint:
+        raise VerifierImageLockError("owner approval key differs from external registration")
+    ssh_keygen = _executable(args.ssh_keygen, label="ssh-keygen")
+    if _sha256_file(Path(ssh_keygen)) != owner_evidence["ssh_keygen_executable_sha256"]:
+        raise VerifierImageLockError("ssh-keygen executable differs from the image lock")
+    verify_verifier_owner_approval_signature(
+        statement=owner_approval,
+        signature=owner_signature,
+        public_key=owner_public_key,
+        expected_statement_sha256=owner_evidence["statement_sha256"],
+        expected_signature_sha256=owner_evidence["signature_sha256"],
+        expected_public_key_sha256=owner_evidence["public_key_sha256"],
+        expected_owner_key_fingerprint=args.expected_owner_key_fingerprint,
+        ssh_keygen=ssh_keygen,
+    )
 
     bundle = Path(args.cosign_bundle)
     if bundle.is_symlink() or not bundle.resolve(strict=True).is_file():

@@ -26,7 +26,11 @@ def _steps(path: Path, job: str) -> list[dict]:
 
 
 def test_all_third_party_actions_are_immutable_commit_pins():
-    for path, job in ((BUILD_WORKFLOW, "build"), (SIGN_WORKFLOW, "sign")):
+    for path, job in (
+        (BUILD_WORKFLOW, "build"),
+        (SIGN_WORKFLOW, "review"),
+        (SIGN_WORKFLOW, "sign"),
+    ):
         for step in _steps(path, job):
             if "uses" in step:
                 assert FULL_SHA_USE.fullmatch(step["uses"]), (path, step["uses"])
@@ -41,8 +45,26 @@ def test_build_and_sign_are_distinct_manual_workflows():
     assert "id-token: write" not in build_text
     assert "cosign sign" not in build_text
     sign_text = SIGN_WORKFLOW.read_text(encoding="utf-8")
-    assert "environment: compose-verifier-signing" in sign_text
+    assert "environment: compose-verifier-signing" not in sign_text
+    assert sign["jobs"]["review"]["permissions"].get("id-token") is None
+    assert sign["jobs"]["sign"]["permissions"]["id-token"] == "write"
+    assert sign["jobs"]["sign"]["needs"] == "review"
+    assert "needs.review.result == 'success'" in sign["jobs"]["sign"]["if"]
     assert '--candidate-sha256 "$CANDIDATE_SHA256"' in sign_text
+    assert "owner_approval_sha256:" in sign_text
+    assert "owner_approval_b64:" in sign_text
+    assert "owner_signature_sha256:" in sign_text
+    assert "owner_signature_b64:" in sign_text
+    assert "verify_probe_a_verifier_owner_approval.py" in sign_text
+    assert "configs/compose_probe_a_verifier_owner_approval.pub" in sign_text
+    assert sign_text.index("verify_probe_a_verifier_owner_approval.py") < sign_text.index(
+        "cosign sign-blob --yes"
+    )
+    review_steps = [step["name"] for step in _steps(SIGN_WORKFLOW, "review")]
+    sign_steps = [step["name"] for step in _steps(SIGN_WORKFLOW, "sign")]
+    assert "Verify the offline owner approval before OIDC signing" in review_steps
+    assert "Build and sign the canonical approval subject" not in review_steps
+    assert "Build and sign the canonical approval subject" in sign_steps
     assert "--offline" in sign_text
     assert "owner image lock and external lock pin are still absent" in sign_text
 
@@ -74,6 +96,13 @@ def test_signing_recomputes_source_labels_and_runtime_closure():
         "dev.alive.dockerfile-sha256",
         "dev.alive.uv-lock-sha256",
         "--print-verifier-code-sha256",
+        "verifier-owner-approval.json",
+        "verifier-owner-approval.sig",
+        "verifier-owner-approval.pub",
+        "ssh-keygen-linux-amd64",
+        "--owner-approval-sha256",
+        "--owner-signature-sha256",
+        "--owner-key-fingerprint",
         "cosign sign-blob --yes",
         '--certificate-identity "$CERTIFICATE_IDENTITY"',
         '--certificate-oidc-issuer "$OIDC_ISSUER"',
