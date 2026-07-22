@@ -191,9 +191,14 @@ Stop if the public-key fingerprint, exact commit, candidate SHA, image digest, b
 field differs from the external review record. Do not use `-N ''` for the real private key and do not place
 `$OWNER_KEY` below the repository, pod storage, or a synchronized GitHub workspace.
 
-No dedicated owner approval key or operational verifier image lock is committed yet. The previously built
-`ed8a23f…` candidate predates this approval contract and is historical only. Until key registration creates the new
-exact commit and steps 1–7 are repeated on that commit, Probe-A remains release-blocked.
+The dedicated owner approval public key is registered at
+`configs/compose_probe_a_verifier_owner_approval.pub`. Its canonical OpenSSH fingerprint is
+`SHA256:74j8HDNk+/psRVtv31L7wQGPmTKGd827dEoujQua5IU` and its canonical public-key-file SHA-256 is
+`2d23c87d551aff2b77ab3ff87b5f208465921fde50af3d39939654848a5a5831`. The operational trust anchor is the exact
+commit containing those bytes together with an independently retained matching fingerprint; the repository text
+alone is not that external registration. No operational verifier image lock or candidate-bound owner signature is
+committed yet. Every previously built candidate predates this key-registration commit and is historical only. Until
+steps 2–7 are repeated from the final clean key-registration commit, Probe-A remains release-blocked.
 
 ## 5. Comparison with the original and alternatives
 
