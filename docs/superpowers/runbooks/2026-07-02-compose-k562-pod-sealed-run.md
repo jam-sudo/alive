@@ -344,6 +344,11 @@ production driver가 내부적으로 다음 순서를 강제해야 한다.
 4. double/single exact union에 대해 outcome store의 durable audit claim을 먼저 원자적으로 설치·검증하고,
    그 audit reference로 terminal의 access를 확정한 뒤 claim-bound materialization을 한 번 수행한다.
    audit 설치 전 실패는 pre-access failure(count 0)이며 `ABORTED_AFTER_SEAL`로 기록하지 않는다.
+   confirmation 뒤 source는 `O_NOFOLLOW` regular-file descriptor로 한 번 열어 hash하고, 그 descriptor를
+   닫지 않은 채 fd-backed path(`/proc/self/fd/N` 또는 `/dev/fd/N`)로 obs 검증과 row materialization을
+   수행해야 한다. 따라서 hash 후 원래 pathname이 교체되어도 검증·채점 바이트가 바뀌지 않는다.
+   obs label 해석은 audit claim 전에는 금지하며, 불일치는 seal이 소비된
+   `ABORTED_AFTER_SEAL`(count 1)이다.
 5. 두 regime을 분리 채점하고 double-unseen만 verdict에 사용.
 6. on-disk pre-access checksum, seal audit run/request checksum, result checksums 교차검증.
 7. complete provenance payload를 내장하고 terminal SHA를 내부 provenance에서 제외한 비순환 구조로

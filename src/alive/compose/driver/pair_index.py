@@ -8,11 +8,12 @@ may verify only the manifest's own DECLARED bytes: its v1 schema shape, its
 (spec §2.2's attestation paragraph, ~line 226; spec §2.3). It may NOT open the
 sealed source to check those declared bytes against reality.
 
-That semantic check — does every indexed row's obs perturbation label actually
-canonicalize to the pair it is filed under, do rows overlap across pairs, does
-the pair union equal the split manifest — is C0's
+Outcome-free row-index overlap and split-union checks run when ``phase2b``
+constructs its lazy store after confirmation. The outcome-bearing semantic
+check — whether each indexed row's obs perturbation label canonicalizes to its
+declared pair — is C0's
 :func:`alive.compose.outcome_store.validate_pair_index_against_source_obs`,
-called ONLY from ``phase2b`` step 4, strictly after confirmation (spec §2.3).
+called ONLY from ``phase2b`` step 5 after the durable audit claim (spec §2.3).
 This module never imports that function, never opens a file, and never
 constructs a store: it is pure validation over two already-parsed
 :class:`~collections.abc.Mapping` objects.
@@ -290,10 +291,11 @@ def validate_pair_index_manifest_preseal(
     This function opens NO file, parses NO AnnData, and constructs NO store —
     it is pure validation over two already-parsed mappings (pre-seal capability
     restriction; spec §2.2/§2.3). The semantic check that indexed rows'
-    perturbation labels actually match their declared pair, that rows don't
-    overlap across pairs, and that the pair union equals the split manifest is
-    performed later, ONLY by ``phase2b`` step 4, via C0's
+    perturbation labels actually match their declared pair is performed later,
+    ONLY by ``phase2b`` step 5 after its durable audit claim, via C0's
     :func:`alive.compose.outcome_store.validate_pair_index_against_source_obs`.
+    Row overlap and split-union checks remain outcome-free store-construction
+    guards and therefore run before that claim.
 
     Parameters
     ----------

@@ -208,7 +208,7 @@ def run_preflight_subcommand(
     # checksum and its binding to the approved_sealed_input_attestation (source-
     # file SHA + obs row-identity SHA equality) over the already-SHA-verified
     # pre-seal bytes — WITHOUT opening the sealed source (the semantic obs-
-    # alignment check is phase2b step 4's C0 validate_pair_index_against_source_obs).
+    # alignment check is phase2b step 5's post-claim validator).
     # A violation raises RunSpecError → the CLI's pre-seal exit 10 (no seal armed).
     manifest_bytes = Path(spec.pre_seal["pair_index_manifest"].path).read_bytes()
     attestation_bytes = Path(spec.pre_seal["approved_sealed_input_attestation"].path).read_bytes()

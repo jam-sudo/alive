@@ -5,7 +5,7 @@
 > **이 문서는 아무것도 정의하지 않는다** — 세부(task)는 plan, claim은 spec, exact param은 config,
 > 시간순 audit는 git이 authoritative다([sources of truth](../../CLAUDE.md#sources)). 상태 행이 authoritative
 > 문서와 어긋나면 **authoritative 문서가 옳다**; 이 인덱스를 갱신한다.
-> **Updated:** 2026-07-21 @ `bb60407` (branch `main`)
+> **Updated:** 2026-07-22 @ `6d8f141` (branch `main`)
 > **갱신 트리거:** sub-project/gate **상태가 바뀔 때만**(커밋마다 아님).
 > **종결 상태:** COMPOSE seal이 정확히 한 번 열리면 이 인덱스는 **frozen/은퇴**한다. 이후 진행상황은
 > seal 결과와 post-hoc analysis가 대신한다.
@@ -178,15 +178,21 @@ branch에서 추적 가능하게 기록한다. `LOCAL` ledger ID만으로는 이
    external lock pin. Until that occurs this is
    **RELEASE-BLOCKED** and authorizes neither a Probe-A rerun nor any seal opening. The governing design is
    `specs/2026-07-20-compose-probe-a-verifier-root-of-trust-design.md`.
-   **2026-07-21 separated-builder correction (local implementation; workflows not yet run):** the isolated image
+   **2026-07-21 separated-builder correction (build gate executed; signing gate blocked):** the isolated image
    path is now a two-dispatch GitHub Actions gate. The first exact-SHA Buildx/GHCR workflow has no OIDC permission
    and emits only a canonical externally pinned unsigned candidate receipt. The second downloads that exact run's
    receipt by run ID, requires its external SHA, independently re-pulls the digest and recomputes labels/closure on
    a fresh runner, then signs a canonical subject under a distinct GitHub OIDC identity. It preserves exact Cosign
-   and trusted-root bytes but deliberately does not create the owner image lock. Targeted local contract tests pass;
-   the workflows have not been pushed or executed, `compose-verifier-signing` environment protection has not been
-   independently confirmed, and no image digest/signature/owner lock/external pin exists. Status remains
-   **RELEASE-BLOCKED**.
+   and trusted-root bytes but deliberately does not create the owner image lock. Both workflows are present on
+   `origin/main` at `6d8f141b047be7b4a4c4cb08429d088bbfb729c4`. Build run `29837916921` succeeded and
+   emitted unsigned candidate receipt SHA-256
+   `5de6310259a8ee58ce75541790dbd8e99a42c91ba1e9ba26a5f813934575d9ae`, image digest
+   `sha256:8fc740a39895dbbec6378b7b3ce70f88914f13c55afd44b62a3b0f7a9cfec117`, and verifier closure
+   `07c139b896aab2f79147fe060441df41e78f83737948dda55e3aef4e30ec15fa`. The signing dispatch was
+   **not** run because the required independently protected `compose-verifier-signing` approval gate could not be
+   established under the current private-repository environment capability. Therefore the candidate remains
+   unsigned and there is no owner image lock, owner signature, or accepted external verifier pin. Status remains
+   **RELEASE-BLOCKED**; the unsigned digest is evidence of a successful build only, never seal authorization.
 5. **§2.5 release gate** — worker locked-env integration green + 독립 검토 후 exact commit `C`를 마지막
    repository commit으로 동결한다. Clean detached `C`에서 bias report → single-leaf finalized config →
    analytical reports를 external durable stage에 게시하고, owner가 `C`·모든 byte hash·immutable object

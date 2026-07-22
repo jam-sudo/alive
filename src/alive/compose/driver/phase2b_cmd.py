@@ -30,16 +30,17 @@ Steps (spec §3.3 steps 0-6):
    is reconstructed byte-for-byte from the CURRENT non-sealed inputs (assembled
    by the SHARED Task-8 :func:`~alive.compose.driver.preflight_cmd.build_confirmation_inputs`).
    The sealed access count is still 0;
-4. ONLY after confirmation: integrity-check the sealed source (``O_NOFOLLOW``
-   regular-file fd, ``(device, inode, size, mtime_ns)`` compared around a
-   streamed hash, digest verified), check the mode-specific audit destination is
-   absent, run the obs-alignment validator
-   (:func:`~alive.compose.outcome_store.validate_pair_index_against_source_obs`),
-   then **construct the sealed store in THIS function only** with
+4. ONLY after confirmation: integrity-check and retain the sealed source
+   (``O_NOFOLLOW`` regular-file fd, ``(device, inode, size, mtime_ns)`` compared
+   around a streamed hash, digest verified), check the mode-specific audit
+   destination is absent, then **construct the lazy sealed store in THIS
+   function only** with
    ``audit_path = <run_dir>/audit.jsonl`` for fixtures or the canonical
    protocol-global audit under ``approved_artifacts_root`` for scientific runs;
 5. dispatch the correct library entry point (``run_phase2b_fixture`` /
-   ``run_phase2b``); the seal is opened EXACTLY once inside it;
+   ``run_phase2b``); the seal is opened EXACTLY once inside it, after which the
+   obs-alignment validator parses metadata and materialisation reads rows through
+   an fd-backed path for the exact inode hashed in step 4;
 6. INDEPENDENTLY re-read ``phase2b_durable_commit.json`` (canonical bytes +
    self-checksum + every recorded file SHA), then map the terminal state to an
    exit code. This runs AFTER the seal is consumed, so a present-but-corrupt
@@ -56,9 +57,10 @@ marker; ``30`` = a non-``COMPLETE`` terminal (``INVALID`` / ``ABORTED``) OR an
 incomplete/corrupt durable export (an absent marker, or a present marker that
 fails its self-checksum / recorded file-SHA re-verification — a POST-seal
 failure, RETURNED not raised, since the seal was already consumed). A pre-seal
-violation (roster, confirmation, source integrity, obs alignment) fails closed by
-RAISING — the seal is never opened, no audit is written, and no terminal artifact
-is left behind.
+violation (roster, confirmation, source integrity) fails closed by RAISING — the
+seal is never opened, no audit is written, and no terminal artifact is left
+behind. Obs-alignment is deliberately post-claim: a mismatch returns 30 after
+durably recording ``ABORTED_AFTER_SEAL``.
 
 See docs/superpowers/specs/2026-07-07-compose-production-driver-design.md §3.3.
 """
@@ -296,11 +298,12 @@ def _run_confirmed_phase2b(
         reconstruct_inputs=reconstruct_inputs,
     )
 
-    # Step 4: ONLY after confirmation. Integrity-check the sealed source, check the
-    # mode-specific audit destination, validate the pair index against the source obs,
-    # then construct the sealed store — the driver's SOLE construction point (§4).
+    # Step 4: ONLY after confirmation. Open + integrity-check the sealed source once,
+    # keep that exact descriptor alive, check the mode-specific audit destination and
+    # construct a LAZY sealed store. Source obs/X are parsed only after its durable
+    # audit claim (§4).
     audit_path, audit_parent = _resolve_seal_audit_destination(spec, run_dir=run_dir)
-    outcome_store = _build_sealed_store(
+    store_context = _build_sealed_store(
         spec=spec,
         audit_path=audit_path,
         audit_parent=audit_parent,
@@ -319,49 +322,50 @@ def _run_confirmed_phase2b(
     # exit 1 for the unlisted DurableLedgerError). A genuinely PRE-seal raise
     # (nothing consumed → audit still empty/absent) is re-raised so the CLI's
     # pre-seal mapping stays correct.
-    try:
-        if spec.mode == "fixture":
-            result = run_phase2b_fixture(
-                run_dir=run_dir,
-                outcome_store=outcome_store,
-                frozen_bundle=bundle,
-                pair_manifest=pair_manifest,
-                response_artifact=payload_response,
-                config=config,
-                ledger=ledger,
-            )
-        else:
-            # Scientific dispatch (a PREPARE obligation; NOT exercised by the local
-            # fixture path). run_phase2b re-verifies activation + clean git itself and
-            # binds the phase2a DISTINCT seed-variability report (never the canonical
-            # name phase2b installs) as seed_variability_report_path.
-            seed_report_path = run_dir / RUN_PRODUCED_BASENAMES["phase2a_seed_variability_report"]
-            scientific_response = {
-                **payload_response,
-                "checksum": response_artifact["combined_checksum"],
-            }
-            result = run_phase2b(
-                run_dir=run_dir,
-                outcome_store=outcome_store,
-                frozen_bundle=bundle,
-                pair_manifest=pair_manifest,
-                response_artifact=scientific_response,
-                config=config,
-                ledger=ledger,
-                activation_record=run_spec.activation_record,
-                git_is_clean=git_clean,
-                provenance_inputs=getattr(run_spec, "provenance_inputs", None),
-                oof_manifest_path=run_dir / RUN_PRODUCED_BASENAMES["oof_manifest"],
-                oof_manifest_checksum=bundle.dev_diagnostics["oof_fold_manifest_checksum"],
-                seed_variability_report_path=seed_report_path,
-                seed_variability_report_checksum=sha256_file(seed_report_path),
-                approximation_bias_report_evidence=approximation_bias_report_evidence,
-            )
-    except Exception as exc:  # noqa: BLE001 - re-raised unless the seal was consumed
-        if _seal_consumed(audit_path):
-            print(f"{type(exc).__name__}: {exc}", file=sys.stderr)
-            return PHASE2B_NONCOMPLETE_EXIT
-        raise
+    with store_context as outcome_store:
+        try:
+            if spec.mode == "fixture":
+                result = run_phase2b_fixture(
+                    run_dir=run_dir,
+                    outcome_store=outcome_store,
+                    frozen_bundle=bundle,
+                    pair_manifest=pair_manifest,
+                    response_artifact=payload_response,
+                    config=config,
+                    ledger=ledger,
+                )
+            else:
+                # Scientific dispatch (a PREPARE obligation; NOT exercised by the local
+                # fixture path). run_phase2b re-verifies activation + clean git itself.
+                seed_report_path = (
+                    run_dir / RUN_PRODUCED_BASENAMES["phase2a_seed_variability_report"]
+                )
+                scientific_response = {
+                    **payload_response,
+                    "checksum": response_artifact["combined_checksum"],
+                }
+                result = run_phase2b(
+                    run_dir=run_dir,
+                    outcome_store=outcome_store,
+                    frozen_bundle=bundle,
+                    pair_manifest=pair_manifest,
+                    response_artifact=scientific_response,
+                    config=config,
+                    ledger=ledger,
+                    activation_record=run_spec.activation_record,
+                    git_is_clean=git_clean,
+                    provenance_inputs=getattr(run_spec, "provenance_inputs", None),
+                    oof_manifest_path=run_dir / RUN_PRODUCED_BASENAMES["oof_manifest"],
+                    oof_manifest_checksum=bundle.dev_diagnostics["oof_fold_manifest_checksum"],
+                    seed_variability_report_path=seed_report_path,
+                    seed_variability_report_checksum=sha256_file(seed_report_path),
+                    approximation_bias_report_evidence=approximation_bias_report_evidence,
+                )
+        except Exception as exc:  # noqa: BLE001 - re-raised unless the seal was consumed
+            if _seal_consumed(audit_path):
+                print(f"{type(exc).__name__}: {exc}", file=sys.stderr)
+                return PHASE2B_NONCOMPLETE_EXIT
+            raise
 
     # Step 6: INDEPENDENTLY re-read the durable commit marker (never the returned
     # result alone), then map the terminal state to an exit code. Nothing
@@ -436,6 +440,7 @@ def _driver_lock(run_dir: Path) -> Iterator[None]:
 # --------------------------------------------------------------------------- #
 
 
+@contextlib.contextmanager
 def _build_sealed_store(
     *,
     spec: ResolvedRunSpec,
@@ -443,14 +448,17 @@ def _build_sealed_store(
     audit_parent: Path,
     sealed_outcome: Mapping[str, Any],
     pair_manifest: Mapping[str, Any],
-) -> ComposeOutcomeStore:
+) -> Iterator[ComposeOutcomeStore]:
     """Construct the sealed outcome store — the driver's SOLE construction site (§4).
 
-    Runs entirely AFTER confirmation: integrity-check the sealed source file,
-    enforce the mode-specific audit destination is absent, enforce each pair's
-    declared role against the split role names, validate the pair index against
-    the source obs labels, THEN build the store with the already-validated audit
-    path. Fixture mode mints a sanctioned
+    Runs entirely AFTER confirmation: integrity-check and retain an open
+    descriptor for the sealed source file, enforce the mode-specific audit
+    destination is absent, and enforce each pair's declared role against the
+    split role names.  It then yields a lazy store whose source-observation
+    validation runs only after :meth:`ComposeOutcomeStore.claim_sealed_access`
+    has durably consumed the seal.  The retained descriptor ensures validation
+    and materialisation reopen the exact inode whose bytes were hashed, even if
+    the source pathname is replaced concurrently. Fixture mode mints a sanctioned
     :class:`~alive.compose.outcome_store.FixtureOutcomeStore` via the allowlisted
     :func:`~alive.compose.outcome_store.build_fixture_outcome_store`; scientific
     mode builds a plain :class:`~alive.compose.outcome_store.ComposeOutcomeStore`.
@@ -471,8 +479,6 @@ def _build_sealed_store(
             f"pair_index_manifest ({manifest_source_sha!r}) != declared "
             f"({expected_source_sha!r})"
         )
-    _verify_sealed_source_integrity(source_path, expected_source_sha)
-
     # ⚑ The recover-critical audit destination is resolved before construction:
     # run-local for fixtures, protocol-global for scientific mode. Any existing
     # node means the write-once claim is unavailable or the seal was consumed.
@@ -482,54 +488,74 @@ def _build_sealed_store(
     # bogus role fails closed before the seal is built).
     _assert_pair_roles(sealed_outcome["pair_index_manifest"])
 
-    # Load the source's obs (bounded synthetic fixture) and validate that every
-    # indexed row's perturbation label canonicalizes to the pair it is filed
-    # under. This is the ONLY driver read of the sealed source's obs labels, done
-    # AFTER confirmation and BEFORE any store construction (C0 contract).
-    source_obj = anndata.read_h5ad(source_path)
-    validate_pair_index_against_source_obs(
-        source_obj,
-        pair_index,
-        pair_manifest,
-        perturbation_col=perturbation_col,
-        combo_sep=combo_sep,
-    )
+    with _open_verified_sealed_source(source_path, expected_source_sha) as verified_source:
+        opened_source: Any | None = None
 
-    if spec.mode == "fixture":
-        # Fixture-vs-real-source byte comparison stays OFF (validated by index +
-        # attestation, not raw source bytes): the allowlisted attestation triple
-        # is passed through and checked against the committed allowlist only.
-        return build_fixture_outcome_store(
-            pair_index,
-            source_obj,
-            pair_manifest,
-            audit_path=audit_path,
-            corpus_id=sealed_outcome["corpus_id"],
-            source_sha256=sealed_outcome["source_sha256"],
-            builder_code_sha256=sealed_outcome["builder_code_sha256"],
-        )
-    return ComposeOutcomeStore(
-        pair_index,
-        source_obj,
-        pair_manifest,
-        audit_path=audit_path,
-    )
+        def _validate_source_obs_after_claim() -> Any:
+            """Open once post-claim, validate, then retain this exact backed source."""
+            nonlocal opened_source
+            source_obj = anndata.read_h5ad(verified_source, backed="r")
+            try:
+                validate_pair_index_against_source_obs(
+                    source_obj,
+                    pair_index,
+                    pair_manifest,
+                    perturbation_col=perturbation_col,
+                    combo_sep=combo_sep,
+                )
+            except BaseException:
+                source_obj.file.close()
+                raise
+            opened_source = source_obj
+            return source_obj
+
+        if spec.mode == "fixture":
+            # Fixture-vs-real-source byte comparison stays OFF (validated by index +
+            # attestation, not raw source bytes): the allowlisted attestation triple
+            # is passed through and checked against the committed allowlist only.
+            outcome_store = build_fixture_outcome_store(
+                pair_index,
+                verified_source,
+                pair_manifest,
+                audit_path=audit_path,
+                corpus_id=sealed_outcome["corpus_id"],
+                source_sha256=sealed_outcome["source_sha256"],
+                builder_code_sha256=sealed_outcome["builder_code_sha256"],
+                materialization_validator=_validate_source_obs_after_claim,
+            )
+        else:
+            outcome_store = ComposeOutcomeStore(
+                pair_index,
+                verified_source,
+                pair_manifest,
+                audit_path=audit_path,
+                materialization_validator=_validate_source_obs_after_claim,
+            )
+        try:
+            yield outcome_store
+        finally:
+            if opened_source is not None:
+                opened_source.file.close()
 
 
-def _verify_sealed_source_integrity(source_path: Path, expected_sha: str) -> None:
-    """Integrity-check the sealed source file (spec §3.3 step 4).
+@contextlib.contextmanager
+def _open_verified_sealed_source(source_path: Path, expected_sha: str) -> Iterator[Path]:
+    """Yield an fd-backed path to the integrity-checked sealed source.
 
     Opens the source with ``O_NOFOLLOW`` (rejecting a symlink final component),
     fstat-verifies it is a regular file, captures its
     ``(device, inode, size, mtime_ns)`` identity, streams the SHA-256, then
-    re-captures the identity and requires it unchanged (a swap during hashing
-    fails closed). The streamed digest must equal ``expected_sha``.
+    re-captures the identity and requires it unchanged (a mutation during
+    hashing fails closed). The streamed digest must equal ``expected_sha``.
+    The original descriptor remains open while the yielded ``/proc/self/fd`` or
+    ``/dev/fd`` path is used, closing the hash-then-reopen pathname race.
 
     Raises
     ------
     Phase2bSubcommandError
         On a symlink / non-regular node, an identity change during hashing, an
-        unreadable file, or a digest mismatch.
+        unreadable file, a digest mismatch, or an unavailable/mismatched
+        descriptor-backed path.
     """
     if source_path.is_symlink():
         raise Phase2bSubcommandError(
@@ -557,19 +583,46 @@ def _verify_sealed_source_integrity(source_path: Path, expected_sha: str) -> Non
             digest.update(chunk)
         post = os.fstat(fd)
         identity_after = (post.st_dev, post.st_ino, post.st_size, post.st_mtime_ns)
+        if identity_before != identity_after:
+            raise Phase2bSubcommandError(
+                f"sealed source {str(source_path)!r} changed identity during hashing "
+                f"(before={identity_before!r} after={identity_after!r})"
+            )
+        actual_sha = digest.hexdigest()
+        if actual_sha != expected_sha:
+            raise Phase2bSubcommandError(
+                f"sealed source {str(source_path)!r} digest mismatch "
+                f"(expected {expected_sha!r}, got {actual_sha!r})"
+            )
+
+        os.lseek(fd, 0, os.SEEK_SET)
+        descriptor_path: Path | None = None
+        for candidate in (Path(f"/proc/self/fd/{fd}"), Path(f"/dev/fd/{fd}")):
+            try:
+                candidate_fd = os.open(candidate, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0))
+            except OSError:
+                continue
+            try:
+                candidate_stat = os.fstat(candidate_fd)
+                candidate_identity = (
+                    candidate_stat.st_dev,
+                    candidate_stat.st_ino,
+                    candidate_stat.st_size,
+                    candidate_stat.st_mtime_ns,
+                )
+            finally:
+                os.close(candidate_fd)
+            if candidate_identity == identity_after:
+                descriptor_path = candidate
+                break
+        if descriptor_path is None:
+            raise Phase2bSubcommandError(
+                "cannot obtain an identity-matched descriptor path for sealed source "
+                f"{str(source_path)!r}; refusing a pathname reopen"
+            )
+        yield descriptor_path
     finally:
         os.close(fd)
-    if identity_before != identity_after:
-        raise Phase2bSubcommandError(
-            f"sealed source {str(source_path)!r} changed identity during hashing "
-            f"(before={identity_before!r} after={identity_after!r})"
-        )
-    actual_sha = digest.hexdigest()
-    if actual_sha != expected_sha:
-        raise Phase2bSubcommandError(
-            f"sealed source {str(source_path)!r} digest mismatch "
-            f"(expected {expected_sha!r}, got {actual_sha!r})"
-        )
 
 
 def _resolve_approximation_bias_report(

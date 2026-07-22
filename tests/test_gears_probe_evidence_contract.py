@@ -56,4 +56,5 @@ def test_replacement_runbook_preserves_metadata_first_boundary() -> None:
     assert "never renormalize a reduced GEARS prediction" in rerun
     assert "MUST NOT be imported, copied, or executed" in rerun
     assert "receipt-last completion marker" in rerun
-    assert "Do **not** pass shell command substitution" in rerun
+    normalized = " ".join(rerun.split())
+    assert "Do **not** pass shell command substitution" in normalized

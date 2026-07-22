@@ -52,7 +52,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
@@ -346,6 +346,13 @@ class ComposeOutcomeStore:
         Path to the durable append-only JSONL audit file. The sealed cohort may
         be opened exactly once per audit path. The file is created if absent;
         the parent directory must exist.
+    materialization_validator : callable or None, optional
+        Driver-supplied source/row validator invoked only after a durable claim
+        has been verified and immediately before the first source row is read.
+        This keeps sealed-source semantic parsing on the consumed side of the
+        audit boundary. It may return a validated source object, which atomically
+        replaces the lazy path before row materialisation; ``None`` retains the
+        original source.
 
     Notes
     -----
@@ -360,6 +367,7 @@ class ComposeOutcomeStore:
         manifest: Mapping,
         *,
         audit_path: str | Path,
+        materialization_validator: Callable[[], object | None] | None = None,
     ) -> None:
         try:
             verify_split_manifest(dict(manifest))
@@ -400,6 +408,8 @@ class ComposeOutcomeStore:
         self._source = source
         self._manifest = manifest
         self._audit_path = Path(audit_path)
+        self._materialization_validator = materialization_validator
+        self._source_validated = False
 
         # Guard the manifest at construction: a malformed manifest must fail
         # closed via ComposeSealingError, never a raw KeyError mid-access.
@@ -665,6 +675,11 @@ class ComposeOutcomeStore:
         # pair_ids — so no unauthenticated field feeds the materialised payload.
         # A genuine claim is unchanged: claim.pair_ids canonicalises to record's.
         sealed_pairs = [tuple(p) for p in record["pair_ids"]]
+        if self._materialization_validator is not None and not self._source_validated:
+            validated_source = self._materialization_validator()
+            if validated_source is not None:
+                self._source = validated_source
+            self._source_validated = True
         return self._materialise_pairs(sealed_pairs)
 
     @staticmethod
@@ -987,6 +1002,7 @@ def build_fixture_outcome_store(
     corpus_id: str,
     source_sha256: str,
     builder_code_sha256: str,
+    materialization_validator: Callable[[], object | None] | None = None,
 ) -> FixtureOutcomeStore:
     """Build the ONLY sanctioned :class:`FixtureOutcomeStore`.
 
@@ -1034,12 +1050,13 @@ def build_fixture_outcome_store(
         source,
         manifest,
         audit_path=audit_path,
+        materialization_validator=materialization_validator,
         fixture_corpus_attestation=attestation,
     )
 
 
 # ---------------------------------------------------------------------------
-# Standalone obs-label alignment validator (phase2b, pre-store)
+# Standalone obs-label alignment validator (phase2b, post-claim)
 # ---------------------------------------------------------------------------
 
 
@@ -1052,6 +1069,11 @@ def validate_pair_index_against_source_obs(
     combo_sep: str = "_",
 ) -> None:
     """Verify each pair-index row's obs perturbation label canonicalizes to its pair.
+
+    The production driver invokes this validator through
+    ``materialization_validator`` only after the durable access claim has been
+    installed. Callers outside that driver remain responsible for placing it on
+    the consumed side of their own seal boundary.
 
     Reads ``source.obs[perturbation_col]`` (a str label per row) and, for every
     (canonical pair -> row indices) entry, asserts every indexed row's label

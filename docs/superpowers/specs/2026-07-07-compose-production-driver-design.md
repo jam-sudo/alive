@@ -53,10 +53,11 @@ Driver는 아래 결함을 우회하거나 wrapper에서 숨기지 않는다. �
    `RunLedger.write`를 쓰지 않으므로(그것은 legacy TG-K562 CLI 전용) merged code 수정 대상이 아니고, 재독출은
    `RunLedger.read`와 byte-호환된다(`durable._canonical_bytes`). 이 항목은 §1 설계규칙으로만 두고 C0
    code-fix 목록에서 제외한다.
-3. `ComposeOutcomeStore` 생성 전에 pair-index의 각 row **perturbation label이 source obs의 canonical pair와
-   일치**하는지 검증한다. 현재 store는 dtype·range·**cross-pair row 중복**(`outcome_store.py:334-339`)·manifest
-   key 집합까지는 검사하나 `source.obs` label 정합은 전혀 안 본다(`298-384`). 즉 누락된 건 중복이 아니라
-   **obs-label 정합**뿐이므로 그 검증만 추가한다.
+3. Lazy `ComposeOutcomeStore` 생성 시에는 source를 파싱하지 않는다. Durable audit claim을 원자적으로 설치하고
+   재독출한 **뒤**, pair-index의 각 row perturbation label이 source obs의 canonical pair와 일치하는지 검증한다.
+   Store constructor의 dtype·range·cross-pair row 중복·manifest key 검사는 outcome-free 구조 검증이며,
+   `source.obs` label 정합은 outcome-bearing semantic access이므로 반드시 claim-bound materialization의 첫
+   validator로 실행한다. 불일치는 pre-seal rejection이 아니라 count 1의 `ABORTED_AFTER_SEAL`이다.
 4. fixture 판정을 caller가 추가할 수 있는 `_compose_fixture_marker` boolean 하나에 맡기지 않는다. 전용
    fixture store/factory와 committed synthetic corpus digest allowlist를 사용한다.
 5. D1 recovery가 durable audit claim 이후 terminal 확인 전 process death(`audit=1, terminal=0`)를 처리한다.
@@ -250,18 +251,18 @@ snapshot ID, source row-identity SHA와 pair-index file SHA를 담은 self-check
 sealed block에 대해 exact schema·lexical containment·attestation equality를 검사한다. `raw_asset`과 source가
 같은 file이면 pre-seal에서 허용되는 유일한 추가 동작은 기존 `sha256_file`과 동등한 sequential byte-hash다;
 H5AD/AnnData parser, backed access, obs/X/layer materialization은 금지한다. Source regular-file/root/digest는
-pre-seal ledger에 결속하되, semantic row validation은 confirmation 이후 `phase2b` step 4에서만 수행한다.
-따라서 preflight confirmation은 검증된 expected digest를 승인하고, phase2b가 승인 뒤 실제 bytes와 row
-identity를 다시 확립한다.
+pre-seal ledger에 결속하되, semantic row validation은 confirmation과 durable audit claim 이후 `phase2b`
+step 5의 protected boundary에서만 수행한다. 따라서 preflight confirmation은 검증된 expected digest를
+승인하고, phase2b는 승인 뒤 실제 bytes를 먼저 hash하되 row identity의 의미 해석은 seal 소비 후 확립한다.
 
 ### 2.3 Pair-index manifest v1
 
 `pair_index_manifest`는 source file SHA, obs row-identity SHA, perturbation column, control/combo token 규칙,
 canonical pair별 row indices와 row-ID digest, role, self-checksum을 포함한다. Pre-seal path는 manifest 내부
 schema/self-checksum과 attestation binding까지만 검증한다. `phase2b`만 confirmation 이후 source를 backed
-mode로 열어 각 row의 perturbation label이 해당 canonical pair와 일치하는지, row가 pair 간 중복되지 않는지,
-pair union이 split manifest와 정확히 같은지 검증한다. 검증된 manifest file SHA는 ledger·pre-access
-provenance·confirmation manifest에 기록한다.
+mode로 열어 각 row의 perturbation label이 해당 canonical pair와 일치하는지는 durable claim 뒤 검증한다.
+Outcome-free row-index 중복과 pair union은 store construction 전에 검증한다. 검증된 manifest file SHA는
+ledger·pre-access provenance·confirmation manifest에 기록한다.
 
 ### 2.4 Loader fail-closed
 
@@ -360,8 +361,10 @@ seal 직전(runbook §6/§7) 순서로 재검증한다.
    manifest를 재구성해 byte equality를 요구한다. 이 단계까지 sealed source access count는 0이다.
 4. confirmation 성공 후에만 source를 `O_NOFOLLOW` regular-file descriptor로 열어 hash 전후
    `(device,inode,size,mtime_ns)`를 비교하고 attestation의 expected source digest와 실제 bytes의 일치를
-   검증한다. Store는 같은 immutable snapshot만 소비해야 하며, 이를 보증할 수 없으면 생성 전에 abort한다.
-   이어 pair-index manifest를 source obs에 대조하고 sealed store를 **이 함수에서만** 생성한다 —
+   검증한다. 이 descriptor는 phase2b 종료까지 유지하고 identity-matched fd-backed path
+   (`/proc/self/fd/N` 또는 `/dev/fd/N`)만 store에 전달한다. Hash 뒤 원 pathname을 다시 열거나 descriptor와
+   다른 inode를 소비해서는 안 되며, 같은 inode를 보증할 수 없으면 생성 전에 abort한다. 이어 sealed store를
+   **이 함수에서만** lazy 생성한다 —
    ResolvedRunSpec/fixture가 제공한 source + verified pair-index + manifest + audit path를 사용한다. **Fixture
    store는 `<run_dir>/audit.jsonl`을 유지하고, scientific store는 §2.2의 protocol-global audit만 사용한다.**
    Scientific path를 caller-selected run directory에서 유도하거나 임의 declared path를 그대로 신뢰하지 않는다.
@@ -372,8 +375,9 @@ seal 직전(runbook §6/§7) 순서로 재검증한다.
    builder는 store 객체가 아니라 sealed-outcome DATA만 만든다(§6).
 5. `run_phase2b[_fixture](run_dir=, outcome_store=, frozen_bundle=, pair_manifest=, response_artifact=,
    config=, ledger=, approximation_bias_report_evidence=<immutable pre-seal snapshot>, ...)`를 호출한다.
-   Scientific config SHA가 non-null인데 이 path가 전달되지 않는 상태는 금지한다. 내부에서 D1/D2 §7 전체(pre-access ledger → durable audit claim →
-   terminal → durable finalize + commit marker)가 이미 강제된다.
+   Scientific config SHA가 non-null인데 이 path가 전달되지 않는 상태는 금지한다. 내부에서 D1/D2 §7 전체
+   (pre-access ledger → durable audit claim → source obs↔pair row alignment → terminal →
+   durable finalize + commit marker)가 이미 강제된다.
 6. Driver는 `phase2b_durable_commit.json`을 독립 재독출해 terminal/summary/final-ledger/pre-access-ledger/
    seed-report SHA와 marker self-checksum을 모두 재검증한 뒤에만 exit 0을 반환한다. 그 전에는 aggregate metric,
    verdict, per-pair 값 어느 것도 stdout/stderr로 내보내지 않는다. 성공 후에도 기본 출력은 terminal state와
@@ -475,7 +479,8 @@ payload는 fixture bound(`_assert_fixture_payload`)를 넘지 않는다.
 - phase2a/preflight에서 raw asset은 digest-only read만 발생하고 AnnData/backed row materialization은 0회임
 - attestation source SHA와 실제 immutable snapshot bytes가 다르면 store 생성 전에 거부됨
 - 실제 source digest/pair-index를 fixture mode에 넣거나 marker만 추가해도 fixture factory가 거부함
-- pair 두 개의 row block을 교환하면 source obs alignment gate가 거부함
+- pair 두 개의 row block을 교환하면 durable claim 뒤 source obs alignment gate가 count 1
+  `ABORTED_AFTER_SEAL`을 기록하고 exit 30을 반환함
 - wrong ledger run/config/environment header가 artifact SHA 일치 여부와 무관하게 거부됨
 
 이는 새 coverage다 — 현재 committed된 phase2a→preflight→phase2b 연쇄 test는 없다.
@@ -516,7 +521,9 @@ subcommand는 direct-child basename의 exact required/allowed/forbidden roster�
 | confirmation manifest 부재·변경 또는 token ≠ confirmation checksum | abort |
 | scientific인데 activation evidence roster/path/hash 불일치 | `ScientificModeError`, abort |
 | fixture corpus/type/digest allowlist 불일치 또는 payload bound 초과 | abort |
-| pair-index row label/source identity/split union 불일치 | abort |
+| source digest/descriptor identity 불일치 | pre-seal abort(count 0) |
+| pair-index row label 불일치 | post-claim `ABORTED_AFTER_SEAL`(count 1), 재실행 금지 |
+| pair-index split union/구조 불일치 | pre-seal abort(count 0) |
 | execution lock 선언값 ≠ 실제 file digest 또는 worker self-report | abort |
 
 seal 접근 이후 예외는 terminal `INVALID`/`ABORTED_AFTER_SEAL`을 남기고 재실행하지 않는다(D1이 강제).

@@ -237,6 +237,31 @@ def test_claim_then_materialize_matches_evaluate_sealed_once(tmp_path: Path) -> 
         assert obs.cells.shape == (3, _N_GENES)
 
 
+def test_materialization_validator_runs_only_after_durable_claim(tmp_path: Path) -> None:
+    manifest = _build_manifest()
+    source, pair_index = _build_pair_index(manifest)
+    audit_path = tmp_path / "compose_audit.jsonl"
+    observed_counts: list[int] = []
+
+    def _validate() -> None:
+        assert audit_path.is_file() and audit_path.stat().st_size > 0
+        observed_counts.append(store.sealed_access_count)
+
+    store = ComposeOutcomeStore(
+        pair_index=pair_index,
+        source=source,
+        manifest=manifest,
+        audit_path=audit_path,
+        materialization_validator=_validate,
+    )
+    assert observed_counts == []
+    claim = store.claim_sealed_access("run-validator-order", _sealed_union(manifest))
+    assert observed_counts == []
+
+    store.materialize_claimed(claim)
+    assert observed_counts == [1]
+
+
 def test_audit_reference_is_derived_from_persisted_record(tmp_path: Path) -> None:
     store, manifest = _build_store(tmp_path)
     claim = store.claim_sealed_access("run-ref", _sealed_union(manifest))

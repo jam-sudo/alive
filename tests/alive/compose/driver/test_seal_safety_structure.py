@@ -42,6 +42,7 @@ docs/superpowers/specs/2026-07-07-compose-production-driver-design.md §4/§2.2)
 from __future__ import annotations
 
 import ast
+import os
 from pathlib import Path
 
 import anndata
@@ -201,14 +202,50 @@ class _ReadH5adSpy:
     ``anndata.read_h5ad`` observes every driver-reachable open.
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        expected_source: Path | None = None,
+        required_audit_path: Path | None = None,
+    ) -> None:
         self.opened: list[Path] = []
+        self.matches_expected_source: list[bool] = []
+        self.audit_present_at_open: list[bool] = []
+        self.expected_source = expected_source
+        self.required_audit_path = required_audit_path
 
     def install(self, monkeypatch: pytest.MonkeyPatch) -> None:
         real = anndata.read_h5ad
 
         def _spy(filename, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003
-            self.opened.append(Path(filename))
+            opened = Path(filename)
+            self.opened.append(opened)
+            if self.expected_source is not None:
+                opened_fd = os.open(opened, os.O_RDONLY)
+                try:
+                    opened_stat = os.fstat(opened_fd)
+                finally:
+                    os.close(opened_fd)
+                expected_stat = self.expected_source.stat()
+                self.matches_expected_source.append(
+                    (
+                        opened_stat.st_dev,
+                        opened_stat.st_ino,
+                        opened_stat.st_size,
+                        opened_stat.st_mtime_ns,
+                    )
+                    == (
+                        expected_stat.st_dev,
+                        expected_stat.st_ino,
+                        expected_stat.st_size,
+                        expected_stat.st_mtime_ns,
+                    )
+                )
+            if self.required_audit_path is not None:
+                self.audit_present_at_open.append(
+                    self.required_audit_path.is_file()
+                    and self.required_audit_path.stat().st_size > 0
+                )
             return real(filename, *args, **kwargs)
 
         monkeypatch.setattr(anndata, "read_h5ad", _spy)
@@ -404,7 +441,11 @@ def test_phase2b_opens_the_outcome_source_positive_control(
     token = _confirmation_token(fx.run_dir)
     sealed_source = Path(fx.sealed_outcome["source_path"]).resolve()
 
-    spy = _ReadH5adSpy()
+    audit_path = fx.run_dir / SEAL_AUDIT_FILENAME
+    spy = _ReadH5adSpy(
+        expected_source=sealed_source,
+        required_audit_path=audit_path,
+    )
     spy.install(monkeypatch)
     assert (
         run_phase2b_subcommand(
@@ -413,8 +454,11 @@ def test_phase2b_opens_the_outcome_source_positive_control(
         == PHASE2B_COMPLETE_EXIT
     )
 
-    opened = {p.resolve() for p in spy.opened}
-    assert sealed_source in opened, (
-        "phase2b did not open the sealed source — the (b) spy would miss a real "
-        f"leak; sealed={sealed_source} opened={sorted(str(p) for p in opened)}"
+    assert spy.matches_expected_source and all(spy.matches_expected_source), (
+        "phase2b did not open the descriptor for the sealed source — the (b) spy "
+        f"would miss a real leak; sealed={sealed_source} opened={spy.opened!r}"
+    )
+    assert spy.audit_present_at_open and all(spy.audit_present_at_open), (
+        "phase2b AnnData-parsed the sealed source before installing its durable "
+        f"audit claim; audit={audit_path} observations={spy.audit_present_at_open!r}"
     )

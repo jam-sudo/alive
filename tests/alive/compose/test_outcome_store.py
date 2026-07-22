@@ -156,7 +156,7 @@ def test_fixture_populates_all_three_roles() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 0. Standalone obs-label alignment validator (phase2b, pre-store)
+# 0. Standalone obs-label alignment validator (phase2b wires it post-claim)
 # ---------------------------------------------------------------------------
 
 

@@ -8,10 +8,11 @@ the phase2b entry roster, acquires the driver lock, re-verifies the frozen bundl
 + re-read ledger via the outcome-free preflight gate, re-verifies the installed
 seal-confirmation manifest against a ``--confirm-seal`` token (the FULL
 ``confirmation_checksum``, never the run id), and — ONLY after confirmation —
-integrity-checks the sealed source, validates the pair index against the source
-obs labels, constructs the sealed FIXTURE store with
+integrity-checks and retains the sealed source descriptor, constructs the sealed
+FIXTURE store with
 ``audit_path == run_dir/audit.jsonl``, runs the bounded synthetic
-``run_phase2b_fixture``, independently re-reads the durable commit marker, and
+``run_phase2b_fixture`` (validating source obs only after the durable claim),
+independently re-reads the durable commit marker, and
 maps the terminal state to an exit code.
 
 These tests run the REAL ``phase2a → preflight → phase2b`` chain on the committed
@@ -27,9 +28,8 @@ Coverage (the four brief scenarios + guards):
      fails closed BEFORE any store construction (no audit, no terminal);
   3. a run-id-only ``--confirm-seal`` token → confirmation fails closed BEFORE
      any store construction (no audit, no terminal);
-  4. swapping two pairs' obs rows in the pair index → the post-confirmation
-     obs-alignment validator fails closed BEFORE store construction (no audit,
-     no terminal);
+  4. swapping two pairs' obs rows in the pair index → the post-claim
+     obs-alignment validator burns the audit and records ``ABORTED_AFTER_SEAL``;
   plus: the sealed store is constructed EXACTLY once (§4).
 """
 
@@ -205,9 +205,9 @@ def test_run_id_only_token_rejects_before_store(tmp_path: Path) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Scenario 4: swapped obs rows → obs-alignment validator fails closed (pre-store)
+# Scenario 4: swapped obs rows → post-claim validator aborts a consumed seal
 # --------------------------------------------------------------------------- #
-def test_swapped_pair_rows_rejected_by_obs_validation_before_store(tmp_path: Path) -> None:
+def test_swapped_pair_rows_abort_after_durable_claim(tmp_path: Path) -> None:
     fx = _run_preseal(tmp_path)
     token = _confirmation_token(fx.run_dir)
 
@@ -220,11 +220,35 @@ def test_swapped_pair_rows_rejected_by_obs_validation_before_store(tmp_path: Pat
     a, b = keys[0], keys[1]
     pair_index[a], pair_index[b] = pair_index[b], pair_index[a]
 
-    with pytest.raises(ComposeSealingError):
-        run_phase2b_subcommand(
-            fx, approved_artifacts_root=tmp_path, run_dir=fx.run_dir, confirm_seal_token=token
-        )
-    _no_seal_side_effects(fx.run_dir)
+    rc = run_phase2b_subcommand(
+        fx, approved_artifacts_root=tmp_path, run_dir=fx.run_dir, confirm_seal_token=token
+    )
+
+    assert rc == PHASE2B_NONCOMPLETE_EXIT
+    audit_path = fx.run_dir / SEAL_AUDIT_FILENAME
+    assert len(audit_path.read_text(encoding="utf-8").splitlines()) == 1
+    assert _terminal_artifacts(fx.run_dir) == [fx.run_dir / Phase2bTerminal.ABORTED_ARTIFACT]
+    aborted = json.loads((fx.run_dir / Phase2bTerminal.ABORTED_ARTIFACT).read_bytes())
+    assert aborted["terminal_state"] == "ABORTED_AFTER_SEAL"
+    assert aborted["sealed_access_count"] == 1
+    assert aborted["exception_class"] == "ComposeSealingError"
+    assert (fx.run_dir / DURABLE_COMMIT_FILENAME).is_file()
+
+
+def test_verified_descriptor_survives_source_path_replacement(tmp_path: Path) -> None:
+    """The bytes later opened are the hashed inode, not a replaced pathname."""
+    source_path = tmp_path / "source.h5ad"
+    original = b"original-sealed-source"
+    replacement = b"replacement-source"
+    source_path.write_bytes(original)
+    replacement_path = tmp_path / "replacement.h5ad"
+    replacement_path.write_bytes(replacement)
+
+    expected_sha = hashlib.sha256(original).hexdigest()
+    with phase2b_mod._open_verified_sealed_source(source_path, expected_sha) as descriptor_path:
+        replacement_path.replace(source_path)
+        assert source_path.read_bytes() == replacement
+        assert descriptor_path.read_bytes() == original
 
 
 # --------------------------------------------------------------------------- #
