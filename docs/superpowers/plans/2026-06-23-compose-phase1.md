@@ -20,7 +20,10 @@
 ## Global Constraints
 
 - **Spec:** `docs/superpowers/specs/2026-06-22-compose-epistasis-operator-design.md`. This plan implements **Phase 1 only** (§5).
-- **No seal access (§2.5).** Phase 1 code must never read `sealed_double_unseen` or `secondary_sealed` expression/outcomes. Only `singles_train` + `combo_calibration` (+ outcome-independent cell-count metadata) are readable. A leakage test enforces this.
+- **No seal access (§2.5).** Phase 1 code must never read `sealed_double_unseen` or
+  `sealed_single_unseen` expression/outcomes. Only `singles_train` +
+  `combo_calibration` (+ outcome-independent cell-count metadata) are readable. A leakage
+  test enforces this. (`secondary_sealed` was an obsolete draft label.)
 - **Outcome-independent eligibility (§2.2, CLAUDE.md#invariants).** Eligible singles/pairs are chosen by cell-count/QC + ESM availability + graph structure ONLY — never by GI strength or response magnitude.
 - **Two-stage identification (§3.1–3.2).** `z_g` is fixed from singles BEFORE `B` is estimated; `B` estimation is a linear regularized least-squares.
 - **Identifiability ≠ recovery ≠ generalization (§1.4, C3).** Algebraic identifiability is the noiseless rank condition; noisy recovery is the synthetic known-answer result; neither is a real-generalization claim. Keep them separate in code, names, and reports.
@@ -1261,7 +1264,7 @@ import numpy as np
 
 from alive.compose.identify import RankReport
 
-_SEALED_ROLES = frozenset({"sealed_double_unseen", "secondary_sealed"})
+_SEALED_ROLES = frozenset({"sealed_double_unseen", "sealed_single_unseen"})
 
 
 class LeakageError(Exception):

@@ -1,8 +1,8 @@
 """COMPOSE Phase-1 pre-check gates (spec §2.4): power, measurability, rank.
 
 These gates decide go/no-go for the real Phase-2 study WITHOUT opening any seal.
-The measurability gate enforces the leakage guard: it refuses to run on data
-tagged with a sealed role.
+The measurability gate enforces the leakage guard: it refuses every role except
+the registered calibration role.
 """
 
 from __future__ import annotations
@@ -12,12 +12,11 @@ from dataclasses import dataclass
 import numpy as np
 
 from alive.compose.identify import RankReport
-
-_SEALED_ROLES = frozenset({"sealed_double_unseen", "secondary_sealed"})
+from alive.compose.split import CALIBRATION_ROLE_NAME
 
 
 class LeakageError(Exception):
-    """Raised if a gate is asked to read sealed-role data."""
+    """Raised if a gate is asked to read non-calibration-role data."""
 
 
 @dataclass(frozen=True)
@@ -61,11 +60,23 @@ def measurability_gate(
     eps_split_a: np.ndarray,
     eps_split_b: np.ndarray,
     *,
-    _role: str = "combo_calibration",
+    _role: str,
 ) -> GateResult:
-    """Noise-ceiling via split-half agreement on DEV pairs only (§2.4 guard)."""
-    if _role in _SEALED_ROLES:
-        raise LeakageError(f"measurability gate must not read sealed role {_role!r}")
+    """Noise-ceiling via split-half agreement on calibration pairs only.
+
+    ``_role`` is mandatory and must equal the registered calibration role.
+    Unknown, legacy, misspelled and sealed roles all fail closed. The role check
+    is defense in depth; the caller must still obtain the arrays through the
+    typed development-only data boundary because an array has no intrinsic
+    provenance that this numerical function could infer.
+    """
+    # This is a development-only operation, so an allowlist is safer than a
+    # blacklist: legacy names, typos and future roles all fail closed.
+    if _role != CALIBRATION_ROLE_NAME:
+        raise LeakageError(
+            "measurability gate accepts only the registered development role "
+            f"{CALIBRATION_ROLE_NAME!r}; got {_role!r}"
+        )
     a = np.asarray(eps_split_a, dtype=np.float64).ravel()
     b = np.asarray(eps_split_b, dtype=np.float64).ravel()
     a0, b0 = a - a.mean(), b - b.mean()

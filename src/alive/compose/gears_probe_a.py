@@ -46,6 +46,23 @@ from alive.compose.fit_role import (
     row_identity_sha256,
     validate_fit_role_artifact,
 )
+from alive.compose.network_isolation import (
+    DRIVER_RELATIVE_PATH,
+    LAUNCHER_RECEIPT_KEYS,
+    LAUNCHER_RECEIPT_SCHEMA,
+    LAUNCHER_RELATIVE_PATH,
+    LOOPBACK_NAMESPACE_KEYS,
+    LOOPBACK_NAMESPACE_METHOD,
+    PYTHON_ISOLATION_FLAGS,
+    SECCOMP_ALLOWED_CAPABILITIES_MASK,
+    SECCOMP_CAPABILITY_FIELDS,
+    SECCOMP_PRIVILEGE_CAPABILITY_FIELDS,
+    SECCOMP_SOCKET_KEYS,
+    SECCOMP_SOCKET_METHOD,
+    isolation_implementation_sha256,
+    launcher_receipt_sha256,
+    seccomp_policy_sha256,
+)
 from alive.provenance import sha256_bytes, sha256_file, sha256_json
 
 REPORT_SCHEMA = "compose_gears_probe_a_report_v8"
@@ -141,8 +158,8 @@ _SINGLETON_ROLE_PATHS = {
 _MULTI_ROLES = frozenset({"roster_receipt", "probe_a_checkpoint", "raw_sample", "log"})
 _KNOWN_ROLES = frozenset(_SINGLETON_ROLE_PATHS) | _MULTI_ROLES
 
-COMMAND_RECORD_SCHEMA = "compose_gears_probe_command_record_v1"
-RUNTIME_SCHEMA = "compose_gears_probe_runtime_v4"
+COMMAND_RECORD_SCHEMA = "compose_gears_probe_command_record_v2"
+RUNTIME_SCHEMA = "compose_gears_probe_runtime_v5"
 PROVIDER_ATTESTATION_SCHEMA = "compose_provider_runtime_attestation_v1"
 INPUTS_SCHEMA = "compose_gears_probe_inputs_v4"
 ROLE_ATTESTATION_SCHEMA = "compose_gears_probe_role_attestation_v3"
@@ -201,6 +218,8 @@ _COMMAND_KEYS = {
     "schema",
     "command",
     "argv",
+    "isolation_receipt",
+    "isolation_receipt_sha256",
     "cwd",
     "env",
     "started_at_utc",
@@ -260,13 +279,6 @@ _CGROUP_EFFECTIVE_KEYS = {
     "memory_limit_bytes",
 }
 _HOST_VISIBLE_KEYS = {"cpu_model", "cpu_count", "ram_bytes"}
-_NETWORK_ISOLATION_KEYS = {
-    "method",
-    "network_namespace",
-    "interfaces",
-    "ipv4_non_loopback_route_count",
-    "ipv6_non_loopback_route_count",
-}
 _INPUTS_KEYS = {
     "schema",
     "protocol",
@@ -1859,24 +1871,91 @@ def validate_runtime_evidence(
     _sha(obj["runtime_fingerprint_sha256"], "runtime.runtime_fingerprint_sha256")
     if obj["network_disabled"] is not True:
         raise ProbeAEvidenceError("runtime evidence must attest network_disabled=true")
-    isolation = _exact_keys(
-        obj["network_isolation"], _NETWORK_ISOLATION_KEYS, "runtime.network_isolation"
-    )
-    namespace = _nonempty_string(
-        isolation["network_namespace"], "runtime.network_isolation.network_namespace"
-    )
-    if (
-        isolation["method"] != "linux_network_namespace_loopback_only"
-        or re.fullmatch(r"net:\[[0-9]+\]", namespace) is None
-        or isolation["interfaces"] != ["lo"]
-        or type(isolation["ipv4_non_loopback_route_count"]) is not int
-        or isolation["ipv4_non_loopback_route_count"] != 0
-        or type(isolation["ipv6_non_loopback_route_count"]) is not int
-        or isolation["ipv6_non_loopback_route_count"] != 0
-    ):
-        raise ProbeAEvidenceError(
-            "runtime network isolation is not a loopback-only Linux network namespace"
+    isolation_payload = obj["network_isolation"]
+    if not isinstance(isolation_payload, Mapping):
+        raise ProbeAEvidenceError("runtime.network_isolation must be an object")
+    method = isolation_payload.get("method")
+    if method == LOOPBACK_NAMESPACE_METHOD:
+        isolation = _exact_keys(
+            isolation_payload,
+            set(LOOPBACK_NAMESPACE_KEYS),
+            "runtime.network_isolation",
         )
+        namespace = _nonempty_string(
+            isolation["network_namespace"],
+            "runtime.network_isolation.network_namespace",
+        )
+        if (
+            re.fullmatch(r"net:\[[0-9]+\]", namespace) is None
+            or isolation["interfaces"] != ["lo"]
+            or type(isolation["ipv4_non_loopback_route_count"]) is not int
+            or isolation["ipv4_non_loopback_route_count"] != 0
+            or type(isolation["ipv6_non_loopback_route_count"]) is not int
+            or isolation["ipv6_non_loopback_route_count"] != 0
+        ):
+            raise ProbeAEvidenceError(
+                "runtime network isolation is not a loopback-only Linux network namespace"
+            )
+    elif method == SECCOMP_SOCKET_METHOD:
+        isolation = _exact_keys(
+            isolation_payload,
+            set(SECCOMP_SOCKET_KEYS),
+            "runtime.network_isolation",
+        )
+        if isolation["collector_implementation_sha256"] != isolation_implementation_sha256():
+            raise ProbeAEvidenceError(
+                "runtime seccomp isolation collector implementation differs from the verifier"
+            )
+        if isolation["policy_sha256"] != seccomp_policy_sha256():
+            raise ProbeAEvidenceError(
+                "runtime seccomp isolation expected policy differs from the verifier"
+            )
+        if isolation["architecture"] != "x86_64":
+            raise ProbeAEvidenceError("runtime seccomp isolation architecture must be x86_64")
+        for capability_field in SECCOMP_CAPABILITY_FIELDS:
+            capabilities = isolation[capability_field]
+            if (
+                not isinstance(capabilities, str)
+                or re.fullmatch(r"[0-9a-f]{16}", capabilities) is None
+                or (
+                    capability_field in SECCOMP_PRIVILEGE_CAPABILITY_FIELDS
+                    and int(capabilities, 16) & ~SECCOMP_ALLOWED_CAPABILITIES_MASK
+                )
+            ):
+                raise ProbeAEvidenceError(
+                    "runtime seccomp isolation capability sets exceed the admitted allowlist"
+                )
+        if int(isolation["permitted_capabilities_hex"], 16) & ~int(
+            isolation["bounding_capabilities_hex"], 16
+        ):
+            raise ProbeAEvidenceError(
+                "runtime seccomp isolation permitted capabilities exceed its bounding set"
+            )
+        if (
+            type(isolation["no_new_privs"]) is not int
+            or isolation["no_new_privs"] != 1
+            or type(isolation["seccomp_mode"]) is not int
+            or isolation["seccomp_mode"] != 2
+            or type(isolation["seccomp_filter_count"]) is not int
+            or isolation["seccomp_filter_count"] < 1
+            or any(
+                type(isolation[field]) is not int or isolation[field] != 1
+                for field in (
+                    "af_inet_stream_errno",
+                    "af_inet_dgram_errno",
+                    "af_inet6_stream_errno",
+                    "af_inet6_dgram_errno",
+                    "af_unix_socket_errno",
+                    "af_unix_dgram_errno",
+                )
+            )
+            or isolation["af_unix_socketpair_available"] is not True
+        ):
+            raise ProbeAEvidenceError(
+                "runtime seccomp isolation does not prove the socketpair-only policy"
+            )
+    else:
+        raise ProbeAEvidenceError("runtime network isolation method is unsupported")
     result = dict(obj)
     result["provider_allocation"] = dict(allocation)
     result["cgroup_effective"] = dict(cgroup)
@@ -2025,6 +2104,7 @@ def _validate_commands(
     approved_roots: list[str] = []
     alias_paths: list[str] = []
     prepared_roster_path: str | None = None
+    execution_python_identity: tuple[object, ...] | None = None
 
     def execution_path(relative: str) -> str:
         if execution_root is None:
@@ -2064,6 +2144,147 @@ def _validate_commands(
             or any(not isinstance(token, str) or not token for token in argv)
         ):
             raise ProbeAEvidenceError("commands argv must be a non-empty string list")
+        receipt_payload = obj["isolation_receipt"]
+        receipt = _exact_keys(
+            receipt_payload,
+            set(LAUNCHER_RECEIPT_KEYS),
+            f"commands record {index}.isolation_receipt",
+        )
+        _checksum(receipt, f"commands record {index}.isolation_receipt")
+        if (
+            obj["isolation_receipt_sha256"] != launcher_receipt_sha256(receipt)
+            or receipt["schema"] != LAUNCHER_RECEIPT_SCHEMA
+            or type(receipt["pid"]) is not int
+            or receipt["pid"] <= 0
+            or receipt["method"] != SECCOMP_SOCKET_METHOD
+            or receipt["architecture"] != "x86_64"
+            or receipt["collector_implementation_sha256"] != isolation_implementation_sha256()
+            or receipt["policy_sha256"] != seccomp_policy_sha256()
+            or receipt["launcher_path"] != LAUNCHER_RELATIVE_PATH
+        ):
+            raise ProbeAEvidenceError(
+                "commands isolation receipt identity does not match the admitted runtime"
+            )
+        receipt_proof = _exact_keys(
+            receipt["proof"],
+            set(SECCOMP_SOCKET_KEYS),
+            f"commands record {index}.isolation_receipt.proof",
+        )
+        receipt_capabilities_valid = all(
+            isinstance(receipt_proof[field], str)
+            and re.fullmatch(r"[0-9a-f]{16}", receipt_proof[field]) is not None
+            and not (
+                field in SECCOMP_PRIVILEGE_CAPABILITY_FIELDS
+                and int(receipt_proof[field], 16) & ~SECCOMP_ALLOWED_CAPABILITIES_MASK
+            )
+            for field in SECCOMP_CAPABILITY_FIELDS
+        )
+        if (
+            receipt_proof["method"] != SECCOMP_SOCKET_METHOD
+            or receipt_proof["collector_implementation_sha256"] != isolation_implementation_sha256()
+            or receipt_proof["policy_sha256"] != seccomp_policy_sha256()
+            or receipt_proof["architecture"] != "x86_64"
+            or not receipt_capabilities_valid
+            or int(receipt_proof["permitted_capabilities_hex"], 16)
+            & ~int(receipt_proof["bounding_capabilities_hex"], 16)
+            or type(receipt_proof["no_new_privs"]) is not int
+            or receipt_proof["no_new_privs"] != 1
+            or type(receipt_proof["seccomp_mode"]) is not int
+            or receipt_proof["seccomp_mode"] != 2
+            or type(receipt_proof["seccomp_filter_count"]) is not int
+            or receipt_proof["seccomp_filter_count"] < 1
+            or any(
+                type(receipt_proof[field]) is not int or receipt_proof[field] != 1
+                for field in (
+                    "af_inet_stream_errno",
+                    "af_inet_dgram_errno",
+                    "af_inet6_stream_errno",
+                    "af_inet6_dgram_errno",
+                    "af_unix_socket_errno",
+                    "af_unix_dgram_errno",
+                )
+            )
+            or receipt_proof["af_unix_socketpair_available"] is not True
+            or receipt["proof_sha256"] != sha256_json(receipt_proof)
+        ):
+            raise ProbeAEvidenceError(
+                "commands isolation receipt does not contain the exact seccomp behavioral proof"
+            )
+        launcher = Path(__file__).resolve().parents[3] / LAUNCHER_RELATIVE_PATH
+        driver = Path(__file__).resolve().parents[3] / DRIVER_RELATIVE_PATH
+        if receipt["launcher_sha256"] != sha256_file(launcher):
+            raise ProbeAEvidenceError(
+                "commands isolation receipt launcher differs from the verifier"
+            )
+        if receipt["driver_sha256"] != sha256_file(driver):
+            raise ProbeAEvidenceError("commands isolation receipt driver differs from the verifier")
+        launcher_argv = receipt["launcher_argv"]
+        exec_argv = receipt["exec_argv"]
+        python_executable = receipt["python_executable"]
+        python_executable_realpath = receipt["python_executable_realpath"]
+        python_prefix = receipt["python_prefix"]
+        loader_environment = receipt["loader_environment"]
+        driver_path = receipt["driver_path"]
+        if (
+            not isinstance(launcher_argv, list)
+            or not isinstance(exec_argv, list)
+            or not launcher_argv
+            or not exec_argv
+            or any(
+                not isinstance(token, str) or not token for token in (*launcher_argv, *exec_argv)
+            )
+            or not isinstance(python_executable, str)
+            or not Path(python_executable).is_absolute()
+            or ".." in Path(python_executable).parts
+            or not isinstance(python_executable_realpath, str)
+            or not Path(python_executable_realpath).is_absolute()
+            or ".." in Path(python_executable_realpath).parts
+            or not isinstance(receipt["python_executable_sha256"], str)
+            or re.fullmatch(r"[0-9a-f]{64}", receipt["python_executable_sha256"]) is None
+            or not isinstance(python_prefix, str)
+            or not Path(python_prefix).is_absolute()
+            or ".." in Path(python_prefix).parts
+            or not Path(python_executable).is_relative_to(Path(python_prefix))
+            or receipt["python_isolation_flags"] != PYTHON_ISOLATION_FLAGS
+            or not isinstance(loader_environment, Mapping)
+            or set(loader_environment) != {"LD_LIBRARY_PATH"}
+            or not isinstance(loader_environment["LD_LIBRARY_PATH"], str)
+            or any(
+                not token or not Path(token).is_absolute() or ".." in Path(token).parts
+                for token in loader_environment["LD_LIBRARY_PATH"].split(os.pathsep)
+                if loader_environment["LD_LIBRARY_PATH"]
+            )
+            or not isinstance(driver_path, str)
+            or not Path(driver_path).is_absolute()
+            or ".." in Path(driver_path).parts
+            or not driver_path.endswith(DRIVER_RELATIVE_PATH)
+            or launcher_argv
+            != [
+                launcher_argv[0],
+                "--",
+                *exec_argv,
+            ]
+            or not Path(launcher_argv[0]).is_absolute()
+            or not launcher_argv[0].endswith(LAUNCHER_RELATIVE_PATH)
+            or exec_argv != [python_executable, "-I", *argv]
+            or argv[0] != driver_path
+            or receipt["exec_argv_sha256"] != sha256_json(exec_argv)
+        ):
+            raise ProbeAEvidenceError("commands isolation receipt argv binding is invalid")
+        observed_python_identity = (
+            python_executable,
+            python_executable_realpath,
+            receipt["python_executable_sha256"],
+            python_prefix,
+            tuple(sorted(receipt["python_isolation_flags"].items())),
+            tuple(sorted(loader_environment.items())),
+        )
+        if execution_python_identity is None:
+            execution_python_identity = observed_python_identity
+        elif execution_python_identity != observed_python_identity:
+            raise ProbeAEvidenceError(
+                "commands isolation receipts do not use one exact Python runtime"
+            )
         script_indexes = [
             position
             for position, token in enumerate(argv)
@@ -2077,6 +2298,10 @@ def _validate_commands(
             raise ProbeAEvidenceError(
                 "commands argv must invoke one maintained GEARS probe CLI with "
                 "the named subcommand immediately following it"
+            )
+        if argv.count(driver_path) != 1 or argv[0] != driver_path or exec_argv[2:] != argv:
+            raise ProbeAEvidenceError(
+                "commands isolation receipt does not bind the exact maintained execution path"
             )
         if any("$(" in token or "`" in token for token in argv):
             raise ProbeAEvidenceError("commands argv must not use shell command substitution")
@@ -2402,7 +2627,17 @@ def _validate_commands(
                 raise ProbeAEvidenceError(
                     "Probe-A report command is not bound to the raw/registration/report contract"
                 )
-        _nonempty_string(obj["cwd"], f"commands record {index}.cwd")
+        cwd = _nonempty_string(obj["cwd"], f"commands record {index}.cwd")
+        repository_path = Path(driver_path).parents[2]
+        if (
+            not Path(cwd).is_absolute()
+            or ".." in Path(cwd).parts
+            or Path(cwd) != repository_path
+            or Path(launcher_argv[0]) != repository_path / LAUNCHER_RELATIVE_PATH
+        ):
+            raise ProbeAEvidenceError(
+                "commands launcher/driver paths do not originate from the recorded checkout"
+            )
         env = obj["env"]
         if not isinstance(env, Mapping) or any(
             not isinstance(key, str)

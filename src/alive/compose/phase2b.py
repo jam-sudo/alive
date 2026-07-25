@@ -104,7 +104,11 @@ from alive.compose.seed_variability import (
     verify_seed_variability_for_preflight,
 )
 from alive.compose.select import OOFFoldManifest, OOFFoldManifestError
-from alive.compose.split import verify_split_manifest
+from alive.compose.split import (
+    SEALED_DOUBLE_UNSEEN_ROLE_NAME,
+    SEALED_SINGLE_UNSEEN_ROLE_NAME,
+    verify_split_manifest,
+)
 from alive.compose.terminal import Phase2bTerminal, TerminalState
 from alive.compose.verdict2 import (
     ComposeIntegrityReport,
@@ -115,9 +119,10 @@ from alive.compose.verdict2 import (
 )
 from alive.provenance import EnvironmentInfo, RunLedger, sha256_file, sha256_json
 
-#: The two sealed regime role labels (manifest order).
-_DOUBLE_ROLE = "sealed_double_unseen"
-_SINGLE_ROLE = "sealed_single_unseen"
+#: The two sealed regime role labels, bound to the single canonical roster in
+#: :mod:`alive.compose.split` rather than re-spelled here.
+_DOUBLE_ROLE = SEALED_DOUBLE_UNSEEN_ROLE_NAME
+_SINGLE_ROLE = SEALED_SINGLE_UNSEEN_ROLE_NAME
 
 #: The headline method (config ``baselines.ablation_ladder[0]``); never a
 #: comparator. The double-unseen headline bounds drive the sealed verdict.

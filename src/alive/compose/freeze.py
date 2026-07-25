@@ -137,11 +137,18 @@ def _assert_no_outcome_reference(obj: object) -> None:
     """
     stack: list[object] = [obj]
     seen: set[int] = set()
+    # `seen` is keyed on id(), and the numpy branches below materialise NEW
+    # temporaries (``tolist()`` elements, structured-array field views) that
+    # nothing else references. Pinning every visited object prevents CPython from
+    # recycling a freed address into a later temporary, which the id-keyed set
+    # would then treat as already-scanned and skip — a silent fail-open.
+    visited: list[object] = []
     while stack:
         cur = stack.pop()
         if id(cur) in seen:
             continue
         seen.add(id(cur))
+        visited.append(cur)
 
         if isinstance(cur, str):
             lowered = cur.casefold()
@@ -150,7 +157,18 @@ def _assert_no_outcome_reference(obj: object) -> None:
                     f"measured-outcome reference detected (bundle is predictions-only): {cur!r}"
                 )
             continue
-        if isinstance(cur, (bytes, bytearray)):
+        if isinstance(cur, (bytes, bytearray, np.bytes_)):
+            try:
+                decoded = bytes(cur).decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise OutcomeLeakageError(
+                    "non-UTF-8 byte string is not permitted in predictions-only diagnostics"
+                ) from exc
+            lowered = decoded.casefold()
+            if any(token in lowered for token in OUTCOME_TOKENS):
+                raise OutcomeLeakageError(
+                    f"measured-outcome reference detected (bundle is predictions-only): {decoded!r}"
+                )
             continue
         if hasattr(cur, "__dataclass_fields__"):
             for fname in cur.__dataclass_fields__:  # type: ignore[attr-defined]
@@ -168,7 +186,13 @@ def _assert_no_outcome_reference(obj: object) -> None:
         if isinstance(cur, Sequence):
             stack.extend(cur)
             continue
-        # scalars / numpy arrays: nothing string-bearing to scan
+        if isinstance(cur, np.ndarray) and cur.dtype.fields is not None:
+            stack.extend(cur[name] for name in cur.dtype.names or ())
+            continue
+        if isinstance(cur, np.ndarray) and cur.dtype.kind in {"U", "S", "O"}:
+            stack.extend(cur.ravel().tolist())
+            continue
+        # scalars / numeric numpy arrays: nothing string-bearing to scan
 
 
 def _is_canonical(pair: tuple[str, str]) -> bool:

@@ -5,7 +5,8 @@
 > 완료됐지만 현재 committed config/evidence는 release-ready가 아니다. Real fit과 sealed access는
 > current `ActivationRecord`, finalized config/evidence, clean owner-approved exact SHA와
 > `docs/superpowers/COMPOSE-SEAL-READINESS.md`의 release gate가 모두 유효할 때만 허용된다.
-> **개정일:** 2026-07-19 (status sanitization; scientific claim unchanged)
+> **개정일:** 2026-07-24 (sealed secondary role roster를 live config/§10.4와 정합화;
+> scientific claim unchanged)
 > **protocol 이름:** `COMPOSE-K562-v1`
 > **선행 milestone:** `TG-K562-v1` (COMPLETE, verdict `NO_DISTINCT_WIN`; 본 milestone은 그 결과에 소급 주장하지 않음, seal 영구 독립 §6.3)
 
@@ -129,7 +130,13 @@ disjoint roles:
 - `sealed_double_unseen` — 두 유전자 모두 training combo에 없는 쌍(**headline**, power 충족 시).
   단, 두 유전자의 single perturbation은 `singles_train`에서 관측되므로 이는 gene-zero-shot이 아니라
   combo/pair-zero-shot이다.
-- `secondary_sealed` — single-unseen, both-seen (보고용).
+- `sealed_single_unseen` — 정확히 한 유전자만 calibration gene set에 속하는 쌍
+  (**등록된 secondary evaluation regime**).
+
+두 유전자 모두 calibration gene set에 속하는 both-seen pair는 `combo_calibration`이다. 따라서
+COMPOSE-K562-v1에는 별도 both-seen sealed role이 없으며, both-seen test는 deferred다
+(`configs/compose_k562_v1_phase2.yaml`). role roster의 정본은
+`combo_calibration`, `sealed_double_unseen`, `sealed_single_unseen`의 정확한 3개다.
 
 그래프 제약: GI 그래프를 분할해 test-쌍 유전자를 training combo에서 격리한다. 이 격리가 power를
 제한한다(§2.4).
@@ -142,14 +149,15 @@ disjoint roles:
 - **Measurability / noise-ceiling gate.** split-half(또는 replicate) 추정기로 $\varepsilon$의
   noise floor와 추정가능 분산(천장)을 산출·보고한다. 이 gate는 `combo_calibration`/unsealed
   development pairs 또는 outcome-independent cell-count metadata만 사용한다. `sealed_double_unseen`
-  및 `secondary_sealed`의 expression/outcome을 사용해 noise ceiling을 추정하지 않는다. 신호 ≈
+  및 `sealed_single_unseen`의 expression/outcome을 사용해 noise ceiling을 추정하지 않는다. 신호 ≈
   noise면 **FUTILITY_STOPPED**(§4), 합성 결과를 deliverable로, seal은 닫힌 채 종료.
 - **Rank gate.** calibration 설계행렬 $\Phi$(§3.2)의 rank를 보고; 미달이면 식별 부분공간을
   명시하고 그 밖의 double-unseen 예측은 주장하지 않는다.
 
 ### 2.5 Seal (신규·독립; §6.3)
 
-`sealed_double_unseen`(및 secondary) outcome은 model/method freeze 후 **정확히 1회** 개방한다.
+`sealed_double_unseen`과 `sealed_single_unseen` outcome은 model/method freeze 후 하나의
+등록된 sealed union으로 **정확히 1회** 개방한다.
 fit/식별/선택에는 `singles_train` + `combo_calibration`만 사용한다. `TG-K562-v1`과 별도의
 run-identity·audit·store. composite run_id = config + data-card + raw + feature-map digest.
 futility-stopped run은 sealed access count 0으로 영구 종료한다.

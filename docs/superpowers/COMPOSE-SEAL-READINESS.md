@@ -5,7 +5,7 @@
 > **이 문서는 아무것도 정의하지 않는다** — 세부(task)는 plan, claim은 spec, exact param은 config,
 > 시간순 audit는 git이 authoritative다([sources of truth](../../CLAUDE.md#sources)). 상태 행이 authoritative
 > 문서와 어긋나면 **authoritative 문서가 옳다**; 이 인덱스를 갱신한다.
-> **Updated:** 2026-07-22 @ `9969fb1` (branch `main`)
+> **Updated:** 2026-07-25 @ `a1721c3` (branch `compose-network-isolation`)
 > **갱신 트리거:** sub-project/gate **상태가 바뀔 때만**(커밋마다 아님).
 > **종결 상태:** COMPOSE seal이 정확히 한 번 열리면 이 인덱스는 **frozen/은퇴**한다. 이후 진행상황은
 > seal 결과와 post-hoc analysis가 대신한다.
@@ -151,6 +151,40 @@ branch에서 추적 가능하게 기록한다. `LOCAL` ledger ID만으로는 이
    roster passes 217 tests plus full Ruff check/format and `git diff --check`. The prior candidate pin is therefore
    retired for future runs. A clean implementation commit, full verification, recomputed pin, and independent acceptance
    are mandatory; this correction does not authorize a pod run or alter the archived negative result.
+   **2026-07-23 managed-pod isolation correction (working tree, not operationally pinned):** a standard RunPod
+   preflight proved that `unshare --net` is unavailable without `CAP_SYS_ADMIN`/`CAP_NET_ADMIN`; no scientific
+   command or evidence publication was attempted and that pod was terminated. Runtime v5 therefore retains the
+   lo-only namespace proof and adds an exact `no_new_privs` + seccomp alternative that permits only endpoint-free
+   `AF_UNIX socketpair` IPC, denies all `socket`/`connect` plus `io_uring_setup`/`pidfd_getfd`, restricts execution
+   to the validated x86_64 ABI and an exact allowlist for privilege-bearing capability sets, and actively
+   re-probes IPv4/IPv6/Unix
+   stream/datagram denial at capture and every stateful command boundary. The launcher now passes a same-PID
+   sealed-memfd receipt whose canonical bytes are embedded in command-record v2 and replayed by the offline
+   verifier. Receipt v2 also fail-closes non-`-I`/import-loader overrides, arbitrary wrappers or interpreters, and
+   cross-command Python/driver drift. Its live memfd check establishes continuity inside the trusted producer; the
+   archived self-checksummed JSON is explicitly not represented as independent remote attestation. The collector
+   and expected-policy SHAs bind the committed request; they are deliberately not
+   called a kernel-filter read-back because Linux exposes no such unprivileged introspection. Governing design:
+   `specs/2026-07-23-compose-managed-pod-network-isolation-design.md`. All earlier verifier/image/owner-lock pins
+   are historical after this code change; a clean commit, fresh signed verifier image/owner lock, and independent
+   review remain mandatory. The single test that establishes the kernel property is `skipif`-ed off non-Linux
+   hosts and therefore remains **unrun** on the developer machine; executing the suite on the Linux x86_64 target
+   is an outstanding verification step, and a green macOS run reporting `1 skipped` is not isolation evidence.
+   Seal state remains **UNOPENED** and execution remains **RELEASE-BLOCKED**.
+   **2026-07-25 leakage-guard corrections (same branch, not operationally pinned):** two development-boundary
+   guards were found failing open and were fixed with mutation-verified regression tests. (1) The measurability
+   gate blacklisted `secondary_sealed`, a role name that exists nowhere else in the protocol; the real second
+   sealed role is `sealed_single_unseen`, so the single-unseen regime passed a tripwire that was only ever
+   checking a phantom. The gate is now an allowlist over the registered calibration role with a mandatory
+   explicit role argument, and every sealed-role reference is bound by semantic name from one canonical roster
+   rather than spelled out per call site or indexed positionally out of `ROLE_NAMES`. Role label values are
+   unchanged, so no run identity moves. (2) Both recursive leakage scanners skipped numpy string/object arrays
+   entirely; extending them to scan those arrays exposed a second fail-open, because the visited set is keyed on
+   `id()` and the newly materialised temporaries let CPython recycle a freed address into a later temporary that
+   was then skipped unscanned. Visited objects are now pinned for the walk. Neither guard is the primary seal —
+   the outcome store's one-time claim covered both sealed roles throughout — but both are development-boundary
+   walls that must not fail open. A clean commit and independent review at the exact SHA remain mandatory. Seal
+   state remains **UNOPENED** and execution remains **RELEASE-BLOCKED**.
    **2026-07-20 upstream-custody/runtime-origin correction (candidate, not operationally pinned):** the next
    verifier revision archives the exact worker payload, fit-role H5AD, alias map, response projection, and selected
    roster as fixed manifest roles; derives `inputs.json`/role attestation from those bytes; and requires independent

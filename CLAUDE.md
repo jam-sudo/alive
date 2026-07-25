@@ -101,7 +101,7 @@ mock 대체하지 않는다. guard가 작업을 막으면 코드를 완화하지
 - sealed-read 차단·1회 claim → `compose/outcome_store.py` (`ComposeSealingError`)
 - leakage/freeze wall → `compose/gates.py`, `compose/freeze.py`
 - write-once/durable terminal → `io.atomic_write_once`, `compose/durable.py`, `compose/terminal.py`
-- entry/identity/pair audit → `compose/preflight.py`, `compose/driver/confirmation.py`, `pair_index.py`
+- entry/identity/pair audit → `compose/preflight.py`, `compose/driver/confirmation.py`, `compose/driver/pair_index.py`
 
 ## 5. Protocol registry {#registry}
 

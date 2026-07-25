@@ -25,7 +25,7 @@ WORKDIR /opt/alive
 COPY pyproject.toml uv.lock ./
 COPY src/ ./src/
 RUN mkdir -p scripts/compose scripts/baselines
-COPY scripts/compose/verify_gears_probe_a.py scripts/compose/gears_decision_probe.py ./scripts/compose/
+COPY scripts/compose/verify_gears_probe_a.py scripts/compose/gears_decision_probe.py scripts/compose/run_network_isolated.py ./scripts/compose/
 COPY scripts/baselines/gears_worker.py ./scripts/baselines/
 
 # uv.lock authenticates every downloaded wheel/sdist.  The project remains an

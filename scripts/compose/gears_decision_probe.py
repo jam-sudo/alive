@@ -24,6 +24,7 @@ import os
 import pickle
 import platform
 import re
+import site
 import stat
 import subprocess
 import sys
@@ -31,16 +32,81 @@ import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
-import anndata as ad
-import numpy as np
-import pandas as pd
-from scipy import sparse
 
-from alive.compose.activation_evidence import (
+def _bootstrap_runtime_identity() -> None:
+    """Reject import shadowing before decision-bearing packages are imported."""
+    repository = Path(__file__).resolve().parents[2]
+    flags = {
+        "ignore_environment": int(sys.flags.ignore_environment),
+        "isolated": int(sys.flags.isolated),
+        "no_user_site": int(sys.flags.no_user_site),
+        "safe_path": int(getattr(sys.flags, "safe_path", 0)),
+    }
+    if (
+        flags
+        != {
+            "ignore_environment": 1,
+            "isolated": 1,
+            "no_user_site": 1,
+            "safe_path": 1,
+        }
+        or site.ENABLE_USER_SITE
+    ):
+        raise RuntimeError("maintained GEARS probe driver requires Python -I")
+    contaminated = [
+        name
+        for name in (
+            "LD_AUDIT",
+            "LD_PRELOAD",
+            "PYTHONBREAKPOINT",
+            "PYTHONHOME",
+            "PYTHONINSPECT",
+            "PYTHONPATH",
+            "PYTHONSTARTUP",
+            "PYTHONUSERBASE",
+        )
+        if os.environ.get(name)
+    ]
+    if contaminated:
+        raise RuntimeError(
+            "maintained GEARS probe driver forbids import/loader overrides: "
+            + ", ".join(contaminated)
+        )
+    library_path = os.environ.get("LD_LIBRARY_PATH", "")
+    if library_path:
+        for token in library_path.split(os.pathsep):
+            candidate = Path(token)
+            if not token or not candidate.is_absolute():
+                raise RuntimeError(
+                    "LD_LIBRARY_PATH must contain only non-empty absolute directories"
+                )
+            resolved = candidate.resolve(strict=True)
+            if not resolved.is_dir() or resolved.stat().st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+                raise RuntimeError("LD_LIBRARY_PATH contains an unsafe directory")
+    expected_alive = (repository / "src/alive/__init__.py").resolve(strict=True)
+    alive_spec = importlib.util.find_spec("alive")
+    if alive_spec is None or alive_spec.origin is None:
+        raise RuntimeError("maintained GEARS probe driver cannot resolve the alive package")
+    if Path(alive_spec.origin).resolve(strict=True) != expected_alive:
+        raise RuntimeError(
+            "maintained GEARS probe driver alive import does not originate from this checkout"
+        )
+
+
+if __name__ == "__main__":
+    _bootstrap_runtime_identity()
+
+
+import anndata as ad  # noqa: E402
+import numpy as np  # noqa: E402
+import pandas as pd  # noqa: E402
+from scipy import sparse  # noqa: E402
+
+from alive.compose.activation_evidence import (  # noqa: E402
     ActivationEvidenceError,
     validate_go_resource_manifest,
 )
-from alive.compose.approximation_bias import (
+from alive.compose.approximation_bias import (  # noqa: E402
     PROBE_A_INPUT_TRANSFORM,
     PROBE_A_REGISTRATION_SCHEMA,
     PROBE_A_REPRESENTATION,
@@ -51,14 +117,17 @@ from alive.compose.approximation_bias import (
     self_checksum,
     validate_probe_a_owner_policy,
 )
-from alive.compose.baseline_subprocess import canonical_payload_sha256, read_payload
-from alive.compose.fit_role import (
+from alive.compose.baseline_subprocess import (  # noqa: E402
+    canonical_payload_sha256,
+    read_payload,
+)
+from alive.compose.fit_role import (  # noqa: E402
     FitRoleArtifactSpec,
     read_verified_fit_role_artifact,
     row_identity_sha256,
     validate_fit_role_artifact,
 )
-from alive.compose.gears_probe_a import (
+from alive.compose.gears_probe_a import (  # noqa: E402
     ALIAS_ARTIFACT_PATH,
     FIT_ROLE_ARTIFACT_PATH,
     GEARS_LOCK_PATH,
@@ -93,7 +162,7 @@ from alive.compose.gears_probe_a import (
     validate_registration,
     validate_runtime_evidence,
 )
-from alive.compose.gene_universe import (
+from alive.compose.gene_universe import (  # noqa: E402
     AliasMap,
     GeneUniverseError,
     assert_gears_roster_matches,
@@ -102,8 +171,15 @@ from alive.compose.gene_universe import (
     load_gears_gene_roster,
     normalize_full_then_subset,
 )
-from alive.io import atomic_write_once
-from alive.provenance import sha256_bytes, sha256_file, sha256_json
+from alive.compose.network_isolation import (  # noqa: E402
+    LAUNCHER_RECEIPT_KEYS,
+    NetworkIsolationError,
+    collect_network_isolation,
+    launcher_receipt_sha256,
+    validate_sealed_launcher_receipt,
+)
+from alive.io import atomic_write_once  # noqa: E402
+from alive.provenance import sha256_bytes, sha256_file, sha256_json  # noqa: E402
 
 _MANIFEST_SCHEMA = PROBE_INPUT_MANIFEST_SCHEMA
 _RECEIPT_SCHEMA = ROSTER_RECEIPT_SCHEMA
@@ -111,10 +187,11 @@ _ADATA_SCHEMA = PROBE_INPUT_ADATA_SCHEMA
 _CANDIDATE_SCHEMA = "compose_perturbation_candidates_v1"
 _GENE2GO_SCHEMA = "compose_gene2go_nodes_v1"
 _COMMAND_RESULT_SCHEMA = "compose_gears_probe_command_result_v1"
-_COMMAND_RECORD_SCHEMA = "compose_gears_probe_command_record_v1"
+_COMMAND_RECORD_SCHEMA = "compose_gears_probe_command_record_v2"
 _COMMAND_ENV_ALLOWLIST = (
     "CUBLAS_WORKSPACE_CONFIG",
     "CUDA_VISIBLE_DEVICES",
+    "LD_LIBRARY_PATH",
     "MKL_NUM_THREADS",
     "OMP_NUM_THREADS",
     "PYTHONHASHSEED",
@@ -467,6 +544,7 @@ def _append_command_record(
     ledger_path: str | Path,
     command: str,
     argv: list[str],
+    isolation_receipt: dict[str, object],
     started_at_utc: str,
     primary_file_sha256: str,
 ) -> None:
@@ -475,10 +553,14 @@ def _append_command_record(
     parent = _assert_command_ledger_open(ledger)
     if any(not isinstance(token, str) or not token for token in argv):
         raise GeneUniverseError("command ledger argv must be non-empty strings")
+    if set(isolation_receipt) != set(LAUNCHER_RECEIPT_KEYS):
+        raise GeneUniverseError("command ledger isolation receipt has an invalid field roster")
     body = {
         "schema": _COMMAND_RECORD_SCHEMA,
         "command": command,
         "argv": argv,
+        "isolation_receipt": isolation_receipt,
+        "isolation_receipt_sha256": launcher_receipt_sha256(isolation_receipt),
         "cwd": os.getcwd(),
         "env": {key: os.environ[key] for key in _COMMAND_ENV_ALLOWLIST if key in os.environ},
         "started_at_utc": started_at_utc,
@@ -566,14 +648,31 @@ def _finalize_command(
     # Runtime capture alone is insufficient: every stateful producer must still
     # match the captured cgroup/GPU/network context when it commits success.
     _assert_runtime_execution_context(args.command_ledger)
+    receipt = _validate_launcher_execution(invocation_argv)
+    if receipt != args._launcher_receipt:
+        raise GeneUniverseError("sealed launcher receipt changed during command execution")
     _append_command_record(
         ledger_path=args.command_ledger,
         command=args.command,
         argv=invocation_argv,
+        isolation_receipt=receipt,
         started_at_utc=started_at_utc,
         primary_file_sha256=primary_file_sha256,
     )
     _emit_command_result(command=args.command, primary_file_sha256=primary_file_sha256)
+
+
+def _validate_launcher_execution(invocation_argv: list[str]) -> dict[str, object]:
+    """Require the sealed same-PID launcher receipt for every maintained command."""
+    try:
+        proof = collect_network_isolation(require_seccomp=True)
+        return validate_sealed_launcher_receipt(
+            current_argv=invocation_argv,
+            repository_root=Path(__file__).resolve().parents[2],
+            current_proof=proof,
+        )
+    except NetworkIsolationError as exc:
+        raise GeneUniverseError(str(exc)) from exc
 
 
 def _probe_output_path(*, evidence_root: str | Path, out_raw: str | Path) -> str:
@@ -1446,52 +1545,11 @@ def _collect_network_isolation(
     proc_root: str | Path = "/proc",
     net_class_root: str | Path = "/sys/class/net",
 ) -> dict[str, object]:
-    """Prove that this process has only loopback network reachability."""
-    proc = Path(proc_root)
-    interfaces_root = Path(net_class_root)
-    if interfaces_root.is_symlink() or not interfaces_root.is_dir():
-        raise GeneUniverseError("network interface root must be a real directory")
+    """Translate the shared kernel-isolation contract into CLI errors."""
     try:
-        interfaces = sorted(path.name for path in interfaces_root.iterdir())
-    except OSError as exc:
-        raise GeneUniverseError(f"cannot enumerate network interfaces: {exc}") from exc
-    if interfaces != ["lo"]:
-        raise GeneUniverseError("runtime network namespace must expose only loopback")
-    namespace_path = proc / "self/ns/net"
-    try:
-        namespace = os.readlink(namespace_path)
-    except OSError as exc:
-        raise GeneUniverseError(f"cannot read runtime network namespace identity: {exc}") from exc
-    if re.fullmatch(r"net:\[[0-9]+\]", namespace) is None:
-        raise GeneUniverseError("runtime network namespace identity is malformed")
-
-    ipv4 = _required_text(proc / "net/route", label="runtime IPv4 route table").splitlines()
-    if not ipv4 or ipv4[0].split()[:2] != ["Iface", "Destination"]:
-        raise GeneUniverseError("runtime IPv4 route table header is malformed")
-    ipv4_non_loopback = sum(1 for line in ipv4[1:] if line.strip() and line.split()[0] != "lo")
-    ipv6_path = proc / "net/ipv6_route"
-    if ipv6_path.is_symlink():
-        raise GeneUniverseError("runtime IPv6 route table must not be a symlink")
-    try:
-        ipv6 = ipv6_path.read_text(encoding="utf-8").splitlines()
-    except OSError as exc:
-        raise GeneUniverseError(f"cannot read runtime IPv6 route table: {exc}") from exc
-    ipv6_non_loopback = 0
-    for line in ipv6:
-        fields = line.split()
-        if len(fields) < 10:
-            raise GeneUniverseError("runtime IPv6 route table row is malformed")
-        if fields[-1] != "lo":
-            ipv6_non_loopback += 1
-    if ipv4_non_loopback or ipv6_non_loopback:
-        raise GeneUniverseError("runtime network namespace has a non-loopback route")
-    return {
-        "method": "linux_network_namespace_loopback_only",
-        "network_namespace": namespace,
-        "interfaces": interfaces,
-        "ipv4_non_loopback_route_count": ipv4_non_loopback,
-        "ipv6_non_loopback_route_count": ipv6_non_loopback,
-    }
+        return collect_network_isolation(proc_root, net_class_root)
+    except NetworkIsolationError as exc:
+        raise GeneUniverseError(str(exc)) from exc
 
 
 def _collect_gpu_identity() -> dict[str, str]:
@@ -1702,17 +1760,10 @@ def _assert_runtime_execution_context(command_ledger: str | Path) -> None:
         raise GeneUniverseError(
             "current command GPU identity differs from captured runtime evidence"
         )
-    for field in (
-        "method",
-        "network_namespace",
-        "interfaces",
-        "ipv4_non_loopback_route_count",
-        "ipv6_non_loopback_route_count",
-    ):
-        if current_network[field] != runtime["network_isolation"][field]:
-            raise GeneUniverseError(
-                "current command network isolation differs from captured runtime evidence"
-            )
+    if current_network != runtime["network_isolation"]:
+        raise GeneUniverseError(
+            "current command network isolation differs from captured runtime evidence"
+        )
 
 
 def _fit_spec(block: dict) -> FitRoleArtifactSpec:
@@ -2648,6 +2699,7 @@ def main(argv: list[str] | None = None) -> int:
     """Run one maintained probe-preparation command."""
     invocation_argv = list(sys.argv) if argv is None else [str(Path(__file__).resolve()), *argv]
     args = _parser().parse_args(argv)
+    args._launcher_receipt = _validate_launcher_execution(invocation_argv)
     started_at_utc = _utc_now()
     if args.command != "build-evidence-manifest":
         ledger_parent = _assert_command_ledger_open(args.command_ledger)
