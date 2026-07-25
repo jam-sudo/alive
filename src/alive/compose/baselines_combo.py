@@ -209,8 +209,9 @@ def _assert_no_sealed_reference(obj: object) -> None:
     The scan therefore fires on a sealed token buried at any nesting depth, not
     just at the top level.
 
-    Bytes are kept out by design: only ``str`` carries a sealed token here, and
-    the context fields are all strings/tuples-of-strings.
+    Byte strings are decoded as UTF-8 and scanned. Non-UTF-8 bytes fail closed;
+    accepting opaque binary values here would create an encoding-dependent
+    bypass of the leakage wall.
 
     Parameters
     ----------
@@ -225,18 +226,33 @@ def _assert_no_sealed_reference(obj: object) -> None:
     """
     stack: list[object] = [obj]
     seen: set[int] = set()
+    # `seen` is keyed on id(), and the numpy branches below materialise NEW
+    # temporaries (``tolist()`` elements, structured-array field views) that
+    # nothing else references. Pinning every visited object prevents CPython from
+    # recycling a freed address into a later temporary, which the id-keyed set
+    # would then treat as already-scanned and skip — a silent fail-open.
+    visited: list[object] = []
     while stack:
         cur = stack.pop()
         # avoid pathological re-visits of shared/cyclic containers
         if id(cur) in seen:
             continue
         seen.add(id(cur))
+        visited.append(cur)
 
         if isinstance(cur, str):
             if _string_is_sealed(cur):
                 raise ValueError(f"sealed reference detected in context: {cur!r}")
             continue
-        if isinstance(cur, (bytes, bytearray)):
+        if isinstance(cur, (bytes, bytearray, np.bytes_)):
+            try:
+                decoded = bytes(cur).decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise ValueError(
+                    "non-UTF-8 byte string is not permitted in leakage-sensitive context"
+                ) from exc
+            if _string_is_sealed(decoded):
+                raise ValueError(f"sealed reference detected in byte string: {decoded!r}")
             continue
         # dataclass instances: scan their field values
         if hasattr(cur, "__dataclass_fields__"):
@@ -259,7 +275,15 @@ def _assert_no_sealed_reference(obj: object) -> None:
         if isinstance(cur, Sequence):
             stack.extend(cur)
             continue
-        # scalars / numpy arrays / anything else: nothing string-bearing to scan
+        # numpy string/object/structured arrays are not collections.abc.Sequence.
+        # Scan every string-bearing field rather than relying on the container API.
+        if isinstance(cur, np.ndarray) and cur.dtype.fields is not None:
+            stack.extend(cur[name] for name in cur.dtype.names or ())
+            continue
+        if isinstance(cur, np.ndarray) and cur.dtype.kind in {"U", "S", "O"}:
+            stack.extend(cur.ravel().tolist())
+            continue
+        # scalars / numeric arrays / anything else: nothing string-bearing to scan
 
 
 # --------------------------------------------------------------------------- #

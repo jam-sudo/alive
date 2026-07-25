@@ -247,6 +247,63 @@ def test_recursive_sealed_scan_fires_on_deeply_nested_structure():
         _assert_no_sealed_reference(dirty_path)
 
 
+def test_recursive_sealed_scan_fires_on_all_string_bearing_numpy_arrays():
+    # numpy string/object arrays are not collections.abc.Sequence, so the scanner
+    # must special-case them; otherwise a sealed token in a `dtype='U'`/object
+    # array would slip past unscanned (audit 2026-07-24).
+    from alive.compose.baselines_combo import _assert_no_sealed_reference
+
+    clean = {"labels": np.array(["fine", "also_fine"], dtype="U")}
+    _assert_no_sealed_reference(clean)  # must NOT raise
+
+    dirty_unicode = {"labels": np.array(["ok", "sealed_double_unseen"], dtype="U")}
+    with pytest.raises(ValueError):
+        _assert_no_sealed_reference(dirty_unicode)
+
+    dirty_object = {"labels": np.array([{"role": "sealed_single_unseen"}], dtype=object)}
+    with pytest.raises(ValueError):
+        _assert_no_sealed_reference(dirty_object)
+
+    dirty_bytes = {"labels": np.array([b"sealed_single_unseen"], dtype="S")}
+    with pytest.raises(ValueError):
+        _assert_no_sealed_reference(dirty_bytes)
+
+    dirty_structured = np.array(
+        [(b"sealed_double_unseen",)],
+        dtype=[("role", "S32")],
+    )
+    with pytest.raises(ValueError):
+        _assert_no_sealed_reference(dirty_structured)
+
+
+def test_recursive_sealed_scan_fails_closed_on_non_utf8_bytes():
+    from alive.compose.baselines_combo import _assert_no_sealed_reference
+
+    with pytest.raises(ValueError, match="non-UTF-8"):
+        _assert_no_sealed_reference({"opaque": b"\xff"})
+
+
+def test_recursive_sealed_scan_survives_temporary_object_id_reuse():
+    """A freed temporary's ``id`` may be handed to the next temporary.
+
+    ``ndarray.tolist()`` materialises NEW ``str`` objects that nothing outside the
+    walk references. Once such a temporary has been scanned and dropped, CPython
+    can reuse its address for the next temporary of the same size. A visited set
+    keyed on bare ``id`` would then treat the *sealed* string as already-scanned
+    and skip it — a silent fail-open. The scan must therefore keep every visited
+    object alive so an address is never recycled mid-walk (audit 2026-07-25).
+    """
+    from alive.compose.baselines_combo import _assert_no_sealed_reference
+
+    # Identical itemsize: the sealed temporary lands on a freed benign address.
+    benign = np.array([f"zzzzzzzzzz_{i:04d}" for i in range(60)], dtype="U15")
+    sealed = np.array(["sealed_yy_99999"], dtype="U15")
+    assert sealed.dtype == benign.dtype
+    # LIFO: `benign` is popped, scanned and freed BEFORE `sealed` is expanded.
+    with pytest.raises(ValueError, match="sealed"):
+        _assert_no_sealed_reference([sealed, benign])
+
+
 # --------------------------------------------------------------------------- #
 # guarded adapter — untyped dict rejection
 # --------------------------------------------------------------------------- #

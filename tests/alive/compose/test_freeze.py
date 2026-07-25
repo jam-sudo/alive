@@ -202,6 +202,32 @@ def test_rejects_sealed_token_nested_deep_in_diagnostics():
         _bundle(dev_diagnostics=deep)
 
 
+def test_outcome_scan_survives_temporary_object_id_reuse():
+    """``ndarray.tolist()`` temporaries must not be skipped via a recycled ``id``.
+
+    The scanner's visited set is keyed on ``id``; a temporary that has been
+    scanned and freed can have its address reused by the next temporary of the
+    same size, which would then be skipped unscanned. Keeping visited objects
+    alive for the duration of the walk closes that fail-open (audit 2026-07-25).
+    """
+    from alive.compose.freeze import _assert_no_outcome_reference
+
+    benign = np.array([f"zzzzzzzzzz_{i:04d}" for i in range(60)], dtype="U15")
+    leaky = np.array(["measured_yy_999"], dtype="U15")
+    assert leaky.dtype == benign.dtype
+    with pytest.raises(OutcomeLeakageError, match="measured-outcome"):
+        _assert_no_outcome_reference([leaky, benign])
+
+
+def test_rejects_byte_and_numpy_encoded_leakage_markers():
+    with pytest.raises(OutcomeLeakageError):
+        _bundle(dev_diagnostics={"note": np.array([b"sealed_single_unseen"], dtype="S")})
+    with pytest.raises(OutcomeLeakageError):
+        _bundle(dev_diagnostics={"note": np.array(["measured_outcomes"], dtype="U")})
+    with pytest.raises(OutcomeLeakageError, match="non-UTF-8"):
+        _bundle(dev_diagnostics={"note": b"\xff"})
+
+
 def test_rejects_sealed_token_in_method_roster():
     with pytest.raises(OutcomeLeakageError):
         _bundle(
