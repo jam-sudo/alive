@@ -133,9 +133,15 @@ live-validate a genuinely sealed receipt, and prove IPv4/IPv6 and Unix stream/da
 That Linux test is the only check that establishes the kernel property itself; every other test in the roster
 exercises schema, argv, receipt, and validator logic against recorded values. It is `skipif`-ed off any non-Linux
 host, so **a green suite on macOS or any other non-Linux developer machine is not evidence that the isolation
-holds** — it leaves the kernel property entirely unverified and reports only `1 skipped`. Treat the kernel proof
-as an explicitly unrun, pod-only check until the suite has been run on the Linux x86_64 target, and never record
-a non-Linux run as isolation verification.
+holds** — such a run leaves the kernel property entirely unverified and reports only `1 skipped`. A non-Linux run
+is therefore never recorded as isolation verification.
+
+The kernel property is consequently established by CI on a real x86_64 Linux kernel, not by a developer host.
+`.github/workflows/test-suite.yml` asserts the runner architecture before doing anything else, and then parses its
+own JUnit report and fails unless that specific test actually executed — so a future change to the skip condition
+cannot silently restore a green-but-unverified suite. The dated run that currently satisfies this requirement is
+recorded in `../COMPOSE-SEAL-READINESS.md`; CI evidence covers the policy's behavior on x86_64 Linux and never
+substitutes for a production pod's own `capture-runtime` evidence.
 
 Because this implementation changes producer and verifier decision code, every earlier verifier source closure,
 OCI digest, owner approval, image lock, and verifier pin is historical. Operational use requires a new clean

@@ -5,7 +5,7 @@
 > **이 문서는 아무것도 정의하지 않는다** — 세부(task)는 plan, claim은 spec, exact param은 config,
 > 시간순 audit는 git이 authoritative다([sources of truth](../../CLAUDE.md#sources)). 상태 행이 authoritative
 > 문서와 어긋나면 **authoritative 문서가 옳다**; 이 인덱스를 갱신한다.
-> **Updated:** 2026-07-25 @ `a1721c3` (branch `compose-network-isolation`)
+> **Updated:** 2026-07-25 @ `614017b` (branch `main`)
 > **갱신 트리거:** sub-project/gate **상태가 바뀔 때만**(커밋마다 아님).
 > **종결 상태:** COMPOSE seal이 정확히 한 번 열리면 이 인덱스는 **frozen/은퇴**한다. 이후 진행상황은
 > seal 결과와 post-hoc analysis가 대신한다.
@@ -167,10 +167,24 @@ branch에서 추적 가능하게 기록한다. `LOCAL` ledger ID만으로는 이
    called a kernel-filter read-back because Linux exposes no such unprivileged introspection. Governing design:
    `specs/2026-07-23-compose-managed-pod-network-isolation-design.md`. All earlier verifier/image/owner-lock pins
    are historical after this code change; a clean commit, fresh signed verifier image/owner lock, and independent
-   review remain mandatory. The single test that establishes the kernel property is `skipif`-ed off non-Linux
-   hosts and therefore remains **unrun** on the developer machine; executing the suite on the Linux x86_64 target
-   is an outstanding verification step, and a green macOS run reporting `1 skipped` is not isolation evidence.
-   Seal state remains **UNOPENED** and execution remains **RELEASE-BLOCKED**.
+   review remain mandatory. Seal state remains **UNOPENED** and execution remains **RELEASE-BLOCKED**.
+   **2026-07-25 kernel-property verification (supersedes the "outstanding" status recorded above):** the single
+   test that establishes the kernel property is `skipif`-ed off non-Linux hosts, so it had never executed anywhere
+   — every green result this project had recorded came from a developer macOS host reporting `1 skipped`, and no
+   CI ran the suite at all. `.github/workflows/test-suite.yml` (commit `614017b`) now runs the full suite on
+   `ubuntu-24.04`, asserts the runner is a real x86_64 Linux kernel, and fails unless that test actually executed.
+   Run `30154404171` succeeded on `Linux 6.17.0-1020-azure x86_64`: **2336 passed, 1 skipped** (the remaining skip
+   is `test_features.py` `importorskip("torch")`), with the kernel-isolation test **executed and passed**. IPv4/
+   IPv6 and Unix stream/datagram denial, x32 denial, `io_uring_setup`/`pidfd_getfd` denial, and same-PID sealed-
+   memfd receipt validation are therefore kernel-proven. This establishes that the seccomp policy behaves as
+   specified on x86_64 Linux; it does **not** establish that any production pod is correctly configured, which
+   still requires that pod's own `capture-runtime` evidence. It does not clear `RELEASE-BLOCKED`, substitute for
+   the exact-SHA independent review, or open the seal.
+   **2026-07-25 pre-pod local gate:** the probe-rerun runbook's §2.2 verification roster was run at clean exact
+   commit `614017b67e35e9cc07f68d5b512213d8356cf1b2` — **254 passed**, plus `ruff check`/`ruff format --check`
+   over the whole repository, `git diff --check`, and an empty `git status --short`. This records local
+   implementation readiness only; the verifier OCI image, owner-frozen image lock, exact-SHA independent review,
+   and pod-stage gates all remain outstanding.
    **2026-07-25 leakage-guard corrections (same branch, not operationally pinned):** two development-boundary
    guards were found failing open and were fixed with mutation-verified regression tests. (1) The measurability
    gate blacklisted `secondary_sealed`, a role name that exists nowhere else in the protocol; the real second
