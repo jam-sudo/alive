@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import pickle
 import subprocess
 import sys
@@ -24,6 +25,15 @@ from alive.compose.gene_universe import (
     generate_gears_gene_roster,
     normalize_full_then_subset,
 )
+from alive.compose.network_isolation import (
+    DRIVER_RELATIVE_PATH,
+    LAUNCHER_RECEIPT_SCHEMA,
+    LAUNCHER_RELATIVE_PATH,
+    PYTHON_ISOLATION_FLAGS,
+    SECCOMP_SOCKET_METHOD,
+    isolation_implementation_sha256,
+    seccomp_policy_sha256,
+)
 from alive.provenance import sha256_file, sha256_json
 
 _REPO = Path(__file__).resolve().parents[3]
@@ -32,12 +42,85 @@ _PROBE = _REPO / "scripts/compose/gears_decision_probe.py"
 _SHA = "a" * 64
 
 
+def _fake_isolation_receipt() -> dict[str, object]:
+    proof = {
+        "method": SECCOMP_SOCKET_METHOD,
+        "collector_implementation_sha256": isolation_implementation_sha256(),
+        "policy_sha256": seccomp_policy_sha256(),
+        "architecture": "x86_64",
+        "no_new_privs": 1,
+        "seccomp_mode": 2,
+        "seccomp_filter_count": 2,
+        "effective_capabilities_hex": "0000000000000000",
+        "permitted_capabilities_hex": "0000000000000000",
+        "inheritable_capabilities_hex": "0000000000000000",
+        "bounding_capabilities_hex": "0000000000000000",
+        "ambient_capabilities_hex": "0000000000000000",
+        "af_inet_stream_errno": 1,
+        "af_inet_dgram_errno": 1,
+        "af_inet6_stream_errno": 1,
+        "af_inet6_dgram_errno": 1,
+        "af_unix_socket_errno": 1,
+        "af_unix_dgram_errno": 1,
+        "af_unix_socketpair_available": True,
+    }
+    python_executable = "/opt/alive-venv/bin/python"
+    exec_argv = [python_executable, "-I", str(_PROBE), "verify-input"]
+    body = {
+        "schema": LAUNCHER_RECEIPT_SCHEMA,
+        "pid": 1234,
+        "method": SECCOMP_SOCKET_METHOD,
+        "architecture": "x86_64",
+        "collector_implementation_sha256": isolation_implementation_sha256(),
+        "policy_sha256": seccomp_policy_sha256(),
+        "launcher_path": LAUNCHER_RELATIVE_PATH,
+        "launcher_sha256": sha256_file(_REPO / LAUNCHER_RELATIVE_PATH),
+        "launcher_argv": [str(_REPO / LAUNCHER_RELATIVE_PATH), "--", *exec_argv],
+        "python_executable": python_executable,
+        "python_executable_realpath": "/usr/local/bin/python3.12",
+        "python_executable_sha256": "f" * 64,
+        "python_prefix": "/opt/alive-venv",
+        "python_isolation_flags": dict(PYTHON_ISOLATION_FLAGS),
+        "loader_environment": {"LD_LIBRARY_PATH": "/usr/local/nvidia/lib64"},
+        "driver_path": str(_REPO / DRIVER_RELATIVE_PATH),
+        "driver_sha256": sha256_file(_REPO / DRIVER_RELATIVE_PATH),
+        "exec_argv": exec_argv,
+        "exec_argv_sha256": sha256_json(exec_argv),
+        "proof": proof,
+        "proof_sha256": sha256_json(proof),
+    }
+    return {**body, "self_checksum": sha256_json(body)}
+
+
 def _load(path: Path, name: str):
     spec = importlib.util.spec_from_file_location(name, path)
     module = importlib.util.module_from_spec(spec)
     sys.modules[name] = module
     spec.loader.exec_module(module)
     return module
+
+
+def test_driver_bootstrap_rejects_nonisolated_python_and_pythonpath(tmp_path):
+    observed = subprocess.run(
+        [sys.executable, str(_PROBE), "--help"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert observed.returncode != 0
+    assert "requires Python -I" in observed.stderr
+
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(tmp_path)
+    observed = subprocess.run(
+        [sys.executable, "-I", str(_PROBE), "--help"],
+        env=env,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert observed.returncode != 0
+    assert "PYTHONPATH" in observed.stderr
 
 
 def _source() -> ad.AnnData:
@@ -577,6 +660,7 @@ def test_command_recorder_appends_canonical_verifier_records(tmp_path, monkeypat
     probe = _load(_PROBE, "_probe_test_command_recorder")
     ledger = tmp_path / "commands.jsonl"
     monkeypatch.setenv("PYTHONHASHSEED", "11")
+    monkeypatch.setenv("LD_LIBRARY_PATH", "/usr/local/nvidia/lib64")
     monkeypatch.setenv("UNRELATED_SECRET", "must-not-be-recorded")
     argv = [
         str(_PROBE),
@@ -589,6 +673,7 @@ def test_command_recorder_appends_canonical_verifier_records(tmp_path, monkeypat
         ledger_path=ledger,
         command="verify-input",
         argv=argv,
+        isolation_receipt=_fake_isolation_receipt(),
         started_at_utc="2026-07-20T00:00:00Z",
         primary_file_sha256=_SHA,
     )
@@ -596,6 +681,7 @@ def test_command_recorder_appends_canonical_verifier_records(tmp_path, monkeypat
         ledger_path=ledger,
         command="verify-input",
         argv=argv,
+        isolation_receipt=_fake_isolation_receipt(),
         started_at_utc="2026-07-20T00:00:01Z",
         primary_file_sha256="b" * 64,
     )
@@ -603,9 +689,12 @@ def test_command_recorder_appends_canonical_verifier_records(tmp_path, monkeypat
     lines = ledger.read_text(encoding="utf-8").splitlines()
     assert len(lines) == 2
     records = [json.loads(line) for line in lines]
-    assert records[0]["schema"] == "compose_gears_probe_command_record_v1"
+    assert records[0]["schema"] == "compose_gears_probe_command_record_v2"
     assert records[0]["argv"] == argv
-    assert records[0]["env"] == {"PYTHONHASHSEED": "11"}
+    assert records[0]["env"] == {
+        "LD_LIBRARY_PATH": "/usr/local/nvidia/lib64",
+        "PYTHONHASHSEED": "11",
+    }
     assert records[0]["self_checksum"] == sha256_json(
         {key: value for key, value in records[0].items() if key != "self_checksum"}
     )
@@ -619,6 +708,7 @@ def test_command_recorder_rejects_relative_and_symlink_ledgers(tmp_path):
             ledger_path="commands.jsonl",
             command="verify-input",
             argv=[str(_PROBE), "verify-input"],
+            isolation_receipt=_fake_isolation_receipt(),
             started_at_utc="2026-07-20T00:00:00Z",
             primary_file_sha256=_SHA,
         )
@@ -631,6 +721,7 @@ def test_command_recorder_rejects_relative_and_symlink_ledgers(tmp_path):
             ledger_path=linked,
             command="verify-input",
             argv=[str(_PROBE), "verify-input"],
+            isolation_receipt=_fake_isolation_receipt(),
             started_at_utc="2026-07-20T00:00:00Z",
             primary_file_sha256=_SHA,
         )
@@ -646,6 +737,7 @@ def test_command_ledger_cannot_reopen_after_manifest_publication(tmp_path):
             ledger_path=ledger,
             command="verify-input",
             argv=[str(_PROBE), "verify-input"],
+            isolation_receipt=_fake_isolation_receipt(),
             started_at_utc="2026-07-20T00:00:00Z",
             primary_file_sha256=_SHA,
         )
@@ -677,6 +769,7 @@ def test_command_ledger_rechecks_manifest_after_acquiring_lock(tmp_path, monkeyp
             ledger_path=ledger,
             command="verify-input",
             argv=[str(_PROBE), "verify-input"],
+            isolation_receipt=_fake_isolation_receipt(),
             started_at_utc="2026-07-20T00:00:00Z",
             primary_file_sha256=_SHA,
         )
@@ -720,6 +813,7 @@ def test_command_finalization_rechecks_network_isolation_before_ledger_commit(
 ):
     probe = _load(_PROBE, "_probe_test_command_finalization")
     observed: list[str] = []
+    receipt = _fake_isolation_receipt()
     monkeypatch.setattr(
         probe,
         "_assert_runtime_execution_context",
@@ -732,12 +826,21 @@ def test_command_finalization_rechecks_network_isolation_before_ledger_commit(
     )
     monkeypatch.setattr(
         probe,
+        "_validate_launcher_execution",
+        lambda _argv: receipt,
+    )
+    monkeypatch.setattr(
+        probe,
         "_emit_command_result",
         lambda **_kwargs: observed.append("stdout"),
     )
 
     probe._finalize_command(
-        args=SimpleNamespace(command="verify-input", command_ledger=tmp_path / "commands.jsonl"),
+        args=SimpleNamespace(
+            command="verify-input",
+            command_ledger=tmp_path / "commands.jsonl",
+            _launcher_receipt=receipt,
+        ),
         invocation_argv=[str(_PROBE), "verify-input"],
         started_at_utc="2026-07-20T00:00:00Z",
         primary_file_sha256=_SHA,
@@ -891,7 +994,7 @@ def test_runtime_publication_binds_provider_and_cgroup_limits(
 
     runtime = json.loads(output.read_text())
     assert observed_sha == sha256_file(output)
-    assert runtime["schema"] == "compose_gears_probe_runtime_v4"
+    assert runtime["schema"] == "compose_gears_probe_runtime_v5"
     assert runtime["provider_attestation_sha256"] == sha256_file(attestation)
     assert runtime["provider_allocation"]["cpu_count"] == 8
     assert runtime["cgroup_effective"] == {
@@ -953,7 +1056,10 @@ def test_runtime_publication_binds_provider_and_cgroup_limits(
         probe._assert_runtime_execution_context(evidence / "commands.jsonl")
 
 
-def test_network_isolation_requires_loopback_only_namespace(tmp_path):
+def test_collect_network_isolation_accepts_loopback_only_and_rejects_extra_interface(tmp_path):
+    # Loopback-only namespace mode collects cleanly; a non-lo interface with no
+    # seccomp process status is then rejected (the raise reports "process status",
+    # which the old "requires_loopback_only_namespace" name understated).
     probe = _load(_PROBE, "_probe_test_network_isolation")
     proc = tmp_path / "proc"
     (proc / "self/ns").mkdir(parents=True)
@@ -977,7 +1083,7 @@ def test_network_isolation_requires_loopback_only_namespace(tmp_path):
     }
 
     (interfaces / "eth0").mkdir()
-    with pytest.raises(GeneUniverseError, match="only loopback"):
+    with pytest.raises(GeneUniverseError, match="process status"):
         probe._collect_network_isolation(proc, interfaces)
 
 

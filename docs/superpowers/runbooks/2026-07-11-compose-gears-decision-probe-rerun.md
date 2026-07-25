@@ -173,14 +173,17 @@ GPU-hours/cost. Never place credentials in the repository or transcript artifact
    download or unmanifested resource read.
 
 After network isolation and before `build-roster`, invoke maintained `capture-runtime` exactly once. Run every
-recorded command in a Linux network namespace that exposes only `lo` and no non-loopback IPv4/IPv6 route (for
-example, an owner-reviewed `unshare --net` wrapper when the pod grants that capability). The collector enumerates
-the namespace interfaces/routes and records its namespace inode; a caller flag without that observation fails.
-Every maintained stateful producer repeats the loopback-only namespace check immediately before committing its
-successful command record, so leaving the namespace after runtime capture is a hard failure rather than an
-unrecorded execution-mode change. The same commit boundary also reopens canonical `runtime.json` and rejects a
-different process-effective cgroup or visible GPU identity. Every post-capture command performs the same context
-and clean-exact-commit check both before work and before committing success.
+recorded command under one of the two exact kernel isolation modes defined by
+`../specs/2026-07-23-compose-managed-pod-network-isolation-design.md`: either a Linux namespace exposing only
+`lo` and no non-loopback IPv4/IPv6 route, or the maintained `PR_SET_NO_NEW_PRIVS` +
+`linux_seccomp_socketpair_only_behavior_v2` launcher. Standard managed pods that cannot create a namespace must use
+`scripts/compose/run_network_isolated.py`; namespace-creation failure is not evidence and must never be bypassed
+with a caller assertion. Every maintained stateful producer recollects the exact selected proof immediately
+before committing its successful command record, so changing mode or losing any kernel/probe invariant after
+runtime capture is a hard failure rather than an unrecorded execution-mode change. The same commit boundary also
+reopens canonical `runtime.json` and rejects a different process-effective cgroup or visible GPU identity. Every
+post-capture command performs the same context and clean-exact-commit check both before work and before committing
+success.
 Supply the external attestation pin literally with `--provider-attestation-sha256`; do not compute it inline. The
 collector records three deliberately separate views: provider allocation, process-effective cgroup v1/v2
 CPU/cpuset/memory limits resolved from `/proc/self/cgroup` and mountinfo (including tighter ancestors), and
@@ -191,8 +194,12 @@ disagreement, mutable/missing image identity, network-enabled capture, or any ex
 The roster receipt SHA and later probe-manifest SHA must be captured into the durable command/evidence ledger at
 their publication boundary and read back from that ledger. Pass the same absolute evidence-root
 `commands.jsonl` as `--command-ledger` to every maintained command before manifest closure. After successful
-publication the CLI atomically appends one canonical `compose_gears_probe_command_record_v1`, including its exact
-argv/cwd/environment allowlist/times and primary SHA. Its stdout
+publication the CLI atomically appends one canonical `compose_gears_probe_command_record_v2`, including its exact
+argv/cwd/environment allowlist/times, primary SHA, and the replayable sealed same-PID launcher receipt. The
+receipt binds the exact isolated Python invocation/resolved binary/hash/prefix/loader path, maintained driver
+source, x86_64 expected-policy digest, and active behavioral proof. Its live memfd validation detects drift inside
+the trusted producer; the archived self-checksummed JSON is provenance rather than independent remote
+attestation, and the expected-policy digest is not described as an unprivileged kernel-filter read-back. Its stdout
 `compose_gears_probe_command_result_v1` is a convenience receipt and MUST NOT be appended to the ledger. Do
 not invoke any stateful command after `manifest.json` publication: the maintained CLI checks this before work and
 again at append, and treats the ledger as irreversibly closed once the manifest exists. Do
@@ -220,7 +227,10 @@ unavailable reader-spy attestation is a **STOP**, not a warning.
 - Render CLI help from the committed maintained probe CLI; commands in the evidence log must come from that help,
   not from this document or memory.
 - Materialize the externally reviewed owner assertion `provider_runtime_attestation.json`, then run maintained
-  `capture-runtime` once inside the proved loopback-only namespace. Supply the absolute `--command-ledger`; the
+  `capture-runtime` once through `run_network_isolated.py`, optionally inside the proved namespace as an additional
+  outer boundary. Invoke both launcher and driver with the same absolute interpreter and literal `-I`; do not set
+  Python import overrides, `LD_PRELOAD`, or `LD_AUDIT`. Supply the absolute
+  `--command-ledger`; the
   CLI appends the first command record itself and its primary SHA must equal the eventual manifested
   `runtime.json` bytes. The attestation timestamp must precede capture by no more than 24 hours.
 - Run source/manifest/hash validation and metadata-only role resolution.
@@ -490,7 +500,7 @@ least one successful invocation of each maintained CLI subcommand that actually 
 build-probe-a-report}`. `build-roster` may repeat for multiple candidate rosters, but every such attempt must
 finish before the unique canonical `prepare-input` command;
 `capture-runtime` occurs exactly once before every other maintained command, binds the external provider
-attestation SHA, approved commit, canonical runtime path, proved loopback-only namespace, and its primary SHA
+attestation SHA, approved commit, canonical runtime path, proved kernel network-isolation mode, and its primary SHA
 equals the manifested runtime SHA;
 `build-probe-a-registration` occurs exactly once after prepared-input verification, binds the owner-policy and
 prepared-manifest pins, and its primary SHA equals the manifested registration SHA; `probe-a` occurs exactly once
@@ -503,7 +513,7 @@ primary-file SHA values, and one runtime fingerprint. The `probe-a` record must 
 Each argv must contain exactly one maintained driver token and its recorded subcommand must immediately follow
 that token; merely placing a command label elsewhere in argv is rejected.
 `runtime.json`, `inputs.json`, and `role_attestation.json` use respectively
-`compose_gears_probe_runtime_v4`, `compose_gears_probe_inputs_v4`, and
+`compose_gears_probe_runtime_v5`, `compose_gears_probe_inputs_v4`, and
 `compose_gears_probe_role_attestation_v3`; they bind the approved commit, separate preparation/GEARS dependency
 locks, the complete installed-package-roster digest, runtime/input
 identities, exact fit-role counts, the prepared-manifest/H5AD/row/control-roster SHA identities, zero sealed
@@ -516,10 +526,13 @@ decision-grade and no Probe-B PASS schema is recognized by this verifier**.
 
 The manifested provider file uses `compose_provider_runtime_attestation_v1` and is revalidated against its
 external file pin. Its source-evidence path must name exactly one manifested `logs/` entry with the same SHA and
-one of the admitted control-plane source types. Runtime v4 must reproduce that provider/pod/image/allocation
+one of the admitted control-plane source types. Runtime v5 must reproduce that provider/pod/image/allocation
 exactly, require one visible GPU whose model equals the allocation, and carry exact nested schemas for
-`provider_allocation`, `cgroup_effective`, and `host_visible`. Runtime v4 also binds the exact network namespace,
-not merely the loopback interface/route shape. The verifier recomputes quota cores, canonical
+`provider_allocation`, `cgroup_effective`, and `host_visible`. Runtime v5 also binds either the exact lo-only
+network namespace or the exact x86_64 seccomp collector/expected-policy/kernel-status/behavioral proof. Every
+command record also carries the canonical sealed launcher receipt and its SHA, and the verifier replays its
+launcher/driver sources, exact interpreter/loader identity, and outer/inner argv binding, requiring the same
+identity across every command. The verifier recomputes quota cores, canonical
 cpuset cardinality, and effective CPU cores; requires finite positive cgroup CPU and memory; and rejects cgroup
 values exceeding either provider allocation or host-visible capacity. Provider allocation and host-visible
 capacity are never substituted for one another.

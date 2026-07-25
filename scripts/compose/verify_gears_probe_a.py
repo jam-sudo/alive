@@ -53,6 +53,7 @@ def _verifier_code_sha256() -> str:
     entrypoints = (
         "scripts/compose/verify_gears_probe_a.py",
         "scripts/compose/gears_decision_probe.py",
+        "scripts/compose/run_network_isolated.py",
         "scripts/baselines/gears_worker.py",
     )
     alive_sources = tuple(

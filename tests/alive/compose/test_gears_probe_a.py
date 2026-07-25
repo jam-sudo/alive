@@ -94,6 +94,16 @@ from alive.compose.gears_probe_a import (
 from alive.compose.gears_probe_a import (
     validate_evidence_semantics as _core_validate_evidence_semantics,
 )
+from alive.compose.network_isolation import (
+    DRIVER_RELATIVE_PATH,
+    LAUNCHER_RECEIPT_SCHEMA,
+    LAUNCHER_RELATIVE_PATH,
+    PYTHON_ISOLATION_FLAGS,
+    SECCOMP_SOCKET_METHOD,
+    isolation_implementation_sha256,
+    launcher_receipt_sha256,
+    seccomp_policy_sha256,
+)
 from alive.compose.response import fit_response_space
 from alive.provenance import sha256_file, sha256_json
 
@@ -413,6 +423,26 @@ def _report(
 def _resign(payload: dict, checksum_field: str = "self_checksum") -> None:
     body = {key: value for key, value in payload.items() if key != checksum_field}
     payload[checksum_field] = sha256_json(body)
+
+
+def _resign_command(payload: dict) -> None:
+    """Rebind a fixture's sealed-launcher lineage after an intentional mutation."""
+    receipt = payload["isolation_receipt"]
+    exec_argv = receipt["exec_argv"]
+    indexes = [
+        index
+        for index, token in enumerate(exec_argv)
+        if token.endswith("scripts/compose/gears_decision_probe.py")
+    ]
+    prefix = exec_argv[: indexes[0]] if len(indexes) == 1 else ["/usr/bin/python3", "-I"]
+    rebound_exec = [*prefix, *payload["argv"]]
+    launcher_prefix = receipt["launcher_argv"][: receipt["launcher_argv"].index("--") + 1]
+    receipt["exec_argv"] = rebound_exec
+    receipt["exec_argv_sha256"] = sha256_json(rebound_exec)
+    receipt["launcher_argv"] = [*launcher_prefix, *rebound_exec]
+    _resign(receipt)
+    payload["isolation_receipt_sha256"] = launcher_receipt_sha256(receipt)
+    _resign(payload)
 
 
 def _file_entry(root: Path, role: str, relpath: str) -> dict:
@@ -799,10 +829,7 @@ def _complete_evidence(root: Path) -> tuple[dict, dict, dict, str, str, str]:
             "schema": COMMAND_RECORD_SCHEMA,
             "command": command,
             "argv": [
-                "uv",
-                "run",
-                "python",
-                "scripts/compose/gears_decision_probe.py",
+                "/workspace/ALIVE/scripts/compose/gears_decision_probe.py",
                 command,
                 "--command-ledger",
                 "/workspace/evidence/commands.jsonl",
@@ -993,6 +1020,63 @@ def _complete_evidence(root: Path) -> tuple[dict, dict, dict, str, str, str]:
                     f"/workspace/evidence/{REPORT_PATH}",
                 ]
             )
+        isolation_proof = {
+            "method": SECCOMP_SOCKET_METHOD,
+            "collector_implementation_sha256": isolation_implementation_sha256(),
+            "policy_sha256": seccomp_policy_sha256(),
+            "architecture": "x86_64",
+            "no_new_privs": 1,
+            "seccomp_mode": 2,
+            "seccomp_filter_count": 2,
+            "effective_capabilities_hex": "0000000000000000",
+            "permitted_capabilities_hex": "0000000000000000",
+            "inheritable_capabilities_hex": "0000000000000000",
+            "bounding_capabilities_hex": "0000000000000000",
+            "ambient_capabilities_hex": "0000000000000000",
+            "af_inet_stream_errno": 1,
+            "af_inet_dgram_errno": 1,
+            "af_inet6_stream_errno": 1,
+            "af_inet6_dgram_errno": 1,
+            "af_unix_socket_errno": 1,
+            "af_unix_dgram_errno": 1,
+            "af_unix_socketpair_available": True,
+        }
+        python_executable = "/opt/alive-venv/bin/python"
+        exec_argv = [python_executable, "-I", *command_body["argv"]]
+        launcher_argv = [
+            f"/workspace/ALIVE/{LAUNCHER_RELATIVE_PATH}",
+            "--",
+            *exec_argv,
+        ]
+        isolation_receipt_body = {
+            "schema": LAUNCHER_RECEIPT_SCHEMA,
+            "pid": 1000 + index,
+            "method": SECCOMP_SOCKET_METHOD,
+            "architecture": "x86_64",
+            "collector_implementation_sha256": isolation_implementation_sha256(),
+            "policy_sha256": seccomp_policy_sha256(),
+            "launcher_path": LAUNCHER_RELATIVE_PATH,
+            "launcher_sha256": sha256_file(_REPO / LAUNCHER_RELATIVE_PATH),
+            "launcher_argv": launcher_argv,
+            "python_executable": python_executable,
+            "python_executable_realpath": "/usr/local/bin/python3.12",
+            "python_executable_sha256": "f" * 64,
+            "python_prefix": "/opt/alive-venv",
+            "python_isolation_flags": dict(PYTHON_ISOLATION_FLAGS),
+            "loader_environment": {"LD_LIBRARY_PATH": "/usr/local/nvidia/lib64"},
+            "driver_path": f"/workspace/ALIVE/{DRIVER_RELATIVE_PATH}",
+            "driver_sha256": sha256_file(_REPO / DRIVER_RELATIVE_PATH),
+            "exec_argv": exec_argv,
+            "exec_argv_sha256": sha256_json(exec_argv),
+            "proof": isolation_proof,
+            "proof_sha256": sha256_json(isolation_proof),
+        }
+        isolation_receipt = {
+            **isolation_receipt_body,
+            "self_checksum": sha256_json(isolation_receipt_body),
+        }
+        command_body["isolation_receipt"] = isolation_receipt
+        command_body["isolation_receipt_sha256"] = launcher_receipt_sha256(isolation_receipt)
         command = {**command_body, "self_checksum": sha256_json(command_body)}
         command_lines.append(json.dumps(command, sort_keys=True, separators=(",", ":")))
     (root / "commands.jsonl").write_text("\n".join(command_lines) + "\n", encoding="utf-8")
@@ -1122,7 +1206,7 @@ def _negative_evidence(
             command["primary_file_sha256"] = sha256_file(root / REPORT_PATH)
             sha_index = command["argv"].index("--raw-sample-sha256") + 1
             command["argv"][sha_index] = sha256_file(raw_path)
-        _resign(command)
+        _resign_command(command)
     command_path.write_text(
         "\n".join(
             json.dumps(command, sort_keys=True, separators=(",", ":")) for command in commands
@@ -2133,6 +2217,96 @@ def test_runtime_validator_rejects_unproved_network_isolation(tmp_path):
         )
 
 
+def test_runtime_validator_accepts_exact_seccomp_socket_isolation(tmp_path):
+    _complete_evidence(tmp_path)
+    provider = json.loads((tmp_path / PROVIDER_ATTESTATION_PATH).read_text(encoding="utf-8"))
+    runtime = json.loads((tmp_path / "runtime.json").read_text(encoding="utf-8"))
+    runtime["network_isolation"] = {
+        "method": SECCOMP_SOCKET_METHOD,
+        "collector_implementation_sha256": isolation_implementation_sha256(),
+        "policy_sha256": seccomp_policy_sha256(),
+        "architecture": "x86_64",
+        "no_new_privs": 1,
+        "seccomp_mode": 2,
+        "seccomp_filter_count": 2,
+        "effective_capabilities_hex": "0000000000000000",
+        "permitted_capabilities_hex": "0000000000000000",
+        "inheritable_capabilities_hex": "0000000000000000",
+        "bounding_capabilities_hex": "0000000000000000",
+        "ambient_capabilities_hex": "0000000000000000",
+        "af_inet_stream_errno": 1,
+        "af_inet_dgram_errno": 1,
+        "af_inet6_stream_errno": 1,
+        "af_inet6_dgram_errno": 1,
+        "af_unix_socket_errno": 1,
+        "af_unix_dgram_errno": 1,
+        "af_unix_socketpair_available": True,
+    }
+    _resign(runtime)
+    validated = validate_runtime_evidence(
+        runtime,
+        provider_attestation=validate_provider_runtime_attestation(provider),
+        provider_attestation_sha256=sha256_file(tmp_path / PROVIDER_ATTESTATION_PATH),
+        expected_git_commit=COMMIT,
+    )
+    assert validated["network_isolation"] == runtime["network_isolation"]
+
+
+@pytest.mark.parametrize(
+    ("field", "replacement", "message"),
+    [
+        ("collector_implementation_sha256", "0" * 64, "implementation differs"),
+        ("policy_sha256", "0" * 64, "expected policy differs"),
+        ("architecture", "aarch64", "must be x86_64"),
+        ("no_new_privs", 0, "socketpair-only"),
+        ("seccomp_mode", 0, "socketpair-only"),
+        ("seccomp_filter_count", 0, "socketpair-only"),
+        ("effective_capabilities_hex", f"{1 << 39:016x}", "allowlist"),
+        ("permitted_capabilities_hex", f"{1 << 21:016x}", "allowlist"),
+        ("af_inet_dgram_errno", 0, "socketpair-only"),
+        ("af_unix_socket_errno", 0, "socketpair-only"),
+        ("af_unix_dgram_errno", 0, "socketpair-only"),
+        ("af_unix_socketpair_available", False, "socketpair-only"),
+    ],
+)
+def test_runtime_validator_rejects_invalid_seccomp_socket_isolation(
+    tmp_path, field, replacement, message
+):
+    _complete_evidence(tmp_path)
+    provider = json.loads((tmp_path / PROVIDER_ATTESTATION_PATH).read_text(encoding="utf-8"))
+    runtime = json.loads((tmp_path / "runtime.json").read_text(encoding="utf-8"))
+    runtime["network_isolation"] = {
+        "method": SECCOMP_SOCKET_METHOD,
+        "collector_implementation_sha256": isolation_implementation_sha256(),
+        "policy_sha256": seccomp_policy_sha256(),
+        "architecture": "x86_64",
+        "no_new_privs": 1,
+        "seccomp_mode": 2,
+        "seccomp_filter_count": 2,
+        "effective_capabilities_hex": "0000000000000000",
+        "permitted_capabilities_hex": "0000000000000000",
+        "inheritable_capabilities_hex": "0000000000000000",
+        "bounding_capabilities_hex": "0000000000000000",
+        "ambient_capabilities_hex": "0000000000000000",
+        "af_inet_stream_errno": 1,
+        "af_inet_dgram_errno": 1,
+        "af_inet6_stream_errno": 1,
+        "af_inet6_dgram_errno": 1,
+        "af_unix_socket_errno": 1,
+        "af_unix_dgram_errno": 1,
+        "af_unix_socketpair_available": True,
+    }
+    runtime["network_isolation"][field] = replacement
+    _resign(runtime)
+    with pytest.raises(ProbeAEvidenceError, match=message):
+        validate_runtime_evidence(
+            runtime,
+            provider_attestation=validate_provider_runtime_attestation(provider),
+            provider_attestation_sha256=sha256_file(tmp_path / PROVIDER_ATTESTATION_PATH),
+            expected_git_commit=COMMIT,
+        )
+
+
 @pytest.mark.parametrize(
     ("path", "payload", "message"),
     [
@@ -2213,7 +2387,7 @@ def test_semantic_validator_binds_upstream_command_paths(
     records = [json.loads(line) for line in commands_path.read_text(encoding="utf-8").splitlines()]
     record = next(item for item in records if item["command"] == command)
     record["argv"][record["argv"].index(option) + 1] = replacement
-    _resign(record)
+    _resign_command(record)
     commands_path.write_text(
         "\n".join(json.dumps(item, sort_keys=True, separators=(",", ":")) for item in records)
         + "\n",
@@ -2235,6 +2409,28 @@ def test_semantic_validator_rejects_command_labels_wrapped_around_unrelated_argv
     commands_path = tmp_path / "commands.jsonl"
     records = [json.loads(line) for line in commands_path.read_text(encoding="utf-8").splitlines()]
     records[0]["argv"] = ["true", records[0]["command"]]
+    _resign_command(records[0])
+    commands_path.write_text(
+        "\n".join(json.dumps(record, sort_keys=True, separators=(",", ":")) for record in records)
+        + "\n",
+        encoding="utf-8",
+    )
+    _refresh_manifest_entry(manifest, tmp_path, "commands.jsonl")
+    with pytest.raises(ProbeAEvidenceError, match="argv binding is invalid"):
+        validate_evidence_semantics(
+            manifest,
+            evidence_root=tmp_path,
+            expected_git_commit=COMMIT,
+            registration_sha256=registration_sha,
+            provider_attestation_sha256=_provider_pin(tmp_path),
+        )
+
+
+def test_semantic_validator_rejects_argv_not_bound_by_launcher_receipt(tmp_path):
+    _, _, manifest, registration_sha, _, _ = _complete_evidence(tmp_path)
+    commands_path = tmp_path / "commands.jsonl"
+    records = [json.loads(line) for line in commands_path.read_text(encoding="utf-8").splitlines()]
+    records[0]["argv"].append("--forged")
     _resign(records[0])
     commands_path.write_text(
         "\n".join(json.dumps(record, sort_keys=True, separators=(",", ":")) for record in records)
@@ -2242,7 +2438,90 @@ def test_semantic_validator_rejects_command_labels_wrapped_around_unrelated_argv
         encoding="utf-8",
     )
     _refresh_manifest_entry(manifest, tmp_path, "commands.jsonl")
-    with pytest.raises(ProbeAEvidenceError, match="maintained GEARS probe CLI"):
+    with pytest.raises(ProbeAEvidenceError, match="argv binding is invalid"):
+        validate_evidence_semantics(
+            manifest,
+            evidence_root=tmp_path,
+            expected_git_commit=COMMIT,
+            registration_sha256=registration_sha,
+            provider_attestation_sha256=_provider_pin(tmp_path),
+        )
+
+
+def test_semantic_validator_rejects_forged_launcher_source_receipt(tmp_path):
+    _, _, manifest, registration_sha, _, _ = _complete_evidence(tmp_path)
+    commands_path = tmp_path / "commands.jsonl"
+    records = [json.loads(line) for line in commands_path.read_text(encoding="utf-8").splitlines()]
+    receipt = records[0]["isolation_receipt"]
+    receipt["launcher_sha256"] = "0" * 64
+    _resign(receipt)
+    records[0]["isolation_receipt_sha256"] = launcher_receipt_sha256(receipt)
+    _resign(records[0])
+    commands_path.write_text(
+        "\n".join(json.dumps(record, sort_keys=True, separators=(",", ":")) for record in records)
+        + "\n",
+        encoding="utf-8",
+    )
+    _refresh_manifest_entry(manifest, tmp_path, "commands.jsonl")
+    with pytest.raises(ProbeAEvidenceError, match="launcher differs from the verifier"):
+        validate_evidence_semantics(
+            manifest,
+            evidence_root=tmp_path,
+            expected_git_commit=COMMIT,
+            registration_sha256=registration_sha,
+            provider_attestation_sha256=_provider_pin(tmp_path),
+        )
+
+
+def test_semantic_validator_rejects_nonisolated_python_receipt(tmp_path):
+    _, _, manifest, registration_sha, _, _ = _complete_evidence(tmp_path)
+    commands_path = tmp_path / "commands.jsonl"
+    records = [json.loads(line) for line in commands_path.read_text(encoding="utf-8").splitlines()]
+    receipt = records[0]["isolation_receipt"]
+    receipt["python_isolation_flags"]["isolated"] = 0
+    _resign(receipt)
+    records[0]["isolation_receipt_sha256"] = launcher_receipt_sha256(receipt)
+    _resign(records[0])
+    commands_path.write_text(
+        "\n".join(json.dumps(record, sort_keys=True, separators=(",", ":")) for record in records)
+        + "\n",
+        encoding="utf-8",
+    )
+    _refresh_manifest_entry(manifest, tmp_path, "commands.jsonl")
+    with pytest.raises(ProbeAEvidenceError, match="argv binding is invalid"):
+        validate_evidence_semantics(
+            manifest,
+            evidence_root=tmp_path,
+            expected_git_commit=COMMIT,
+            registration_sha256=registration_sha,
+            provider_attestation_sha256=_provider_pin(tmp_path),
+        )
+
+
+def test_semantic_validator_rejects_cross_command_python_drift(tmp_path):
+    _, _, manifest, registration_sha, _, _ = _complete_evidence(tmp_path)
+    commands_path = tmp_path / "commands.jsonl"
+    records = [json.loads(line) for line in commands_path.read_text(encoding="utf-8").splitlines()]
+    receipt = records[1]["isolation_receipt"]
+    receipt["python_executable"] = "/opt/other-venv/bin/python"
+    receipt["python_prefix"] = "/opt/other-venv"
+    receipt["exec_argv"][0] = receipt["python_executable"]
+    receipt["exec_argv_sha256"] = sha256_json(receipt["exec_argv"])
+    receipt["launcher_argv"] = [
+        receipt["launcher_argv"][0],
+        "--",
+        *receipt["exec_argv"],
+    ]
+    _resign(receipt)
+    records[1]["isolation_receipt_sha256"] = launcher_receipt_sha256(receipt)
+    _resign(records[1])
+    commands_path.write_text(
+        "\n".join(json.dumps(record, sort_keys=True, separators=(",", ":")) for record in records)
+        + "\n",
+        encoding="utf-8",
+    )
+    _refresh_manifest_entry(manifest, tmp_path, "commands.jsonl")
+    with pytest.raises(ProbeAEvidenceError, match="one exact Python runtime"):
         validate_evidence_semantics(
             manifest,
             evidence_root=tmp_path,
@@ -2264,7 +2543,7 @@ def test_semantic_validator_requires_recorded_subcommand_at_cli_position(tmp_pat
     )
     probe["argv"][script_index + 1] = "verify-input"
     probe["argv"].append("probe-a")
-    _resign(probe)
+    _resign_command(probe)
     commands_path.write_text(
         "\n".join(json.dumps(record, sort_keys=True, separators=(",", ":")) for record in records)
         + "\n",
@@ -2293,15 +2572,15 @@ def test_semantic_validator_allows_repeated_real_candidate_commands(tmp_path):
     records = [json.loads(line) for line in commands_path.read_text(encoding="utf-8").splitlines()]
     original = next(record for record in records if record["command"] == "build-roster")
     original["ended_at_utc"] = "2026-07-17T00:00:01.400000+00:00"
-    _resign(original)
-    repeated = {**original, "argv": list(original["argv"]), "env": dict(original["env"])}
+    _resign_command(original)
+    repeated = json.loads(json.dumps(original))
     repeated["started_at_utc"] = "2026-07-17T00:00:01.500000+00:00"
     repeated["ended_at_utc"] = "2026-07-17T00:00:01.900000+00:00"
     repeated["primary_file_sha256"] = sha256_file(alternate_path)
     repeated["argv"][repeated["argv"].index("--out-receipt") + 1] = (
         "/workspace/evidence/roster_receipts/alternate.json"
     )
-    _resign(repeated)
+    _resign_command(repeated)
     records.insert(2, repeated)
     commands_path.write_text(
         "\n".join(json.dumps(record, sort_keys=True, separators=(",", ":")) for record in records)
@@ -2326,7 +2605,7 @@ def test_semantic_validator_rejects_candidate_roster_after_input_preparation(tmp
     repeated["started_at_utc"] = "2026-07-17T00:01:00+00:00"
     repeated["ended_at_utc"] = "2026-07-17T00:01:01+00:00"
     repeated["primary_file_sha256"] = "e" * 64
-    _resign(repeated)
+    _resign_command(repeated)
     records.append(repeated)
     commands_path.write_text(
         "\n".join(json.dumps(record, sort_keys=True, separators=(",", ":")) for record in records)
@@ -2350,7 +2629,7 @@ def test_semantic_validator_requires_selected_receipt_command_lineage(tmp_path):
     records = [json.loads(line) for line in commands_path.read_text(encoding="utf-8").splitlines()]
     roster = next(record for record in records if record["command"] == "build-roster")
     roster["primary_file_sha256"] = "e" * 64
-    _resign(roster)
+    _resign_command(roster)
     commands_path.write_text(
         "\n".join(json.dumps(record, sort_keys=True, separators=(",", ":")) for record in records)
         + "\n",
@@ -2374,7 +2653,7 @@ def test_semantic_validator_binds_probe_environment_to_raw_seed(tmp_path):
     records = [json.loads(line) for line in commands_path.read_text(encoding="utf-8").splitlines()]
     probe = next(record for record in records if record["command"] == "probe-a")
     probe["env"]["PYTHONHASHSEED"] = "12"
-    _resign(probe)
+    _resign_command(probe)
     commands_path.write_text(
         "\n".join(json.dumps(record, sort_keys=True, separators=(",", ":")) for record in records)
         + "\n",
@@ -2411,7 +2690,7 @@ def test_semantic_validator_uses_recorded_pod_root_not_local_copy_path(tmp_path)
 
     verify = next(record for record in records if record["command"] == "verify-input")
     verify["argv"][verify["argv"].index("--command-ledger") + 1] = "/workspace/other/commands.jsonl"
-    _resign(verify)
+    _resign_command(verify)
     commands_path.write_text(
         "\n".join(json.dumps(record, sort_keys=True, separators=(",", ":")) for record in records)
         + "\n",
@@ -2478,7 +2757,7 @@ def test_semantic_validator_requires_runtime_capture_first_and_one_root(tmp_path
     records[0], records[1] = records[1], records[0]
     capture = records[0]
     capture["argv"][capture["argv"].index("--evidence-root") + 1] = "/workspace/other"
-    _resign(capture)
+    _resign_command(capture)
     commands_path.write_text(
         "\n".join(json.dumps(record, sort_keys=True, separators=(",", ":")) for record in records)
         + "\n",
@@ -2501,7 +2780,7 @@ def test_semantic_validator_binds_probe_a_command_to_raw_artifact(tmp_path):
     records = [json.loads(line) for line in commands_path.read_text(encoding="utf-8").splitlines()]
     probe_a = next(record for record in records if record["command"] == "probe-a")
     probe_a["primary_file_sha256"] = "0" * 64
-    _resign(probe_a)
+    _resign_command(probe_a)
     commands_path.write_text(
         "\n".join(json.dumps(record, sort_keys=True, separators=(",", ":")) for record in records)
         + "\n",
@@ -2524,7 +2803,7 @@ def test_semantic_validator_binds_gene2go_source_bytes_and_manifest(tmp_path):
     records = [json.loads(line) for line in commands_path.read_text(encoding="utf-8").splitlines()]
     roster = next(record for record in records if record["command"] == "build-roster")
     roster["argv"][roster["argv"].index("--gene2go-source-sha256") + 1] = "0" * 64
-    _resign(roster)
+    _resign_command(roster)
     commands_path.write_text(
         "\n".join(json.dumps(record, sort_keys=True, separators=(",", ":")) for record in records)
         + "\n",
@@ -2547,7 +2826,7 @@ def test_semantic_validator_binds_report_command_to_its_inputs_and_output(tmp_pa
     records = [json.loads(line) for line in commands_path.read_text(encoding="utf-8").splitlines()]
     report = next(record for record in records if record["command"] == "build-probe-a-report")
     report["argv"][report["argv"].index("--raw-sample-sha256") + 1] = "0" * 64
-    _resign(report)
+    _resign_command(report)
     commands_path.write_text(
         "\n".join(json.dumps(record, sort_keys=True, separators=(",", ":")) for record in records)
         + "\n",
@@ -2604,7 +2883,7 @@ def test_semantic_validator_binds_control_rows_to_prepared_h5ad(tmp_path):
     records = [json.loads(line) for line in commands_path.read_text(encoding="utf-8").splitlines()]
     probe_record = next(record for record in records if record["command"] == "probe-a")
     probe_record["primary_file_sha256"] = sha256_file(raw_path)
-    _resign(probe_record)
+    _resign_command(probe_record)
     report_path = tmp_path / REPORT_PATH
     report = json.loads(report_path.read_text(encoding="utf-8"))
     report["raw_samples"][0]["sha256"] = sha256_file(raw_path)
@@ -2617,7 +2896,7 @@ def test_semantic_validator_binds_control_rows_to_prepared_h5ad(tmp_path):
         raw_path
     )
     report_record["primary_file_sha256"] = sha256_file(report_path)
-    _resign(report_record)
+    _resign_command(report_record)
     commands_path.write_text(
         "\n".join(json.dumps(record, sort_keys=True, separators=(",", ":")) for record in records)
         + "\n",
