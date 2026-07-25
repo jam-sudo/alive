@@ -14,7 +14,8 @@ What it computes (all on development inputs):
 * the retained **singular-value spectrum** of :math:`\\Phi` and the **rank
   tolerance** used to threshold it;
 * **split-half measurability** with an EXPLICIT development role, via
-  :func:`alive.compose.gates.measurability_gate` (which refuses sealed roles);
+  :func:`alive.compose.gates.measurability_gate` (which rejects every
+  non-calibration role);
 * the **OOF primary theta** (L1 vs additive) via
   :func:`alive.compose.select.select_hyperparams` on calibration pairs.
 
@@ -156,7 +157,7 @@ def real_calibration_diagnostics(
     eps_split_a: np.ndarray,
     eps_split_b: np.ndarray,
     dev_oof_threshold: float = 0.0,
-    measurability_role: str = "combo_calibration",
+    measurability_role: str,
 ) -> FutilityResult:
     r"""Run the Phase-2a development checkpoint on development-role inputs only.
 

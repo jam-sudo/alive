@@ -65,6 +65,7 @@ from alive.compose.freeze import (
 from alive.compose.models import fitted_model_checksum
 from alive.compose.response import ResponseSpace, bind_response_source, verify_response_artifact
 from alive.compose.select import OOFFoldManifest
+from alive.compose.split import CALIBRATION_ROLE_NAME
 from alive.compose.zfactor import GeneFactorBank
 from alive.provenance import RunLedger, sha256_bytes, sha256_file, sha256_json
 
@@ -1432,7 +1433,7 @@ def _run_phase2a_core(
         eps_split_a=np.asarray(inputs.eps_split_a, dtype=float),
         eps_split_b=np.asarray(inputs.eps_split_b, dtype=float),
         dev_oof_threshold=cfg.dev_oof_threshold,
-        measurability_role="combo_calibration",
+        measurability_role=CALIBRATION_ROLE_NAME,
     )
     selected_k = futility.selected_k_total
     selected_lambda = futility.selected_lambda

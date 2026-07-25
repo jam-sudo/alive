@@ -62,14 +62,19 @@ from alive.compose.freeze import (
     OutcomeLeakageError,
     _assert_no_outcome_reference,
 )
-from alive.compose.split import ROLE_NAMES
+from alive.compose.split import (
+    SEALED_DOUBLE_UNSEEN_ROLE_NAME,
+    SEALED_SINGLE_UNSEEN_ROLE_NAME,
+)
 from alive.provenance import LedgerError, RunLedger
 
-#: The two sealed regimes, in their fixed manifest order. ``combo_calibration``
-#: (``ROLE_NAMES[0]``) is a development role and is intentionally NOT a sealed
+#: The two sealed regimes. Bind the semantic names, never a position in
+#: ``ROLE_NAMES``: appending a future non-sealed role to the manifest would
+#: silently re-point a positional reference at the wrong role.
+#: ``combo_calibration`` is a development role and is intentionally NOT a sealed
 #: evaluation regime.
-_DOUBLE_ROLE = ROLE_NAMES[1]  # "sealed_double_unseen"
-_SINGLE_ROLE = ROLE_NAMES[2]  # "sealed_single_unseen"
+_DOUBLE_ROLE = SEALED_DOUBLE_UNSEEN_ROLE_NAME
+_SINGLE_ROLE = SEALED_SINGLE_UNSEEN_ROLE_NAME
 
 #: Ledger artifact names whose recorded SHA must equal the bundle field of the
 #: same meaning. The exact names are those recorded by the Phase-2a orchestrator

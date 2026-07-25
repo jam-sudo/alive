@@ -60,15 +60,20 @@ from typing import TYPE_CHECKING, Protocol, runtime_checkable
 import numpy as np
 import scipy.sparse as sp
 
-from alive.compose.split import verify_split_manifest
+from alive.compose.split import (
+    SEALED_DOUBLE_UNSEEN_ROLE_NAME,
+    SEALED_ROLE_NAMES,
+    SEALED_SINGLE_UNSEEN_ROLE_NAME,
+    verify_split_manifest,
+)
 from alive.io import atomic_write_once
 from alive.provenance import sha256_json
 
 if TYPE_CHECKING:
     import anndata as _anndata
 
-#: The two sealed roles whose union forms the sealed cohort.
-_SEALED_ROLES = ("sealed_double_unseen", "sealed_single_unseen")
+#: The sealed roles whose union forms the sealed cohort.
+_SEALED_ROLES = SEALED_ROLE_NAMES
 
 #: Pair ID type: a canonical 2-tuple ``(a, b)`` (lexicographic min/max).
 PairID = tuple[str, str]
@@ -415,20 +420,18 @@ class ComposeOutcomeStore:
         # closed via ComposeSealingError, never a raw KeyError mid-access.
         try:
             roles = manifest["roles"]
-            self._double_ids: frozenset[PairID] = frozenset(
-                self._canonical(p) for p in roles["sealed_double_unseen"]
-            )
-            self._single_ids: frozenset[PairID] = frozenset(
-                self._canonical(p) for p in roles["sealed_single_unseen"]
-            )
+            self._sealed_ids_by_role: dict[str, frozenset[PairID]] = {
+                role: frozenset(self._canonical(p) for p in roles[role]) for role in _SEALED_ROLES
+            }
+            self._double_ids = self._sealed_ids_by_role[SEALED_DOUBLE_UNSEEN_ROLE_NAME]
+            self._single_ids = self._sealed_ids_by_role[SEALED_SINGLE_UNSEEN_ROLE_NAME]
             self._manifest_checksum: str = manifest["checksum"]
         except KeyError as exc:
             raise ComposeSealingError(
                 f"malformed manifest: missing required key {exc}. "
-                "Expected 'roles' (with 'sealed_double_unseen' and 'sealed_single_unseen') "
-                "and 'checksum'."
+                f"Expected 'roles' (with {list(_SEALED_ROLES)!r}) and 'checksum'."
             ) from exc
-        self._sealed_ids: frozenset[PairID] = self._double_ids | self._single_ids
+        self._sealed_ids: frozenset[PairID] = frozenset().union(*self._sealed_ids_by_role.values())
         manifest_pairs = {self._canonical(pair) for role in roles.values() for pair in role}
         if set(self._pair_index) != manifest_pairs:
             missing = sorted(manifest_pairs - set(self._pair_index))
@@ -931,10 +934,7 @@ class ComposeOutcomeStore:
         record = {
             "run_id": run_id,
             "pair_ids": sorted_pairs,
-            "role_counts": {
-                "sealed_double_unseen": len(self._double_ids),
-                "sealed_single_unseen": len(self._single_ids),
-            },
+            "role_counts": {role: len(self._sealed_ids_by_role[role]) for role in _SEALED_ROLES},
             "manifest_checksum": self._manifest_checksum,
             "request_checksum": sha256_json(sorted_pairs),
         }

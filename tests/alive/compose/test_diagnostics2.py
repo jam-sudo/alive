@@ -33,6 +33,7 @@ from alive.compose.diagnostics2 import (
 from alive.compose.gates import LeakageError
 from alive.compose.models import L1Model
 from alive.compose.operator import bilinear_predict, sym_basis_dim
+from alive.compose.split import CALIBRATION_ROLE_NAME
 
 
 # --------------------------------------------------------------------------- #
@@ -124,6 +125,7 @@ def _run(inst, **overrides):
         "uncovered_tolerance": inst["uncovered_tolerance"],
         "eps_split_a": inst["eps_split_a"],
         "eps_split_b": inst["eps_split_b"],
+        "measurability_role": CALIBRATION_ROLE_NAME,
     }
     kwargs.update(overrides)
     return real_calibration_diagnostics(**kwargs)

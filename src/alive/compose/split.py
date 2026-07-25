@@ -35,8 +35,27 @@ from alive.provenance import sha256_json
 PAIR_SPLIT_ALGORITHM = "compose_gene_partition_pair_split"
 PAIR_SPLIT_VERSION = "2a.1"
 
+#: Canonical role names. Keep the semantic names explicit: deriving sealed roles
+#: positionally from ``ROLE_NAMES[1:]`` would silently classify any future
+#: non-sealed role appended to the manifest as sealed.
+CALIBRATION_ROLE_NAME = "combo_calibration"
+SEALED_DOUBLE_UNSEEN_ROLE_NAME = "sealed_double_unseen"
+SEALED_SINGLE_UNSEEN_ROLE_NAME = "sealed_single_unseen"
+
 #: Manifest role keys, emitted in this fixed order.
-ROLE_NAMES = ("combo_calibration", "sealed_double_unseen", "sealed_single_unseen")
+ROLE_NAMES = (
+    CALIBRATION_ROLE_NAME,
+    SEALED_DOUBLE_UNSEEN_ROLE_NAME,
+    SEALED_SINGLE_UNSEEN_ROLE_NAME,
+)
+
+#: Exact sealed outcome roster. These roles are opened once, after selection
+#: freeze, only through the outcome store.
+SEALED_ROLE_NAMES = (
+    SEALED_DOUBLE_UNSEEN_ROLE_NAME,
+    SEALED_SINGLE_UNSEEN_ROLE_NAME,
+)
+
 _MANIFEST_KEYS = frozenset(
     {
         "algorithm",
@@ -257,9 +276,9 @@ def build_split_manifest(
         "eligibility_hash": sha256_json(eligibility),
         "calibration_genes": sorted(split.combo_genes, key=lambda s: s.encode("utf-8")),
         "roles": {
-            "combo_calibration": [[a, b] for a, b in split.combo_calibration],
-            "sealed_double_unseen": [[a, b] for a, b in split.sealed_double_unseen],
-            "sealed_single_unseen": [[a, b] for a, b in split.sealed_single_unseen],
+            CALIBRATION_ROLE_NAME: [[a, b] for a, b in split.combo_calibration],
+            SEALED_DOUBLE_UNSEEN_ROLE_NAME: [[a, b] for a, b in split.sealed_double_unseen],
+            SEALED_SINGLE_UNSEEN_ROLE_NAME: [[a, b] for a, b in split.sealed_single_unseen],
         },
     }
     manifest = dict(payload)
@@ -328,9 +347,9 @@ def verify_split_manifest(manifest: dict) -> str:
 
     reproduced = build_pair_split(eligible, seed=seed, calibration_fraction=float(fraction))
     expected_roles = {
-        "combo_calibration": reproduced.combo_calibration,
-        "sealed_double_unseen": reproduced.sealed_double_unseen,
-        "sealed_single_unseen": reproduced.sealed_single_unseen,
+        CALIBRATION_ROLE_NAME: reproduced.combo_calibration,
+        SEALED_DOUBLE_UNSEEN_ROLE_NAME: reproduced.sealed_double_unseen,
+        SEALED_SINGLE_UNSEEN_ROLE_NAME: reproduced.sealed_single_unseen,
     }
     if role_pairs != expected_roles:
         raise ValueError("split manifest role membership does not reproduce from seed/fraction")

@@ -49,6 +49,7 @@ from pathlib import Path
 from alive.compose.config import ComposePhase1Config, load_compose_config
 from alive.compose.gates import GateResult, measurability_gate, power_gate, rank_gate
 from alive.compose.identify import RankReport
+from alive.compose.split import CALIBRATION_ROLE_NAME
 from alive.compose.synthetic import RecoveryReport, frontier_sweep, run_recovery
 from alive.provenance import capture_environment, sha256_file
 
@@ -188,7 +189,11 @@ def run_phase1(config: ComposePhase1Config, *, gate_inputs: dict) -> Phase1Repor
         min_pairs=config.min_double_unseen_pairs,
         min_cells=config.min_cells_per_pair,
     )
-    g_meas = measurability_gate(gate_inputs["eps_split_a"], gate_inputs["eps_split_b"])
+    g_meas = measurability_gate(
+        gate_inputs["eps_split_a"],
+        gate_inputs["eps_split_b"],
+        _role=CALIBRATION_ROLE_NAME,
+    )
     # The rank gate's RankReport is a SYNTHETIC PROXY, not a real Norman Phi rank:
     # Phase 1 has no Norman calibration design, so we forward only the boolean
     # full-rank flag from the synthetic recovery run. We flag this explicitly in the

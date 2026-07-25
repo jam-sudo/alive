@@ -27,6 +27,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from alive.compose.gates import measurability_gate, power_gate
+from alive.compose.split import CALIBRATION_ROLE_NAME
 
 #: Evaluation regimes the power gate is reported for (headline first). The
 #: development role ``combo_calibration`` is NOT an evaluation regime.
@@ -301,7 +302,11 @@ def compute_regime_detectable_effect_report(
         Measurability ceiling, ``ε`` effect-size vs split-half noise, and the
         per-regime power gate result (headline = ``sealed_double_unseen``).
     """
-    meas = measurability_gate(eps_split_a, eps_split_b)  # fails closed on sealed roles
+    meas = measurability_gate(
+        eps_split_a,
+        eps_split_b,
+        _role=CALIBRATION_ROLE_NAME,
+    )
 
     eps = np.asarray(eps_calibration, dtype=np.float64)
     a = np.asarray(eps_split_a, dtype=np.float64)
