@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 import zipfile
 from pathlib import Path
 
@@ -15,6 +17,7 @@ from alive.compose.kernel_isolation_ci import (
     CI_PROOF_PROFILE_V2,
     CI_RECEIPT_SCHEMA,
     CI_TEST_CLASSNAME,
+    CI_WORKFLOW_PATH,
     KernelIsolationCIError,
     build_kernel_isolation_ci_archive,
     build_kernel_isolation_ci_receipt,
@@ -24,7 +27,6 @@ from alive.compose.kernel_isolation_ci import (
 from alive.provenance import sha256_json
 
 _REPO = Path(__file__).resolve().parents[3]
-_WORKFLOW = _REPO / ".github/workflows/test-suite.yml"
 _ARCHIVE = (
     _REPO
     / "docs/activation-evidence/compose"
@@ -56,22 +58,50 @@ def _write_junit(
     )
 
 
+def _synthetic_repo(root: Path, *, workflow_body: str = "name: synthetic\non: push\n") -> str:
+    """Commit a canonical workflow into a throwaway repo; return its HEAD sha."""
+    root.mkdir(parents=True, exist_ok=True)
+    env = {**os.environ, "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_SYSTEM": "/dev/null"}
+
+    def run(*args: str) -> str:
+        return subprocess.run(
+            ["git", *args], cwd=root, capture_output=True, text=True, check=True, env=env
+        ).stdout.strip()
+
+    run("init", "-q")
+    run("config", "user.email", "test@example.invalid")
+    run("config", "user.name", "compose-test")
+    workflow = root / CI_WORKFLOW_PATH
+    workflow.parent.mkdir(parents=True, exist_ok=True)
+    workflow.write_text(workflow_body, encoding="utf-8")
+    run("add", CI_WORKFLOW_PATH)
+    run("commit", "-q", "-m", "workflow")
+    return run("rev-parse", "HEAD")
+
+
+def _build(junit: Path, repo: Path, head_sha: str, **overrides: object) -> dict[str, object]:
+    kwargs: dict[str, object] = {
+        "junit_path": junit,
+        "workflow_path": repo / CI_WORKFLOW_PATH,
+        "repository": "jam-sudo/alive",
+        "head_sha": head_sha,
+        "run_id": 123,
+        "run_attempt": 1,
+        "runner_os": "Linux",
+        "runner_architecture": "x86_64",
+        "kernel_release": "6.17.0-test",
+        "proof_profile": CI_PROOF_PROFILE_V2,
+    }
+    kwargs.update(overrides)
+    return build_kernel_isolation_ci_receipt(**kwargs)
+
+
 def _receipt(tmp_path: Path, **junit_kwargs: object) -> dict[str, object]:
     tmp_path.mkdir(parents=True, exist_ok=True)
     junit = tmp_path / "junit.xml"
     _write_junit(junit, **junit_kwargs)
-    return build_kernel_isolation_ci_receipt(
-        junit_path=junit,
-        workflow_path=_WORKFLOW,
-        repository="jam-sudo/alive",
-        head_sha="a" * 40,
-        run_id=123,
-        run_attempt=1,
-        runner_os="Linux",
-        runner_architecture="x86_64",
-        kernel_release="6.17.0-test",
-        proof_profile=CI_PROOF_PROFILE_V2,
-    )
+    repo = tmp_path / "repo"
+    return _build(junit, repo, _synthetic_repo(repo))
 
 
 def test_builds_v2_receipt_only_when_both_kernel_tests_pass(tmp_path):
@@ -229,19 +259,42 @@ def test_rejects_testcase_smuggled_outside_the_single_testsuite(tmp_path):
         "</testcase></testsuite></testsuites>",
         encoding="utf-8",
     )
+    repo = tmp_path / "repo"
     with pytest.raises(KernelIsolationCIError, match="direct child of the single testsuite"):
-        build_kernel_isolation_ci_receipt(
-            junit_path=junit,
-            workflow_path=_WORKFLOW,
-            repository="jam-sudo/alive",
-            head_sha="a" * 40,
-            run_id=123,
-            run_attempt=1,
-            runner_os="Linux",
-            runner_architecture="x86_64",
-            kernel_release="6.17.0-test",
-            proof_profile=CI_PROOF_PROFILE_V2,
-        )
+        _build(junit, repo, _synthetic_repo(repo))
+
+
+def test_workflow_must_match_the_blob_recorded_at_the_commit_under_test(tmp_path):
+    junit = tmp_path / "junit.xml"
+    _write_junit(junit)
+    repo = tmp_path / "repo"
+    head_sha = _synthetic_repo(repo)
+    (repo / CI_WORKFLOW_PATH).write_text("name: swapped after commit\n", encoding="utf-8")
+    with pytest.raises(KernelIsolationCIError, match="differs from the blob recorded"):
+        _build(junit, repo, head_sha)
+
+
+def test_rejects_a_workflow_at_a_suffix_matching_path_inside_the_worktree(tmp_path):
+    """The canonical suffix alone must not admit an arbitrary file (attack G)."""
+    junit = tmp_path / "junit.xml"
+    _write_junit(junit)
+    repo = tmp_path / "repo"
+    head_sha = _synthetic_repo(repo)
+    decoy = repo / "nested" / CI_WORKFLOW_PATH
+    decoy.parent.mkdir(parents=True, exist_ok=True)
+    decoy.write_text("totally not the real workflow\n", encoding="utf-8")
+    with pytest.raises(KernelIsolationCIError, match="workflow path is not canonical"):
+        _build(junit, repo, head_sha, workflow_path=decoy)
+
+
+def test_rejects_a_workflow_outside_any_git_worktree(tmp_path):
+    junit = tmp_path / "junit.xml"
+    _write_junit(junit)
+    loose = tmp_path / "loose" / CI_WORKFLOW_PATH
+    loose.parent.mkdir(parents=True, exist_ok=True)
+    loose.write_text("name: ungoverned\n", encoding="utf-8")
+    with pytest.raises(KernelIsolationCIError):
+        _build(junit, tmp_path / "loose", "b" * 40, workflow_path=loose)
 
 
 def test_committed_historical_kernel_receipt_is_valid():

@@ -12,6 +12,7 @@ import io
 import json
 import math
 import re
+import subprocess
 import xml.etree.ElementTree as ET
 import zipfile
 from collections.abc import Mapping, Sequence
@@ -19,13 +20,14 @@ from datetime import datetime
 from pathlib import Path
 
 from alive.io import atomic_write_once
-from alive.provenance import sha256_bytes, sha256_file, sha256_json
+from alive.provenance import sha256_bytes, sha256_json
 
 CI_RECEIPT_SCHEMA = "compose_kernel_isolation_ci_receipt_v1"
 CI_ARCHIVE_SCHEMA = "compose_kernel_isolation_ci_archive_v1"
 CI_PROOF_PROFILE_V1 = "x86_64_seccomp_primitives_v1"
 CI_PROOF_PROFILE_V2 = "x86_64_seccomp_primitives_and_launcher_wiring_v2"
 CI_WORKFLOW_PATH = ".github/workflows/test-suite.yml"
+_GIT_TIMEOUT = 30
 CI_TEST_CLASSNAME = "tests.alive.compose.test_network_isolation"
 CI_PRIMITIVE_TEST = "test_linux_policy_and_sealed_receipt_validate_in_the_active_process"
 CI_E2E_TEST = "test_linux_launcher_executes_driver_self_check_end_to_end"
@@ -153,6 +155,51 @@ def _aware_timestamp(value: object, label: str) -> datetime:
     if parsed.tzinfo is None or parsed.utcoffset() is None:
         raise KernelIsolationCIError(f"{label} timestamp must include a timezone")
     return parsed
+
+
+def _git(repo_root: Path, *args: str) -> bytes:
+    """Run ``git`` in ``repo_root`` (argv, no shell) and return raw stdout."""
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(repo_root), *args],
+            capture_output=True,
+            timeout=_GIT_TIMEOUT,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise KernelIsolationCIError(f"git {args[0]} failed at {repo_root}: {exc}") from exc
+    if result.returncode != 0:
+        raise KernelIsolationCIError(
+            f"git {args[0]} exited {result.returncode} at {repo_root}: "
+            f"{result.stderr.decode('utf-8', 'replace').strip()}"
+        )
+    return result.stdout
+
+
+def _workflow_bytes_at_commit(workflow_path: Path, head_sha: str) -> bytes:
+    """Return the workflow bytes, bound to the blob recorded at ``head_sha``.
+
+    Validating the argument as a path alone accepts any file whose name happens
+    to end in the canonical suffix, so a receipt could commit to a workflow that
+    was never in the repository. The file must instead be the canonical workflow
+    of a real Git worktree, and must match byte-for-byte the blob that commit
+    records at that path.
+    """
+    directory = workflow_path.parent
+    if not directory.is_dir():
+        raise KernelIsolationCIError(f"kernel-isolation workflow directory is missing: {directory}")
+    repo_root = Path(_git(directory, "rev-parse", "--show-toplevel").decode().strip()).resolve()
+    if workflow_path.resolve() != repo_root / CI_WORKFLOW_PATH:
+        raise KernelIsolationCIError("kernel-isolation receipt workflow path is not canonical")
+    try:
+        workflow_bytes = workflow_path.read_bytes()
+    except OSError as exc:
+        raise KernelIsolationCIError(f"cannot read the kernel-isolation workflow: {exc}") from exc
+    recorded = _git(repo_root, "cat-file", "blob", f"{head_sha}:{CI_WORKFLOW_PATH}")
+    if workflow_bytes != recorded:
+        raise KernelIsolationCIError(
+            "kernel-isolation workflow differs from the blob recorded at the commit under test"
+        )
+    return workflow_bytes
 
 
 def _reject_nested_elements(element: ET.Element, label: str) -> None:
@@ -293,18 +340,14 @@ def build_kernel_isolation_ci_receipt(
     _positive_int(run_attempt, "run_attempt")
     if runner_os != "Linux" or runner_architecture != "x86_64" or not kernel_release:
         raise KernelIsolationCIError("kernel-isolation receipt requires a real Linux x86_64 runner")
-    workflow = Path(workflow_path)
-    if workflow.as_posix() != CI_WORKFLOW_PATH and not workflow.as_posix().endswith(
-        f"/{CI_WORKFLOW_PATH}"
-    ):
-        raise KernelIsolationCIError("kernel-isolation receipt workflow path is not canonical")
+    workflow_bytes = _workflow_bytes_at_commit(Path(workflow_path), head_sha)
     junit, cases = _parse_junit(junit_path, required_tests=required)
     body = {
         "schema": CI_RECEIPT_SCHEMA,
         "proof_profile": proof_profile,
         "repository": repository,
         "workflow_path": CI_WORKFLOW_PATH,
-        "workflow_sha256": sha256_file(workflow),
+        "workflow_sha256": sha256_bytes(workflow_bytes),
         "head_sha": head_sha,
         "run_id": run_id,
         "run_attempt": run_attempt,
