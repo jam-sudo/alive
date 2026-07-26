@@ -442,3 +442,36 @@ def test_missing_factor_bank_for_k_rejected():
             model_factory=lambda: L1Model(),
             uncovered_tolerance=0.7,
         )
+
+
+def test_singular_candidate_scores_non_viable_and_never_wins():
+    """A candidate with no unique solution must lose, not abort selection.
+
+    A zero factor bank makes the Gram matrix exactly zero at ``lam=0``, which
+    every LAPACK build reports as singular. That candidate has no estimate to
+    score, so it is recorded as ``-inf`` and the regularised candidate — which
+    does solve — is selected. Before this, selection propagated the raw
+    ``LinAlgError`` on builds that report singularity and scored an arbitrary
+    estimate on builds that do not.
+    """
+    rng = np.random.default_rng(10)
+    gene_ids, idx_pairs, pair_ids, _, additive, eps = _make_instance(rng, k=4, p=7)
+    Z = np.zeros((len(gene_ids), 4))
+
+    result = select_hyperparams(
+        idx_pairs=idx_pairs,
+        pair_ids=pair_ids,
+        eps_obs=eps,
+        additive=additive,
+        factors_by_k={4: Z},
+        k_total_grid=[4],
+        lambda_grid=[0.0, 0.001],
+        n_genes=len(gene_ids),
+        n_folds=3,
+        seed=11,
+        model_factory=lambda: L1Model(),
+        uncovered_tolerance=0.9,
+    )
+    assert result.theta_by_candidate[(4, 0.0)] == float("-inf")
+    assert np.isfinite(result.theta_by_candidate[(4, 0.001)])
+    assert result.selected_lambda == 0.001

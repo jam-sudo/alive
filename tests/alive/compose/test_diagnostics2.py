@@ -180,6 +180,28 @@ def test_rank_deficient_design_is_futility_stopped():
     assert any("rank" in f.lower() for f in res.failures)
 
 
+def test_exactly_singular_design_stops_for_futility_instead_of_raising():
+    """A design whose normal equations are singular must not abort the checkpoint.
+
+    ``np.linalg.solve`` reports exact singularity on some LAPACK builds and
+    returns an arbitrary vector on others, so before the estimator normalised
+    that outcome this path raised ``LinAlgError`` on one machine and reached the
+    rank gate on another. A zero factor bank makes the Gram matrix exactly zero
+    at ``lam=0``, which every LAPACK reports, so this pins the portable result.
+    """
+    rng = np.random.default_rng(7)
+    inst = _full_rank_instance(rng)
+    Z = inst["factors_by_k"][inst["selected_k_total"]]
+    inst["factors_by_k"] = {inst["selected_k_total"]: np.zeros_like(Z)}
+    res = _run(inst)
+    assert res.status == "FUTILITY_STOPPED"
+    assert not res.rank_report.is_full_rank
+    assert any("rank" in f.lower() for f in res.failures)
+    # The singular lam=0 candidate scored non-viable and lost to the regularised
+    # one, which is solvable; the rank gate then stopped the study anyway.
+    assert res.selected_lambda == 1e-3
+
+
 def test_non_finite_conditioning_is_futility_stopped():
     rng = np.random.default_rng(3)
     inst = _full_rank_instance(rng)

@@ -15,6 +15,15 @@ import numpy as np
 from alive.compose.operator import design_matrix, sym_basis_dim
 
 
+class SingularDesignError(ValueError):
+    """The normal equations have no unique solution for this design and ``lam``.
+
+    Raised only where LAPACK reports the Gram matrix as exactly singular. A
+    full-rank design never reaches it, so the estimate for an identifiable
+    design is unaffected.
+    """
+
+
 @dataclass(frozen=True)
 class RankReport:
     """Algebraic-identifiability diagnostics for a calibration pair set."""
@@ -61,11 +70,26 @@ def identify_operator(
 
     Solves ``min_C ||Phi C^T - eps_obs||^2 + lam ||C||^2`` via the normal
     equations ``(Phi^T Phi + lam I) C^T = Phi^T eps_obs``.
+
+    Raises
+    ------
+    SingularDesignError
+        If LAPACK reports the Gram matrix as exactly singular, which happens
+        for a rank-deficient design at ``lam == 0``. Whether a given LAPACK
+        build reports exact singularity or returns an arbitrary vector for such
+        a design is not portable, so the outcome is normalised here instead of
+        propagating a bare ``LinAlgError`` on some machines and a meaningless
+        estimate on others.
     """
     Z = np.asarray(Z, dtype=np.float64)
     eps_obs = np.asarray(eps_obs, dtype=np.float64)
     phi = design_matrix(Z, pairs)
     gram = phi.T @ phi + float(lam) * np.eye(phi.shape[1])
     rhs = phi.T @ eps_obs
-    coef_t = np.linalg.solve(gram, rhs)  # (sym_dim, p)
+    try:
+        coef_t = np.linalg.solve(gram, rhs)  # (sym_dim, p)
+    except np.linalg.LinAlgError as exc:
+        raise SingularDesignError(
+            f"calibration design has no unique least-squares solution at lam={float(lam)!r}: {exc}"
+        ) from exc
     return coef_t.T

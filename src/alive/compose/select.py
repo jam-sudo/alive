@@ -42,6 +42,7 @@ from pathlib import Path
 import numpy as np
 from numpy.random import PCG64, Generator
 
+from alive.compose.identify import SingularDesignError
 from alive.compose.metric2 import paired_relative_error_reduction
 from alive.io import atomic_write_once
 from alive.provenance import sha256_json
@@ -944,17 +945,25 @@ def select_hyperparams(
                 f"factors_by_k[{k_total}] has {Z.shape[0]} gene rows, expected {n_genes}"
             )
         for lam in lambda_grid:
-            theta, _ = _oof_theta_for_candidate(
-                folds=folds,
-                idx_pairs=idx_pairs,
-                pair_ids=pair_ids,
-                eps_obs=eps,
-                additive=add,
-                Z=Z,
-                lam=float(lam),
-                p=p,
-                model_factory=model_factory,
-            )
+            # A candidate whose normal equations are singular has no estimate to
+            # score. It is scored as non-viable rather than allowed to abort the
+            # checkpoint, so a rank-deficient design still reaches the registered
+            # rank gate and stops for futility instead of raising. Unreachable for
+            # an identifiable design: LAPACK only reports exact singularity here.
+            try:
+                theta, _ = _oof_theta_for_candidate(
+                    folds=folds,
+                    idx_pairs=idx_pairs,
+                    pair_ids=pair_ids,
+                    eps_obs=eps,
+                    additive=add,
+                    Z=Z,
+                    lam=float(lam),
+                    p=p,
+                    model_factory=model_factory,
+                )
+            except SingularDesignError:
+                theta = float("-inf")
             theta_by_candidate[(int(k_total), float(lam))] = theta
 
     # Select max theta; deterministic tie-break: lower k_total, then LARGER lambda.

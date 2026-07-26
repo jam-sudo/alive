@@ -3,8 +3,14 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
-from alive.compose.identify import RankReport, identify_operator, rank_diagnostics
+from alive.compose.identify import (
+    RankReport,
+    SingularDesignError,
+    identify_operator,
+    rank_diagnostics,
+)
 from alive.compose.operator import bilinear_predict, sym_basis_dim
 
 
@@ -50,3 +56,30 @@ def test_rank_deficient_flagged():
     # must NOT read "well-conditioned" off only the positive singular values.
     assert not np.isfinite(rep.condition_number)
     assert rep.condition_number == float("inf")
+
+
+def test_singular_design_raises_a_typed_error_not_a_bare_linalg_error():
+    """Whether LAPACK reports exact singularity is not portable; the outcome is.
+
+    A zero factor bank makes the Gram matrix exactly zero at ``lam=0``, so every
+    LAPACK build reports it singular. Without normalisation the caller would see
+    ``numpy.linalg.LinAlgError`` here and an arbitrary estimate on a build whose
+    pivots happen not to underflow to zero.
+    """
+    n_genes, k, p = 6, 3, 2
+    Z = np.zeros((n_genes, k))
+    pairs = [(i, j) for i in range(n_genes) for j in range(i + 1, n_genes)]
+    eps = np.zeros((len(pairs), p))
+    with pytest.raises(SingularDesignError, match="no unique least-squares solution"):
+        identify_operator(Z, pairs, eps, lam=0.0)
+
+
+def test_regularisation_makes_the_same_design_solvable():
+    """The guard fires on singularity itself, not on the design being degenerate."""
+    n_genes, k, p = 6, 3, 2
+    Z = np.zeros((n_genes, k))
+    pairs = [(i, j) for i in range(n_genes) for j in range(i + 1, n_genes)]
+    eps = np.zeros((len(pairs), p))
+    coef = identify_operator(Z, pairs, eps, lam=1e-3)
+    assert coef.shape == (p, sym_basis_dim(k))
+    assert np.all(coef == 0.0)
