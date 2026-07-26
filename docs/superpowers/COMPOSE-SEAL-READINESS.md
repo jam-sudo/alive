@@ -5,7 +5,7 @@
 > **이 문서는 아무것도 정의하지 않는다** — 세부(task)는 plan, claim은 spec, exact param은 config,
 > 시간순 audit는 git이 authoritative다([sources of truth](../../CLAUDE.md#sources)). 상태 행이 authoritative
 > 문서와 어긋나면 **authoritative 문서가 옳다**; 이 인덱스를 갱신한다.
-> **Updated:** 2026-07-26 @ `2dd23d6` (branch `main`)
+> **Updated:** 2026-07-26 @ `248db75` (branch `compose-ci-receipt-hardening`)
 > **갱신 트리거:** sub-project/gate **상태가 바뀔 때만**(커밋마다 아님).
 > **종결 상태:** COMPOSE seal이 정확히 한 번 열리면 이 인덱스는 **frozen/은퇴**한다. 이후 진행상황은
 > seal 결과와 post-hoc analysis가 대신한다.
@@ -215,6 +215,21 @@ branch에서 추적 가능하게 기록한다. `LOCAL` ledger ID만으로는 이
    does **not** clear `RELEASE-BLOCKED`, substitute for the exact-SHA independent review, establish that any
    production pod is correctly configured, or open the seal. A fresh verifier image/owner lock and independent
    acceptance at a clean exact commit remain mandatory. Seal state remains **UNOPENED**.
+   **2026-07-26 receipt-builder hardening (branch `compose-ci-receipt-hardening`, not operationally pinned):**
+   the three forged-input paths recorded in the entry above are closed. (1) Testcase outcome detection was a
+   blacklist of three tag names, so a rerun plugin's `rerunFailure`/`flakyFailure` element and a `failure`
+   buried under `system-err` both read as a pass; it is now an allowlist over the xunit2 vocabulary pytest
+   actually emits, nested elements under those children are refused, and every testcase must be a direct child
+   of the single testsuite. (2) `--workflow` accepted any path ending in the canonical suffix; the file must
+   now be a real Git worktree's canonical workflow and byte-identical to the blob that `--head-sha` records at
+   that path, which removes "any file anywhere" from the trust base but still does **not** prove GitHub
+   executed that workflow — only Actions' own execution integrity does. Every new negative test was checked
+   against the pre-fix builder and fails there; one acceptance test guards the opposite direction, that the
+   allowlist does not start rejecting real pytest output. The archive published at `ccc5a2e` stays
+   reproducible: rebuilding its receipt from the downloaded run-`30200634662` JUnit under the hardened builder
+   still yields `a6e6c024…a06b`. This is a development-boundary correction with no config, lineage, or
+   evidence mutation; it does not clear `RELEASE-BLOCKED` or open the seal, and independent review at a clean
+   exact commit remains mandatory. Seal state remains **UNOPENED**.
    **2026-07-25 pre-pod local gate:** the probe-rerun runbook's §2.2 verification roster was run at clean exact
    commit `614017b67e35e9cc07f68d5b512213d8356cf1b2` — **254 passed**, plus `ruff check`/`ruff format --check`
    over the whole repository, `git diff --check`, and an empty `git status --short`. This records local
