@@ -58,25 +58,34 @@ def _write_junit(
     )
 
 
+def _run_git(root: Path, *args: str) -> str:
+    """Run git against ``root`` only, immune to an inherited ``GIT_*`` environment.
+
+    Sanitising just ``GIT_CONFIG_*`` is not enough. With ``GIT_DIR`` exported,
+    these helpers init, add and commit into *that* repository instead of the
+    throwaway one — running this file under a stray ``GIT_DIR`` has already
+    written a commit into a real checkout. Fixtures must not be able to reach
+    outside ``root``.
+    """
+    env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    env |= {"GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_SYSTEM": "/dev/null"}
+    return subprocess.run(
+        ["git", *args], cwd=root, capture_output=True, text=True, check=True, env=env
+    ).stdout.strip()
+
+
 def _synthetic_repo(root: Path, *, workflow_body: str = "name: synthetic\non: push\n") -> str:
     """Commit a canonical workflow into a throwaway repo; return its HEAD sha."""
     root.mkdir(parents=True, exist_ok=True)
-    env = {**os.environ, "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_SYSTEM": "/dev/null"}
-
-    def run(*args: str) -> str:
-        return subprocess.run(
-            ["git", *args], cwd=root, capture_output=True, text=True, check=True, env=env
-        ).stdout.strip()
-
-    run("init", "-q")
-    run("config", "user.email", "test@example.invalid")
-    run("config", "user.name", "compose-test")
+    _run_git(root, "init", "-q")
+    _run_git(root, "config", "user.email", "test@example.invalid")
+    _run_git(root, "config", "user.name", "compose-test")
     workflow = root / CI_WORKFLOW_PATH
     workflow.parent.mkdir(parents=True, exist_ok=True)
     workflow.write_text(workflow_body, encoding="utf-8")
-    run("add", CI_WORKFLOW_PATH)
-    run("commit", "-q", "-m", "workflow")
-    return run("rev-parse", "HEAD")
+    _run_git(root, "add", CI_WORKFLOW_PATH)
+    _run_git(root, "commit", "-q", "-m", "workflow")
+    return _run_git(root, "rev-parse", "HEAD")
 
 
 def _build(junit: Path, repo: Path, head_sha: str, **overrides: object) -> dict[str, object]:
@@ -295,6 +304,26 @@ def test_rejects_a_workflow_outside_any_git_worktree(tmp_path):
     loose.write_text("name: ungoverned\n", encoding="utf-8")
     with pytest.raises(KernelIsolationCIError):
         _build(junit, tmp_path / "loose", "b" * 40, workflow_path=loose)
+
+
+def test_workflow_binding_ignores_a_hostile_git_environment(tmp_path, monkeypatch):
+    """``GIT_*`` must not let a non-worktree directory answer as a repository.
+
+    ``GIT_DIR``/``GIT_WORK_TREE`` redirect repository discovery, so an inherited
+    environment could otherwise make an arbitrary staging directory pass the
+    "must be a real Git worktree" check using an unrelated repository's objects.
+    """
+    junit = tmp_path / "junit.xml"
+    _write_junit(junit)
+    repo = tmp_path / "repo"
+    head_sha = _synthetic_repo(repo)
+    stage = tmp_path / "stage"
+    (stage / CI_WORKFLOW_PATH).parent.mkdir(parents=True, exist_ok=True)
+    (stage / CI_WORKFLOW_PATH).write_bytes((repo / CI_WORKFLOW_PATH).read_bytes())
+    monkeypatch.setenv("GIT_DIR", str(repo / ".git"))
+    monkeypatch.setenv("GIT_WORK_TREE", str(stage))
+    with pytest.raises(KernelIsolationCIError, match="not a git repository"):
+        _build(junit, stage, head_sha, workflow_path=stage / CI_WORKFLOW_PATH)
 
 
 def test_committed_historical_kernel_receipt_is_valid():

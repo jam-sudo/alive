@@ -11,6 +11,7 @@ from __future__ import annotations
 import io
 import json
 import math
+import os
 import re
 import subprocess
 import xml.etree.ElementTree as ET
@@ -158,12 +159,21 @@ def _aware_timestamp(value: object, label: str) -> datetime:
 
 
 def _git(repo_root: Path, *args: str) -> bytes:
-    """Run ``git`` in ``repo_root`` (argv, no shell) and return raw stdout."""
+    """Run ``git`` in ``repo_root`` (argv, no shell) and return raw stdout.
+
+    ``GIT_DIR``/``GIT_WORK_TREE``/``GIT_ALTERNATE_OBJECT_DIRECTORIES`` and the
+    rest of the ``GIT_*`` namespace redirect repository discovery and object
+    lookup, so an inherited environment can make a directory that is not a
+    worktree answer as though it were one. They are stripped: only the path
+    argument may decide which repository answers.
+    """
+    environment = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
     try:
         result = subprocess.run(
             ["git", "-C", str(repo_root), *args],
             capture_output=True,
             timeout=_GIT_TIMEOUT,
+            env=environment,
         )
     except (OSError, subprocess.SubprocessError) as exc:
         raise KernelIsolationCIError(f"git {args[0]} failed at {repo_root}: {exc}") from exc
