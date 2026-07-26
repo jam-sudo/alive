@@ -5,7 +5,7 @@
 > **이 문서는 아무것도 정의하지 않는다** — 세부(task)는 plan, claim은 spec, exact param은 config,
 > 시간순 audit는 git이 authoritative다([sources of truth](../../CLAUDE.md#sources)). 상태 행이 authoritative
 > 문서와 어긋나면 **authoritative 문서가 옳다**; 이 인덱스를 갱신한다.
-> **Updated:** 2026-07-26 @ `2dd23d6` (branch `main`)
+> **Updated:** 2026-07-26 @ `26e93e5` (branch `compose-singular-design-failure-path`)
 > **갱신 트리거:** sub-project/gate **상태가 바뀔 때만**(커밋마다 아님).
 > **종결 상태:** COMPOSE seal이 정확히 한 번 열리면 이 인덱스는 **frozen/은퇴**한다. 이후 진행상황은
 > seal 결과와 post-hoc analysis가 대신한다.
@@ -220,6 +220,24 @@ branch에서 추적 가능하게 기록한다. `LOCAL` ledger ID만으로는 이
    over the whole repository, `git diff --check`, and an empty `git status --short`. This records local
    implementation readiness only; the verifier OCI image, owner-frozen image lock, exact-SHA independent review,
    and pod-stage gates all remain outstanding.
+   **2026-07-26 singular-design portability correction (branch `compose-singular-design-failure-path`, not
+   operationally pinned):** `identify_operator` solved the normal equations with `np.linalg.solve` and let
+   whatever LAPACK decided escape. For a rank-deficient design at `lam=0` the Gram matrix is singular, and
+   whether LAPACK reports that or returns an arbitrary vector depends on rounding, hence on the CPU. Two Linux
+   CI runners on the same commit disagreed: one reached the rank gate, the other aborted the development
+   futility checkpoint with an uncaught `LinAlgError`; the macOS build never raises, which is why this was
+   invisible locally. **The verdict was never wrong** — `failures` is built from the rank report, so a
+   rank-deficient design stops for futility either way; what was not portable is whether the checkpoint
+   *returns* that verdict or crashes first. The estimator now raises a typed `SingularDesignError` where LAPACK
+   reports exact singularity, and selection scores such a candidate non-viable rather than letting it abort.
+   The registered rank gate keeps its existing position: it is defined at the **selected** dimension and
+   `FutilityResult` always carries selection outputs, so no complete result exists before selection and the
+   gate cannot simply be moved ahead of it. The new branch is unreachable for an identifiable design, so a
+   full-rank estimate is unchanged. **Residual, deliberately not addressed:** a build that does not report
+   singularity still scores an arbitrary estimate, so `selected_lambda` for a rank-deficient design can still
+   differ by platform; removing that means registering a numerical rank tolerance applied before the solve,
+   which is a scientific decision, not a portability fix. This is a development-boundary correction with no
+   config, lineage or evidence mutation. Seal state remains **UNOPENED**; execution remains **RELEASE-BLOCKED**.
    **2026-07-25 leakage-guard corrections (same branch, not operationally pinned):** two development-boundary
    guards were found failing open and were fixed with mutation-verified regression tests. (1) The measurability
    gate blacklisted `secondary_sealed`, a role name that exists nowhere else in the protocol; the real second
