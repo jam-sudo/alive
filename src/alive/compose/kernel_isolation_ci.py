@@ -72,6 +72,8 @@ _JUNIT_KEYS = frozenset(
 _TEST_CASE_KEYS = frozenset({"classname", "name", "time_seconds", "status"})
 _TERMINAL_CASE_TAGS = frozenset({"skipped", "failure", "error"})
 _TEXT_ONLY_CASE_TAGS = frozenset({"system-out", "system-err"})
+_SUITE_CHILD_TAGS = frozenset({"testcase", "properties", "system-out", "system-err"})
+_REGULAR_BLOB_MODES = frozenset({"100644", "100755"})
 _ARCHIVE_KEYS = frozenset(
     {
         "schema",
@@ -204,6 +206,12 @@ def _workflow_bytes_at_commit(workflow_path: Path, head_sha: str) -> bytes:
         workflow_bytes = workflow_path.read_bytes()
     except OSError as exc:
         raise KernelIsolationCIError(f"cannot read the kernel-isolation workflow: {exc}") from exc
+    entry = _git(repo_root, "ls-tree", "-z", head_sha, "--", CI_WORKFLOW_PATH)
+    fields = entry.decode("utf-8", "replace").split("\0")[0].split("\t")[0].split()
+    if len(fields) != 3 or fields[0] not in _REGULAR_BLOB_MODES or fields[1] != "blob":
+        raise KernelIsolationCIError(
+            "the commit under test does not record a regular-file workflow at that path"
+        )
     recorded = _git(repo_root, "cat-file", "blob", f"{head_sha}:{CI_WORKFLOW_PATH}")
     if workflow_bytes != recorded:
         raise KernelIsolationCIError(
@@ -264,6 +272,13 @@ def _parse_junit(
     if len(suites) != 1:
         raise KernelIsolationCIError("kernel-isolation JUnit must contain exactly one testsuite")
     suite = suites[0]
+    if root.tag not in {"testsuites", "testsuite"}:
+        raise KernelIsolationCIError(f"JUnit root element {root.tag!r} is not a pytest report")
+    for child in suite:
+        if child.tag not in _SUITE_CHILD_TAGS:
+            raise KernelIsolationCIError(
+                f"JUnit testsuite has an unrecognised child element {child.tag!r}"
+            )
     try:
         totals = {
             field: int(suite.attrib[field]) for field in ("tests", "failures", "errors", "skipped")
@@ -344,7 +359,7 @@ def build_kernel_isolation_ci_receipt(
     required = _required_tests(proof_profile)
     if not isinstance(repository, str) or _REPOSITORY_RE.fullmatch(repository) is None:
         raise KernelIsolationCIError("repository must be an owner/name identifier")
-    if _COMMIT_RE.fullmatch(head_sha) is None:
+    if not isinstance(head_sha, str) or _COMMIT_RE.fullmatch(head_sha) is None:
         raise KernelIsolationCIError("head SHA must be a full lowercase Git commit")
     _positive_int(run_id, "run_id")
     _positive_int(run_attempt, "run_attempt")

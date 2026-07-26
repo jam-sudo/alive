@@ -302,7 +302,7 @@ def test_rejects_a_workflow_outside_any_git_worktree(tmp_path):
     loose = tmp_path / "loose" / CI_WORKFLOW_PATH
     loose.parent.mkdir(parents=True, exist_ok=True)
     loose.write_text("name: ungoverned\n", encoding="utf-8")
-    with pytest.raises(KernelIsolationCIError):
+    with pytest.raises(KernelIsolationCIError, match="not a git repository"):
         _build(junit, tmp_path / "loose", "b" * 40, workflow_path=loose)
 
 
@@ -324,6 +324,45 @@ def test_workflow_binding_ignores_a_hostile_git_environment(tmp_path, monkeypatc
     monkeypatch.setenv("GIT_WORK_TREE", str(stage))
     with pytest.raises(KernelIsolationCIError, match="not a git repository"):
         _build(junit, stage, head_sha, workflow_path=stage / CI_WORKFLOW_PATH)
+
+
+def test_rejects_a_symlink_workflow_entry_at_the_commit(tmp_path):
+    """A mode-120000 entry hands back its target path, not a workflow.
+
+    GitHub will not execute a symlinked workflow file, so a receipt built from
+    one attests a workflow that could never have run.
+    """
+    junit = tmp_path / "junit.xml"
+    _write_junit(junit)
+    repo = tmp_path / "repo"
+    _synthetic_repo(repo)
+    payload = repo / "payload.txt"
+    payload.write_text("/some/other/real.yml", encoding="utf-8")
+    blob = _run_git(repo, "hash-object", "-w", "payload.txt")
+    _run_git(repo, "update-index", "--add", "--cacheinfo", f"120000,{blob},{CI_WORKFLOW_PATH}")
+    tree = _run_git(repo, "write-tree")
+    head_sha = _run_git(repo, "commit-tree", tree, "-m", "symlinked workflow")
+    (repo / CI_WORKFLOW_PATH).write_text("/some/other/real.yml", encoding="utf-8")
+    with pytest.raises(KernelIsolationCIError, match="regular-file workflow"):
+        _build(junit, repo, head_sha)
+
+
+def test_rejects_unrecognised_testsuite_markup(tmp_path):
+    junit = tmp_path / "junit.xml"
+    junit.write_text(
+        '<?xml version="1.0" encoding="utf-8"?>'
+        '<testsuites name="pytest tests">'
+        '<testsuite name="pytest" errors="0" failures="0" skipped="0" tests="2" time="0.3" '
+        'timestamp="2026-07-25T00:00:00+00:00" hostname="runner">'
+        '<failure message="the suite blew up" />'
+        f'<testcase classname="{CI_TEST_CLASSNAME}" name="{CI_PRIMITIVE_TEST}" time="0.1" />'
+        f'<testcase classname="{CI_TEST_CLASSNAME}" name="{CI_E2E_TEST}" time="0.2" />'
+        "</testsuite></testsuites>",
+        encoding="utf-8",
+    )
+    repo = tmp_path / "repo"
+    with pytest.raises(KernelIsolationCIError, match="testsuite has an unrecognised child"):
+        _build(junit, repo, _synthetic_repo(repo))
 
 
 def test_committed_historical_kernel_receipt_is_valid():
