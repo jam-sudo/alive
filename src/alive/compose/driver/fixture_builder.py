@@ -72,7 +72,13 @@ from alive.compose.operator import _sym_to_vec, bilinear_predict
 from alive.compose.outcome_store import FIXTURE_CORPUS_V1, FixtureCorpusAttestation
 from alive.compose.phase2a import OutcomeAccessAudit, Phase2aInputs
 from alive.compose.response import fit_response_space, verify_response_artifact
-from alive.compose.split import ROLE_NAMES, build_split_manifest
+from alive.compose.roles import (
+    CALIBRATION_ROLE_NAME,
+    ROLE_NAMES,
+    SEALED_DOUBLE_UNSEEN_ROLE_NAME,
+    SEALED_SINGLE_UNSEEN_ROLE_NAME,
+)
+from alive.compose.split import build_split_manifest
 from alive.compose.worker_bundle import build_worker_bundle
 from alive.provenance import sha256_file, sha256_json
 
@@ -250,9 +256,9 @@ def _build_instance(manifest: Mapping[str, Any], *, k_grid: tuple[int, ...]) -> 
     (preflight parity) and the calibration outcomes align with the dev store.
     """
     roles = manifest["roles"]
-    cal_pairs = [tuple(p) for p in roles["combo_calibration"]]
-    sealed_double = [tuple(p) for p in roles["sealed_double_unseen"]]
-    sealed_single = [tuple(p) for p in roles["sealed_single_unseen"]]
+    cal_pairs = [tuple(p) for p in roles[CALIBRATION_ROLE_NAME]]
+    sealed_double = [tuple(p) for p in roles[SEALED_DOUBLE_UNSEEN_ROLE_NAME]]
+    sealed_single = [tuple(p) for p in roles[SEALED_SINGLE_UNSEEN_ROLE_NAME]]
     gene_ids = sorted(
         {g for role in ROLE_NAMES for pair in roles[role] for g in pair},
         key=lambda s: s.encode("utf-8"),
@@ -353,7 +359,7 @@ def _build_response_and_fit_role(
         [(f"c{i}", "control", "control") for i in range(n_control)]
         + [(f"s{i}", "singles", gene_id) for i, gene_id in enumerate(single_genes)]
         + [
-            (f"m{i}", "combo_calibration", f"{a}{COMBO_SEP}{b}")
+            (f"m{i}", CALIBRATION_ROLE_NAME, f"{a}{COMBO_SEP}{b}")
             for i, (a, b) in enumerate(combo_pairs)
         ]
     )
@@ -361,7 +367,7 @@ def _build_response_and_fit_role(
         X=X,
         var_names=tuple(gene_order),
         rows=tuple(rows),
-        role_counts={"control": n_control, "singles": n_single, "combo_calibration": n_combo},
+        role_counts={"control": n_control, "singles": n_single, CALIBRATION_ROLE_NAME: n_combo},
         raw_data_sha256=raw_data_sha256,
         pair_manifest_sha256=_fixture_digest("fit_role_pair_manifest"),
         eligibility_hash=_fixture_digest("fit_role_eligibility"),
@@ -629,7 +635,7 @@ def build_compose_fixture(tmp_root: Path) -> FixtureBundle:
     dev_source_path = _write_json(stage1 / "development_outcome_source.json", dev_source_obj)
     dev_source_sha = sha256_file(dev_source_path)
     access_audit = {
-        "role": "combo_calibration",
+        "role": CALIBRATION_ROLE_NAME,
         "manifest_checksum": manifest["checksum"],
         "source_checksum": dev_source_sha,
         "sealed_access_count": 0,

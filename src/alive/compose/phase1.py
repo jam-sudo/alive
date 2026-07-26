@@ -49,7 +49,7 @@ from pathlib import Path
 from alive.compose.config import ComposePhase1Config, load_compose_config
 from alive.compose.gates import GateResult, measurability_gate, power_gate, rank_gate
 from alive.compose.identify import RankReport
-from alive.compose.split import CALIBRATION_ROLE_NAME
+from alive.compose.roles import CALIBRATION_ROLE_NAME
 from alive.compose.synthetic import RecoveryReport, frontier_sweep, run_recovery
 from alive.provenance import capture_environment, sha256_file
 

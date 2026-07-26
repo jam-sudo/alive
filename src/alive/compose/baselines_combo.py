@@ -39,14 +39,15 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from alive.compose.roles import CALIBRATION_ROLE_NAME, SEALED_ROLE_NAMES
+
 #: Roles the deep combo adapters are permitted to train on — exactly this set.
-ALLOWED_ADAPTER_ROLES: frozenset[str] = frozenset({"singles", "combo_calibration"})
+ALLOWED_ADAPTER_ROLES: frozenset[str] = frozenset({"singles", CALIBRATION_ROLE_NAME})
 
 #: Substrings that mark a sealed role / sealed outcome key / path to a sealed
 #: asset. The recursive scanner refuses any string containing one of these.
 SEALED_TOKENS: tuple[str, ...] = (
-    "sealed_double_unseen",
-    "sealed_single_unseen",
+    *SEALED_ROLE_NAMES,
     "sealed",
 )
 

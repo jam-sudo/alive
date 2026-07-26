@@ -44,6 +44,10 @@ from pathlib import Path
 import numpy as np
 
 from alive.compose.baselines_combo import _assert_no_sealed_reference
+from alive.compose.roles import (
+    SEALED_DOUBLE_UNSEEN_ROLE_NAME,
+    SEALED_SINGLE_UNSEEN_ROLE_NAME,
+)
 from alive.io import atomic_write_once
 from alive.provenance import sha256_json
 
@@ -529,10 +533,18 @@ class FrozenPredictionBundle:
         single_ids = tuple(tuple(p) for p in pair_ids_single_unseen)
 
         validated_double = _validate_role_predictions(
-            "sealed_double_unseen", roster, double_ids, predictions_double_unseen, response_dim
+            SEALED_DOUBLE_UNSEEN_ROLE_NAME,
+            roster,
+            double_ids,
+            predictions_double_unseen,
+            response_dim,
         )
         validated_single = _validate_role_predictions(
-            "sealed_single_unseen", roster, single_ids, predictions_single_unseen, response_dim
+            SEALED_SINGLE_UNSEEN_ROLE_NAME,
+            roster,
+            single_ids,
+            predictions_single_unseen,
+            response_dim,
         )
         validated_model_artifacts = _validate_model_artifact_binding(
             roster,
@@ -607,14 +619,14 @@ class FrozenPredictionBundle:
         """
         # re-validate predictions (catches shape/finiteness corruption directly).
         _validate_role_predictions(
-            "sealed_double_unseen",
+            SEALED_DOUBLE_UNSEEN_ROLE_NAME,
             self.method_roster,
             self.pair_ids_double_unseen,
             self.predictions_double_unseen,
             self.response_dim,
         )
         _validate_role_predictions(
-            "sealed_single_unseen",
+            SEALED_SINGLE_UNSEEN_ROLE_NAME,
             self.method_roster,
             self.pair_ids_single_unseen,
             self.predictions_single_unseen,

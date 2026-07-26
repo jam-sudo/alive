@@ -29,6 +29,11 @@ import numpy as np
 from numpy.typing import NDArray
 
 from alive.compose.identify import rank_diagnostics
+from alive.compose.roles import (
+    CALIBRATION_ROLE_NAME,
+    SEALED_DOUBLE_UNSEEN_ROLE_NAME,
+    SEALED_SINGLE_UNSEEN_ROLE_NAME,
+)
 from alive.compose.split import build_pair_split
 from alive.compose.zfactor import build_factor_grid
 
@@ -194,13 +199,13 @@ def validate_phi_rank_activation_report(
     if n_calibration_genes > top["n_z_universe_genes"]:
         raise ValueError("phi-rank calibration-gene count exceeds its gene universe")
     pair_counts = {
-        "combo_calibration": _nonnegative_int(
+        CALIBRATION_ROLE_NAME: _nonnegative_int(
             report["n_combo_calibration"], "phi-rank n_combo_calibration"
         ),
-        "sealed_double_unseen": _nonnegative_int(
+        SEALED_DOUBLE_UNSEEN_ROLE_NAME: _nonnegative_int(
             report["n_sealed_double_unseen"], "phi-rank n_sealed_double_unseen"
         ),
-        "sealed_single_unseen": _nonnegative_int(
+        SEALED_SINGLE_UNSEEN_ROLE_NAME: _nonnegative_int(
             report["n_sealed_single_unseen"], "phi-rank n_sealed_single_unseen"
         ),
     }
@@ -222,7 +227,7 @@ def validate_phi_rank_activation_report(
             or block["sym_dim"] != sym_dim
             or block["rank"] != sym_dim
             or block["is_full_rank"] is not True
-            or block["n_calibration_pairs_scored"] != pair_counts["combo_calibration"]
+            or block["n_calibration_pairs_scored"] != pair_counts[CALIBRATION_ROLE_NAME]
             or block["n_calibration_pairs_skipped"] != 0
             or _nonnegative_int(block["n_genes"], "phi-rank factor n_genes")
             != top["n_z_universe_genes"]

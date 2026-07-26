@@ -64,8 +64,8 @@ from alive.compose.freeze import (
 )
 from alive.compose.models import fitted_model_checksum
 from alive.compose.response import ResponseSpace, bind_response_source, verify_response_artifact
+from alive.compose.roles import CALIBRATION_ROLE_NAME
 from alive.compose.select import OOFFoldManifest
-from alive.compose.split import CALIBRATION_ROLE_NAME
 from alive.compose.zfactor import GeneFactorBank
 from alive.provenance import RunLedger, sha256_bytes, sha256_file, sha256_json
 
@@ -152,9 +152,9 @@ class DevelopmentOutcomeStore:
             )
         if not np.all(np.isfinite(eps)):
             raise ValueError("combo_calibration_eps contains non-finite values")
-        if self.access_audit.role != "combo_calibration":
+        if self.access_audit.role != CALIBRATION_ROLE_NAME:
             raise OutcomeLeakageError(
-                f"development outcome audit role must be 'combo_calibration', "
+                f"development outcome audit role must be {CALIBRATION_ROLE_NAME!r}, "
                 f"got {self.access_audit.role!r}"
             )
         if self.access_audit.sealed_access_count != 0:
@@ -425,7 +425,7 @@ def build_subprocess_fit_payload(
         "schema_version": 2,
         "response_dim": int(inputs.response_dim),
         "seed": int(inputs.seed),
-        "allowed_roles": ["singles", "combo_calibration"],
+        "allowed_roles": ["singles", CALIBRATION_ROLE_NAME],
         "pair_ids": [],
         "single_gene_ids": list(genes),
         "singles_response": [
@@ -963,7 +963,7 @@ def _baseline_context(inputs: Phase2aInputs) -> BaselineTrainingContext:
         calibration pair IDs and single-gene IDs.
     """
     return BaselineTrainingContext(
-        allowed_roles=frozenset({"singles", "combo_calibration"}),
+        allowed_roles=frozenset({"singles", CALIBRATION_ROLE_NAME}),
         pair_manifest_checksum=inputs.manifest_checksum,
         response_space_checksum=inputs.response_space_checksum,
         training_pair_ids=tuple(tuple(p) for p in inputs.cal_pair_ids),

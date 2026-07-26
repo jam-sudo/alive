@@ -27,14 +27,18 @@ import numpy as np
 from numpy.typing import NDArray
 
 from alive.compose.gates import measurability_gate, power_gate
-from alive.compose.split import CALIBRATION_ROLE_NAME
+from alive.compose.roles import (
+    CALIBRATION_ROLE_NAME,
+    SEALED_DOUBLE_UNSEEN_ROLE_NAME,
+    SEALED_ROLE_NAMES,
+)
 
 #: Evaluation regimes the power gate is reported for (headline first). The
 #: development role ``combo_calibration`` is NOT an evaluation regime.
-_EVAL_REGIMES = ("sealed_double_unseen", "sealed_single_unseen")
+_EVAL_REGIMES = SEALED_ROLE_NAMES
 
 #: The headline regime; the other eval regime is a secondary/fallback.
-_HEADLINE_REGIME = "sealed_double_unseen"
+_HEADLINE_REGIME = SEALED_DOUBLE_UNSEEN_ROLE_NAME
 
 # Phase-1 preregistration values consumed by
 # ``scripts/compose_detectable_effect_report.py``. The scientific activation
@@ -163,7 +167,7 @@ def validate_regime_detectable_effect_activation_report(
     if top["git_sha"] != expected_git_sha:
         raise ValueError("detectable-effect git_sha mismatch")
 
-    expected_regime_keys = frozenset({"combo_calibration", *_EVAL_REGIMES})
+    expected_regime_keys = frozenset({CALIBRATION_ROLE_NAME, *_EVAL_REGIMES})
     pair_counts = _require_exact_keys(
         top["regime_pair_counts"], expected_regime_keys, "regime_pair_counts"
     )
@@ -202,7 +206,7 @@ def validate_regime_detectable_effect_activation_report(
     n_calibration = _nonnegative_int(
         measurability["n_calibration_pairs"], "measurability.n_calibration_pairs"
     )
-    if n_calibration != pair_counts["combo_calibration"]:
+    if n_calibration != pair_counts[CALIBRATION_ROLE_NAME]:
         raise ValueError("measurability calibration count does not match the split count")
     if type(measurability["passed"]) is not bool:  # noqa: E721 - reject int-as-bool
         raise ValueError("measurability.passed must be a boolean")

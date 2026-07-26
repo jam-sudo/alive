@@ -57,6 +57,7 @@ WORKER_BUNDLE_HELPER_SOURCES: Mapping[str, str] = MappingProxyType(
         "alive/compose/baselines_combo.py": "src/alive/compose/baselines_combo.py",
         "alive/compose/fit_role.py": "src/alive/compose/fit_role.py",
         "alive/compose/response.py": "src/alive/compose/response.py",
+        "alive/compose/roles.py": "src/alive/compose/roles.py",
         "alive/compose/worker_identity.py": "src/alive/compose/worker_identity.py",
         "alive/provenance.py": "src/alive/provenance.py",
     }

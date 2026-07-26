@@ -43,6 +43,11 @@ from alive.compose.detectable_effect import (
     compute_regime_detectable_effect_report,
 )
 from alive.compose.response import fit_response_space
+from alive.compose.roles import (
+    CALIBRATION_ROLE_NAME,
+    SEALED_DOUBLE_UNSEEN_ROLE_NAME,
+    SEALED_SINGLE_UNSEEN_ROLE_NAME,
+)
 from alive.compose.split import build_pair_split
 from alive.data.norman import eligible_genes, eligible_pairs, parse_labels
 from alive.provenance import sha256_file, sha256_json
@@ -131,15 +136,15 @@ def main(argv: list[str] | None = None) -> int:
         eps_b.append(d_b - delta[g] - delta[h])
 
     regime_pair_counts = {
-        "combo_calibration": len(split.combo_calibration),
-        "sealed_double_unseen": len(split.sealed_double_unseen),
-        "sealed_single_unseen": len(split.sealed_single_unseen),
+        CALIBRATION_ROLE_NAME: len(split.combo_calibration),
+        SEALED_DOUBLE_UNSEEN_ROLE_NAME: len(split.sealed_double_unseen),
+        SEALED_SINGLE_UNSEEN_ROLE_NAME: len(split.sealed_single_unseen),
     }
     # Sealed regimes: outcome-INDEPENDENT cell-count metadata only (no projection).
     regime_cells_per_pair = {
-        "sealed_double_unseen": _median_cells(doubles, split.sealed_double_unseen),
-        "sealed_single_unseen": _median_cells(doubles, split.sealed_single_unseen),
-        "combo_calibration": _median_cells(doubles, split.combo_calibration),
+        SEALED_DOUBLE_UNSEEN_ROLE_NAME: _median_cells(doubles, split.sealed_double_unseen),
+        SEALED_SINGLE_UNSEEN_ROLE_NAME: _median_cells(doubles, split.sealed_single_unseen),
+        CALIBRATION_ROLE_NAME: _median_cells(doubles, split.combo_calibration),
     }
 
     report = compute_regime_detectable_effect_report(

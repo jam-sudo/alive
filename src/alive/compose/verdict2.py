@@ -62,11 +62,12 @@ from enum import Enum
 from functools import cached_property
 from pathlib import Path
 
+from alive.compose.roles import SEALED_DOUBLE_UNSEEN_ROLE_NAME
 from alive.provenance import sha256_json
 
 # Registered double-unseen role name (config ``split.roles``); the ONLY regime
 # permitted to drive this verdict.
-DOUBLE_UNSEEN_ROLE: str = "sealed_double_unseen"
+DOUBLE_UNSEEN_ROLE: str = SEALED_DOUBLE_UNSEEN_ROLE_NAME
 
 # Registered integrity-clause disclaimer (config ``verdict.integrity_clause_
 # disclaimer``). Carried verbatim into the result evidence so reviewers can see

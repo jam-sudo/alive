@@ -29,7 +29,7 @@ from typing import Any, Mapping
 
 from alive.compose.driver.run_spec import RunSpecError
 from alive.compose.driver.seal_boundary import scientific_protocol_seal_audit_path
-from alive.compose.split import ROLE_NAMES
+from alive.compose.roles import ROLE_NAMES
 from alive.provenance import sha256_json
 
 __all__ = [
@@ -277,7 +277,7 @@ def validate_pair_index_manifest_preseal(
        digest + role for each), and ``self_checksum``;
     2. each ``pairs[i]`` entry's shape: a canonical (UTF-8 byte-ordered,
        non-self) gene pair, a role drawn from the registered split roles
-       (:data:`alive.compose.split.ROLE_NAMES`), a non-empty list of
+       (:data:`alive.compose.roles.ROLE_NAMES`), a non-empty list of
        non-negative, non-duplicate row indices, and a 64-hex row-ID digest;
        no two entries may declare the same canonical pair;
     3. ``manifest.self_checksum == sha256_json(manifest excluding self_checksum)``;

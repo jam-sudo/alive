@@ -91,6 +91,10 @@ from alive.compose.provenance2 import (
     verify_upstream_before_access,
 )
 from alive.compose.response import ResponseSpace, verify_response_artifact
+from alive.compose.roles import (
+    SEALED_DOUBLE_UNSEEN_ROLE_NAME,
+    SEALED_SINGLE_UNSEEN_ROLE_NAME,
+)
 from alive.compose.scoring2 import RegimeScore, score_regime
 from alive.compose.seed_variability import (
     DEVELOPMENT_SEED_VARIABILITY_FILENAME,
@@ -104,11 +108,7 @@ from alive.compose.seed_variability import (
     verify_seed_variability_for_preflight,
 )
 from alive.compose.select import OOFFoldManifest, OOFFoldManifestError
-from alive.compose.split import (
-    SEALED_DOUBLE_UNSEEN_ROLE_NAME,
-    SEALED_SINGLE_UNSEEN_ROLE_NAME,
-    verify_split_manifest,
-)
+from alive.compose.split import verify_split_manifest
 from alive.compose.terminal import Phase2bTerminal, TerminalState
 from alive.compose.verdict2 import (
     ComposeIntegrityReport,

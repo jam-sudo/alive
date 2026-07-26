@@ -62,7 +62,7 @@ from alive.compose.freeze import (
     OutcomeLeakageError,
     _assert_no_outcome_reference,
 )
-from alive.compose.split import (
+from alive.compose.roles import (
     SEALED_DOUBLE_UNSEEN_ROLE_NAME,
     SEALED_SINGLE_UNSEEN_ROLE_NAME,
 )

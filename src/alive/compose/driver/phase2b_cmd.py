@@ -110,7 +110,7 @@ from alive.compose.outcome_store import (
 )
 from alive.compose.phase2b import run_phase2b, run_phase2b_fixture
 from alive.compose.preflight import run_preflight
-from alive.compose.split import ROLE_NAMES
+from alive.compose.roles import ROLE_NAMES
 from alive.compose.terminal import TerminalState
 from alive.provenance import RunLedger, sha256_file, sha256_json
 
@@ -731,7 +731,7 @@ def _assert_pair_roles(pair_index_manifest: Mapping[str, Any]) -> None:
     """Fail closed unless every pair's declared role is a registered split role.
 
     Enforces each ``pairs[i].role`` against the canonical
-    :data:`~alive.compose.split.ROLE_NAMES` (a bogus role must never reach the
+    :data:`~alive.compose.roles.ROLE_NAMES` (a bogus role must never reach the
     seal boundary).
 
     Raises

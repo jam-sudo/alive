@@ -5,7 +5,7 @@
 > **이 문서는 아무것도 정의하지 않는다** — 세부(task)는 plan, claim은 spec, exact param은 config,
 > 시간순 audit는 git이 authoritative다([sources of truth](../../CLAUDE.md#sources)). 상태 행이 authoritative
 > 문서와 어긋나면 **authoritative 문서가 옳다**; 이 인덱스를 갱신한다.
-> **Updated:** 2026-07-25 @ `614017b` (branch `main`)
+> **Updated:** 2026-07-26 @ `bad2693` (branch `main`)
 > **갱신 트리거:** sub-project/gate **상태가 바뀔 때만**(커밋마다 아님).
 > **종결 상태:** COMPOSE seal이 정확히 한 번 열리면 이 인덱스는 **frozen/은퇴**한다. 이후 진행상황은
 > seal 결과와 post-hoc analysis가 대신한다.
@@ -190,8 +190,9 @@ branch에서 추적 가능하게 기록한다. `LOCAL` ledger ID만으로는 이
    gate blacklisted `secondary_sealed`, a role name that exists nowhere else in the protocol; the real second
    sealed role is `sealed_single_unseen`, so the single-unseen regime passed a tripwire that was only ever
    checking a phantom. The gate is now an allowlist over the registered calibration role with a mandatory
-   explicit role argument, and every sealed-role reference is bound by semantic name from one canonical roster
-   rather than spelled out per call site or indexed positionally out of `ROLE_NAMES`. Role label values are
+   explicit role argument, and decision-bearing sealed-role references are now bound by semantic constants from
+   one canonical roster rather than spelled out per call site or indexed positionally out of `ROLE_NAMES`.
+   The config loader independently asserts exact parity with that roster. Role label values are
    unchanged, so no run identity moves. (2) Both recursive leakage scanners skipped numpy string/object arrays
    entirely; extending them to scan those arrays exposed a second fail-open, because the visited set is keyed on
    `id()` and the newly materialised temporaries let CPython recycle a freed address into a later temporary that

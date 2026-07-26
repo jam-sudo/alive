@@ -60,12 +60,12 @@ from typing import TYPE_CHECKING, Protocol, runtime_checkable
 import numpy as np
 import scipy.sparse as sp
 
-from alive.compose.split import (
+from alive.compose.roles import (
     SEALED_DOUBLE_UNSEEN_ROLE_NAME,
     SEALED_ROLE_NAMES,
     SEALED_SINGLE_UNSEEN_ROLE_NAME,
-    verify_split_manifest,
 )
+from alive.compose.split import verify_split_manifest
 from alive.io import atomic_write_once
 from alive.provenance import sha256_json
 

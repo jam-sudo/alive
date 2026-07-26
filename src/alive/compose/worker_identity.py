@@ -31,6 +31,7 @@ _BUNDLED_ALIVE_ORIGINS: Mapping[str, str] = MappingProxyType(
         "alive.compose.baselines_combo": "alive/compose/baselines_combo.py",
         "alive.compose.fit_role": "alive/compose/fit_role.py",
         "alive.compose.response": "alive/compose/response.py",
+        "alive.compose.roles": "alive/compose/roles.py",
         "alive.compose.worker_identity": "alive/compose/worker_identity.py",
         "alive.provenance": "alive/provenance.py",
     }

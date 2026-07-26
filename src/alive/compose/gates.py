@@ -12,7 +12,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from alive.compose.identify import RankReport
-from alive.compose.split import CALIBRATION_ROLE_NAME
+from alive.compose.roles import CALIBRATION_ROLE_NAME
 
 
 class LeakageError(Exception):

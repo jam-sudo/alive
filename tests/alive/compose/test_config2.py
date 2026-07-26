@@ -28,6 +28,7 @@ from alive.compose.config2 import (
     assert_scientific_mode_allowed,
     load_compose_phase2_config,
 )
+from alive.compose.split import ROLE_NAMES
 from alive.provenance import sha256_json
 
 CANON = "configs/compose_k562_v1_phase2.yaml"
@@ -523,8 +524,15 @@ def test_bootstrap_replicates_change_rejected(tmp_path):
 
 
 def test_role_names():
+    # Spell the pre-registered roster out here as an INDEPENDENT third copy.
+    # Asserting only `cfg.role_names == ROLE_NAMES` cannot fail: the loader
+    # already raises on exact inequality against that same constant, so the
+    # comparison is unreachable as a failure. A literal is what still catches a
+    # coordinated edit of the code constant *and* the committed config.
+    registered_roles = ("combo_calibration", "sealed_double_unseen", "sealed_single_unseen")
     cfg = load_compose_phase2_config(CANON)
-    assert cfg.role_names == ("combo_calibration", "sealed_double_unseen", "sealed_single_unseen")
+    assert cfg.role_names == registered_roles
+    assert ROLE_NAMES == registered_roles
     assert cfg.fit_roles == ("control", "singles")
 
 

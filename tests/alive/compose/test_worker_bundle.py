@@ -107,7 +107,7 @@ def test_real_worker_bundle_is_byte_deterministic_and_exact(tmp_path: Path, meth
         method=method,
     )
 
-    assert len(WORKER_BUNDLE_HELPER_SOURCES) == 8
+    assert len(WORKER_BUNDLE_HELPER_SOURCES) == 9
     assert first_path.read_bytes() == second_path.read_bytes()
     assert first.sha256 == second.sha256 == hashlib.sha256(first_path.read_bytes()).hexdigest()
     assert first.manifest == second.manifest

@@ -29,32 +29,20 @@ from typing import Iterable
 import numpy as np
 from numpy.random import PCG64, Generator
 
+from alive.compose.roles import (
+    CALIBRATION_ROLE_NAME,
+    ROLE_NAMES,
+    SEALED_DOUBLE_UNSEEN_ROLE_NAME,
+    SEALED_SINGLE_UNSEEN_ROLE_NAME,
+)
+from alive.compose.roles import (
+    SEALED_ROLE_NAMES as SEALED_ROLE_NAMES,
+)
 from alive.io import atomic_write_once
 from alive.provenance import sha256_json
 
 PAIR_SPLIT_ALGORITHM = "compose_gene_partition_pair_split"
 PAIR_SPLIT_VERSION = "2a.1"
-
-#: Canonical role names. Keep the semantic names explicit: deriving sealed roles
-#: positionally from ``ROLE_NAMES[1:]`` would silently classify any future
-#: non-sealed role appended to the manifest as sealed.
-CALIBRATION_ROLE_NAME = "combo_calibration"
-SEALED_DOUBLE_UNSEEN_ROLE_NAME = "sealed_double_unseen"
-SEALED_SINGLE_UNSEEN_ROLE_NAME = "sealed_single_unseen"
-
-#: Manifest role keys, emitted in this fixed order.
-ROLE_NAMES = (
-    CALIBRATION_ROLE_NAME,
-    SEALED_DOUBLE_UNSEEN_ROLE_NAME,
-    SEALED_SINGLE_UNSEEN_ROLE_NAME,
-)
-
-#: Exact sealed outcome roster. These roles are opened once, after selection
-#: freeze, only through the outcome store.
-SEALED_ROLE_NAMES = (
-    SEALED_DOUBLE_UNSEEN_ROLE_NAME,
-    SEALED_SINGLE_UNSEEN_ROLE_NAME,
-)
 
 _MANIFEST_KEYS = frozenset(
     {

@@ -42,6 +42,7 @@ from typing import Any
 
 import yaml
 
+from alive.compose.roles import ROLE_NAMES
 from alive.provenance import sha256_json
 
 # ---------------------------------------------------------------------------
@@ -101,11 +102,7 @@ _EXPECTED_BOOTSTRAP_REPLICATES = 10000
 _EXPECTED_ESM_MODEL = "esm2_t33_650M_UR50D_mean_pool"
 _EXPECTED_ESTABLISHED_POWER_STATUS = "established_from_registered_report"
 _BLOCKED_POWER_STATUS = "unestablished_activation_blocker"
-_EXPECTED_ROLE_NAMES: tuple[str, ...] = (
-    "combo_calibration",
-    "sealed_double_unseen",
-    "sealed_single_unseen",
-)
+_EXPECTED_ROLE_NAMES: tuple[str, ...] = ROLE_NAMES
 #: Structural non-empty-result floor on the number of sealed pairs that must be
 #: scored before a sealed artifact can be accepted. This is deliberately NOT
 #: the statistical power floor: the registered 20-pair/50-cell adequacy gate is
@@ -228,9 +225,7 @@ _KNOWN_SPLIT = frozenset(
         "both_seen_test",
     }
 )
-_KNOWN_SPLIT_ROLES = frozenset(
-    {"combo_calibration", "sealed_double_unseen", "sealed_single_unseen"}
-)
+_KNOWN_SPLIT_ROLES = frozenset(ROLE_NAMES)
 _KNOWN_RESPONSE_SPACE = frozenset({"transform", "n_hvg", "pca_dim", "fit_roles"})
 _KNOWN_FACTOR_Z = frozenset(
     {
