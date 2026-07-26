@@ -191,10 +191,17 @@ def _workflow_bytes_at_commit(workflow_path: Path, head_sha: str) -> bytes:
     """Return the workflow bytes, bound to the blob recorded at ``head_sha``.
 
     Validating the argument as a path alone accepts any file whose name happens
-    to end in the canonical suffix, so a receipt could commit to a workflow that
-    was never in the repository. The file must instead be the canonical workflow
-    of a real Git worktree, and must match byte-for-byte the blob that commit
-    records at that path.
+    to end in the canonical suffix, so ``workflow_sha256`` could describe a file
+    no commit ever contained. It must instead be the canonical workflow of a Git
+    worktree, recorded at ``head_sha`` as a regular file, and byte-identical to
+    that blob.
+
+    The binding is to *a* worktree that records this blob, not to the repository
+    named in ``repository`` -- that field stays self-declared. Inside CI the two
+    coincide, because the worktree is the checkout of the commit under test.
+    Nothing here makes a receipt harder to fabricate for someone who already has
+    the repository; it only stops ``workflow_sha256`` from naming a workflow the
+    commit never had.
     """
     directory = workflow_path.parent
     if not directory.is_dir():

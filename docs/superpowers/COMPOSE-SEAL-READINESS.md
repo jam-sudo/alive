@@ -5,7 +5,7 @@
 > **이 문서는 아무것도 정의하지 않는다** — 세부(task)는 plan, claim은 spec, exact param은 config,
 > 시간순 audit는 git이 authoritative다([sources of truth](../../CLAUDE.md#sources)). 상태 행이 authoritative
 > 문서와 어긋나면 **authoritative 문서가 옳다**; 이 인덱스를 갱신한다.
-> **Updated:** 2026-07-26 @ `248db75` (branch `compose-ci-receipt-hardening`)
+> **Updated:** 2026-07-26 @ `c00727d` (branch `compose-ci-receipt-hardening`)
 > **갱신 트리거:** sub-project/gate **상태가 바뀔 때만**(커밋마다 아님).
 > **종결 상태:** COMPOSE seal이 정확히 한 번 열리면 이 인덱스는 **frozen/은퇴**한다. 이후 진행상황은
 > seal 결과와 post-hoc analysis가 대신한다.
@@ -230,6 +230,25 @@ branch에서 추적 가능하게 기록한다. `LOCAL` ledger ID만으로는 이
    still yields `a6e6c024…a06b`. This is a development-boundary correction with no config, lineage, or
    evidence mutation; it does not clear `RELEASE-BLOCKED` or open the seal, and independent review at a clean
    exact commit remains mandatory. Seal state remains **UNOPENED**.
+   **2026-07-26 adversarial review of that hardening (same branch):** two independent reviews of the pushed
+   commit returned APPROVE-WITH-FINDINGS, and four findings were material enough to fix rather than record.
+   (1) The git helper inherited the process environment, so `GIT_DIR`/`GIT_WORK_TREE` made a directory that is
+   not a worktree answer as one — the "real Git worktree" property was defeated by an environment variable.
+   This was not hypothetical: a reviewer exercising it wrote a commit into the working checkout, because the
+   test fixtures had the same weakness. Both the production helper and the fixtures now run git with the
+   `GIT_*` namespace stripped, so only the path argument selects a repository. (2) `<testsuite>` children were
+   unvalidated, leaving the same class of hole one level above the one just closed. (3) A mode-`120000` tree
+   entry was read as a workflow, yielding a receipt for a symlink GitHub would never execute; the entry must
+   now be a regular-file blob. (4) The claim that the binding raises the bar against forged receipts was too
+   strong and is withdrawn: anyone holding the repository can still produce a valid receipt for a real commit
+   with the genuine workflow hash, because `repository`, `run_id` and the runner fields are self-declared. The
+   binding only stops `workflow_sha256` from naming a workflow the commit never contained. **Reproducing an
+   archived receipt now requires checking out that commit** — rebuilding run-`30200634662`'s receipt from a
+   worktree at `2dd23d6` yields `a6e6c024…a06b`, while the same command at a later tip fails with *"workflow
+   differs from the blob recorded at the commit under test"*, which a verifier must not misread as tampering.
+   Known and deliberately unfixed: a JUnit truncated to only passing cases still reconciles, because the
+   receipt does not attest suite size — that property is carried by the pinned workflow content, not the
+   schema. Seal state remains **UNOPENED**; execution remains **RELEASE-BLOCKED**.
    **2026-07-25 pre-pod local gate:** the probe-rerun runbook's §2.2 verification roster was run at clean exact
    commit `614017b67e35e9cc07f68d5b512213d8356cf1b2` — **254 passed**, plus `ruff check`/`ruff format --check`
    over the whole repository, `git diff --check`, and an empty `git status --short`. This records local
