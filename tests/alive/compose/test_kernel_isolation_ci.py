@@ -56,10 +56,10 @@ def _write_junit(
     )
 
 
-def _receipt(tmp_path: Path) -> dict[str, object]:
+def _receipt(tmp_path: Path, **junit_kwargs: object) -> dict[str, object]:
     tmp_path.mkdir(parents=True, exist_ok=True)
     junit = tmp_path / "junit.xml"
-    _write_junit(junit)
+    _write_junit(junit, **junit_kwargs)
     return build_kernel_isolation_ci_receipt(
         junit_path=junit,
         workflow_path=_WORKFLOW,
@@ -86,23 +86,11 @@ def test_builds_v2_receipt_only_when_both_kernel_tests_pass(tmp_path):
 
 
 def test_rejects_skipped_end_to_end_test(tmp_path):
-    junit = tmp_path / "junit.xml"
-    _write_junit(
-        junit,
-        second_outcome='<skipped type="pytest.skip" message="no Linux" />',
-        skipped=1,
-    )
     with pytest.raises(KernelIsolationCIError, match="testcase failed"):
-        build_kernel_isolation_ci_receipt(
-            junit_path=junit,
-            workflow_path=_WORKFLOW,
-            repository="jam-sudo/alive",
-            head_sha="a" * 40,
-            run_id=123,
-            run_attempt=1,
-            runner_os="Linux",
-            runner_architecture="x86_64",
-            kernel_release="6.17.0-test",
+        _receipt(
+            tmp_path,
+            second_outcome='<skipped type="pytest.skip" message="no Linux" />',
+            skipped=1,
         )
 
 
@@ -114,20 +102,8 @@ def test_rejects_skipped_end_to_end_test(tmp_path):
     ],
 )
 def test_rejects_inconsistent_junit_or_nonfinite_duration(tmp_path, kwargs, message):
-    junit = tmp_path / "junit.xml"
-    _write_junit(junit, **kwargs)
     with pytest.raises(KernelIsolationCIError, match=message):
-        build_kernel_isolation_ci_receipt(
-            junit_path=junit,
-            workflow_path=_WORKFLOW,
-            repository="jam-sudo/alive",
-            head_sha="a" * 40,
-            run_id=123,
-            run_attempt=1,
-            runner_os="Linux",
-            runner_architecture="x86_64",
-            kernel_release="6.17.0-test",
-        )
+        _receipt(tmp_path, **kwargs)
 
 
 def test_receipt_and_archive_tampering_fail_closed(tmp_path):
@@ -201,6 +177,70 @@ def test_archive_builder_rejects_missing_receipt_or_unrelated_junit(tmp_path, in
             expires_at_utc="2026-08-24T13:00:00Z",
             archived_at_utc="2026-07-25T13:00:00Z",
             archived_by="independent reviewer",
+        )
+
+
+@pytest.mark.parametrize(
+    ("second_outcome", "message"),
+    [
+        ('<rerunFailure message="flaky" />', "unrecognised child element"),
+        ('<flakyFailure message="flaky" />', "unrecognised child element"),
+        ('<system-err><failure message="boom" /></system-err>', "must not contain nested"),
+        ('<system-out><error message="boom" /></system-out>', "must not contain nested"),
+        ('<failure message="boom"><nested /></failure>', "must not contain nested"),
+        ("<properties><unexpected /></properties>", "only contain property elements"),
+    ],
+)
+def test_unknown_or_buried_failure_markup_fails_closed(tmp_path, second_outcome, message):
+    """A tag scan that only knows three bad names reads these forgeries as a pass.
+
+    ``rerunFailure``/``flakyFailure`` are what rerun plugins emit, and a
+    ``failure`` under captured output is not a direct child, so neither is seen
+    by a blacklist. Both must be rejected instead of counted as a clean run.
+    """
+    with pytest.raises(KernelIsolationCIError, match=message):
+        _receipt(tmp_path, second_outcome=second_outcome)
+
+
+def test_accepts_the_legitimate_xunit2_child_vocabulary(tmp_path):
+    """The allowlist must not reject output pytest genuinely emits."""
+    receipt = _receipt(
+        tmp_path,
+        second_outcome=(
+            "<system-out>captured stdout</system-out>"
+            "<system-err>captured stderr</system-err>"
+            '<properties><property name="k" value="v" /></properties>'
+        ),
+    )
+    assert [case["status"] for case in receipt["required_test_cases"]] == ["passed", "passed"]
+
+
+def test_rejects_testcase_smuggled_outside_the_single_testsuite(tmp_path):
+    junit = tmp_path / "junit.xml"
+    junit.write_text(
+        '<?xml version="1.0" encoding="utf-8"?>'
+        '<testsuites name="pytest tests">'
+        '<testsuite name="pytest" errors="0" failures="0" skipped="0" tests="2" time="0.3" '
+        'timestamp="2026-07-25T00:00:00+00:00" hostname="runner">'
+        f'<testcase classname="{CI_TEST_CLASSNAME}" name="{CI_PRIMITIVE_TEST}" time="0.1" />'
+        f'<testcase classname="{CI_TEST_CLASSNAME}" name="{CI_E2E_TEST}" time="0.2">'
+        f'<properties><testcase classname="{CI_TEST_CLASSNAME}" name="smuggled" time="0.1">'
+        '<failure message="boom" /></testcase></properties>'
+        "</testcase></testsuite></testsuites>",
+        encoding="utf-8",
+    )
+    with pytest.raises(KernelIsolationCIError, match="direct child of the single testsuite"):
+        build_kernel_isolation_ci_receipt(
+            junit_path=junit,
+            workflow_path=_WORKFLOW,
+            repository="jam-sudo/alive",
+            head_sha="a" * 40,
+            run_id=123,
+            run_attempt=1,
+            runner_os="Linux",
+            runner_architecture="x86_64",
+            kernel_release="6.17.0-test",
+            proof_profile=CI_PROOF_PROFILE_V2,
         )
 
 

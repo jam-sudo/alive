@@ -67,6 +67,8 @@ _JUNIT_KEYS = frozenset(
     }
 )
 _TEST_CASE_KEYS = frozenset({"classname", "name", "time_seconds", "status"})
+_TERMINAL_CASE_TAGS = frozenset({"skipped", "failure", "error"})
+_TEXT_ONLY_CASE_TAGS = frozenset({"system-out", "system-err"})
 _ARCHIVE_KEYS = frozenset(
     {
         "schema",
@@ -153,6 +155,43 @@ def _aware_timestamp(value: object, label: str) -> datetime:
     return parsed
 
 
+def _reject_nested_elements(element: ET.Element, label: str) -> None:
+    if len(element):
+        raise KernelIsolationCIError(f"JUnit {label} must not contain nested elements")
+
+
+def _case_outcomes(case: ET.Element) -> list[str]:
+    """Return a testcase's terminal outcome tags, failing closed on unknown markup.
+
+    Only the xunit2 vocabulary pytest actually emits is accepted. Scanning for a
+    fixed set of *bad* tag names instead would read two forgeries as a pass: a
+    rerun plugin's ``rerunFailure`` element, whose tag is simply not in the set,
+    and a ``failure`` buried under ``system-err``, which is not a direct child.
+    Unrecognised markup is therefore rejected rather than ignored.
+    """
+    outcomes: list[str] = []
+    for child in case:
+        if child.tag in _TERMINAL_CASE_TAGS:
+            _reject_nested_elements(child, f"{child.tag} element")
+            outcomes.append(child.tag)
+        elif child.tag in _TEXT_ONLY_CASE_TAGS:
+            _reject_nested_elements(child, f"{child.tag} element")
+        elif child.tag == "properties":
+            for prop in child:
+                if prop.tag != "property":
+                    raise KernelIsolationCIError(
+                        "JUnit properties may only contain property elements"
+                    )
+                _reject_nested_elements(prop, "property element")
+        else:
+            raise KernelIsolationCIError(
+                f"JUnit testcase has an unrecognised child element {child.tag!r}"
+            )
+    if len(outcomes) > 1:
+        raise KernelIsolationCIError("a JUnit testcase has multiple terminal outcomes")
+    return outcomes
+
+
 def _parse_junit(
     path: str | Path,
     *,
@@ -186,11 +225,13 @@ def _parse_junit(
 
     cases: list[dict[str, object]] = []
     all_cases = list(root.iter("testcase"))
+    if len(suite.findall("testcase")) != len(all_cases):
+        raise KernelIsolationCIError(
+            "every JUnit testcase must be a direct child of the single testsuite"
+        )
     observed = {"tests": len(all_cases), "failures": 0, "errors": 0, "skipped": 0}
     for case in all_cases:
-        outcomes = [child.tag for child in case if child.tag in {"skipped", "failure", "error"}]
-        if len(outcomes) > 1:
-            raise KernelIsolationCIError("a JUnit testcase has multiple terminal outcomes")
+        outcomes = _case_outcomes(case)
         if outcomes:
             outcome = outcomes[0]
             observed[f"{outcome}s" if outcome != "skipped" else "skipped"] += 1
@@ -208,7 +249,7 @@ def _parse_junit(
                 f"expected exactly one clean JUnit testcase {CI_TEST_CLASSNAME}.{name}"
             )
         case = matches[0]
-        outcomes = [child.tag for child in case if child.tag in {"skipped", "failure", "error"}]
+        outcomes = _case_outcomes(case)
         if outcomes:
             raise KernelIsolationCIError(f"required kernel-isolation testcase failed: {outcomes}")
         time_seconds = _duration(case.attrib.get("time", ""), "required testcase")
