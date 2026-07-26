@@ -98,6 +98,30 @@ The expected result for the currently committed evidence is `INCOMPLETE`. Valida
 success means the record is internally honest and immutable; it does **not** mean the
 scientific release gate passes.
 
+## Linux kernel-isolation CI archives
+
+`kernel_isolation_ci_<full-head-sha>.json` files are durable archive wrappers around
+canonical CI receipts. Each archive binds the exact workflow/head SHA, GitHub run,
+Linux kernel and architecture, JUnit content SHA, exact required testcase roster,
+source artifact ID/name/archive digest/expiry, and nested/self checksums.
+
+The committed `...614017b....json` archive preserves historical proof profile
+`x86_64_seccomp_primitives_v1` from run `30154404171`. It proves the low-level
+seccomp/receipt test at that exact code revision; it does **not** claim the newer
+launcher-wiring profile. Every candidate using
+`x86_64_seccomp_primitives_and_launcher_wiring_v2` requires its own later archive
+containing both the primitive and real launcher→`execve`→driver tests. GitHub
+artifacts remain transport and may expire; the version-controlled archive is the
+durable review record. Neither profile substitutes for a production pod's own
+runtime capture or authorizes scientific execution.
+
+For a v2 run, an independent reviewer downloads the GitHub artifact and runs
+`scripts/compose/archive_kernel_isolation_ci_receipt.py` with the observed artifact
+ID/name/expiry and review timestamp/identity. The importer reads the ZIP itself,
+requires its exact `junit.xml` + `kernel-isolation-ci-receipt.json` roster, binds
+both files to the reviewed receipt, and writes the archive once. Hand-assembling a
+v2 archive or recording only a run URL is not an accepted path.
+
 To become `COMPLETE`, each backend must reference a committed
 `compose_smoke_pair_roster_v1` file. The validator reads the actual sorted pair lists,
 recomputes both roster hashes and their intersection, and requires zero overlap. It also

@@ -5,7 +5,7 @@
 > **이 문서는 아무것도 정의하지 않는다** — 세부(task)는 plan, claim은 spec, exact param은 config,
 > 시간순 audit는 git이 authoritative다([sources of truth](../../CLAUDE.md#sources)). 상태 행이 authoritative
 > 문서와 어긋나면 **authoritative 문서가 옳다**; 이 인덱스를 갱신한다.
-> **Updated:** 2026-07-26 @ `bad2693` (branch `main`)
+> **Updated:** 2026-07-26 @ `402c3d0` (branch `main`)
 > **갱신 트리거:** sub-project/gate **상태가 바뀔 때만**(커밋마다 아님).
 > **종결 상태:** COMPOSE seal이 정확히 한 번 열리면 이 인덱스는 **frozen/은퇴**한다. 이후 진행상황은
 > seal 결과와 post-hoc analysis가 대신한다.
@@ -179,7 +179,18 @@ branch에서 추적 가능하게 기록한다. `LOCAL` ledger ID만으로는 이
    memfd receipt validation are therefore kernel-proven. This establishes that the seccomp policy behaves as
    specified on x86_64 Linux; it does **not** establish that any production pod is correctly configured, which
    still requires that pod's own `capture-runtime` evidence. It does not clear `RELEASE-BLOCKED`, substitute for
-   the exact-SHA independent review, or open the seal.
+   the exact-SHA independent review, or open the seal. The downloaded JUnit SHA, workflow SHA, run/kernel/test
+   identity and original artifact archive digest are now preserved in
+   `docs/activation-evidence/compose/kernel_isolation_ci_614017b67e35e9cc07f68d5b512213d8356cf1b2.json`
+   as historical proof profile `x86_64_seccomp_primitives_v1`; the expiring GitHub artifact is no longer the only
+   review record.
+   **2026-07-25 launcher-wiring/durable-receipt correction (working tree, not operationally pinned):** the Linux
+   gate now additionally requires a real maintained launcher → `execve` → driver self-check, pre-existing
+   `connect` denial, non-Unix `socketpair` denial, and inherited-FD closure. CI profile
+   `x86_64_seccomp_primitives_and_launcher_wiring_v2` fails unless both exact Linux tests pass and emits a
+   canonical receipt that must be independently archived in version control. The historical v1 archive cannot
+   satisfy this stronger gate. A clean exact commit, successful v2 Linux run, durable v2 archive, fresh verifier
+   image/owner lock and independent acceptance remain mandatory.
    **2026-07-25 pre-pod local gate:** the probe-rerun runbook's §2.2 verification roster was run at clean exact
    commit `614017b67e35e9cc07f68d5b512213d8356cf1b2` — **254 passed**, plus `ruff check`/`ruff format --check`
    over the whole repository, `git diff --check`, and an empty `git status --short`. This records local

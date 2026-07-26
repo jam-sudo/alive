@@ -126,22 +126,36 @@ evidence root.
 Local tests must cover exact BPF construction, non-x86 rejection, both runtime schemas, missing kernel
 preconditions, invalid probe results, collector/policy mismatch, capability allowlist violations, sealed-receipt
 and launcher-argv tampering, non-isolated Python, import/loader overrides, alternate interpreter/wrapper/driver,
-cross-command Python drift, and command-boundary drift. A Linux test must install the real filter, create and
-live-validate a genuinely sealed receipt, and prove IPv4/IPv6 and Unix stream/datagram denial, x32 socket denial,
-`io_uring_setup`/`pidfd_getfd` denial, and `AF_UNIX socketpair` availability.
+cross-command Python drift, and command-boundary drift. The Linux gate has two independently named tests:
 
-That Linux test is the only check that establishes the kernel property itself; every other test in the roster
-exercises schema, argv, receipt, and validator logic against recorded values. It is `skipif`-ed off any non-Linux
-host, so **a green suite on macOS or any other non-Linux developer machine is not evidence that the isolation
-holds** — such a run leaves the kernel property entirely unverified and reports only `1 skipped`. A non-Linux run
-is therefore never recorded as isolation verification.
+1. a primitive test installs the real filter, proves closure of an inherited descriptor, creates and
+   live-validates a genuinely sealed receipt, and proves IPv4/IPv6 and Unix stream/datagram denial, denial of a
+   pre-existing socket's `connect`, non-`AF_UNIX` `socketpair`, x32 socket, `io_uring_setup`, and `pidfd_getfd`,
+   while retaining `AF_UNIX socketpair`; and
+2. an end-to-end test invokes the exact maintained launcher and driver as subprocesses, crosses the real
+   `execve` boundary, and requires the driver to live-validate the same-PID receipt before emitting a bounded,
+   non-scientific `isolation-self-check`. It reads no scientific input and writes no command ledger.
+
+Those two Linux tests jointly establish the kernel primitives and activation-time launcher wiring; every other
+test in the roster exercises schema, argv, receipt, and validator logic against recorded values. Both are
+`skipif`-ed off any non-Linux host, so **a green suite on macOS or any other non-Linux developer machine is not
+evidence that the complete isolation gate holds**. A non-Linux run is therefore never recorded as isolation
+verification.
 
 The kernel property is consequently established by CI on a real x86_64 Linux kernel, not by a developer host.
-`.github/workflows/test-suite.yml` asserts the runner architecture before doing anything else, and then parses its
-own JUnit report and fails unless that specific test actually executed — so a future change to the skip condition
-cannot silently restore a green-but-unverified suite. The dated run that currently satisfies this requirement is
-recorded in `../COMPOSE-SEAL-READINESS.md`; CI evidence covers the policy's behavior on x86_64 Linux and never
-substitutes for a production pod's own `capture-runtime` evidence.
+`.github/workflows/test-suite.yml` asserts the runner architecture before doing anything else, and then builds a
+canonical `compose_kernel_isolation_ci_receipt_v1` from its JUnit report. Receipt profile
+`x86_64_seccomp_primitives_and_launcher_wiring_v2` requires the exact classname/name roster for both tests and
+fails on a skip, failure, error, duplicate, missing case, architecture mismatch, or inconsistent suite total. The
+receipt binds the exact head/workflow SHAs, run identity, kernel release, JUnit SHA and required case results.
+The uploaded JUnit/receipt artifact is expiring transport only. Before operational approval, an independent
+reviewer must download it, verify the source artifact digest and receipt, and commit a self-checksummed
+`compose_kernel_isolation_ci_archive_v1` under `docs/activation-evidence/compose`. A run URL or green badge alone
+is not durable evidence. The registered archive importer must read the downloaded ZIP itself, require its exact
+JUnit/receipt member roster, cross-bind both files to the reviewed receipt, and publish the archive write-once;
+manual reconstruction is not accepted for v2. Dated historical/current status belongs in
+`../COMPOSE-SEAL-READINESS.md`; even a durable CI receipt never substitutes for a production pod's own
+`capture-runtime` evidence.
 
 Because this implementation changes producer and verifier decision code, every earlier verifier source closure,
 OCI digest, owner approval, image lock, and verifier pin is historical. Operational use requires a new clean

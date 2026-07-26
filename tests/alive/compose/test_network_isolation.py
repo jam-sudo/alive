@@ -26,6 +26,7 @@ from alive.compose.network_isolation import (
     isolation_implementation_sha256,
     seccomp_policy_sha256,
 )
+from alive.provenance import sha256_json
 
 _REPO = Path(__file__).resolve().parents[3]
 _LAUNCHER = _REPO / "scripts/compose/run_network_isolated.py"
@@ -385,7 +386,16 @@ driver = root / DRIVER_RELATIVE_PATH
 driver_argv = [str(driver), "verify-input"]
 exec_argv = [sys.executable, "-I", *driver_argv]
 launcher_argv = [str(launcher), "--", *exec_argv]
+extra_fd = os.open("/dev/null", os.O_RDONLY)
 close_inherited_fds()
+observed = {}
+try:
+    os.fstat(extra_fd)
+except OSError as exc:
+    observed["inherited_fd_closed"] = exc.errno
+else:
+    observed["inherited_fd_closed"] = 0
+preexisting_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 install_seccomp_socket_isolation()
 proof = collect_network_isolation(require_seccomp=True)
 receipt_fd, receipt = create_sealed_launcher_receipt(
@@ -400,7 +410,6 @@ validated = validate_sealed_launcher_receipt(
     repository_root=root,
     current_proof=proof,
 )
-observed = {}
 observed["receipt_seals"] = fcntl.fcntl(receipt_fd, 1034)
 observed["receipt_same_pid"] = receipt["pid"] == os.getpid()
 observed["receipt_method"] = receipt["method"]
@@ -423,6 +432,19 @@ left, right = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
 left.close()
 right.close()
 observed["unix_socketpair"] = True
+try:
+    socket.socketpair(socket.AF_INET, socket.SOCK_STREAM)
+except OSError as exc:
+    observed["inet_socketpair"] = exc.errno
+else:
+    observed["inet_socketpair"] = 0
+try:
+    preexisting_socket.connect(("127.0.0.1", 9))
+except OSError as exc:
+    observed["preexisting_connect"] = exc.errno
+else:
+    observed["preexisting_connect"] = 0
+preexisting_socket.close()
 libc = ctypes.CDLL(None, use_errno=True)
 libc.syscall.restype = ctypes.c_long
 for name, number in (("io_uring_setup", 425), ("pidfd_getfd", 438)):
@@ -448,8 +470,11 @@ print(json.dumps(observed, sort_keys=True))
         "inet_stream": errno.EPERM,
         "inet6_dgram": errno.EPERM,
         "inet6_stream": errno.EPERM,
+        "inet_socketpair": errno.EPERM,
+        "inherited_fd_closed": errno.EBADF,
         "io_uring_setup": errno.EPERM,
         "pidfd_getfd": errno.EPERM,
+        "preexisting_connect": errno.EPERM,
         "receipt_method": SECCOMP_SOCKET_METHOD,
         "receipt_same_pid": True,
         "receipt_seals": 15,
@@ -459,3 +484,45 @@ print(json.dumps(observed, sort_keys=True))
         "unix_stream": errno.EPERM,
         "x32_socket": errno.EPERM,
     }
+
+
+@pytest.mark.skipif(platform.system() != "Linux", reason="seccomp is a Linux kernel API")
+def test_linux_launcher_executes_driver_self_check_end_to_end():
+    """Exercise the real launcher, ``execve``, driver bootstrap and live receipt."""
+    driver = str(_REPO / DRIVER_RELATIVE_PATH)
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            str(_LAUNCHER),
+            "--",
+            sys.executable,
+            "-I",
+            driver,
+            "isolation-self-check",
+        ],
+        cwd=_REPO,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert set(payload) == {
+        "schema",
+        "pid",
+        "method",
+        "collector_implementation_sha256",
+        "policy_sha256",
+        "proof_sha256",
+        "receipt_sha256",
+        "self_checksum",
+    }
+    body = {key: value for key, value in payload.items() if key != "self_checksum"}
+    assert payload["schema"] == "compose_network_isolation_e2e_self_check_v1"
+    assert payload["pid"] > 0
+    assert payload["method"] == SECCOMP_SOCKET_METHOD
+    assert payload["collector_implementation_sha256"] == isolation_implementation_sha256()
+    assert payload["policy_sha256"] == seccomp_policy_sha256()
+    assert payload["self_checksum"] == sha256_json(body)

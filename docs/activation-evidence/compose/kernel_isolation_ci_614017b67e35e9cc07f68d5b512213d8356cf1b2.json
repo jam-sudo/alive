@@ -1,0 +1,49 @@
+{
+  "archived_at_utc": "2026-07-25T13:29:52Z",
+  "archived_by": "Codex independent review of GitHub run metadata, logs, and downloaded JUnit artifact",
+  "receipt": {
+    "head_sha": "614017b67e35e9cc07f68d5b512213d8356cf1b2",
+    "junit": {
+      "errors": 0,
+      "failures": 0,
+      "passed": 2336,
+      "sha256": "f3f68e0172d0b54eaeb1cdc5c510a7d0d638d9cd151da1e878c0b1118585826b",
+      "skipped": 1,
+      "tests": 2337,
+      "timestamp": "2026-07-25T10:24:33.543875+00:00"
+    },
+    "proof_profile": "x86_64_seccomp_primitives_v1",
+    "repository": "jam-sudo/alive",
+    "required_test_cases": [
+      {
+        "classname": "tests.alive.compose.test_network_isolation",
+        "name": "test_linux_policy_and_sealed_receipt_validate_in_the_active_process",
+        "status": "passed",
+        "time_seconds": "0.051"
+      }
+    ],
+    "run_attempt": 1,
+    "run_id": 30154404171,
+    "runner": {
+      "architecture": "x86_64",
+      "kernel_release": "6.17.0-1020-azure",
+      "os": "Linux"
+    },
+    "schema": "compose_kernel_isolation_ci_receipt_v1",
+    "self_checksum": "276dfa4dfa2a4f6772f9f5202800365877c1b1a297d3b2eaf31455219ddba0da",
+    "source_run_url": "https://github.com/jam-sudo/alive/actions/runs/30154404171",
+    "status": "passed",
+    "workflow_path": ".github/workflows/test-suite.yml",
+    "workflow_sha256": "9a33bc8d4b4dc9e0691f28a00f01723777e677838d6fa4e684930e409fe31248"
+  },
+  "receipt_sha256": "3a56bf58f5e2a11833ae424969052ece24131b98c90eb509acb34f6937569d7c",
+  "schema": "compose_kernel_isolation_ci_archive_v1",
+  "self_checksum": "daba933cc001e4c46cd7358e0174e0067a53615960437e39e6d3351fe330fdfe",
+  "source_artifact": {
+    "archive_sha256": "a6c6b0039c0ea839674d742b606db2aa051a8afbce717d6a0c2605bd329d9e05",
+    "artifact_id": 8618766602,
+    "artifact_name": "junit-614017b67e35e9cc07f68d5b512213d8356cf1b2",
+    "expires_at_utc": "2026-08-08T10:48:54Z",
+    "junit_sha256": "f3f68e0172d0b54eaeb1cdc5c510a7d0d638d9cd151da1e878c0b1118585826b"
+  }
+}

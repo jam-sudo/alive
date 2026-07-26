@@ -173,6 +173,7 @@ from alive.compose.gene_universe import (  # noqa: E402
 )
 from alive.compose.network_isolation import (  # noqa: E402
     LAUNCHER_RECEIPT_KEYS,
+    SECCOMP_SOCKET_METHOD,
     NetworkIsolationError,
     collect_network_isolation,
     launcher_receipt_sha256,
@@ -188,6 +189,7 @@ _CANDIDATE_SCHEMA = "compose_perturbation_candidates_v1"
 _GENE2GO_SCHEMA = "compose_gene2go_nodes_v1"
 _COMMAND_RESULT_SCHEMA = "compose_gears_probe_command_result_v1"
 _COMMAND_RECORD_SCHEMA = "compose_gears_probe_command_record_v2"
+_ISOLATION_SELF_CHECK_SCHEMA = "compose_network_isolation_e2e_self_check_v1"
 _COMMAND_ENV_ALLOWLIST = (
     "CUBLAS_WORKSPACE_CONFIG",
     "CUDA_VISIBLE_DEVICES",
@@ -673,6 +675,30 @@ def _validate_launcher_execution(invocation_argv: list[str]) -> dict[str, object
         )
     except NetworkIsolationError as exc:
         raise GeneUniverseError(str(exc)) from exc
+
+
+def _emit_isolation_self_check(receipt: dict[str, object]) -> None:
+    """Emit a non-scientific proof that launcher ``execve`` reached this driver."""
+    proof = receipt["proof"]
+    if not isinstance(proof, dict):
+        raise GeneUniverseError("isolation self-check receipt proof is malformed")
+    body = {
+        "schema": _ISOLATION_SELF_CHECK_SCHEMA,
+        "pid": os.getpid(),
+        "method": receipt["method"],
+        "collector_implementation_sha256": receipt["collector_implementation_sha256"],
+        "policy_sha256": receipt["policy_sha256"],
+        "proof_sha256": receipt["proof_sha256"],
+        "receipt_sha256": launcher_receipt_sha256(receipt),
+    }
+    if (
+        body["method"] != SECCOMP_SOCKET_METHOD
+        or receipt["pid"] != body["pid"]
+        or receipt["proof_sha256"] != sha256_json(proof)
+    ):
+        raise GeneUniverseError("isolation self-check receipt identity is inconsistent")
+    payload = {**body, "self_checksum": sha256_json(body)}
+    print(json.dumps(payload, sort_keys=True, separators=(",", ":")), flush=True)
 
 
 def _probe_output_path(*, evidence_root: str | Path, out_raw: str | Path) -> str:
@@ -2682,6 +2708,10 @@ def _parser() -> argparse.ArgumentParser:
     report.add_argument("--probe-a-registration-sha256", required=True)
     report.add_argument("--git-commit", required=True)
     report.add_argument("--out-report", required=True)
+    commands.add_parser(
+        "isolation-self-check",
+        help="CI-only: prove the real launcher exec path without reading data or writing evidence",
+    )
     for recorded in (runtime, roster, prepare, verify, registration, probe_a, report):
         recorded.add_argument(
             "--command-ledger",
@@ -2700,6 +2730,9 @@ def main(argv: list[str] | None = None) -> int:
     invocation_argv = list(sys.argv) if argv is None else [str(Path(__file__).resolve()), *argv]
     args = _parser().parse_args(argv)
     args._launcher_receipt = _validate_launcher_execution(invocation_argv)
+    if args.command == "isolation-self-check":
+        _emit_isolation_self_check(args._launcher_receipt)
+        return 0
     started_at_utc = _utc_now()
     if args.command != "build-evidence-manifest":
         ledger_parent = _assert_command_ledger_open(args.command_ledger)
