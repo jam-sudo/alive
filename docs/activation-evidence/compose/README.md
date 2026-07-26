@@ -130,6 +130,12 @@ third party, and the launcher end-to-end test was introduced in the same commit,
 that run is the test's first and only execution. Treat it as durable, byte-bound
 evidence that the run happened as recorded — not as independent acceptance.
 
+`validate_kernel_isolation_ci_receipt` is a **self-consistency** check only. It has no
+access to real JUnit bytes, so a receipt whose `junit.sha256` was altered and whose
+`self_checksum` was then recomputed still validates. Only `build_kernel_isolation_ci_archive`
+(or an independent recomputation from the downloaded artifact) binds a receipt to actual
+CI output. A reviewer must never treat validator acceptance as proof of provenance.
+
 To become `COMPLETE`, each backend must reference a committed
 `compose_smoke_pair_roster_v1` file. The validator reads the actual sorted pair lists,
 recomputes both roster hashes and their intersection, and requires zero overlap. It also
