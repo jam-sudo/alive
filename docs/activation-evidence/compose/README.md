@@ -122,6 +122,14 @@ requires its exact `junit.xml` + `kernel-isolation-ci-receipt.json` roster, bind
 both files to the reviewed receipt, and writes the archive once. Hand-assembling a
 v2 archive or recording only a run URL is not an accepted path.
 
+The committed `...2dd23d6....json` archive is the first `x86_64_seccomp_primitives_and_launcher_wiring_v2`
+record, from run `30200634662`. Its review standing is weaker than the v1 archive's
+and its `archived_by` field states so: it was produced by subagents dispatched from
+the session that authored the workflow and triggered the run, not by an independent
+third party, and the launcher end-to-end test was introduced in the same commit, so
+that run is the test's first and only execution. Treat it as durable, byte-bound
+evidence that the run happened as recorded — not as independent acceptance.
+
 To become `COMPLETE`, each backend must reference a committed
 `compose_smoke_pair_roster_v1` file. The validator reads the actual sorted pair lists,
 recomputes both roster hashes and their intersection, and requires zero overlap. It also

@@ -5,7 +5,7 @@
 > **이 문서는 아무것도 정의하지 않는다** — 세부(task)는 plan, claim은 spec, exact param은 config,
 > 시간순 audit는 git이 authoritative다([sources of truth](../../CLAUDE.md#sources)). 상태 행이 authoritative
 > 문서와 어긋나면 **authoritative 문서가 옳다**; 이 인덱스를 갱신한다.
-> **Updated:** 2026-07-26 @ `402c3d0` (branch `main`)
+> **Updated:** 2026-07-26 @ `2dd23d6` (branch `main`)
 > **갱신 트리거:** sub-project/gate **상태가 바뀔 때만**(커밋마다 아님).
 > **종결 상태:** COMPOSE seal이 정확히 한 번 열리면 이 인덱스는 **frozen/은퇴**한다. 이후 진행상황은
 > seal 결과와 post-hoc analysis가 대신한다.
@@ -191,6 +191,30 @@ branch에서 추적 가능하게 기록한다. `LOCAL` ledger ID만으로는 이
    canonical receipt that must be independently archived in version control. The historical v1 archive cannot
    satisfy this stronger gate. A clean exact commit, successful v2 Linux run, durable v2 archive, fresh verifier
    image/owner lock and independent acceptance remain mandatory.
+   **2026-07-26 v2 launcher-wiring verification (closes the v2 run and archive items above; the rest stand):**
+   run `30200634662` at commit `2dd23d627fc0e31a7d5005a3e81ff20b8dcd9472` succeeded on
+   `Linux 6.17.0-1020-azure x86_64`: **2346 passed, 1 skipped** (the remaining skip is the same
+   `test_features.py` `importorskip("torch")`). Both profile-required tests **executed and passed** —
+   `test_linux_policy_and_sealed_receipt_validate_in_the_active_process` (0.068 s) and
+   `test_linux_launcher_executes_driver_self_check_end_to_end` (1.434 s) — so the maintained launcher →
+   `execve` → driver self-check path is kernel-proven, which the v1 one-test roster never covered. The
+   canonical receipt and its GitHub artifact (id `8631825177`, expiring `2026-10-24T11:42:20Z`) are preserved
+   durably as proof profile `x86_64_seccomp_primitives_and_launcher_wiring_v2` in
+   `docs/activation-evidence/compose/kernel_isolation_ci_2dd23d627fc0e31a7d5005a3e81ff20b8dcd9472.json`.
+   **Scope:** `alive.compose.network_isolation` is imported only by `gears_probe_a.py`, the
+   `gears_decision_probe.py` driver, and the `run_network_isolated.py` launcher; the phase2b driver,
+   `run_spec`, and the seal boundary do not use it. This evidence covers the GEARS Probe-A driver path, not
+   COMPOSE scientific execution generally. **Review standing:** the archive was built by subagents dispatched
+   from the session that authored the workflow and triggered the run, and the end-to-end test was introduced
+   in this same commit, so this run is its first and only execution — this is *not* the independent
+   third-party review the v1 archive recorded, and the archive's `archived_by` field says so. Three latent
+   receipt-builder weaknesses were found and are **unexploited here**: `rerunFailure`-class tags are not
+   treated as failures, a `failure` element nested below a non-`testcase` parent is not seen, and
+   `--workflow` is validated by path suffix only. All three are forged-input paths, inert under the current
+   lock (no rerun plugin installed), and are hardening items rather than defects in this run's evidence. This
+   does **not** clear `RELEASE-BLOCKED`, substitute for the exact-SHA independent review, establish that any
+   production pod is correctly configured, or open the seal. A fresh verifier image/owner lock and independent
+   acceptance at a clean exact commit remain mandatory. Seal state remains **UNOPENED**.
    **2026-07-25 pre-pod local gate:** the probe-rerun runbook's §2.2 verification roster was run at clean exact
    commit `614017b67e35e9cc07f68d5b512213d8356cf1b2` — **254 passed**, plus `ruff check`/`ruff format --check`
    over the whole repository, `git diff --check`, and an empty `git status --short`. This records local

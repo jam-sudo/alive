@@ -1,0 +1,55 @@
+{
+  "archived_at_utc": "2026-07-26T12:40:51Z",
+  "archived_by": "Claude Code subagent review dispatched by the authoring session (adversarial audit + from-primary-bytes recomputation); not an independent third party",
+  "receipt": {
+    "head_sha": "2dd23d627fc0e31a7d5005a3e81ff20b8dcd9472",
+    "junit": {
+      "errors": 0,
+      "failures": 0,
+      "passed": 2346,
+      "sha256": "77c0262aaf67f0c337d91a6d53a31c4345f62dc22a8b129664785cda200ab84f",
+      "skipped": 1,
+      "tests": 2347,
+      "timestamp": "2026-07-26T11:42:40.131358+00:00"
+    },
+    "proof_profile": "x86_64_seccomp_primitives_and_launcher_wiring_v2",
+    "repository": "jam-sudo/alive",
+    "required_test_cases": [
+      {
+        "classname": "tests.alive.compose.test_network_isolation",
+        "name": "test_linux_policy_and_sealed_receipt_validate_in_the_active_process",
+        "status": "passed",
+        "time_seconds": "0.068"
+      },
+      {
+        "classname": "tests.alive.compose.test_network_isolation",
+        "name": "test_linux_launcher_executes_driver_self_check_end_to_end",
+        "status": "passed",
+        "time_seconds": "1.434"
+      }
+    ],
+    "run_attempt": 1,
+    "run_id": 30200634662,
+    "runner": {
+      "architecture": "x86_64",
+      "kernel_release": "6.17.0-1020-azure",
+      "os": "Linux"
+    },
+    "schema": "compose_kernel_isolation_ci_receipt_v1",
+    "self_checksum": "ce21f4dace56fa7840ce3df4d837260cf85ce31472ca4778d081e680c7083a18",
+    "source_run_url": "https://github.com/jam-sudo/alive/actions/runs/30200634662",
+    "status": "passed",
+    "workflow_path": ".github/workflows/test-suite.yml",
+    "workflow_sha256": "8aae7a139635e87e4bb8ea4d9c178178206328232fbd7b60c282f10e7ef7c226"
+  },
+  "receipt_sha256": "a6e6c02438366a85a97bf532b926a0ea8560d29238de513efe378770d48ba06b",
+  "schema": "compose_kernel_isolation_ci_archive_v1",
+  "self_checksum": "be70d9095255b58f4981315371eee52ac741157b2dd536a868e734722e6de45e",
+  "source_artifact": {
+    "archive_sha256": "1707a4dce36c14af50dd1a72fc3276efdb9da48586f9b9828421a2f150ff22ad",
+    "artifact_id": 8631825177,
+    "artifact_name": "junit-2dd23d627fc0e31a7d5005a3e81ff20b8dcd9472",
+    "expires_at_utc": "2026-10-24T11:42:20Z",
+    "junit_sha256": "77c0262aaf67f0c337d91a6d53a31c4345f62dc22a8b129664785cda200ab84f"
+  }
+}
