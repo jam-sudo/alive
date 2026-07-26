@@ -73,6 +73,8 @@ _TEST_CASE_KEYS = frozenset({"classname", "name", "time_seconds", "status"})
 _TERMINAL_CASE_TAGS = frozenset({"skipped", "failure", "error"})
 _TEXT_ONLY_CASE_TAGS = frozenset({"system-out", "system-err"})
 _SUITE_CHILD_TAGS = frozenset({"testcase", "properties", "system-out", "system-err"})
+_CASE_CHILD_TAGS = _TERMINAL_CASE_TAGS | _TEXT_ONLY_CASE_TAGS | frozenset({"properties"})
+_CONTAINER_TAGS = frozenset({"testsuite", "testcase"})
 _REGULAR_BLOB_MODES = frozenset({"100644", "100755"})
 _ARCHIVE_KEYS = frozenset(
     {
@@ -166,8 +168,12 @@ def _git(repo_root: Path, *args: str) -> bytes:
     ``GIT_DIR``/``GIT_WORK_TREE``/``GIT_ALTERNATE_OBJECT_DIRECTORIES`` and the
     rest of the ``GIT_*`` namespace redirect repository discovery and object
     lookup, so an inherited environment can make a directory that is not a
-    worktree answer as though it were one. They are stripped: only the path
-    argument may decide which repository answers.
+    worktree answer as though it were one. They are stripped, so no ``GIT_*``
+    variable can redirect the answer.
+
+    That is the whole of it. ``PATH`` still decides which ``git`` binary runs,
+    so this makes the call environment-independent, not unspoofable by someone
+    who already controls the process.
     """
     environment = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
     try:
@@ -213,6 +219,7 @@ def _workflow_bytes_at_commit(workflow_path: Path, head_sha: str) -> bytes:
         workflow_bytes = workflow_path.read_bytes()
     except OSError as exc:
         raise KernelIsolationCIError(f"cannot read the kernel-isolation workflow: {exc}") from exc
+    _git(repo_root, "cat-file", "-e", f"{head_sha}^{{commit}}")
     entry = _git(repo_root, "ls-tree", "-z", head_sha, "--", CI_WORKFLOW_PATH)
     fields = entry.decode("utf-8", "replace").split("\0")[0].split("\t")[0].split()
     if len(fields) != 3 or fields[0] not in _REGULAR_BLOB_MODES or fields[1] != "blob":
@@ -232,6 +239,31 @@ def _reject_nested_elements(element: ET.Element, label: str) -> None:
         raise KernelIsolationCIError(f"JUnit {label} must not contain nested elements")
 
 
+def _validate_report_children(element: ET.Element, allowed: frozenset[str], label: str) -> None:
+    """Reject markup a pytest report cannot contain, at whichever level it appears.
+
+    Applied at the root, the suite and each testcase. Guarding only one level
+    leaves the same forgery available one level up: burying a ``failure`` under
+    a suite-level ``properties`` or ``system-out`` hides it just as effectively
+    as burying it under a testcase's. Containers are skipped here because their
+    own children are validated by their own call.
+    """
+    for child in element:
+        if child.tag not in allowed:
+            raise KernelIsolationCIError(
+                f"JUnit {label} has an unrecognised child element {child.tag!r}"
+            )
+        if child.tag == "properties":
+            for prop in child:
+                if prop.tag != "property":
+                    raise KernelIsolationCIError(
+                        "JUnit properties may only contain property elements"
+                    )
+                _reject_nested_elements(prop, "property element")
+        elif child.tag not in _CONTAINER_TAGS:
+            _reject_nested_elements(child, f"{child.tag} element")
+
+
 def _case_outcomes(case: ET.Element) -> list[str]:
     """Return a testcase's terminal outcome tags, failing closed on unknown markup.
 
@@ -241,24 +273,8 @@ def _case_outcomes(case: ET.Element) -> list[str]:
     and a ``failure`` buried under ``system-err``, which is not a direct child.
     Unrecognised markup is therefore rejected rather than ignored.
     """
-    outcomes: list[str] = []
-    for child in case:
-        if child.tag in _TERMINAL_CASE_TAGS:
-            _reject_nested_elements(child, f"{child.tag} element")
-            outcomes.append(child.tag)
-        elif child.tag in _TEXT_ONLY_CASE_TAGS:
-            _reject_nested_elements(child, f"{child.tag} element")
-        elif child.tag == "properties":
-            for prop in child:
-                if prop.tag != "property":
-                    raise KernelIsolationCIError(
-                        "JUnit properties may only contain property elements"
-                    )
-                _reject_nested_elements(prop, "property element")
-        else:
-            raise KernelIsolationCIError(
-                f"JUnit testcase has an unrecognised child element {child.tag!r}"
-            )
+    _validate_report_children(case, _CASE_CHILD_TAGS, "testcase")
+    outcomes = [child.tag for child in case if child.tag in _TERMINAL_CASE_TAGS]
     if len(outcomes) > 1:
         raise KernelIsolationCIError("a JUnit testcase has multiple terminal outcomes")
     return outcomes
@@ -281,11 +297,9 @@ def _parse_junit(
     suite = suites[0]
     if root.tag not in {"testsuites", "testsuite"}:
         raise KernelIsolationCIError(f"JUnit root element {root.tag!r} is not a pytest report")
-    for child in suite:
-        if child.tag not in _SUITE_CHILD_TAGS:
-            raise KernelIsolationCIError(
-                f"JUnit testsuite has an unrecognised child element {child.tag!r}"
-            )
+    if root is not suite:
+        _validate_report_children(root, frozenset({"testsuite"}), "report root")
+    _validate_report_children(suite, _SUITE_CHILD_TAGS, "testsuite")
     try:
         totals = {
             field: int(suite.attrib[field]) for field in ("tests", "failures", "errors", "skipped")

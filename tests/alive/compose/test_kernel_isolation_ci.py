@@ -302,7 +302,7 @@ def test_rejects_a_workflow_outside_any_git_worktree(tmp_path):
     loose = tmp_path / "loose" / CI_WORKFLOW_PATH
     loose.parent.mkdir(parents=True, exist_ok=True)
     loose.write_text("name: ungoverned\n", encoding="utf-8")
-    with pytest.raises(KernelIsolationCIError, match="not a git repository"):
+    with pytest.raises(KernelIsolationCIError, match="git rev-parse exited"):
         _build(junit, tmp_path / "loose", "b" * 40, workflow_path=loose)
 
 
@@ -322,7 +322,7 @@ def test_workflow_binding_ignores_a_hostile_git_environment(tmp_path, monkeypatc
     (stage / CI_WORKFLOW_PATH).write_bytes((repo / CI_WORKFLOW_PATH).read_bytes())
     monkeypatch.setenv("GIT_DIR", str(repo / ".git"))
     monkeypatch.setenv("GIT_WORK_TREE", str(stage))
-    with pytest.raises(KernelIsolationCIError, match="not a git repository"):
+    with pytest.raises(KernelIsolationCIError, match="git rev-parse exited"):
         _build(junit, stage, head_sha, workflow_path=stage / CI_WORKFLOW_PATH)
 
 
@@ -363,6 +363,73 @@ def test_rejects_unrecognised_testsuite_markup(tmp_path):
     repo = tmp_path / "repo"
     with pytest.raises(KernelIsolationCIError, match="testsuite has an unrecognised child"):
         _build(junit, repo, _synthetic_repo(repo))
+
+
+@pytest.mark.parametrize(
+    ("root_extra", "suite_extra", "message"),
+    [
+        ("", '<failure message="the suite blew up" />', "testsuite has an unrecognised child"),
+        ("", "<properties><failure /></properties>", "only contain property elements"),
+        ("", "<system-out><failure /></system-out>", "system-out element must not contain nested"),
+        ('<failure message="the run blew up" />', "", "report root has an unrecognised child"),
+    ],
+)
+def test_rejects_markup_above_the_testcase_level(tmp_path, root_extra, suite_extra, message):
+    """Guarding only the testcase leaves the same forgery available one level up."""
+    junit = tmp_path / "junit.xml"
+    junit.write_text(
+        '<?xml version="1.0" encoding="utf-8"?>'
+        f'<testsuites name="pytest tests">{root_extra}'
+        '<testsuite name="pytest" errors="0" failures="0" skipped="0" tests="2" time="0.3" '
+        f'timestamp="2026-07-25T00:00:00+00:00" hostname="runner">{suite_extra}'
+        f'<testcase classname="{CI_TEST_CLASSNAME}" name="{CI_PRIMITIVE_TEST}" time="0.1" />'
+        f'<testcase classname="{CI_TEST_CLASSNAME}" name="{CI_E2E_TEST}" time="0.2" />'
+        "</testsuite></testsuites>",
+        encoding="utf-8",
+    )
+    repo = tmp_path / "repo"
+    with pytest.raises(KernelIsolationCIError, match=message):
+        _build(junit, repo, _synthetic_repo(repo))
+
+
+def test_accepts_suite_level_properties_and_captured_output(tmp_path):
+    """``record_testsuite_property`` and ``junit_logging`` output must still pass."""
+    junit = tmp_path / "junit.xml"
+    junit.write_text(
+        '<?xml version="1.0" encoding="utf-8"?>'
+        '<testsuites name="pytest tests">'
+        '<testsuite name="pytest" errors="0" failures="0" skipped="0" tests="2" time="0.3" '
+        'timestamp="2026-07-25T00:00:00+00:00" hostname="runner">'
+        '<properties><property name="suite" value="alive" /></properties>'
+        "<system-out>suite stdout</system-out>"
+        f'<testcase classname="{CI_TEST_CLASSNAME}" name="{CI_PRIMITIVE_TEST}" time="0.1" />'
+        f'<testcase classname="{CI_TEST_CLASSNAME}" name="{CI_E2E_TEST}" time="0.2" />'
+        "</testsuite></testsuites>",
+        encoding="utf-8",
+    )
+    repo = tmp_path / "repo"
+    receipt = _build(junit, repo, _synthetic_repo(repo))
+    assert [case["status"] for case in receipt["required_test_cases"]] == ["passed", "passed"]
+
+
+def test_rejects_a_head_sha_that_is_not_a_commit(tmp_path):
+    """A 40-hex tree resolves for both ls-tree and cat-file; it is not a run."""
+    junit = tmp_path / "junit.xml"
+    _write_junit(junit)
+    repo = tmp_path / "repo"
+    _synthetic_repo(repo)
+    tree_sha = _run_git(repo, "rev-parse", "HEAD^{tree}")
+    with pytest.raises(KernelIsolationCIError, match="git cat-file exited"):
+        _build(junit, repo, tree_sha)
+
+
+def test_rejects_a_non_string_head_sha(tmp_path):
+    junit = tmp_path / "junit.xml"
+    _write_junit(junit)
+    repo = tmp_path / "repo"
+    _synthetic_repo(repo)
+    with pytest.raises(KernelIsolationCIError, match="head SHA must be"):
+        _build(junit, repo, None)
 
 
 def test_committed_historical_kernel_receipt_is_valid():
