@@ -5,7 +5,7 @@
 > **이 문서는 아무것도 정의하지 않는다** — 세부(task)는 plan, claim은 spec, exact param은 config,
 > 시간순 audit는 git이 authoritative다([sources of truth](../../CLAUDE.md#sources)). 상태 행이 authoritative
 > 문서와 어긋나면 **authoritative 문서가 옳다**; 이 인덱스를 갱신한다.
-> **Updated:** 2026-07-26 @ `c00727d` (branch `compose-ci-receipt-hardening`)
+> **Updated:** 2026-07-26 @ `f4eb7bd` (branch `compose-ci-receipt-hardening`)
 > **갱신 트리거:** sub-project/gate **상태가 바뀔 때만**(커밋마다 아님).
 > **종결 상태:** COMPOSE seal이 정확히 한 번 열리면 이 인덱스는 **frozen/은퇴**한다. 이후 진행상황은
 > seal 결과와 post-hoc analysis가 대신한다.
@@ -223,7 +223,9 @@ branch에서 추적 가능하게 기록한다. `LOCAL` ledger ID만으로는 이
    of the single testsuite. (2) `--workflow` accepted any path ending in the canonical suffix; the file must
    now be a real Git worktree's canonical workflow and byte-identical to the blob that `--head-sha` records at
    that path, which removes "any file anywhere" from the trust base but still does **not** prove GitHub
-   executed that workflow — only Actions' own execution integrity does. Every new negative test was checked
+   executed that workflow — only Actions' own execution integrity does. *(The "trust base" phrasing here is
+   narrowed by the adversarial-review entry below: it does not make a receipt harder to fabricate.)* Every
+   new negative test was checked
    against the pre-fix builder and fails there; one acceptance test guards the opposite direction, that the
    allowlist does not start rejecting real pytest output. The archive published at `ccc5a2e` stays
    reproducible: rebuilding its receipt from the downloaded run-`30200634662` JUnit under the hardened builder
@@ -249,6 +251,19 @@ branch에서 추적 가능하게 기록한다. `LOCAL` ledger ID만으로는 이
    Known and deliberately unfixed: a JUnit truncated to only passing cases still reconciles, because the
    receipt does not attest suite size — that property is carried by the pinned workflow content, not the
    schema. Seal state remains **UNOPENED**; execution remains **RELEASE-BLOCKED**.
+   **2026-07-26 review of those fixes (same branch):** a third review confirmed the three fixes close what
+   they claim, that each new negative test fails against the commit before its fix, and that the recorded
+   "18 failed → green under a hostile `GIT_DIR`" figure reproduces exactly. It found the markup guard still
+   stopped one level short — suite-level `properties`/`system-out` contents and the report root's own children
+   were unvalidated — and that `head_sha` was never required to name a commit, so a 40-hex *tree* satisfied
+   both `ls-tree` and `cat-file`. Both are now closed by one child-validation rule applied at root, suite and
+   testcase, plus an explicit commit-object check. It also caught the environment fix repeating the very
+   overclaim the entry above withdraws: stripping `GIT_*` makes the call environment-independent, **not**
+   unspoofable, because `PATH` still selects the `git` binary — a shim on `PATH` defeats it with no `GIT_*`
+   set at all. The docstring now says so. Confirmed not broken by the strip: `actions/checkout` writes
+   `safe.directory` into `$HOME/.gitconfig` by argv, not through `GIT_CONFIG_*`, so it survives; a container
+   image that carried it via `GIT_CONFIG_COUNT` would not, which this job does not use. Seal state remains
+   **UNOPENED**; execution remains **RELEASE-BLOCKED**.
    **2026-07-25 pre-pod local gate:** the probe-rerun runbook's §2.2 verification roster was run at clean exact
    commit `614017b67e35e9cc07f68d5b512213d8356cf1b2` — **254 passed**, plus `ruff check`/`ruff format --check`
    over the whole repository, `git diff --check`, and an empty `git status --short`. This records local
