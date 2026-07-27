@@ -344,6 +344,9 @@ def test_unregistered_esm_model_is_rejected(tmp_path):
 def test_runtime_contract_values_are_exposed_and_hashed():
     cfg = load_compose_phase2_config(CANON)
     assert cfg.lambda_grid == (0.0, 0.001, 0.01, 0.1)
+    assert cfg.unregularized_solver == "svd_lstsq_minimum_norm"
+    assert cfg.unregularized_oof_rank_policy == "require_full_rank_each_train_fold"
+    assert cfg.rank_tolerance_rule == "max_shape_times_float64_eps_times_sigma_max"
     assert cfg.oof_folds == 3
     assert cfg.uncovered_tolerance == 0.75
     assert cfg.split_seed == 11
@@ -361,6 +364,23 @@ def test_runtime_contract_values_are_exposed_and_hashed():
         "cpa",
     )
     assert len(cfg.config_sha256) == 64
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("estimator", "unregistered_solver"),
+        ("unregularized_solver", "singular_normal_equations"),
+        ("selection", "row_random_cv"),
+        ("unregularized_oof_rank_policy", "score_arbitrary_solution"),
+        ("rank_tolerance_rule", "lapack_solver_outcome"),
+    ],
+)
+def test_identification_algorithm_and_rank_policy_are_exact(key, value, tmp_path):
+    raw = _raw()
+    raw["identification"][key] = value
+    with pytest.raises(Phase2ConfigError, match=f"identification.{key}"):
+        load_compose_phase2_config(_write(tmp_path, raw))
 
 
 @pytest.mark.parametrize("bad", [0, -1, True, "1", 1.0])
@@ -632,7 +652,10 @@ _MISSING_KEY_CASES = [
     ("baselines.gears", lambda raw: raw["baselines"]["gears"].pop("package")),
     ("data", lambda raw: raw["data"].pop("cell_line")),
     ("eligibility", lambda raw: raw["eligibility"].pop("min_cells_per_gene")),
-    ("identification", lambda raw: raw["identification"].pop("estimator")),
+    (
+        "identification",
+        lambda raw: raw["identification"].pop("unregularized_oof_rank_policy"),
+    ),
     ("seeds", lambda raw: raw["seeds"].pop("split_seed")),
 ]
 
