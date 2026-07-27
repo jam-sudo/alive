@@ -1434,6 +1434,8 @@ def _run_phase2a_core(
         eps_split_b=np.asarray(inputs.eps_split_b, dtype=float),
         dev_oof_threshold=cfg.dev_oof_threshold,
         measurability_role=CALIBRATION_ROLE_NAME,
+        unregularized_oof_rank_policy=cfg.unregularized_oof_rank_policy,
+        rank_tolerance_rule=cfg.rank_tolerance_rule,
     )
     selected_k = futility.selected_k_total
     selected_lambda = futility.selected_lambda
@@ -1547,6 +1549,10 @@ def _run_phase2a_core(
             "measurable": bool(futility.measurability.passed),
             "selected_k_total": int(selected_k),
             "selected_lambda": round(float(selected_lambda), 12),
+            "nonviable_candidates": [
+                {"k_total": k, "lambda": lam, "reason": reason}
+                for k, lam, reason in futility.nonviable_candidates
+            ],
             # binds the exact development OOF fold layout into the frozen bundle.
             "oof_fold_manifest_checksum": oof_fold_manifest_checksum,
             # audit field: this run opened no seal. Named without the "sealed"

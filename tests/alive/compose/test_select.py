@@ -442,3 +442,89 @@ def test_missing_factor_bank_for_k_rejected():
             model_factory=lambda: L1Model(),
             uncovered_tolerance=0.7,
         )
+
+
+def test_singular_candidate_is_explicitly_nonviable_and_never_wins():
+    """A candidate with no unique solution must lose, not abort selection.
+
+    A zero factor bank makes every OOF train design rank zero at ``lam=0``. That
+    candidate has no estimate to score, so it is absent from the finite score map
+    and carries an explicit audit reason; the regularised candidate is selected.
+    """
+    rng = np.random.default_rng(10)
+    gene_ids, idx_pairs, pair_ids, _, additive, eps = _make_instance(rng, k=4, p=7)
+    Z = np.zeros((len(gene_ids), 4))
+
+    result = select_hyperparams(
+        idx_pairs=idx_pairs,
+        pair_ids=pair_ids,
+        eps_obs=eps,
+        additive=additive,
+        factors_by_k={4: Z},
+        k_total_grid=[4],
+        lambda_grid=[0.0, 0.001],
+        n_genes=len(gene_ids),
+        n_folds=3,
+        seed=11,
+        model_factory=lambda: L1Model(),
+        uncovered_tolerance=0.9,
+    )
+    assert (4, 0.0) not in result.theta_by_candidate
+    assert "non-identifiable" in result.nonviable_candidates[(4, 0.0)]
+    assert all(np.isfinite(theta) for theta in result.theta_by_candidate.values())
+    assert np.isfinite(result.theta_by_candidate[(4, 0.001)])
+    assert result.selected_lambda == 0.001
+
+
+def test_all_nonviable_candidates_invalidate_before_platform_solver(monkeypatch):
+    """A grid containing only undefined estimators has no artificial winner."""
+    rng = np.random.default_rng(20)
+    gene_ids, idx_pairs, pair_ids, _, additive, eps = _make_instance(rng, k=4, p=7)
+    Z = np.zeros((len(gene_ids), 4))
+    called = False
+
+    def _arbitrary_lstsq(phi, target, *, rcond):
+        nonlocal called
+        called = True
+        return np.full((phi.shape[1], target.shape[1]), 123.0), (), 0, np.array([])
+
+    monkeypatch.setattr(np.linalg, "lstsq", _arbitrary_lstsq)
+
+    with pytest.raises(SelectionError, match="no viable hyperparameter candidate"):
+        select_hyperparams(
+            idx_pairs=idx_pairs,
+            pair_ids=pair_ids,
+            eps_obs=eps,
+            additive=additive,
+            factors_by_k={4: Z},
+            k_total_grid=[4],
+            lambda_grid=[0.0],
+            n_genes=len(gene_ids),
+            n_folds=3,
+            seed=11,
+            model_factory=lambda: L1Model(),
+            uncovered_tolerance=0.9,
+        )
+    assert not called
+
+
+@pytest.mark.parametrize("bad_grid", [[-0.1], [np.nan], [np.inf], [0.0, -0.0]])
+def test_invalid_or_duplicate_lambda_grid_is_rejected(bad_grid):
+    rng = np.random.default_rng(21)
+    gene_ids, idx_pairs, pair_ids, Z, additive, eps = _make_instance(rng, k=4, p=7)
+
+    with pytest.raises(SelectionError, match="lambda_grid"):
+        select_hyperparams(
+            idx_pairs=idx_pairs,
+            pair_ids=pair_ids,
+            eps_obs=eps,
+            additive=additive,
+            factors_by_k={4: Z},
+            k_total_grid=[4],
+            lambda_grid=bad_grid,
+            n_genes=len(gene_ids),
+            n_folds=3,
+            seed=11,
+            model_factory=lambda: L1Model(),
+            uncovered_tolerance=0.9,
+        )

@@ -15,6 +15,17 @@ import numpy as np
 from alive.compose.operator import design_matrix, sym_basis_dim
 
 
+class SingularDesignError(ValueError):
+    """The registered least-squares solver failed to produce an estimate.
+
+    A LAPACK least-squares/solve failure is normalized to this type. Phase-specific
+    callers that require full-rank input (notably Phase-2a OOF selection) apply
+    their registered rank policy before calling this general estimator; Phase 1
+    also uses the minimum-norm solution deliberately to characterize
+    rank-deficient recovery.
+    """
+
+
 @dataclass(frozen=True)
 class RankReport:
     """Algebraic-identifiability diagnostics for a calibration pair set."""
@@ -59,13 +70,46 @@ def identify_operator(
 ) -> np.ndarray:
     """Estimate ``coef`` (p, sym_dim) by ridge least squares on the design matrix.
 
-    Solves ``min_C ||Phi C^T - eps_obs||^2 + lam ||C||^2`` via the normal
-    equations ``(Phi^T Phi + lam I) C^T = Phi^T eps_obs``.
+    Solves ``min_C ||Phi C^T - eps_obs||^2 + lam ||C||^2``. At ``lam == 0`` it
+    uses the SVD minimum-norm least-squares solution with the same
+    ``max(shape) * float64-eps * sigma_max`` cutoff as :func:`rank_diagnostics`;
+    this defines Phase-1 rank-deficient recovery without relying on an arbitrary
+    singular normal-equation result. Positive ridge penalties use
+    ``(Phi^T Phi + lam I) C^T = Phi^T eps_obs``.
+
+    Raises
+    ------
+    SingularDesignError
+        If LAPACK cannot compute the least-squares/linear-system solution.
+        Phase-2a OOF selection applies its registered train-fold rank policy
+        before fitting.
     """
     Z = np.asarray(Z, dtype=np.float64)
     eps_obs = np.asarray(eps_obs, dtype=np.float64)
+    lam = float(lam)
+    if not np.isfinite(lam) or lam < 0.0:
+        raise ValueError(f"lam must be finite and non-negative, got {lam!r}")
+
     phi = design_matrix(Z, pairs)
-    gram = phi.T @ phi + float(lam) * np.eye(phi.shape[1])
+    if lam == 0.0:
+        # np.linalg.lstsq's rcond is relative to sigma_max.  This explicit value
+        # exactly mirrors rank_diagnostics' absolute threshold:
+        # max(phi.shape) * eps * sigma_max.
+        rcond = float(max(phi.shape) * np.finfo(np.float64).eps)
+        try:
+            coef_t, _, _, _ = np.linalg.lstsq(phi, eps_obs, rcond=rcond)
+        except np.linalg.LinAlgError as exc:
+            raise SingularDesignError(
+                f"unregularized least-squares solver failed at lam={lam!r}: {exc}"
+            ) from exc
+        return coef_t.T
+
+    gram = phi.T @ phi + lam * np.eye(phi.shape[1])
     rhs = phi.T @ eps_obs
-    coef_t = np.linalg.solve(gram, rhs)  # (sym_dim, p)
+    try:
+        coef_t = np.linalg.solve(gram, rhs)  # (sym_dim, p)
+    except np.linalg.LinAlgError as exc:
+        raise SingularDesignError(
+            f"calibration design has no unique least-squares solution at lam={lam!r}: {exc}"
+        ) from exc
     return coef_t.T

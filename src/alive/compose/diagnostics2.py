@@ -90,6 +90,9 @@ class FutilityResult:
         The total factor dimension selected by gene-disjoint OOF.
     selected_lambda
         The ridge regularization selected by gene-disjoint OOF.
+    nonviable_candidates
+        Deterministically sorted ``(k_total, lambda, reason)`` records for
+        candidates excluded before scoring. Empty when every candidate was viable.
     oof_manifest
         The canonical, checksummed record of the EXACT gene-disjoint OOF folds
         this checkpoint's single selection call built (never a rebuilt fold set).
@@ -111,6 +114,7 @@ class FutilityResult:
     selected_lambda: float
     oof_manifest: OOFFoldManifest | None = None
     failures: tuple[str, ...] = field(default=())
+    nonviable_candidates: tuple[tuple[int, float, str], ...] = field(default=())
 
 
 def _spectrum_and_tol(Z: np.ndarray, pairs: Sequence[tuple[int, int]]) -> tuple[np.ndarray, float]:
@@ -158,6 +162,8 @@ def real_calibration_diagnostics(
     eps_split_b: np.ndarray,
     dev_oof_threshold: float = 0.0,
     measurability_role: str,
+    unregularized_oof_rank_policy: str,
+    rank_tolerance_rule: str,
 ) -> FutilityResult:
     r"""Run the Phase-2a development checkpoint on development-role inputs only.
 
@@ -188,6 +194,8 @@ def real_calibration_diagnostics(
     measurability_role
         Explicit development role forwarded to the measurability gate. A sealed
         role raises :class:`~alive.compose.gates.LeakageError` (no sealed read).
+    unregularized_oof_rank_policy, rank_tolerance_rule
+        Exact config-bound OOF estimator-domain policy forwarded to selection.
 
     Returns
     -------
@@ -223,6 +231,8 @@ def real_calibration_diagnostics(
         seed=seed,
         model_factory=model_factory,
         uncovered_tolerance=uncovered_tolerance,
+        unregularized_oof_rank_policy=unregularized_oof_rank_policy,
+        rank_tolerance_rule=rank_tolerance_rule,
     )
     selected_k_total = selection.selected_k_total
     selected_lambda = selection.selected_lambda
@@ -272,4 +282,8 @@ def real_calibration_diagnostics(
         selected_lambda=selected_lambda,
         oof_manifest=selection.oof_manifest,
         failures=tuple(failures),
+        nonviable_candidates=tuple(
+            (candidate[0], candidate[1], reason)
+            for candidate, reason in sorted(selection.nonviable_candidates.items())
+        ),
     )
