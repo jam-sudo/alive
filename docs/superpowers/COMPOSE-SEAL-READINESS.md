@@ -5,7 +5,7 @@
 > **이 문서는 아무것도 정의하지 않는다** — 세부(task)는 plan, claim은 spec, exact param은 config,
 > 시간순 audit는 git이 authoritative다([sources of truth](../../CLAUDE.md#sources)). 상태 행이 authoritative
 > 문서와 어긋나면 **authoritative 문서가 옳다**; 이 인덱스를 갱신한다.
-> **Updated:** 2026-07-26 @ `2dd23d6` (branch `main`)
+> **Updated:** 2026-07-27 @ `8b447af` (branch `compose-oof-estimator-domain-gate`)
 > **갱신 트리거:** sub-project/gate **상태가 바뀔 때만**(커밋마다 아님).
 > **종결 상태:** COMPOSE seal이 정확히 한 번 열리면 이 인덱스는 **frozen/은퇴**한다. 이후 진행상황은
 > seal 결과와 post-hoc analysis가 대신한다.
@@ -220,7 +220,28 @@ branch에서 추적 가능하게 기록한다. `LOCAL` ledger ID만으로는 이
    over the whole repository, `git diff --check`, and an empty `git status --short`. This records local
    implementation readiness only; the verifier OCI image, owner-frozen image lock, exact-SHA independent review,
    and pod-stage gates all remain outstanding.
-   **2026-07-25 leakage-guard corrections (same branch, not operationally pinned):** two development-boundary
+   **2026-07-27 singular-design estimator-domain correction (branch
+   `compose-singular-design-failure-path`, not operationally pinned):** the first correction normalized only
+   the branch where `np.linalg.solve` actually raised. That was incomplete: for the same rank-deficient
+   `lam=0` Gram matrix another LAPACK build could return an arbitrary vector, score it, and potentially change
+   not only `selected_lambda` but the selected `k_total` and downstream futility status. The prior statement
+   that “the verdict was never wrong” was therefore stronger than the code justified and is withdrawn.
+   The corrected contract now applies the already-defined
+   `max(Phi.shape) * float64_eps * sigma_max` rank rule **before** every unregularized OOF train-fold solve.
+   A deficient candidate is recorded with a deterministic fold/reason and omitted from the finite score map;
+   if none remain, selection fails closed. Passing unregularized fits and Phase-1 rank-deficient recovery
+   characterization use an explicitly registered SVD minimum-norm least-squares solver, not singular normal
+   equations. No `-Infinity` sentinel can become a winner or leak into JSON.
+   The futility artifact is schema v2, serializes a non-finite condition number as `null` plus an explicit
+   `condition_number_is_finite=false`, and uses strict JSON (`allow_nan=false`). The policy and tolerance-rule
+   names are frozen in the config and confirmation manifest. This is a scientific selection-contract change,
+   not a no-op exception wrapper: the config digest/run identity moves, and all config-bound activation
+   evidence, ResolvedRunSpec/carrier material, exact-SHA review and owner pin must be regenerated. It removes
+   platform-dependent singular-solve behavior; it does not claim bitwise portability for arbitrary near-rank-
+   boundary SVD inputs, which still depend on the exact pinned runtime/BLAS evidence. Seal state remains
+   **UNOPENED**; execution remains **RELEASE-BLOCKED**.
+   **2026-07-25 leakage-guard corrections (branch `compose-network-isolation`, merged as `d4c1ea8`):**
+   two development-boundary
    guards were found failing open and were fixed with mutation-verified regression tests. (1) The measurability
    gate blacklisted `secondary_sealed`, a role name that exists nowhere else in the protocol; the real second
    sealed role is `sealed_single_unseen`, so the single-unseen regime passed a tripwire that was only ever
