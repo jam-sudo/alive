@@ -40,6 +40,7 @@ from alive.compose.diagnostics2 import FutilityResult
 from alive.compose.driver.fixture_builder import build_compose_fixture
 from alive.compose.driver.phase2a_cmd import (
     FUTILITY_REPORT_SCHEMA,
+    Phase2aSubcommandError,
     _persist_futility_report,
     run_phase2a_subcommand,
 )
@@ -203,6 +204,23 @@ def _real_futility_result() -> Phase2aResult:
         method_lock=None,
         oof_manifest=None,
     )
+
+
+def test_futility_report_refuses_a_non_finite_value(tmp_path: Path) -> None:
+    """A non-finite value must fail typed, not as a bare ValueError.
+
+    ``allow_nan=False`` rejects it while ``sha256_json`` does not, so an
+    unhandled one would escape the driver's exit-code contract and leave no
+    report at all.
+    """
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    result = _real_futility_result()
+    object.__setattr__(result.futility, "oof_theta", float("inf"))
+
+    with pytest.raises(Phase2aSubcommandError, match="not strictly serializable"):
+        _persist_futility_report(run_dir, run_id="fixture-run-id", result=result)
+    assert sorted(p.name for p in run_dir.iterdir()) == []
 
 
 def test_futility_writes_only_the_futility_report(tmp_path: Path) -> None:

@@ -433,11 +433,18 @@ def _persist_futility_report(run_dir: Path, *, run_id: str, result: Phase2aResul
     }
     body["self_checksum"] = sha256_json({k: v for k, v in body.items() if k != "self_checksum"})
     path = Path(run_dir) / RUN_PRODUCED_BASENAMES["futility_report"]
+    # Serialize before writing. allow_nan=False rejects a non-finite value, and
+    # sha256_json above does not, so an unhandled one would otherwise surface as
+    # a bare ValueError -- outside the driver's exit-code contract, and with no
+    # report written at all.
     try:
-        atomic_write_once(
-            path,
-            json.dumps(body, sort_keys=True, separators=(",", ":"), allow_nan=False),
-        )
+        payload = json.dumps(body, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    except ValueError as exc:
+        raise Phase2aSubcommandError(
+            f"phase2a futility report is not strictly serializable: {exc}"
+        ) from exc
+    try:
+        atomic_write_once(path, payload)
     except FileExistsError as exc:
         raise Phase2aSubcommandError(
             f"phase2a futility report already exists at {str(path)!r}; write-once"
