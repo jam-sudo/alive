@@ -652,9 +652,18 @@ _MISSING_KEY_CASES = [
     ("baselines.gears", lambda raw: raw["baselines"]["gears"].pop("package")),
     ("data", lambda raw: raw["data"].pop("cell_line")),
     ("eligibility", lambda raw: raw["eligibility"].pop("min_cells_per_gene")),
+    ("identification", lambda raw: raw["identification"].pop("estimator")),
+    (
+        "identification",
+        lambda raw: raw["identification"].pop("unregularized_solver"),
+    ),
     (
         "identification",
         lambda raw: raw["identification"].pop("unregularized_oof_rank_policy"),
+    ),
+    (
+        "identification",
+        lambda raw: raw["identification"].pop("rank_tolerance_rule"),
     ),
     ("seeds", lambda raw: raw["seeds"].pop("split_seed")),
 ]
