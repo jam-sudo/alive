@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 import zipfile
 from pathlib import Path
 
@@ -15,6 +17,7 @@ from alive.compose.kernel_isolation_ci import (
     CI_PROOF_PROFILE_V2,
     CI_RECEIPT_SCHEMA,
     CI_TEST_CLASSNAME,
+    CI_WORKFLOW_PATH,
     KernelIsolationCIError,
     build_kernel_isolation_ci_archive,
     build_kernel_isolation_ci_receipt,
@@ -24,7 +27,6 @@ from alive.compose.kernel_isolation_ci import (
 from alive.provenance import sha256_json
 
 _REPO = Path(__file__).resolve().parents[3]
-_WORKFLOW = _REPO / ".github/workflows/test-suite.yml"
 _ARCHIVE = (
     _REPO
     / "docs/activation-evidence/compose"
@@ -56,22 +58,59 @@ def _write_junit(
     )
 
 
-def _receipt(tmp_path: Path) -> dict[str, object]:
+def _run_git(root: Path, *args: str) -> str:
+    """Run git against ``root`` only, immune to an inherited ``GIT_*`` environment.
+
+    Sanitising just ``GIT_CONFIG_*`` is not enough. With ``GIT_DIR`` exported,
+    these helpers init, add and commit into *that* repository instead of the
+    throwaway one — running this file under a stray ``GIT_DIR`` has already
+    written a commit into a real checkout. Fixtures must not be able to reach
+    outside ``root``.
+    """
+    env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    env |= {"GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_SYSTEM": "/dev/null"}
+    return subprocess.run(
+        ["git", *args], cwd=root, capture_output=True, text=True, check=True, env=env
+    ).stdout.strip()
+
+
+def _synthetic_repo(root: Path, *, workflow_body: str = "name: synthetic\non: push\n") -> str:
+    """Commit a canonical workflow into a throwaway repo; return its HEAD sha."""
+    root.mkdir(parents=True, exist_ok=True)
+    _run_git(root, "init", "-q")
+    _run_git(root, "config", "user.email", "test@example.invalid")
+    _run_git(root, "config", "user.name", "compose-test")
+    workflow = root / CI_WORKFLOW_PATH
+    workflow.parent.mkdir(parents=True, exist_ok=True)
+    workflow.write_text(workflow_body, encoding="utf-8")
+    _run_git(root, "add", CI_WORKFLOW_PATH)
+    _run_git(root, "commit", "-q", "-m", "workflow")
+    return _run_git(root, "rev-parse", "HEAD")
+
+
+def _build(junit: Path, repo: Path, head_sha: str, **overrides: object) -> dict[str, object]:
+    kwargs: dict[str, object] = {
+        "junit_path": junit,
+        "workflow_path": repo / CI_WORKFLOW_PATH,
+        "repository": "jam-sudo/alive",
+        "head_sha": head_sha,
+        "run_id": 123,
+        "run_attempt": 1,
+        "runner_os": "Linux",
+        "runner_architecture": "x86_64",
+        "kernel_release": "6.17.0-test",
+        "proof_profile": CI_PROOF_PROFILE_V2,
+    }
+    kwargs.update(overrides)
+    return build_kernel_isolation_ci_receipt(**kwargs)
+
+
+def _receipt(tmp_path: Path, **junit_kwargs: object) -> dict[str, object]:
     tmp_path.mkdir(parents=True, exist_ok=True)
     junit = tmp_path / "junit.xml"
-    _write_junit(junit)
-    return build_kernel_isolation_ci_receipt(
-        junit_path=junit,
-        workflow_path=_WORKFLOW,
-        repository="jam-sudo/alive",
-        head_sha="a" * 40,
-        run_id=123,
-        run_attempt=1,
-        runner_os="Linux",
-        runner_architecture="x86_64",
-        kernel_release="6.17.0-test",
-        proof_profile=CI_PROOF_PROFILE_V2,
-    )
+    _write_junit(junit, **junit_kwargs)
+    repo = tmp_path / "repo"
+    return _build(junit, repo, _synthetic_repo(repo))
 
 
 def test_builds_v2_receipt_only_when_both_kernel_tests_pass(tmp_path):
@@ -86,23 +125,11 @@ def test_builds_v2_receipt_only_when_both_kernel_tests_pass(tmp_path):
 
 
 def test_rejects_skipped_end_to_end_test(tmp_path):
-    junit = tmp_path / "junit.xml"
-    _write_junit(
-        junit,
-        second_outcome='<skipped type="pytest.skip" message="no Linux" />',
-        skipped=1,
-    )
     with pytest.raises(KernelIsolationCIError, match="testcase failed"):
-        build_kernel_isolation_ci_receipt(
-            junit_path=junit,
-            workflow_path=_WORKFLOW,
-            repository="jam-sudo/alive",
-            head_sha="a" * 40,
-            run_id=123,
-            run_attempt=1,
-            runner_os="Linux",
-            runner_architecture="x86_64",
-            kernel_release="6.17.0-test",
+        _receipt(
+            tmp_path,
+            second_outcome='<skipped type="pytest.skip" message="no Linux" />',
+            skipped=1,
         )
 
 
@@ -114,20 +141,8 @@ def test_rejects_skipped_end_to_end_test(tmp_path):
     ],
 )
 def test_rejects_inconsistent_junit_or_nonfinite_duration(tmp_path, kwargs, message):
-    junit = tmp_path / "junit.xml"
-    _write_junit(junit, **kwargs)
     with pytest.raises(KernelIsolationCIError, match=message):
-        build_kernel_isolation_ci_receipt(
-            junit_path=junit,
-            workflow_path=_WORKFLOW,
-            repository="jam-sudo/alive",
-            head_sha="a" * 40,
-            run_id=123,
-            run_attempt=1,
-            runner_os="Linux",
-            runner_architecture="x86_64",
-            kernel_release="6.17.0-test",
-        )
+        _receipt(tmp_path, **kwargs)
 
 
 def test_receipt_and_archive_tampering_fail_closed(tmp_path):
@@ -202,6 +217,219 @@ def test_archive_builder_rejects_missing_receipt_or_unrelated_junit(tmp_path, in
             archived_at_utc="2026-07-25T13:00:00Z",
             archived_by="independent reviewer",
         )
+
+
+@pytest.mark.parametrize(
+    ("second_outcome", "message"),
+    [
+        ('<rerunFailure message="flaky" />', "unrecognised child element"),
+        ('<flakyFailure message="flaky" />', "unrecognised child element"),
+        ('<system-err><failure message="boom" /></system-err>', "must not contain nested"),
+        ('<system-out><error message="boom" /></system-out>', "must not contain nested"),
+        ('<failure message="boom"><nested /></failure>', "must not contain nested"),
+        ("<properties><unexpected /></properties>", "only contain property elements"),
+    ],
+)
+def test_unknown_or_buried_failure_markup_fails_closed(tmp_path, second_outcome, message):
+    """A tag scan that only knows three bad names reads these forgeries as a pass.
+
+    ``rerunFailure``/``flakyFailure`` are what rerun plugins emit, and a
+    ``failure`` under captured output is not a direct child, so neither is seen
+    by a blacklist. Both must be rejected instead of counted as a clean run.
+    """
+    with pytest.raises(KernelIsolationCIError, match=message):
+        _receipt(tmp_path, second_outcome=second_outcome)
+
+
+def test_accepts_the_legitimate_xunit2_child_vocabulary(tmp_path):
+    """The allowlist must not reject output pytest genuinely emits."""
+    receipt = _receipt(
+        tmp_path,
+        second_outcome=(
+            "<system-out>captured stdout</system-out>"
+            "<system-err>captured stderr</system-err>"
+            '<properties><property name="k" value="v" /></properties>'
+        ),
+    )
+    assert [case["status"] for case in receipt["required_test_cases"]] == ["passed", "passed"]
+
+
+def test_rejects_testcase_smuggled_outside_the_single_testsuite(tmp_path):
+    junit = tmp_path / "junit.xml"
+    junit.write_text(
+        '<?xml version="1.0" encoding="utf-8"?>'
+        '<testsuites name="pytest tests">'
+        '<testsuite name="pytest" errors="0" failures="0" skipped="0" tests="2" time="0.3" '
+        'timestamp="2026-07-25T00:00:00+00:00" hostname="runner">'
+        f'<testcase classname="{CI_TEST_CLASSNAME}" name="{CI_PRIMITIVE_TEST}" time="0.1" />'
+        f'<testcase classname="{CI_TEST_CLASSNAME}" name="{CI_E2E_TEST}" time="0.2">'
+        f'<properties><testcase classname="{CI_TEST_CLASSNAME}" name="smuggled" time="0.1">'
+        '<failure message="boom" /></testcase></properties>'
+        "</testcase></testsuite></testsuites>",
+        encoding="utf-8",
+    )
+    repo = tmp_path / "repo"
+    with pytest.raises(KernelIsolationCIError, match="direct child of the single testsuite"):
+        _build(junit, repo, _synthetic_repo(repo))
+
+
+def test_workflow_must_match_the_blob_recorded_at_the_commit_under_test(tmp_path):
+    junit = tmp_path / "junit.xml"
+    _write_junit(junit)
+    repo = tmp_path / "repo"
+    head_sha = _synthetic_repo(repo)
+    (repo / CI_WORKFLOW_PATH).write_text("name: swapped after commit\n", encoding="utf-8")
+    with pytest.raises(KernelIsolationCIError, match="differs from the blob recorded"):
+        _build(junit, repo, head_sha)
+
+
+def test_rejects_a_workflow_at_a_suffix_matching_path_inside_the_worktree(tmp_path):
+    """The canonical suffix alone must not admit an arbitrary file (attack G)."""
+    junit = tmp_path / "junit.xml"
+    _write_junit(junit)
+    repo = tmp_path / "repo"
+    head_sha = _synthetic_repo(repo)
+    decoy = repo / "nested" / CI_WORKFLOW_PATH
+    decoy.parent.mkdir(parents=True, exist_ok=True)
+    decoy.write_text("totally not the real workflow\n", encoding="utf-8")
+    with pytest.raises(KernelIsolationCIError, match="workflow path is not canonical"):
+        _build(junit, repo, head_sha, workflow_path=decoy)
+
+
+def test_rejects_a_workflow_outside_any_git_worktree(tmp_path):
+    junit = tmp_path / "junit.xml"
+    _write_junit(junit)
+    loose = tmp_path / "loose" / CI_WORKFLOW_PATH
+    loose.parent.mkdir(parents=True, exist_ok=True)
+    loose.write_text("name: ungoverned\n", encoding="utf-8")
+    with pytest.raises(KernelIsolationCIError, match="git rev-parse exited"):
+        _build(junit, tmp_path / "loose", "b" * 40, workflow_path=loose)
+
+
+def test_workflow_binding_ignores_a_hostile_git_environment(tmp_path, monkeypatch):
+    """``GIT_*`` must not let a non-worktree directory answer as a repository.
+
+    ``GIT_DIR``/``GIT_WORK_TREE`` redirect repository discovery, so an inherited
+    environment could otherwise make an arbitrary staging directory pass the
+    "must be a real Git worktree" check using an unrelated repository's objects.
+    """
+    junit = tmp_path / "junit.xml"
+    _write_junit(junit)
+    repo = tmp_path / "repo"
+    head_sha = _synthetic_repo(repo)
+    stage = tmp_path / "stage"
+    (stage / CI_WORKFLOW_PATH).parent.mkdir(parents=True, exist_ok=True)
+    (stage / CI_WORKFLOW_PATH).write_bytes((repo / CI_WORKFLOW_PATH).read_bytes())
+    monkeypatch.setenv("GIT_DIR", str(repo / ".git"))
+    monkeypatch.setenv("GIT_WORK_TREE", str(stage))
+    with pytest.raises(KernelIsolationCIError, match="git rev-parse exited"):
+        _build(junit, stage, head_sha, workflow_path=stage / CI_WORKFLOW_PATH)
+
+
+def test_rejects_a_symlink_workflow_entry_at_the_commit(tmp_path):
+    """A mode-120000 entry hands back its target path, not a workflow.
+
+    GitHub will not execute a symlinked workflow file, so a receipt built from
+    one attests a workflow that could never have run.
+    """
+    junit = tmp_path / "junit.xml"
+    _write_junit(junit)
+    repo = tmp_path / "repo"
+    _synthetic_repo(repo)
+    payload = repo / "payload.txt"
+    payload.write_text("/some/other/real.yml", encoding="utf-8")
+    blob = _run_git(repo, "hash-object", "-w", "payload.txt")
+    _run_git(repo, "update-index", "--add", "--cacheinfo", f"120000,{blob},{CI_WORKFLOW_PATH}")
+    tree = _run_git(repo, "write-tree")
+    head_sha = _run_git(repo, "commit-tree", tree, "-m", "symlinked workflow")
+    (repo / CI_WORKFLOW_PATH).write_text("/some/other/real.yml", encoding="utf-8")
+    with pytest.raises(KernelIsolationCIError, match="regular-file workflow"):
+        _build(junit, repo, head_sha)
+
+
+def test_rejects_unrecognised_testsuite_markup(tmp_path):
+    junit = tmp_path / "junit.xml"
+    junit.write_text(
+        '<?xml version="1.0" encoding="utf-8"?>'
+        '<testsuites name="pytest tests">'
+        '<testsuite name="pytest" errors="0" failures="0" skipped="0" tests="2" time="0.3" '
+        'timestamp="2026-07-25T00:00:00+00:00" hostname="runner">'
+        '<failure message="the suite blew up" />'
+        f'<testcase classname="{CI_TEST_CLASSNAME}" name="{CI_PRIMITIVE_TEST}" time="0.1" />'
+        f'<testcase classname="{CI_TEST_CLASSNAME}" name="{CI_E2E_TEST}" time="0.2" />'
+        "</testsuite></testsuites>",
+        encoding="utf-8",
+    )
+    repo = tmp_path / "repo"
+    with pytest.raises(KernelIsolationCIError, match="testsuite has an unrecognised child"):
+        _build(junit, repo, _synthetic_repo(repo))
+
+
+@pytest.mark.parametrize(
+    ("root_extra", "suite_extra", "message"),
+    [
+        ("", '<failure message="the suite blew up" />', "testsuite has an unrecognised child"),
+        ("", "<properties><failure /></properties>", "only contain property elements"),
+        ("", "<system-out><failure /></system-out>", "system-out element must not contain nested"),
+        ('<failure message="the run blew up" />', "", "report root has an unrecognised child"),
+    ],
+)
+def test_rejects_markup_above_the_testcase_level(tmp_path, root_extra, suite_extra, message):
+    """Guarding only the testcase leaves the same forgery available one level up."""
+    junit = tmp_path / "junit.xml"
+    junit.write_text(
+        '<?xml version="1.0" encoding="utf-8"?>'
+        f'<testsuites name="pytest tests">{root_extra}'
+        '<testsuite name="pytest" errors="0" failures="0" skipped="0" tests="2" time="0.3" '
+        f'timestamp="2026-07-25T00:00:00+00:00" hostname="runner">{suite_extra}'
+        f'<testcase classname="{CI_TEST_CLASSNAME}" name="{CI_PRIMITIVE_TEST}" time="0.1" />'
+        f'<testcase classname="{CI_TEST_CLASSNAME}" name="{CI_E2E_TEST}" time="0.2" />'
+        "</testsuite></testsuites>",
+        encoding="utf-8",
+    )
+    repo = tmp_path / "repo"
+    with pytest.raises(KernelIsolationCIError, match=message):
+        _build(junit, repo, _synthetic_repo(repo))
+
+
+def test_accepts_suite_level_properties_and_captured_output(tmp_path):
+    """``record_testsuite_property`` and ``junit_logging`` output must still pass."""
+    junit = tmp_path / "junit.xml"
+    junit.write_text(
+        '<?xml version="1.0" encoding="utf-8"?>'
+        '<testsuites name="pytest tests">'
+        '<testsuite name="pytest" errors="0" failures="0" skipped="0" tests="2" time="0.3" '
+        'timestamp="2026-07-25T00:00:00+00:00" hostname="runner">'
+        '<properties><property name="suite" value="alive" /></properties>'
+        "<system-out>suite stdout</system-out>"
+        f'<testcase classname="{CI_TEST_CLASSNAME}" name="{CI_PRIMITIVE_TEST}" time="0.1" />'
+        f'<testcase classname="{CI_TEST_CLASSNAME}" name="{CI_E2E_TEST}" time="0.2" />'
+        "</testsuite></testsuites>",
+        encoding="utf-8",
+    )
+    repo = tmp_path / "repo"
+    receipt = _build(junit, repo, _synthetic_repo(repo))
+    assert [case["status"] for case in receipt["required_test_cases"]] == ["passed", "passed"]
+
+
+def test_rejects_a_head_sha_that_is_not_a_commit(tmp_path):
+    """A 40-hex tree resolves for both ls-tree and cat-file; it is not a run."""
+    junit = tmp_path / "junit.xml"
+    _write_junit(junit)
+    repo = tmp_path / "repo"
+    _synthetic_repo(repo)
+    tree_sha = _run_git(repo, "rev-parse", "HEAD^{tree}")
+    with pytest.raises(KernelIsolationCIError, match="git cat-file exited"):
+        _build(junit, repo, tree_sha)
+
+
+def test_rejects_a_non_string_head_sha(tmp_path):
+    junit = tmp_path / "junit.xml"
+    _write_junit(junit)
+    repo = tmp_path / "repo"
+    _synthetic_repo(repo)
+    with pytest.raises(KernelIsolationCIError, match="head SHA must be"):
+        _build(junit, repo, None)
 
 
 def test_committed_historical_kernel_receipt_is_valid():

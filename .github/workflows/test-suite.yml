@@ -71,8 +71,12 @@ jobs:
           set -euo pipefail
           # The builder checks the exact classname/name roster and requires both
           # the low-level kernel test and the real launcher->execve->driver test.
-          # Its canonical receipt can be imported into version-controlled
-          # activation evidence; this artifact is transport, not durable proof.
+          # It reads --workflow through git and requires that file to be this
+          # worktree's canonical workflow, byte-identical to the blob recorded at
+          # --head-sha, so a receipt cannot commit to a workflow the commit under
+          # test never contained. Its canonical receipt can be imported into
+          # version-controlled activation evidence; this artifact is transport,
+          # not durable proof.
           uv run python scripts/compose/build_kernel_isolation_ci_receipt.py \
             --junit junit.xml \
             --workflow .github/workflows/test-suite.yml \

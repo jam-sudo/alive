@@ -11,7 +11,9 @@ from __future__ import annotations
 import io
 import json
 import math
+import os
 import re
+import subprocess
 import xml.etree.ElementTree as ET
 import zipfile
 from collections.abc import Mapping, Sequence
@@ -19,13 +21,14 @@ from datetime import datetime
 from pathlib import Path
 
 from alive.io import atomic_write_once
-from alive.provenance import sha256_bytes, sha256_file, sha256_json
+from alive.provenance import sha256_bytes, sha256_json
 
 CI_RECEIPT_SCHEMA = "compose_kernel_isolation_ci_receipt_v1"
 CI_ARCHIVE_SCHEMA = "compose_kernel_isolation_ci_archive_v1"
 CI_PROOF_PROFILE_V1 = "x86_64_seccomp_primitives_v1"
 CI_PROOF_PROFILE_V2 = "x86_64_seccomp_primitives_and_launcher_wiring_v2"
 CI_WORKFLOW_PATH = ".github/workflows/test-suite.yml"
+_GIT_TIMEOUT = 30
 CI_TEST_CLASSNAME = "tests.alive.compose.test_network_isolation"
 CI_PRIMITIVE_TEST = "test_linux_policy_and_sealed_receipt_validate_in_the_active_process"
 CI_E2E_TEST = "test_linux_launcher_executes_driver_self_check_end_to_end"
@@ -67,6 +70,12 @@ _JUNIT_KEYS = frozenset(
     }
 )
 _TEST_CASE_KEYS = frozenset({"classname", "name", "time_seconds", "status"})
+_TERMINAL_CASE_TAGS = frozenset({"skipped", "failure", "error"})
+_TEXT_ONLY_CASE_TAGS = frozenset({"system-out", "system-err"})
+_SUITE_CHILD_TAGS = frozenset({"testcase", "properties", "system-out", "system-err"})
+_CASE_CHILD_TAGS = _TERMINAL_CASE_TAGS | _TEXT_ONLY_CASE_TAGS | frozenset({"properties"})
+_CONTAINER_TAGS = frozenset({"testsuite", "testcase"})
+_REGULAR_BLOB_MODES = frozenset({"100644", "100755"})
 _ARCHIVE_KEYS = frozenset(
     {
         "schema",
@@ -153,6 +162,124 @@ def _aware_timestamp(value: object, label: str) -> datetime:
     return parsed
 
 
+def _git(repo_root: Path, *args: str) -> bytes:
+    """Run ``git`` in ``repo_root`` (argv, no shell) and return raw stdout.
+
+    ``GIT_DIR``/``GIT_WORK_TREE``/``GIT_ALTERNATE_OBJECT_DIRECTORIES`` and the
+    rest of the ``GIT_*`` namespace redirect repository discovery and object
+    lookup, so an inherited environment can make a directory that is not a
+    worktree answer as though it were one. They are stripped, so no ``GIT_*``
+    variable can redirect the answer.
+
+    That is the whole of it. ``PATH`` still decides which ``git`` binary runs,
+    so this makes the call environment-independent, not unspoofable by someone
+    who already controls the process.
+    """
+    environment = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(repo_root), *args],
+            capture_output=True,
+            timeout=_GIT_TIMEOUT,
+            env=environment,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise KernelIsolationCIError(f"git {args[0]} failed at {repo_root}: {exc}") from exc
+    if result.returncode != 0:
+        raise KernelIsolationCIError(
+            f"git {args[0]} exited {result.returncode} at {repo_root}: "
+            f"{result.stderr.decode('utf-8', 'replace').strip()}"
+        )
+    return result.stdout
+
+
+def _workflow_bytes_at_commit(workflow_path: Path, head_sha: str) -> bytes:
+    """Return the workflow bytes, bound to the blob recorded at ``head_sha``.
+
+    Validating the argument as a path alone accepts any file whose name happens
+    to end in the canonical suffix, so ``workflow_sha256`` could describe a file
+    no commit ever contained. It must instead be the canonical workflow of a Git
+    worktree, recorded at ``head_sha`` as a regular file, and byte-identical to
+    that blob.
+
+    The binding is to *a* worktree that records this blob, not to the repository
+    named in ``repository`` -- that field stays self-declared. Inside CI the two
+    coincide, because the worktree is the checkout of the commit under test.
+    Nothing here makes a receipt harder to fabricate for someone who already has
+    the repository; it only stops ``workflow_sha256`` from naming a workflow the
+    commit never had.
+    """
+    directory = workflow_path.parent
+    if not directory.is_dir():
+        raise KernelIsolationCIError(f"kernel-isolation workflow directory is missing: {directory}")
+    repo_root = Path(_git(directory, "rev-parse", "--show-toplevel").decode().strip()).resolve()
+    if workflow_path.resolve() != repo_root / CI_WORKFLOW_PATH:
+        raise KernelIsolationCIError("kernel-isolation receipt workflow path is not canonical")
+    try:
+        workflow_bytes = workflow_path.read_bytes()
+    except OSError as exc:
+        raise KernelIsolationCIError(f"cannot read the kernel-isolation workflow: {exc}") from exc
+    _git(repo_root, "cat-file", "-e", f"{head_sha}^{{commit}}")
+    entry = _git(repo_root, "ls-tree", "-z", head_sha, "--", CI_WORKFLOW_PATH)
+    fields = entry.decode("utf-8", "replace").split("\0")[0].split("\t")[0].split()
+    if len(fields) != 3 or fields[0] not in _REGULAR_BLOB_MODES or fields[1] != "blob":
+        raise KernelIsolationCIError(
+            "the commit under test does not record a regular-file workflow at that path"
+        )
+    recorded = _git(repo_root, "cat-file", "blob", f"{head_sha}:{CI_WORKFLOW_PATH}")
+    if workflow_bytes != recorded:
+        raise KernelIsolationCIError(
+            "kernel-isolation workflow differs from the blob recorded at the commit under test"
+        )
+    return workflow_bytes
+
+
+def _reject_nested_elements(element: ET.Element, label: str) -> None:
+    if len(element):
+        raise KernelIsolationCIError(f"JUnit {label} must not contain nested elements")
+
+
+def _validate_report_children(element: ET.Element, allowed: frozenset[str], label: str) -> None:
+    """Reject markup a pytest report cannot contain, at whichever level it appears.
+
+    Applied at the root, the suite and each testcase. Guarding only one level
+    leaves the same forgery available one level up: burying a ``failure`` under
+    a suite-level ``properties`` or ``system-out`` hides it just as effectively
+    as burying it under a testcase's. Containers are skipped here because their
+    own children are validated by their own call.
+    """
+    for child in element:
+        if child.tag not in allowed:
+            raise KernelIsolationCIError(
+                f"JUnit {label} has an unrecognised child element {child.tag!r}"
+            )
+        if child.tag == "properties":
+            for prop in child:
+                if prop.tag != "property":
+                    raise KernelIsolationCIError(
+                        "JUnit properties may only contain property elements"
+                    )
+                _reject_nested_elements(prop, "property element")
+        elif child.tag not in _CONTAINER_TAGS:
+            _reject_nested_elements(child, f"{child.tag} element")
+
+
+def _case_outcomes(case: ET.Element) -> list[str]:
+    """Return a testcase's terminal outcome tags, failing closed on unknown markup.
+
+    Only the xunit2 vocabulary pytest actually emits is accepted. Scanning for a
+    fixed set of *bad* tag names instead would read two forgeries as a pass: a
+    rerun plugin's ``rerunFailure`` element, whose tag is simply not in the set,
+    and a ``failure`` buried under ``system-err``, which is not a direct child.
+    Unrecognised markup is therefore rejected rather than ignored.
+    """
+    _validate_report_children(case, _CASE_CHILD_TAGS, "testcase")
+    outcomes = [child.tag for child in case if child.tag in _TERMINAL_CASE_TAGS]
+    if len(outcomes) > 1:
+        raise KernelIsolationCIError("a JUnit testcase has multiple terminal outcomes")
+    return outcomes
+
+
 def _parse_junit(
     path: str | Path,
     *,
@@ -168,6 +295,11 @@ def _parse_junit(
     if len(suites) != 1:
         raise KernelIsolationCIError("kernel-isolation JUnit must contain exactly one testsuite")
     suite = suites[0]
+    if root.tag not in {"testsuites", "testsuite"}:
+        raise KernelIsolationCIError(f"JUnit root element {root.tag!r} is not a pytest report")
+    if root is not suite:
+        _validate_report_children(root, frozenset({"testsuite"}), "report root")
+    _validate_report_children(suite, _SUITE_CHILD_TAGS, "testsuite")
     try:
         totals = {
             field: int(suite.attrib[field]) for field in ("tests", "failures", "errors", "skipped")
@@ -186,11 +318,13 @@ def _parse_junit(
 
     cases: list[dict[str, object]] = []
     all_cases = list(root.iter("testcase"))
+    if len(suite.findall("testcase")) != len(all_cases):
+        raise KernelIsolationCIError(
+            "every JUnit testcase must be a direct child of the single testsuite"
+        )
     observed = {"tests": len(all_cases), "failures": 0, "errors": 0, "skipped": 0}
     for case in all_cases:
-        outcomes = [child.tag for child in case if child.tag in {"skipped", "failure", "error"}]
-        if len(outcomes) > 1:
-            raise KernelIsolationCIError("a JUnit testcase has multiple terminal outcomes")
+        outcomes = _case_outcomes(case)
         if outcomes:
             outcome = outcomes[0]
             observed[f"{outcome}s" if outcome != "skipped" else "skipped"] += 1
@@ -208,7 +342,7 @@ def _parse_junit(
                 f"expected exactly one clean JUnit testcase {CI_TEST_CLASSNAME}.{name}"
             )
         case = matches[0]
-        outcomes = [child.tag for child in case if child.tag in {"skipped", "failure", "error"}]
+        outcomes = _case_outcomes(case)
         if outcomes:
             raise KernelIsolationCIError(f"required kernel-isolation testcase failed: {outcomes}")
         time_seconds = _duration(case.attrib.get("time", ""), "required testcase")
@@ -246,24 +380,20 @@ def build_kernel_isolation_ci_receipt(
     required = _required_tests(proof_profile)
     if not isinstance(repository, str) or _REPOSITORY_RE.fullmatch(repository) is None:
         raise KernelIsolationCIError("repository must be an owner/name identifier")
-    if _COMMIT_RE.fullmatch(head_sha) is None:
+    if not isinstance(head_sha, str) or _COMMIT_RE.fullmatch(head_sha) is None:
         raise KernelIsolationCIError("head SHA must be a full lowercase Git commit")
     _positive_int(run_id, "run_id")
     _positive_int(run_attempt, "run_attempt")
     if runner_os != "Linux" or runner_architecture != "x86_64" or not kernel_release:
         raise KernelIsolationCIError("kernel-isolation receipt requires a real Linux x86_64 runner")
-    workflow = Path(workflow_path)
-    if workflow.as_posix() != CI_WORKFLOW_PATH and not workflow.as_posix().endswith(
-        f"/{CI_WORKFLOW_PATH}"
-    ):
-        raise KernelIsolationCIError("kernel-isolation receipt workflow path is not canonical")
+    workflow_bytes = _workflow_bytes_at_commit(Path(workflow_path), head_sha)
     junit, cases = _parse_junit(junit_path, required_tests=required)
     body = {
         "schema": CI_RECEIPT_SCHEMA,
         "proof_profile": proof_profile,
         "repository": repository,
         "workflow_path": CI_WORKFLOW_PATH,
-        "workflow_sha256": sha256_file(workflow),
+        "workflow_sha256": sha256_bytes(workflow_bytes),
         "head_sha": head_sha,
         "run_id": run_id,
         "run_attempt": run_attempt,
