@@ -26,9 +26,12 @@ Selection executes the COMPLETE path for every ``(k_total, lambda)`` candidate
 7. select the candidate with maximum ``theta``, with the registered deterministic
    tie-break: lower ``k_total`` first, then LARGER regularization (``lambda``).
 
-Empty folds (a retained fold must have non-empty train AND test) or an
-uncovered-pair fraction above the registered tolerance INVALIDATE selection and
-raise :class:`SelectionError`. The result reports the union of OOF test pairs, the
+An unregularized candidate is non-viable if any OOF train fold is not full rank
+under the registered rank rule; it is excluded with an explicit reason rather
+than represented by a non-finite score. Empty folds (a retained fold must have
+non-empty train AND test), an uncovered-pair fraction above the registered
+tolerance, or a grid with no viable candidate INVALIDATE selection and raise
+:class:`SelectionError`. The result reports the union of OOF test pairs, the
 uncovered calibration pairs and the per-fold exclusions (plan §2.4).
 """
 
@@ -42,12 +45,17 @@ from pathlib import Path
 import numpy as np
 from numpy.random import PCG64, Generator
 
+from alive.compose.identify import SingularDesignError, rank_diagnostics
 from alive.compose.metric2 import paired_relative_error_reduction
 from alive.io import atomic_write_once
 from alive.provenance import sha256_json
 
 #: Immutable schema tag for the persisted OOF fold manifest (D2 Task 1).
 OOF_FOLD_MANIFEST_SCHEMA = "compose_oof_fold_manifest_v1"
+
+#: Exact config-bound OOF estimator-domain policy and its numerical-rank rule.
+UNREGULARIZED_OOF_RANK_POLICY = "require_full_rank_each_train_fold"
+OOF_RANK_TOLERANCE_RULE = "max_shape_times_float64_eps_times_sigma_max"
 
 #: A typed model factory: a zero-arg callable returning a fresh symmetric model
 #: exposing ``fit(Z, pairs, eps_obs, *, lam)`` and ``predict_eps(Z, g, h)``.
@@ -109,8 +117,14 @@ class SelectionResult:
     selected_lambda : float
         Chosen ridge regularization.
     theta_by_candidate : dict
-        Map ``(k_total, lambda) -> OOF theta`` (paired relative error reduction of
-        ``delta_hat`` vs the additive comparator, aggregated over OOF test pairs).
+        Map each *viable* ``(k_total, lambda)`` to its finite OOF theta (paired
+        relative error reduction of ``delta_hat`` vs the additive comparator,
+        aggregated over OOF test pairs).
+    nonviable_candidates : dict
+        Map each excluded ``(k_total, lambda)`` to the deterministic reason the
+        estimator could not be defined. Such candidates are absent from
+        ``theta_by_candidate``; no NaN or infinity sentinel enters selection or
+        persisted diagnostics.
     union_test_pair_ids : tuple of tuple of str
         Sorted union of canonical pair IDs that appear as some fold's OOF test
         pair (the covered calibration pairs).
@@ -132,6 +146,7 @@ class SelectionResult:
     selected_k_total: int
     selected_lambda: float
     theta_by_candidate: dict[tuple[int, float], float]
+    nonviable_candidates: dict[tuple[int, float], str]
     union_test_pair_ids: tuple[tuple[str, str], ...]
     uncovered_pair_ids: tuple[tuple[str, str], ...]
     uncovered_fraction: float
@@ -708,6 +723,19 @@ def _validate_inputs(
         raise SelectionError("k_total_grid is empty")
     if len(lambda_grid) == 0:
         raise SelectionError("lambda_grid is empty")
+    normalized_lambdas: list[float] = []
+    for raw_lam in lambda_grid:
+        if isinstance(raw_lam, bool):
+            raise SelectionError("lambda_grid values must be finite non-negative numbers")
+        try:
+            lam = float(raw_lam)
+        except (TypeError, ValueError) as exc:
+            raise SelectionError("lambda_grid values must be finite non-negative numbers") from exc
+        if not np.isfinite(lam) or lam < 0.0:
+            raise SelectionError(f"lambda_grid values must be finite and non-negative, got {lam!r}")
+        normalized_lambdas.append(lam)
+    if len(set(normalized_lambdas)) != len(normalized_lambdas):
+        raise SelectionError("lambda_grid contains duplicate numeric values")
     if not (0.0 <= float(uncovered_tolerance) <= 1.0):
         raise SelectionError(f"uncovered_tolerance must be in [0, 1], got {uncovered_tolerance}")
 
@@ -763,6 +791,7 @@ def _oof_theta_for_candidate(
     lam: float,
     p: int,
     model_factory: ModelFactory,
+    require_full_rank_unregularized: bool,
 ) -> tuple[float, set[tuple[str, str]]]:
     """OOF ``theta`` (vs additive) for one ``(Z, lambda)`` over all folds.
 
@@ -784,11 +813,22 @@ def _oof_theta_for_candidate(
     row_ids: list[tuple[str, str]] = []
     covered: set[tuple[str, str]] = set()
 
-    for fold in folds:
+    for fold_index, fold in enumerate(folds):
         model = model_factory()
         train_pairs = [idx_pairs[i] for i in fold.train_idx]
         train_eps = eps_obs[list(fold.train_idx)]
-        model.fit(Z, train_pairs, train_eps, lam=float(lam))
+        if require_full_rank_unregularized and float(lam) == 0.0:
+            report = rank_diagnostics(Z, train_pairs)
+            if not report.is_full_rank:
+                raise SingularDesignError(
+                    f"OOF train fold {fold_index}: unregularized calibration design "
+                    "is non-identifiable under the registered rank rule: "
+                    f"rank={report.rank}, sym_dim={report.sym_dim}, lam={float(lam)!r}"
+                )
+        try:
+            model.fit(Z, train_pairs, train_eps, lam=float(lam))
+        except SingularDesignError as exc:
+            raise SingularDesignError(f"OOF train fold {fold_index}: {exc}") from exc
 
         for pi in fold.test_idx:
             g, h = idx_pairs[pi]
@@ -847,6 +887,8 @@ def select_hyperparams(
     seed: int,
     model_factory: ModelFactory,
     uncovered_tolerance: float,
+    unregularized_oof_rank_policy: str = UNREGULARIZED_OOF_RANK_POLICY,
+    rank_tolerance_rule: str = OOF_RANK_TOLERANCE_RULE,
 ) -> SelectionResult:
     """Select ``(k_total, lambda)`` by end-to-end gene-disjoint OOF (plan §2.4).
 
@@ -886,6 +928,10 @@ def select_hyperparams(
     uncovered_tolerance : float
         Maximum allowed fraction of calibration pairs that are never an OOF test
         pair. An uncovered fraction strictly above this invalidates selection.
+    unregularized_oof_rank_policy, rank_tolerance_rule : str
+        Exact config-bound estimator-domain policy. The only registered values
+        require every unregularized OOF train design to be full rank under the
+        ``max(shape) * float64-eps * sigma_max`` rule.
 
     Returns
     -------
@@ -900,6 +946,16 @@ def select_hyperparams(
         retained fold must have non-empty train AND test), or an uncovered-pair
         fraction strictly above ``uncovered_tolerance``.
     """
+    if unregularized_oof_rank_policy != UNREGULARIZED_OOF_RANK_POLICY:
+        raise SelectionError(
+            "unregularized_oof_rank_policy must match the registered value "
+            f"{UNREGULARIZED_OOF_RANK_POLICY!r}"
+        )
+    if rank_tolerance_rule != OOF_RANK_TOLERANCE_RULE:
+        raise SelectionError(
+            f"rank_tolerance_rule must match the registered value {OOF_RANK_TOLERANCE_RULE!r}"
+        )
+
     eps, add, p = _validate_inputs(
         idx_pairs,
         pair_ids,
@@ -937,6 +993,7 @@ def select_hyperparams(
         )
 
     theta_by_candidate: dict[tuple[int, float], float] = {}
+    nonviable_candidates: dict[tuple[int, float], str] = {}
     for k_total in k_total_grid:
         Z = np.asarray(factors_by_k[k_total], dtype=np.float64)
         if Z.shape[0] != n_genes:
@@ -944,18 +1001,37 @@ def select_hyperparams(
                 f"factors_by_k[{k_total}] has {Z.shape[0]} gene rows, expected {n_genes}"
             )
         for lam in lambda_grid:
-            theta, _ = _oof_theta_for_candidate(
-                folds=folds,
-                idx_pairs=idx_pairs,
-                pair_ids=pair_ids,
-                eps_obs=eps,
-                additive=add,
-                Z=Z,
-                lam=float(lam),
-                p=p,
-                model_factory=model_factory,
-            )
-            theta_by_candidate[(int(k_total), float(lam))] = theta
+            candidate = (int(k_total), float(lam))
+            # The estimator decides unregularized rank viability before LAPACK.
+            # Keep an explicit audit reason and omit the candidate from the finite
+            # score map; ``-inf`` is neither a measurement nor strict JSON.
+            try:
+                theta, _ = _oof_theta_for_candidate(
+                    folds=folds,
+                    idx_pairs=idx_pairs,
+                    pair_ids=pair_ids,
+                    eps_obs=eps,
+                    additive=add,
+                    Z=Z,
+                    lam=float(lam),
+                    p=p,
+                    model_factory=model_factory,
+                    require_full_rank_unregularized=True,
+                )
+            except SingularDesignError as exc:
+                nonviable_candidates[candidate] = str(exc)
+                continue
+            if not np.isfinite(theta):
+                raise SelectionError(
+                    f"candidate {candidate} produced non-finite OOF theta {theta!r}"
+                )
+            theta_by_candidate[candidate] = theta
+
+    if not theta_by_candidate:
+        detail = "; ".join(
+            f"{candidate}: {reason}" for candidate, reason in sorted(nonviable_candidates.items())
+        )
+        raise SelectionError(f"no viable hyperparameter candidate; {detail}")
 
     # Select max theta; deterministic tie-break: lower k_total, then LARGER lambda.
     # Sort key maximizes theta, then minimizes k_total, then maximizes lambda. We
@@ -983,6 +1059,7 @@ def select_hyperparams(
         selected_k_total=best[0],
         selected_lambda=best[1],
         theta_by_candidate=theta_by_candidate,
+        nonviable_candidates=nonviable_candidates,
         union_test_pair_ids=tuple(sorted(covered_all)),
         uncovered_pair_ids=tuple(sorted(uncovered)),
         uncovered_fraction=float(uncovered_fraction),

@@ -290,8 +290,9 @@ raw/gene/row/manifest identity 불일치는 entry point 호출 전에 abort한�
 - 결과가 `CONTINUE`이면 frozen bundle + OOF manifest를 atomic write-once persist·(pod에서) upload하고
   재독출·재검증한다. Post-fit `RunLedger`는 아직 in-memory로 유지하며 D2 결속 뒤 마지막에 설치한다. Ledger
   header는 ResolvedRunSpec의 run/config/environment identity와 같아야 한다. `FUTILITY_STOPPED`이면 exact
-  schema `compose_phase2a_futility_v1`의
-  `phase2a_futility.json`만 write-once 설치하고 **종료한다. phase2b 금지.**
+  schema `compose_phase2a_futility_v2`의 `phase2a_futility.json`만 write-once 설치하고 **종료한다.
+  phase2b 금지.** v2는 non-viable OOF 후보 사유를 보존하고 non-finite condition number를 JSON
+  `null` + `condition_number_is_finite=false`로 표현하며, NaN/Infinity serialization을 금지한다.
 - CONTINUE 후, frozen bundle에 고정된 OOF manifest 위에서 merge된 D2 harness
   `development_seed_variability(...)`를 dev roles·동일 `{gears,cpa}` adapter로 실행해 seed-variability
   report를 만든다. 이는 D2 기계의 orchestration일 뿐 새 과학 계산이 아니다. **filename 예약:** phase2a는 이

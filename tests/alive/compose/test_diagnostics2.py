@@ -126,6 +126,8 @@ def _run(inst, **overrides):
         "eps_split_a": inst["eps_split_a"],
         "eps_split_b": inst["eps_split_b"],
         "measurability_role": CALIBRATION_ROLE_NAME,
+        "unregularized_oof_rank_policy": "require_full_rank_each_train_fold",
+        "rank_tolerance_rule": "max_shape_times_float64_eps_times_sigma_max",
     }
     kwargs.update(overrides)
     return real_calibration_diagnostics(**kwargs)
@@ -178,6 +180,33 @@ def test_rank_deficient_design_is_futility_stopped():
     assert res.status == "FUTILITY_STOPPED"
     assert not res.rank_report.is_full_rank
     assert any("rank" in f.lower() for f in res.failures)
+
+
+def test_exactly_singular_design_stops_for_futility_instead_of_raising():
+    """A design whose normal equations are singular must not abort the checkpoint.
+
+    ``np.linalg.solve`` reports exact singularity on some LAPACK builds and
+    returns an arbitrary vector on others, so before the estimator normalised
+    that outcome this path raised ``LinAlgError`` on one machine and reached the
+    rank gate on another. A zero factor bank makes the Gram matrix exactly zero
+    at ``lam=0``, which every LAPACK reports, so this pins the portable result.
+    """
+    rng = np.random.default_rng(7)
+    inst = _full_rank_instance(rng)
+    Z = inst["factors_by_k"][inst["selected_k_total"]]
+    inst["factors_by_k"] = {inst["selected_k_total"]: np.zeros_like(Z)}
+    res = _run(inst)
+    assert res.status == "FUTILITY_STOPPED"
+    assert not res.rank_report.is_full_rank
+    assert any("rank" in f.lower() for f in res.failures)
+    # The singular lam=0 candidate scored non-viable and lost to the regularised
+    # one, which is solvable; the rank gate then stopped the study anyway.
+    assert res.selected_lambda == 1e-3
+    assert len(res.nonviable_candidates) == 1
+    k_total, lam, reason = res.nonviable_candidates[0]
+    assert (k_total, lam) == (inst["selected_k_total"], 0.0)
+    assert "OOF train fold 0" in reason
+    assert "non-identifiable" in reason
 
 
 def test_non_finite_conditioning_is_futility_stopped():

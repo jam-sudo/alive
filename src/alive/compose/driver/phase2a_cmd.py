@@ -43,6 +43,7 @@ See docs/superpowers/specs/2026-07-07-compose-production-driver-design.md §3.1.
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -87,7 +88,7 @@ CONTINUE_EXIT = 0
 FUTILITY_EXIT = 20
 
 #: Exact ``schema`` discriminator of the write-once futility report (spec §3.1).
-FUTILITY_REPORT_SCHEMA = "compose_phase2a_futility_v1"
+FUTILITY_REPORT_SCHEMA = "compose_phase2a_futility_v2"
 
 #: Canonical ledger artifact names for the four driver-added SHAs (spec §3.1).
 #: These extend — and are distinct from — the artifacts the Phase-2a orchestrator
@@ -407,6 +408,7 @@ def _persist_futility_report(run_dir: Path, *, run_id: str, result: Phase2aResul
     """
     futility = result.futility
     rank = futility.rank_report
+    condition_number = float(rank.condition_number)
     body = {
         "schema": FUTILITY_REPORT_SCHEMA,
         "run_id": run_id,
@@ -417,15 +419,32 @@ def _persist_futility_report(run_dir: Path, *, run_id: str, result: Phase2aResul
         "rank": int(rank.rank),
         "sym_dim": int(rank.sym_dim),
         "is_full_rank": bool(rank.is_full_rank),
-        "condition_number": round(float(rank.condition_number), 6),
+        # JSON has no infinity literal. Keep the scientific state explicit and
+        # make strict serialization reject any future unhandled non-finite value.
+        "condition_number": round(condition_number, 6) if math.isfinite(condition_number) else None,
+        "condition_number_is_finite": math.isfinite(condition_number),
         "measurable": bool(futility.measurability.passed),
         "oof_theta": round(float(futility.oof_theta), 12),
         "failures": [str(f) for f in futility.failures],
+        "nonviable_candidates": [
+            {"k_total": k, "lambda": lam, "reason": reason}
+            for k, lam, reason in futility.nonviable_candidates
+        ],
     }
     body["self_checksum"] = sha256_json({k: v for k, v in body.items() if k != "self_checksum"})
     path = Path(run_dir) / RUN_PRODUCED_BASENAMES["futility_report"]
+    # Serialize before writing. allow_nan=False rejects a non-finite value, and
+    # sha256_json above does not, so an unhandled one would otherwise surface as
+    # a bare ValueError -- outside the driver's exit-code contract, and with no
+    # report written at all.
     try:
-        atomic_write_once(path, json.dumps(body, sort_keys=True, separators=(",", ":")))
+        payload = json.dumps(body, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    except ValueError as exc:
+        raise Phase2aSubcommandError(
+            f"phase2a futility report is not strictly serializable: {exc}"
+        ) from exc
+    try:
+        atomic_write_once(path, payload)
     except FileExistsError as exc:
         raise Phase2aSubcommandError(
             f"phase2a futility report already exists at {str(path)!r}; write-once"

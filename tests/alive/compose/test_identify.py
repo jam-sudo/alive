@@ -3,8 +3,14 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
-from alive.compose.identify import RankReport, identify_operator, rank_diagnostics
+from alive.compose.identify import (
+    RankReport,
+    SingularDesignError,
+    identify_operator,
+    rank_diagnostics,
+)
 from alive.compose.operator import bilinear_predict, sym_basis_dim
 
 
@@ -50,3 +56,54 @@ def test_rank_deficient_flagged():
     # must NOT read "well-conditioned" off only the positive singular values.
     assert not np.isfinite(rep.condition_number)
     assert rep.condition_number == float("inf")
+
+
+def test_lapack_singular_failure_is_normalized_to_typed_error(monkeypatch):
+    """The general estimator normalizes LAPACK failure for its callers.
+
+    Phase-2a does its policy-specific precheck in OOF selection. This lower-level
+    function remains usable by Phase 1's rank-deficient recovery diagnostic.
+    """
+    n_genes, k, p = 6, 3, 2
+    Z = np.zeros((n_genes, k))
+    pairs = [(i, j) for i in range(n_genes) for j in range(i + 1, n_genes)]
+    eps = np.zeros((len(pairs), p))
+
+    def _failing_lstsq(phi, target, *, rcond):
+        raise np.linalg.LinAlgError("synthetic singular pivot")
+
+    monkeypatch.setattr(np.linalg, "lstsq", _failing_lstsq)
+    with pytest.raises(SingularDesignError, match="least-squares solver failed"):
+        identify_operator(Z, pairs, eps, lam=0.0)
+
+
+def test_regularisation_makes_the_same_design_solvable():
+    """The guard fires on singularity itself, not on the design being degenerate."""
+    n_genes, k, p = 6, 3, 2
+    Z = np.zeros((n_genes, k))
+    pairs = [(i, j) for i in range(n_genes) for j in range(i + 1, n_genes)]
+    eps = np.zeros((len(pairs), p))
+    coef = identify_operator(Z, pairs, eps, lam=1e-3)
+    assert coef.shape == (p, sym_basis_dim(k))
+    assert np.all(coef == 0.0)
+
+
+def test_unregularized_rank_deficient_fit_is_defined_by_minimum_norm():
+    """Phase 1 can characterize rank-deficient recovery without a singular solve."""
+    n_genes, k, p = 6, 3, 2
+    Z = np.zeros((n_genes, k))
+    pairs = [(i, j) for i in range(n_genes) for j in range(i + 1, n_genes)]
+    eps = np.zeros((len(pairs), p))
+
+    coef = identify_operator(Z, pairs, eps, lam=0.0)
+
+    assert coef.shape == (p, sym_basis_dim(k))
+    assert np.all(coef == 0.0)
+
+
+@pytest.mark.parametrize("lam", [-1.0, np.nan, np.inf])
+def test_invalid_regularisation_is_rejected(lam):
+    rng = np.random.default_rng(3)
+    Z, _, pairs, eps = _make(rng)
+    with pytest.raises(ValueError, match="finite and non-negative"):
+        identify_operator(Z, pairs, eps, lam=lam)

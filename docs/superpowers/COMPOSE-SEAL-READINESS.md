@@ -5,7 +5,7 @@
 > **이 문서는 아무것도 정의하지 않는다** — 세부(task)는 plan, claim은 spec, exact param은 config,
 > 시간순 audit는 git이 authoritative다([sources of truth](../../CLAUDE.md#sources)). 상태 행이 authoritative
 > 문서와 어긋나면 **authoritative 문서가 옳다**; 이 인덱스를 갱신한다.
-> **Updated:** 2026-07-26 @ `2dd23d6` (branch `main`)
+> **Updated:** 2026-07-28 @ `ee7681a` (branch `compose-oof-estimator-domain-gate`)
 > **갱신 트리거:** sub-project/gate **상태가 바뀔 때만**(커밋마다 아님).
 > **종결 상태:** COMPOSE seal이 정확히 한 번 열리면 이 인덱스는 **frozen/은퇴**한다. 이후 진행상황은
 > seal 결과와 post-hoc analysis가 대신한다.
@@ -220,7 +220,46 @@ branch에서 추적 가능하게 기록한다. `LOCAL` ledger ID만으로는 이
    over the whole repository, `git diff --check`, and an empty `git status --short`. This records local
    implementation readiness only; the verifier OCI image, owner-frozen image lock, exact-SHA independent review,
    and pod-stage gates all remain outstanding.
-   **2026-07-25 leakage-guard corrections (same branch, not operationally pinned):** two development-boundary
+   **2026-07-27 singular-design estimator-domain correction (branch
+   `compose-oof-estimator-domain-gate`, not operationally pinned):** the first correction normalized only
+   the branch where `np.linalg.solve` actually raised. That was incomplete: for the same rank-deficient
+   `lam=0` Gram matrix another LAPACK build could return an arbitrary vector, score it, and potentially change
+   not only `selected_lambda` but the selected `k_total` and downstream futility status. The prior statement
+   that “the verdict was never wrong” was therefore stronger than the code justified and is withdrawn.
+   The corrected contract now applies the already-defined
+   `max(Phi.shape) * float64_eps * sigma_max` rank rule **before** every unregularized OOF train-fold solve.
+   A deficient candidate is recorded with a deterministic fold/reason and omitted from the finite score map;
+   if none remain, selection fails closed. Passing unregularized fits and Phase-1 rank-deficient recovery
+   characterization use an explicitly registered SVD minimum-norm least-squares solver, not singular normal
+   equations. No `-Infinity` sentinel can become a winner or leak into JSON.
+   The futility artifact is schema v2, serializes a non-finite condition number as `null` plus an explicit
+   `condition_number_is_finite=false`, and uses strict JSON (`allow_nan=false`). The policy and tolerance-rule
+   names are frozen in the config and confirmation manifest. This is a scientific selection-contract change,
+   not a no-op exception wrapper: the config digest/run identity moves, and all config-bound activation
+   evidence, ResolvedRunSpec/carrier material, exact-SHA review and owner pin must be regenerated. It removes
+   platform-dependent singular-solve behavior; it does not claim bitwise portability for arbitrary near-rank-
+   boundary SVD inputs, which still depend on the exact pinned runtime/BLAS evidence.
+   **Corrections to this entry after adversarial review at the pushed SHAs.** (1) The gate keys on the literal
+   `lam == 0.0`, while the tolerance rule is relative to `sigma_max` and `lam` is an absolute penalty on an
+   unnormalized Gram. A factor bank scaled large enough makes `Phi^T Phi + lam I` byte-identical to
+   `Phi^T Phi`, so a registered positive `lambda` can be numerically unregularized, bypass the gate, and be
+   scored — reviewers demonstrated this on a synthetic bank at scale `1e4`. Nothing in `_verify_factor_banks`
+   constrains factor scale, and no reviewer showed the real pipeline produces such a bank. **Open item:**
+   deciding when a positive `lambda` counts as unregularized is a registered numerical criterion, i.e. a
+   scientific decision, and is deliberately not invented here. Until it is registered, read the guarantee as
+   "no arbitrary LAPACK solution enters selection **at `lam == 0`**". (2) The preflight claim that two runs
+   differing only in solver or rank policy produced the same manifest is **withdrawn**: the seal confirmation
+   manifest already carried `config_checksum` and `run_id`, both of which move with any config change. Only
+   the `selected_hyperparameters` sub-block was blind, so binding the policy there is legibility and
+   defence-in-depth, not the closure of an identity hole. (3) The `SelectionError` raised when the policy
+   leaves no viable candidate was outside the driver's exit-code contract and wrote no artifact; it is now a
+   registered pre-seal rejection whose exclusion reasons travel in the one contracted stderr line. (4) The
+   `rank_tolerance_rule` is the same rule in `rank_diagnostics` and in the `lam=0` solver, but the two use
+   different LAPACK drivers (`gesdd` vs `gelsd`), so identical *threshold* does not mean identical computed
+   rank at the boundary; reviewers measured 9 disagreements in 4000 random matrices and 0 in 22,500 real
+   design-matrix shapes. Seal state remains **UNOPENED**; execution remains **RELEASE-BLOCKED**.
+   **2026-07-25 leakage-guard corrections (branch `compose-network-isolation`, merged as `d4c1ea8`):**
+   two development-boundary
    guards were found failing open and were fixed with mutation-verified regression tests. (1) The measurability
    gate blacklisted `secondary_sealed`, a role name that exists nowhere else in the protocol; the real second
    sealed role is `sealed_single_unseen`, so the single-unseen regime passed a tripwire that was only ever
