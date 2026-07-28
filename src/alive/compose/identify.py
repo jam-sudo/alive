@@ -92,9 +92,12 @@ def identify_operator(
 
     phi = design_matrix(Z, pairs)
     if lam == 0.0:
-        # np.linalg.lstsq's rcond is relative to sigma_max.  This explicit value
-        # exactly mirrors rank_diagnostics' absolute threshold:
-        # max(phi.shape) * eps * sigma_max.
+        # np.linalg.lstsq's rcond is relative to sigma_max, so this value is the
+        # same absolute threshold rank_diagnostics uses:
+        # max(phi.shape) * eps * sigma_max. Same rule, not necessarily the same
+        # verdict at the boundary -- rank_diagnostics goes through np.linalg.svd
+        # (gesdd) and lstsq through gelsd, whose computed spectra differ in the
+        # last bits.
         rcond = float(max(phi.shape) * np.finfo(np.float64).eps)
         try:
             coef_t, _, _, _ = np.linalg.lstsq(phi, eps_obs, rcond=rcond)
