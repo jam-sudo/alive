@@ -104,6 +104,7 @@ from alive.compose.driver.run_spec import RunSpecError
 from alive.compose.driver.scientific_runtime import ScientificRuntimeError
 from alive.compose.outcome_store import ComposeSealingError
 from alive.compose.preflight import PreflightError
+from alive.compose.select import SelectionError
 from alive.provenance import LedgerError
 
 __all__ = [
@@ -167,6 +168,17 @@ _KNOWN_PRESEAL_REJECTIONS: tuple[type[Exception], ...] = (
     # contracted single-stderr-line + exit 10.
     ScientificModeError,
     ScientificRuntimeError,
+    # SelectionError (also a bare ``ValueError`` subclass) invalidates OOF
+    # hyperparameter selection before any seal access: an empty/degenerate fold
+    # layout, an uncovered-pair fraction above the registered tolerance, or a
+    # grid in which the registered estimator-domain rank policy leaves no viable
+    # candidate at all. That last row is reachable only since the policy exists,
+    # and it is a selection INVALIDATION, not a futility verdict — phase2a
+    # produces no futility report for it, so without this entry the run ended in
+    # a traceback and exit 1, outside the §1.1 contract, with the per-candidate
+    # exclusion reasons visible nowhere. They are carried in the exception
+    # message and therefore in the one contracted stderr line.
+    SelectionError,
 )
 
 

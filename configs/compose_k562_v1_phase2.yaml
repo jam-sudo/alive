@@ -68,8 +68,11 @@ factor_z:
 
 identification:
   estimator: ridge_lsq
+  unregularized_solver: svd_lstsq_minimum_norm
   lambda_grid: [0.0, 0.001, 0.01, 0.1]
   selection: calibration_oof_gene_disjoint
+  unregularized_oof_rank_policy: require_full_rank_each_train_fold
+  rank_tolerance_rule: max_shape_times_float64_eps_times_sigma_max
   oof_folds: 3
   uncovered_tolerance: 0.75
 

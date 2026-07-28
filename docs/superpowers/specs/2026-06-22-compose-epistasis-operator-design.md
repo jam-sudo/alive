@@ -435,6 +435,18 @@ dimension 중 2차원은 eligible single-gene ESM vectors에 outcome 없이 적�
 `rank(Φ)=k_total(k_total+1)/2`이며, 단순 pair-count floor가 아니라 실제 $\Phi$ rank와 condition
 number를 gate로 사용한다. calibration gene-disjoint OOF로 `k_total`·$\lambda$를 선택한다.
 
+**OOF estimator-domain gate.** `lambda=0` 후보는 각 gene-disjoint OOF **train fold**의 $\Phi$가
+`max(Phi.shape) * float64_eps * sigma_max` tolerance로 full column rank일 때만 점수를 계산한다. 어느
+train fold라도 미달이면 그 `(k_total, lambda)`는 estimator가 정의되지 않은 **non-viable candidate**로
+사유와 함께 기록하고 점수 map에서 제외한다. `NaN`/`±Infinity` 점수나 LAPACK이 우연히 반환한 임의
+해를 selection에 넣지 않는다. 모든 후보가 non-viable이면 selection 자체가 무효이며 hard error로
+종료한다. 통과한 `lambda=0` 적합과 Phase-1 rank-deficient recovery characterization은 같은 tolerance의
+SVD minimum-norm least-squares(`svd_lstsq_minimum_norm`)로 계산해 singular normal equation의 임의 해를
+사용하지 않는다. `lambda>0` ridge 후보는 이 unregularized-domain gate의 대상이 아니지만, 선택된
+`k_total`은 위의 full-calibration 실제 $\Phi$ rank/condition futility gate를 그대로 통과해야 한다.
+정확한 solver/policy/rule 문자열은 config `identification.unregularized_solver`,
+`identification.unregularized_oof_rank_policy`, `identification.rank_tolerance_rule`에 동결한다.
+
 ### 10.5 Baselines, metric and inference
 
 family = {additive(null floor), GEARS(published SOTA, GO-graph 사용 — 우리 차별점), CPA(latent-

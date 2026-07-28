@@ -52,6 +52,7 @@ from alive.compose.driver.identity_lock import AssemblerError
 from alive.compose.gates import GateResult
 from alive.compose.identify import RankReport
 from alive.compose.phase2a import Phase2aResult
+from alive.compose.select import SelectionError
 
 
 def _fixture_cli_args(tmp_path: Path) -> tuple[str, str, str]:
@@ -207,6 +208,51 @@ def test_futility_via_phase2a_returns_twenty(
 # ``assemble_baseline_backends`` symbol (the same technique the futility test
 # uses for ``run_phase2a_fixture``) forces the reachable §7.1 abort row.
 # --------------------------------------------------------------------------- #
+# --------------------------------------------------------------------------- #
+# Scenario: every hyperparameter candidate is excluded by the registered
+# estimator-domain rank policy -> SelectionError -> 10 (pre-seal). This is a
+# selection INVALIDATION, not FUTILITY_STOPPED: phase2a writes no futility
+# report, so the per-candidate exclusion reasons exist only in the contracted
+# stderr line. SelectionError is a bare ``ValueError`` subclass covered by no
+# other roster entry, so without its entry the run ended in a traceback and
+# exit 1, outside the §1.1 contract.
+# --------------------------------------------------------------------------- #
+def test_selection_error_returns_ten(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    spec_path, approved_root, run_dir = _fixture_cli_args(tmp_path)
+
+    def _raise_selection(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        raise SelectionError(
+            "no viable hyperparameter candidate; (4, 0.0): OOF train fold 0: "
+            "unregularized calibration design is non-identifiable"
+        )
+
+    monkeypatch.setattr(
+        "alive.compose.driver.phase2a_cmd.run_phase2a_fixture",
+        _raise_selection,
+    )
+
+    rc = main(
+        [
+            "phase2a",
+            "--run-spec",
+            spec_path,
+            "--approved-artifacts-root",
+            approved_root,
+            "--run-dir",
+            run_dir,
+        ]
+    )
+
+    assert rc == 10
+    captured = capsys.readouterr()
+    assert captured.out == ""  # NO outcome value on stdout
+    assert "phase2a: SelectionError:" in captured.err
+    # the exclusion reasons are the only record this path leaves
+    assert "no viable hyperparameter candidate" in captured.err
+
+
 def test_assembler_error_returns_ten(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
 ) -> None:

@@ -161,6 +161,9 @@ def test_preflight_passes_installs_and_reconstructs(tmp_path: Path) -> None:
     assert sel["selected_k_total"] == int(frozen.selected_k_total)
     assert sel["selected_lambda"] == round(float(frozen.selected_lambda), 12)
     assert "total_k_grid" in sel and "lambda_grid" in sel  # grid still present
+    assert sel["unregularized_solver"] == "svd_lstsq_minimum_norm"
+    assert sel["unregularized_oof_rank_policy"] == "require_full_rank_each_train_fold"
+    assert sel["rank_tolerance_rule"] == "max_shape_times_float64_eps_times_sigma_max"
 
 
 # --------------------------------------------------------------------------- #

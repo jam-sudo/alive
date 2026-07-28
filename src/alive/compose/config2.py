@@ -67,6 +67,11 @@ _EXPECTED_TOTAL_K_GRID: tuple[int, ...] = (4, 6, 8)
 _EXPECTED_EXPRESSION_DIMS: tuple[int, ...] = (2, 4, 6)
 _EXPECTED_ESM_PROJECTION_DIM = 2
 _EXPECTED_LAMBDA_GRID: tuple[float, ...] = (0.0, 0.001, 0.01, 0.1)
+_EXPECTED_IDENTIFICATION_ESTIMATOR = "ridge_lsq"
+_EXPECTED_UNREGULARIZED_SOLVER = "svd_lstsq_minimum_norm"
+_EXPECTED_IDENTIFICATION_SELECTION = "calibration_oof_gene_disjoint"
+_EXPECTED_UNREGULARIZED_OOF_RANK_POLICY = "require_full_rank_each_train_fold"
+_EXPECTED_RANK_TOLERANCE_RULE = "max_shape_times_float64_eps_times_sigma_max"
 _EXPECTED_OOF_FOLDS = 3
 _EXPECTED_UNCOVERED_TOLERANCE = 0.75
 _EXPECTED_SPLIT_SEED = 11
@@ -241,7 +246,16 @@ _KNOWN_FACTOR_Z = frozenset(
     }
 )
 _KNOWN_IDENTIFICATION = frozenset(
-    {"estimator", "lambda_grid", "selection", "oof_folds", "uncovered_tolerance"}
+    {
+        "estimator",
+        "unregularized_solver",
+        "lambda_grid",
+        "selection",
+        "unregularized_oof_rank_policy",
+        "rank_tolerance_rule",
+        "oof_folds",
+        "uncovered_tolerance",
+    }
 )
 _KNOWN_METRIC = frozenset(
     {
@@ -435,6 +449,9 @@ class ComposePhase2Config:
     esm_model: str
     esm_projection_dim: int
     lambda_grid: tuple[float, ...]
+    unregularized_solver: str
+    unregularized_oof_rank_policy: str
+    rank_tolerance_rule: str
     oof_folds: int
     uncovered_tolerance: float
     split_seed: int
@@ -676,9 +693,14 @@ def load_compose_phase2_config(path: str | Path) -> ComposePhase2Config:
     total_k_grid, expression_dims, esm_model, esm_projection_dim = _validate_factor_z(
         _require(raw, "factor_z", "top-level")
     )
-    lambda_grid, oof_folds, uncovered_tolerance = _validate_identification(
-        _require(raw, "identification", "top-level")
-    )
+    (
+        lambda_grid,
+        unregularized_solver,
+        unregularized_oof_rank_policy,
+        rank_tolerance_rule,
+        oof_folds,
+        uncovered_tolerance,
+    ) = _validate_identification(_require(raw, "identification", "top-level"))
     split_seed, registered_seeds = _validate_seeds(_require(raw, "seeds", "top-level"))
     sealed_minimum_n = _validate_seal(_require(raw, "seal", "top-level"))
     futility_conditions, dev_oof_metric, dev_oof_threshold = _validate_futility(
@@ -723,6 +745,9 @@ def load_compose_phase2_config(path: str | Path) -> ComposePhase2Config:
         esm_model=esm_model,
         esm_projection_dim=esm_projection_dim,
         lambda_grid=lambda_grid,
+        unregularized_solver=unregularized_solver,
+        unregularized_oof_rank_policy=unregularized_oof_rank_policy,
+        rank_tolerance_rule=rank_tolerance_rule,
         oof_folds=oof_folds,
         uncovered_tolerance=uncovered_tolerance,
         split_seed=split_seed,
@@ -890,9 +915,43 @@ def _validate_factor_z(
     return total_k_grid, expression_dims, esm_model, esm_projection_dim
 
 
-def _validate_identification(block: dict[str, Any]) -> tuple[tuple[float, ...], int, float]:
-    """Validate the exact preregistered ridge grid."""
+def _validate_identification(
+    block: dict[str, Any],
+) -> tuple[tuple[float, ...], str, str, str, int, float]:
+    """Validate the exact preregistered estimator, rank policy and OOF controls."""
     _close_schema(block, _KNOWN_IDENTIFICATION, "identification")
+    estimator = _require(block, "estimator", "identification")
+    unregularized_solver = _require(block, "unregularized_solver", "identification")
+    selection = _require(block, "selection", "identification")
+    if estimator != _EXPECTED_IDENTIFICATION_ESTIMATOR:
+        raise Phase2ConfigError(
+            "identification.estimator must match the preregistration exactly: "
+            f"{_EXPECTED_IDENTIFICATION_ESTIMATOR!r}"
+        )
+    if unregularized_solver != _EXPECTED_UNREGULARIZED_SOLVER:
+        raise Phase2ConfigError(
+            "identification.unregularized_solver must match the preregistration exactly: "
+            f"{_EXPECTED_UNREGULARIZED_SOLVER!r}"
+        )
+    if selection != _EXPECTED_IDENTIFICATION_SELECTION:
+        raise Phase2ConfigError(
+            "identification.selection must match the preregistration exactly: "
+            f"{_EXPECTED_IDENTIFICATION_SELECTION!r}"
+        )
+
+    rank_policy = _require(block, "unregularized_oof_rank_policy", "identification")
+    rank_rule = _require(block, "rank_tolerance_rule", "identification")
+    if rank_policy != _EXPECTED_UNREGULARIZED_OOF_RANK_POLICY:
+        raise Phase2ConfigError(
+            "identification.unregularized_oof_rank_policy must match the preregistration "
+            f"exactly: {_EXPECTED_UNREGULARIZED_OOF_RANK_POLICY!r}"
+        )
+    if rank_rule != _EXPECTED_RANK_TOLERANCE_RULE:
+        raise Phase2ConfigError(
+            "identification.rank_tolerance_rule must match the preregistration exactly: "
+            f"{_EXPECTED_RANK_TOLERANCE_RULE!r}"
+        )
+
     raw = _require(block, "lambda_grid", "identification")
     if not isinstance(raw, list) or any(isinstance(x, bool) for x in raw):
         raise Phase2ConfigError("identification.lambda_grid must be a numeric list")
@@ -918,7 +977,7 @@ def _validate_identification(block: dict[str, Any]) -> tuple[tuple[float, ...], 
             f"oof_folds={_EXPECTED_OOF_FOLDS}, "
             f"uncovered_tolerance={_EXPECTED_UNCOVERED_TOLERANCE}"
         )
-    return grid, oof_folds, tolerance
+    return grid, unregularized_solver, rank_policy, rank_rule, oof_folds, tolerance
 
 
 def _validate_seeds(block: dict[str, Any]) -> tuple[int, tuple[int, ...]]:
