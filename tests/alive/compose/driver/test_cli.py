@@ -50,7 +50,7 @@ from alive.compose.driver.cli import main
 from alive.compose.driver.fixture_builder import build_compose_fixture
 from alive.compose.driver.identity_lock import AssemblerError
 from alive.compose.gates import GateResult
-from alive.compose.identify import RankReport
+from alive.compose.identify import RankReport, SingularDesignError
 from alive.compose.phase2a import Phase2aResult
 from alive.compose.select import SelectionError
 
@@ -251,6 +251,52 @@ def test_selection_error_returns_ten(
     assert "phase2a: SelectionError:" in captured.err
     # the exclusion reasons are the only record this path leaves
     assert "no viable hyperparameter candidate" in captured.err
+
+
+# --------------------------------------------------------------------------- #
+# Scenario: the estimator refuses to produce an estimate -> SingularDesignError
+# -> 10 (pre-seal). OOF selection catches this per candidate, but phase2a's
+# post-selection fit on the FULL calibration design (spec §2.5) runs outside
+# that handler — and because the full pair set is a superset of every train
+# fold, its Gram diagonals dominate them elementwise, so an unrepresentable
+# ridge trips there FIRST as factor scale rises. Like SelectionError it is a
+# bare ``ValueError`` subclass covered by no other roster entry, so without its
+# entry that fit ended in a traceback and exit 1, outside the §1.1 contract and
+# writing no artifact.
+# --------------------------------------------------------------------------- #
+def test_singular_design_error_returns_ten(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    spec_path, approved_root, run_dir = _fixture_cli_args(tmp_path)
+
+    def _raise_singular(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        raise SingularDesignError(
+            "ridge penalty lam=0.001 is not representable against the calibration "
+            "Gram on 7 of 10 coordinates"
+        )
+
+    monkeypatch.setattr(
+        "alive.compose.driver.phase2a_cmd.run_phase2a_fixture",
+        _raise_singular,
+    )
+
+    rc = main(
+        [
+            "phase2a",
+            "--run-spec",
+            spec_path,
+            "--approved-artifacts-root",
+            approved_root,
+            "--run-dir",
+            run_dir,
+        ]
+    )
+
+    assert rc == 10
+    captured = capsys.readouterr()
+    assert captured.out == ""  # NO outcome value on stdout
+    assert "phase2a: SingularDesignError:" in captured.err
+    assert "not representable against" in captured.err
 
 
 def test_assembler_error_returns_ten(
