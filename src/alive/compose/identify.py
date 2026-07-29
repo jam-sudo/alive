@@ -75,14 +75,43 @@ def identify_operator(
     ``max(shape) * float64-eps * sigma_max`` cutoff as :func:`rank_diagnostics`;
     this defines Phase-1 rank-deficient recovery without relying on an arbitrary
     singular normal-equation result. Positive ridge penalties use
-    ``(Phi^T Phi + lam I) C^T = Phi^T eps_obs``.
+    ``(Phi^T Phi + lam I) C^T = Phi^T eps_obs``, and are rejected when the
+    penalty is not representable against the Gram's scale (see below).
 
     Raises
     ------
     SingularDesignError
-        If LAPACK cannot compute the least-squares/linear-system solution.
-        Phase-2a OOF selection applies its registered train-fold rank policy
-        before fitting.
+        If LAPACK cannot compute the least-squares/linear-system solution, or if
+        a positive ``lam`` leaves any Gram diagonal entry unchanged — on those
+        coordinates the registered ridge is numerically absent, so the design
+        that would be solved is not ``(Phi^T Phi + lam I)``. Phase-2a OOF
+        selection applies its registered train-fold rank policy before fitting,
+        and records a candidate rejected here as non-viable rather than scoring
+        it.
+
+        Scope. A coordinate is lost when ``lam < ulp(d_ii)/2``, and at the tie
+        ``lam == ulp(d_ii)/2`` only when ``d_ii``'s last mantissa bit is even.
+        ``ulp(d)/2`` is a power of two and no registered lambda is one, so the
+        tie is unreachable here. Wherever the penalty survives it is still
+        quantized to a multiple of ``ulp(d_ii)``, and the ratio actually applied
+        is lambda-specific: over all surviving scales ``applied/lam`` spans
+        ``[0.977, 1.953]`` at ``lam=0.001``, ``[0.781, 1.563]`` at ``0.01`` and
+        ``[0.625, 1.250]`` at ``0.1`` — the low end of the last reached only at
+        the top of a binade, where ``d + lam`` crosses into the next one. Exact
+        application needs ``ulp(d)`` to divide ``lam``, so writing ``lam`` as an
+        odd multiple of ``2**k`` it becomes impossible from ``d >= 2**(k + 53)``:
+        ``2**-7`` at ``lam=0.001``, ``2**-6`` at ``0.01`` and ``2**-2`` at
+        ``0.1``. Every calibration Gram is far above all three. A registered
+        lambda can
+        therefore be applied up to ~37% below its registered value with this
+        check silent, so "the design solved is the registered one" is not
+        certified — only "no coordinate lost its penalty outright". Ordinary
+        ill-conditioning is
+        likewise out of scope: a well-represented ``lam`` can still be
+        immaterial to the fit. Non-finite
+        ``Z``: ``inf`` diagonals compare equal and DO reject; ``NaN`` compares
+        unequal to itself and does not, so this is not fail-closed under NaN
+        (the factor builder rejects non-finite inputs upstream).
     """
     Z = np.asarray(Z, dtype=np.float64)
     eps_obs = np.asarray(eps_obs, dtype=np.float64)
@@ -107,7 +136,46 @@ def identify_operator(
             ) from exc
         return coef_t.T
 
-    gram = phi.T @ phi + lam * np.eye(phi.shape[1])
+    base = phi.T @ phi
+    gram = base + lam * np.eye(phi.shape[1])
+    # Exact representability of the registered estimator -- NOT a tolerance, and
+    # not a new registered numerical criterion. The penalty is added to each
+    # diagonal entry independently, so on a factor bank scaled far enough above
+    # ``lam`` the addition rounds away and ``fl(d_ii + lam) == d_ii``: on those
+    # coordinates the design that gets solved carries no penalty at all, and a
+    # positive registered lambda has been applied as something other than
+    # itself. Rejecting on ANY such coordinate rather than on all of them is
+    # deliberate. ``z`` concatenates an expression block and an ESM block, so a
+    # single over-scaled block loses the penalty only on the basis elements that
+    # involve it -- an all-coordinates rule cannot fire on exactly the input
+    # whose scale nothing upstream bounds. It also makes this reproducible from
+    # committed evidence: ``design_matrix`` rows satisfy
+    # ``||row||**2 = (||z_g||**2 ||z_h||**2 + (z_g . z_h)**2) / 2 <= max||z||**4``
+    # by Cauchy-Schwarz, and ``d_ii <= sum_i d_ii = sum_pairs ||row||**2``, so
+    # ``d_ii <= n_pairs * max||z||**4`` with constant 1 sharp (attained by
+    # ``z_g = z_h = M e_1`` on every pair). No coordinate can lose ``lam`` below
+    # a scale that follows from the pair count alone, without the (uncommitted)
+    # Gram spectrum. Only that FLOOR is spectrum-free; where the guard actually
+    # fires is spectrum-dependent and sits AT OR above it — the sharp
+    # configuration attains the bound, so the two coincide there.
+    #
+    # Nothing upstream bounds that scale: ``_verify_factor_banks`` binds
+    # provenance only, the registered OOF rank policy is keyed to the literal
+    # ``lam == 0.0`` and so never runs for a ridge candidate, and
+    # ``rank_diagnostics`` uses a tolerance relative to ``sigma_max`` and is
+    # therefore exactly scale-invariant -- its rank and condition number are
+    # unchanged across many orders of magnitude of ``||z||``. No registered
+    # diagnostic observes this, which is why it is checked at the point of use.
+    diag_base = np.diag(base)
+    n_lost = int(np.sum(np.diag(gram) == diag_base))
+    if n_lost:
+        raise SingularDesignError(
+            f"ridge penalty lam={lam!r} is not representable against the calibration "
+            f"Gram on {n_lost} of {diag_base.size} coordinates: adding lam*I left those "
+            "diagonal entries unchanged, so the design that would be solved is not the "
+            "registered (Phi^T Phi + lam I). The factor bank is scaled too far above "
+            "the registered penalty for that penalty to be applied as registered"
+        )
     rhs = phi.T @ eps_obs
     try:
         coef_t = np.linalg.solve(gram, rhs)  # (sym_dim, p)

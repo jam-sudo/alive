@@ -307,6 +307,125 @@ branch에서 추적 가능하게 기록한다. `LOCAL` ledger ID만으로는 이
    different LAPACK drivers (`gesdd` vs `gelsd`), so identical *threshold* does not mean identical computed
    rank at the boundary; reviewers measured 9 disagreements in 4000 random matrices and 0 in 22,500 real
    design-matrix shapes. Seal state remains **UNOPENED**; execution remains **RELEASE-BLOCKED**.
+   **2026-07-29 unrepresentable-ridge guard (closes correction (1) above):** the open item is resolved without
+   registering a new numerical criterion. `identify.py` now rejects a positive `lam` that leaves ANY Gram
+   diagonal entry unchanged by `lam*I` — on those coordinates the design solved carries no penalty, so it is
+   not the registered `(Phi^T Phi + lam I)`. Exact equality, no tolerance, so `config_sha256` and `run_id` do
+   not move; `SingularDesignError` is also now a contracted pre-seal rejection (exit 10) because phase2a's
+   post-selection fit on the FULL calibration design runs outside OOF selection's handler and, the full pair
+   set being a superset of every train fold, trips first as factor scale rises.
+   **Rejecting on ANY coordinate rather than all of them is the load-bearing choice.** `z` concatenates an
+   expression and an ESM block, so an over-scaled single block loses the penalty only on the basis elements
+   involving it; an all-coordinates rule provably cannot fire on a block imbalance — the one input whose scale
+   nothing upstream bounds. It also makes the safety argument reproducible from committed evidence: since
+   `d_ii <= n_pairs * max||z||^4`, a FLOOR on the firing scale follows from the pair count alone, without the
+   Gram spectrum; where the guard actually fires is spectrum-dependent and sits above that floor. That inequality is a theorem, not a sample: `_sym_to_vec` is a Frobenius isometry, so a design row
+   satisfies `||row||^2 = (||z_g||^2 ||z_h||^2 + (z_g . z_h)^2)/2 <= max||z||^4` by Cauchy-Schwarz, and
+   `d_ii <= sum_i d_ii = sum_pairs ||row||^2`. The constant 1 is sharp (attained by `z_g = z_h = M e_1` on every
+   pair). An earlier draft asserted the same inequality with constant 2 and justified it by a sampled worst
+   ratio — quoted inconsistently as 0.054 here and 0.094 in the commit message; both are withdrawn. The
+   sampled ratio was ~5-9x below the true supremum and would have given false comfort had the constant been
+   chosen from it. Combining the sharp constant with the exact rounding law (`fl(d+lam) == d` iff
+   `lam <= ulp(d)/2`, so loss needs `d >= 2^ceil(53 + log2 lam)`) gives the exact floors at 41 calibration
+   pairs: `max||z|| = 809.35` for `lam=0.001`, `1361.15` for `0.01`, `2289.17` for `0.1`. The floor is a
+   property of the pair set PASSED, not of the guard: at 131 eligible pairs it falls to 605.36. Only
+   `cal_idx_pairs` (41) and its OOF train subsets ever reach the estimator, so 41 is the operative count. **Quantitative claims from the first draft of this entry are withdrawn.** Independent review
+   refuted them. (i) The thresholds were NOT measured at the real geometry: `real_norman_phi_rank_report.json`
+   records pair counts, rank, condition number and a factor-bank *checksum* — no factor values — and no
+   factor bank is committed anywhere, so the Gram diagonal spread that sets the upper edge cannot be derived
+   from committed evidence. A surrogate matched only on (41 pairs, `sym_dim`) is spectrum-dependent: reviewers
+   measured the all-coordinates threshold at `4.6e3` for a flat `Z` but `2.7e4`–`7.7e4` at a spectrum matching
+   the recorded `cond(Phi)=484`. (ii) `|z| <= sqrt(1500)*log1p(1e4) ~= 356` and the derived `|z| <= ~202` are
+   **not bounds**: `z` is a projection of a GENE-CENTERED shift, so the cap is `2*(1-1/n_genes)*max||delta||`,
+   and a reviewer drove the production `build_gene_factors` to `max|z| = 703.66` on an admissible input at the
+   same per-gene cap. `median_library` is derived at runtime and registered nowhere, so `1e4` is an assumption
+   too. (iii) `|z| ~ 3.8` "recorded in" `real_norman_detectable_effect_report.json` is withdrawn: that report
+   records the GI-residual L2 (`mean_pair_eps_l2 = 3.046`), not any delta or factor magnitude, and no committed
+   artifact records `z`. **What survives:** the guard cannot fire on realistic data — corpus instrumentation
+   found every non-deliberate positive-`lambda` fit fully penalized. The only spectrum-free statement available
+   is the theorem floor above (`809.35` for `lam=0.001` at 41 pairs); surrogate spectra put the actual ANY
+   firing scale higher still, but over 1200 surrogates review measured it spanning `1.5e3`-`4.3e3`, so no
+   narrower band is quotable and none is claimed here. No margin is stated against realistic `||z||`, because
+   per (iii) no committed artifact records it. `703.66` is reproduced exactly through the production
+   `build_gene_factors` and equals `2*(1-1/73)*sqrt(1500)*log1p(1e4)`, and `41 * 703.66^4 = 1.00516e13 < 2^44`,
+   so **no coordinate can lose any
+   registered lambda at that scale with 41 pairs** — the "704 > 484 leaves partial loss unprovable" claim of the
+   previous draft is withdrawn as an artifact of the 2x-loose constant. **But `704` caps the EXPRESSION BLOCK
+   only.** `z` concatenates expression and ESM scores, and this entry's own residual gap is that nothing bounds
+   the ESM block, so `704` is not a cap on `max||z||` and no global safety statement follows from it. Two
+   earlier margin statements are also corrected: they were quoted against the all-coordinates threshold, which
+   is not the criterion shipped.
+   **Correction to the shipped scope claim.** The first draft said a partially-rounded ridge "remains the
+   rank/condition gates' job". That is **false** and both reviews refuted it independently: the OOF rank policy
+   is keyed to the literal `lam == 0.0` and never runs for a ridge candidate, and `rank_diagnostics` uses a
+   tolerance relative to `sigma_max` and is therefore exactly scale-invariant (identical to 15 digits across 18
+   orders of magnitude of `||z||`). There is no condition-number *ceiling* anywhere in the repository:
+   `diagnostics2`'s `isfinite(condition_number)` check fires iff `rank < sym_dim`, i.e. it is the rank gate
+   restated. **New open item:** a registered condition ceiling would detect block-scale imbalance with wide
+   margin (real reports are 15.8 / 32.9 / 484; a pathological bank measured 4.3e12), but it is a registered
+   numerical criterion — a new config field that moves the digest — and is deliberately not invented here.
+   Note the first draft also claimed the recorded condition number "is scale-invariant and cannot detect this
+   class of defect at all"; that holds for a UNIFORM rescale but is false for a block imbalance, where the
+   condition number does move.
+   Three further findings are recorded rather than acted on. (a) The earlier reading that a bypassed candidate
+   would merely produce garbage and lose selection is **withdrawn**: with the guard mutated out, the bypassed
+   `lam=0.001` candidate ties on theta and the registered tie-break resolves ties to the LARGER lambda, so
+   selection actively *prefers* it and the run records a `selected_lambda` it never applied. Reviewers note the
+   exact tie is fixture-specific (the fixture is noiseless); under noise the bypassed candidate ties less often
+   but still wins outright in a minority of seeds. (b) On the real 41-pair calibration set at `k_total=8`
+   (`sym_dim` 36), `sum_f train_f = n_pairs + S <= 82 < 108` where `S` is the number of pairs internal to a
+   single held-out group, so **at least one of the three gene-disjoint folds cannot reach 36 train pairs** and is rank-deficient by construction; the `lam=0.0` candidate at `k=8` is then
+   expected to be recorded non-viable on real data, because `_oof_theta_for_candidate` raises on the first
+   deficient fold. A previous draft of this entry derived "at most ONE fold can reach 36, so at least two are
+   rank-deficient" from the same inequality; that entailment is **false** (`72 <= 82`, and review exhibited a
+   layout with two folds at 36 realizable under the production builder) and is withdrawn. The downstream
+   prediction is unaffected. This is pre-seal observable, and it is the regime where the ridge is load-bearing;
+   it also rules out applying the rank policy to every lambda, which would delete that regime. (c) In the
+   swallowed FULL-RANK regime the float result is bit-identical to normal-equation OLS and matches the exact
+   ridge to ~1e-15 at the recorded spectra, so there the failure is provenance — a recorded `selected_lambda`
+   never materially applied — rather than numerics. A previous draft went further and said numerical damage is
+   "confined to the rank-deficient case"; that is **withdrawn**, because full-rank but ill-conditioned swallowed
+   designs reach O(1) relative error against the exact ridge. The `~1.6e-4` coefficient-error figure quoted in
+   that draft is also **withdrawn**: it is not reproducible at any recorded spectrum (`cond(Phi)` 15.8/32.9/484
+   give ~1e-14), requires `cond(Phi) ~ 3e6`, and is ordinary ill-conditioning rather than penalty loss. The
+   provenance hazard is likewise not confined to the swallowed regime. On one anisotropic surrogate, review
+   measured the ridge ceasing to change the fit by more than `1e-6` relative from `max||z|| ~ 116` while the
+   guard did not fire until `~2.3e3`-`5e3` — a band in factor scale where the registered lambda survives this
+   check (applied to within the quantization noted in `identify.py`, never exactly) and is nonetheless
+   immaterial. The band's width is surrogate-specific and no figure for it is
+   registered here; what matters is that it exists and the guard cannot see it, which is a second reason for
+   the condition-ceiling open item above. One determinism note, analogous to correction (4) of the preceding
+   entry: `n_lost` is computed from the float Gram, so at the exact boundary the verdict can depend on
+   summation order. One review reproduced verdict flips by reversing pair row order (902 of 16000 probes); a
+   second confirmed that the order changes `d_max` but did not reproduce a flip, so the claim is recorded as
+   mechanism-confirmed and frequency-unsettled. It requires `d_max` within a few ulps of the boundary (measured spread across row
+   orders: 6 ulps) and is unreachable at the scales real data occupies. Finally, "the
+   run identity does not move" is literally true but incomplete: the criterion is code-only and therefore
+   invisible in the confirmation manifest's `selected_hyperparameters`, unlike the registered
+   `unregularized_oof_rank_policy`; scientific mode pins `HEAD == approved_git_sha`, so the owner SHA pin must
+   be regenerated regardless. Seal state remains **UNOPENED**; execution remains **RELEASE-BLOCKED**.
+   **2026-07-29 config-bound evidence lineage (survey only; nothing regenerated):** the two committed
+   activation-evidence reports both embed `config_sha256 = d8c65ac4…`, which the current config no longer
+   produces. Recomputing `sha256_json(raw)` at every commit that touched
+   `configs/compose_k562_v1_phase2.yaml` gives the full lineage: `d8c65ac4…` (the digest the reports were
+   generated against at `82a9c83` / `79b01e0`, still current at `0d84d3a`) → `380c4528…` at `d507a09`
+   (**the activation commit itself**, `status: pre-activation → active`, which the config header already
+   flags as intentionally moving run identity) → `a4700194…` at `42d71ce` (predictions/execution-manifest
+   envelope) → `c3e00327…` at `90bc100` (estimator-domain solver and rank policy). **Correction:** an earlier
+   note framed this as a single move `a4700194… → c3e00327…` caused by registering the estimator domain. That
+   is incomplete — the evidence has been three digests stale since activation on its own, and the
+   estimator-domain registration only added the third move. Nothing here is a leakage or seal risk: scientific
+   mode is already fail-closed on all three binding axes (`protocol`, `config_sha256`, and
+   `git_sha == approved_git_sha`) in `config2.py`, both reports carry `activation: BLOCKED`, and the mismatch
+   path has regression tests in `test_config2.py` and `driver/test_scientific_activation_assembly.py`. Exactly
+   two requirements carry this JSON lineage contract (`_CONFIG_BOUND_EVIDENCE_REQUIREMENTS`):
+   `real_norman_phi_rank_and_condition_report` and `regime_specific_detectable_effect_analysis`; the remaining
+   activation requirements point at heterogeneous artifacts and do not. **Regeneration is not a local task.**
+   It needs real Norman data (pod) and, because the `git_sha` axis pins the report to
+   `activation_record.approved_git_sha`, the reports must be produced at the exact commit the owner approves —
+   which is why the §2.5 release-gate ordering (generate at clean detached `C` → publish to the external
+   durable stage → owner approves `C` plus every byte hash) exists rather than committing regenerated evidence
+   back onto the branch. Seal state remains **UNOPENED**; execution remains **RELEASE-BLOCKED**.
    **2026-07-25 leakage-guard corrections (branch `compose-network-isolation`, merged as `d4c1ea8`):**
    two development-boundary
    guards were found failing open and were fixed with mutation-verified regression tests. (1) The measurability

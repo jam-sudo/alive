@@ -102,6 +102,7 @@ from alive.compose.driver.recover_cmd import RecoverSubcommandError, run_recover
 from alive.compose.driver.run_dir_state import RunDirStateError
 from alive.compose.driver.run_spec import RunSpecError
 from alive.compose.driver.scientific_runtime import ScientificRuntimeError
+from alive.compose.identify import SingularDesignError
 from alive.compose.outcome_store import ComposeSealingError
 from alive.compose.preflight import PreflightError
 from alive.compose.select import SelectionError
@@ -179,6 +180,18 @@ _KNOWN_PRESEAL_REJECTIONS: tuple[type[Exception], ...] = (
     # exclusion reasons visible nowhere. They are carried in the exception
     # message and therefore in the one contracted stderr line.
     SelectionError,
+    # SingularDesignError (also a bare ``ValueError`` subclass) is the estimator
+    # refusing to produce an estimate at all: LAPACK could not solve, or a
+    # positive registered lambda is not representable against the calibration
+    # Gram. OOF selection catches it per candidate, but phase2a's post-selection
+    # fit on the FULL calibration design (spec §2.5) runs outside that handler —
+    # and because the full pair set is a superset of every train fold, its Gram
+    # diagonals dominate them elementwise, so this is the path that trips FIRST
+    # as factor scale rises. Without this entry that fit ended in a traceback and
+    # exit 1, outside the §1.1 contract and writing no artifact, exactly as
+    # ``SelectionError`` did before the entry above. It is a fail-closed pre-seal
+    # rejection, so it belongs in the contracted single-stderr-line + exit 10.
+    SingularDesignError,
 )
 
 
