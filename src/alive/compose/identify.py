@@ -82,11 +82,14 @@ def identify_operator(
     ------
     SingularDesignError
         If LAPACK cannot compute the least-squares/linear-system solution, or if
-        a positive ``lam`` leaves every Gram diagonal entry unchanged — at that
-        factor scale the registered ridge is numerically a no-op, so the design
-        that would be solved is the unregularized one. Phase-2a OOF selection
-        applies its registered train-fold rank policy before fitting, and
-        records a candidate rejected here as non-viable rather than scoring it.
+        a positive ``lam`` leaves any Gram diagonal entry unchanged — on those
+        coordinates the registered ridge is numerically absent, so the design
+        that would be solved is not ``(Phi^T Phi + lam I)``. Phase-2a OOF
+        selection applies its registered train-fold rank policy before fitting,
+        and records a candidate rejected here as non-viable rather than scoring
+        it. This check is not fail-closed under a non-finite ``Z``: a NaN
+        diagonal compares unequal to itself and is not rejected here (the factor
+        builder rejects non-finite inputs upstream).
     """
     Z = np.asarray(Z, dtype=np.float64)
     eps_obs = np.asarray(eps_obs, dtype=np.float64)
@@ -115,22 +118,35 @@ def identify_operator(
     gram = base + lam * np.eye(phi.shape[1])
     # Exact representability of the registered estimator -- NOT a tolerance, and
     # not a new registered numerical criterion. The penalty is added to each
-    # diagonal entry independently, so a factor bank scaled far enough above
-    # ``lam`` makes ``fl(d_ii + lam) == d_ii`` for EVERY i; the matrix actually
-    # solved is then the unregularized Gram and a positive registered lambda has
-    # been applied as no regularization at all. Nothing upstream bounds the
-    # factor scale (`_verify_factor_banks` binds provenance, and the recorded
-    # condition number is scale-invariant), so this is checked here rather than
-    # assumed. Scope: it detects a penalty that vanished outright; it does not
-    # certify the conditioning of a partially-rounded ridge, which is what the
-    # rank and condition-number gates cover.
+    # diagonal entry independently, so on a factor bank scaled far enough above
+    # ``lam`` the addition rounds away and ``fl(d_ii + lam) == d_ii``: on those
+    # coordinates the design that gets solved carries no penalty at all, and a
+    # positive registered lambda has been applied as something other than
+    # itself. Rejecting on ANY such coordinate rather than on all of them is
+    # deliberate. ``z`` concatenates an expression block and an ESM block, so a
+    # single over-scaled block loses the penalty only on the basis elements that
+    # involve it -- an all-coordinates rule cannot fire on exactly the input
+    # whose scale nothing upstream bounds. It also makes this reproducible from
+    # committed evidence: ``d_ii <= 2 * n_pairs * max||z||**4``, so no
+    # coordinate can lose ``lam`` below a scale that follows from the pair count
+    # alone, without knowing the (uncommitted) Gram spectrum.
+    #
+    # Nothing upstream bounds that scale: ``_verify_factor_banks`` binds
+    # provenance only, the registered OOF rank policy is keyed to the literal
+    # ``lam == 0.0`` and so never runs for a ridge candidate, and
+    # ``rank_diagnostics`` uses a tolerance relative to ``sigma_max`` and is
+    # therefore exactly scale-invariant -- its rank and condition number are
+    # unchanged across many orders of magnitude of ``||z||``. No registered
+    # diagnostic observes this, which is why it is checked at the point of use.
     diag_base = np.diag(base)
-    if diag_base.size and np.array_equal(np.diag(gram), diag_base):
+    n_lost = int(np.sum(np.diag(gram) == diag_base))
+    if n_lost:
         raise SingularDesignError(
             f"ridge penalty lam={lam!r} is not representable against the calibration "
-            f"Gram (largest diagonal {float(diag_base.max())!r}): adding lam*I left "
-            "every diagonal entry unchanged, so the design that would be solved is "
-            "the UNREGULARIZED one rather than the registered (Phi^T Phi + lam I)"
+            f"Gram on {n_lost} of {diag_base.size} coordinates: adding lam*I left those "
+            "diagonal entries unchanged, so the design that would be solved is not the "
+            "registered (Phi^T Phi + lam I). The factor bank is scaled too far above "
+            "the registered penalty for that penalty to be applied as registered"
         )
     rhs = phi.T @ eps_obs
     try:

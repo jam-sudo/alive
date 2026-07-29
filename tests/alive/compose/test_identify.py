@@ -105,9 +105,9 @@ def test_ridge_swallowed_by_the_gram_scale_is_rejected():
     """A positive lambda the Gram cannot represent must not be solved silently.
 
     ``lam`` is an absolute penalty on an UNNORMALIZED Gram, and nothing upstream
-    bounds the factor scale. Far enough above the penalty, ``fl(d_ii + lam)``
-    equals ``d_ii`` for every i, so a registered positive lambda would be applied
-    as no regularization at all.
+    bounds the factor scale. Far enough above the penalty ``fl(d_ii + lam)``
+    equals ``d_ii``, so a registered positive lambda is applied as something
+    other than itself.
     """
     rng = np.random.default_rng(4)
     Z, _, pairs, eps = _make(rng)
@@ -129,18 +129,80 @@ def test_the_rejected_ridge_really_is_byte_identical_to_the_unregularized_gram()
     assert np.array_equal(gram, base)
 
 
-@pytest.mark.parametrize("lam", [0.001, 0.01, 0.1])
-def test_registered_ridges_survive_the_largest_representable_factor_scale(lam):
-    """The guard must not fire anywhere the registered response space can reach.
+def test_one_over_scaled_factor_block_is_rejected_though_others_keep_the_penalty():
+    """Pin ANY-coordinate rejection, which an all-coordinates rule cannot do.
 
-    ``normalize_total_median`` + ``log1p`` over ``n_hvg: 1500`` bounds a single
-    gene shift by ``sqrt(1500) * log1p(1e4) ~= 356``, and the factor scores are
-    an orthonormal projection of it, so ``|z| <= 356`` regardless of biology.
+    ``z`` concatenates an expression block and an ESM block (registered
+    ``esm_projection_dim: 2``). Over-scaling one block loses the penalty only on
+    the basis elements that involve it, so a rule keyed on "every coordinate
+    lost" can never fire on a block imbalance — the one input whose scale
+    nothing upstream bounds.
+    """
+    rng = np.random.default_rng(6)
+    Z, _, pairs, eps = _make(rng)
+    Z_block = Z.copy()
+    Z_block[:, 2:] *= 1e6  # ESM block only
+
+    phi = design_matrix(Z_block, pairs)
+    base = phi.T @ phi
+    kept = int(np.sum(np.diag(base + 1e-3 * np.eye(phi.shape[1])) != np.diag(base)))
+    # premise: an all-coordinates rule would NOT fire here
+    assert 0 < kept < phi.shape[1]
+
+    with pytest.raises(SingularDesignError, match="not representable against"):
+        identify_operator(Z_block, pairs, eps, lam=1e-3)
+
+
+def _scaled_to_gram_diagonal(Z, pairs, target):
+    """Rescale ``Z`` so the largest Gram diagonal lands near ``target``."""
+    achieved = np.diag(design_matrix(Z, pairs).T @ design_matrix(Z, pairs)).max()
+    return Z * (target / achieved) ** 0.25
+
+
+def test_the_guard_tracks_representability_and_not_a_magnitude_threshold():
+    """The criterion is exact representability, so it must bracket lam/eps.
+
+    A coordinate can only lose ``lam`` once its Gram diagonal exceeds
+    ``lam / eps``. Below that the guard must stay silent no matter how large the
+    Gram is in absolute terms — which is what separates this from an arbitrary
+    magnitude tolerance.
+    """
+    rng = np.random.default_rng(7)
+    Z, _, pairs, eps = _make(rng)
+    lam = 1e-3
+    floor = lam / np.finfo(np.float64).eps  # ~4.5e12
+
+    below = _scaled_to_gram_diagonal(Z, pairs, floor / 100.0)
+    coef = identify_operator(below, pairs, eps, lam=lam)
+    assert np.all(np.isfinite(coef))
+
+    above = _scaled_to_gram_diagonal(Z, pairs, floor * 100.0)
+    with pytest.raises(SingularDesignError, match="not representable against"):
+        identify_operator(above, pairs, eps, lam=lam)
+
+
+@pytest.mark.parametrize("lam", [0.001, 0.01, 0.1])
+def test_registered_ridges_survive_every_provably_representable_factor_scale(lam):
+    """No registered lambda may be rejected below the representability floor.
+
+    ``d_ii <= 2 * n_pairs * max||z||**4``, so no coordinate can lose ``lam``
+    until ``max||z||`` reaches ``(lam / (eps * 2 * n_pairs))**0.25``. Below that
+    the guard must stay silent for ANY design of this size, independently of the
+    Gram spectrum — which is the property that makes the safety argument
+    reproducible without committing a factor bank.
+
+    Deliberately NOT asserted at the response-space ceiling. Factor scores
+    project a GENE-CENTERED shift, so the cap is
+    ``2 * (1 - 1/n_genes) * max_g ||delta_g||`` — twice the per-gene norm — which
+    for ``sqrt(1500) * log1p(1e4)`` and 73 genes is ~704, ABOVE the ~484 floor
+    for ``lam=0.001`` at this pair count. Whether the guard fires there depends
+    on the spectrum, so no such guarantee exists and none is claimed.
     """
     rng = np.random.default_rng(5)
     Z, _, pairs, eps = _make(rng)
-    Z_ceiling = Z * (356.0 / np.abs(Z).max())
-    coef = identify_operator(Z_ceiling, pairs, eps, lam=lam)
+    floor = (lam / (np.finfo(np.float64).eps * 2 * len(pairs))) ** 0.25
+    Z_safe = Z * (0.5 * floor / np.linalg.norm(Z, axis=1).max())
+    coef = identify_operator(Z_safe, pairs, eps, lam=lam)
     assert np.all(np.isfinite(coef))
 
 

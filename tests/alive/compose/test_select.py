@@ -488,7 +488,9 @@ def test_ridge_candidate_swallowed_by_factor_scale_is_recorded_non_viable():
     bypassed candidate here ties the genuinely unregularized one on theta, and
     the registered tie-break resolves ties to the LARGER lambda — so selection
     actively PREFERS it and the run records a ``selected_lambda`` it never
-    applied.
+    applied. The exact tie is a property of this noiseless fixture; under noise
+    the bypassed candidate ties less often but can still win outright, so the
+    hazard is "may be preferred", not "is always preferred".
     """
     rng = np.random.default_rng(21)
     gene_ids, idx_pairs, pair_ids, Z, additive, eps = _make_instance(rng, k=4, p=7)
