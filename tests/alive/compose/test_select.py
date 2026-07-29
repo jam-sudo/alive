@@ -476,6 +476,45 @@ def test_singular_candidate_is_explicitly_nonviable_and_never_wins():
     assert result.selected_lambda == 0.001
 
 
+def test_ridge_candidate_swallowed_by_factor_scale_is_recorded_non_viable():
+    """A ridge the Gram cannot represent is excluded with a reason, not scored.
+
+    The registered rank policy keys on the literal ``lam == 0.0``, so a positive
+    lambda that a large factor bank makes numerically a no-op would otherwise be
+    scored as if it had been regularized. It must land in the same audited
+    non-viable path as an undefined unregularized estimator.
+
+    This is not merely a silent-garbage risk. With the guard removed, the
+    bypassed candidate here ties the genuinely unregularized one on theta, and
+    the registered tie-break resolves ties to the LARGER lambda — so selection
+    actively PREFERS it and the run records a ``selected_lambda`` it never
+    applied.
+    """
+    rng = np.random.default_rng(21)
+    gene_ids, idx_pairs, pair_ids, Z, additive, eps = _make_instance(rng, k=4, p=7)
+
+    result = select_hyperparams(
+        idx_pairs=idx_pairs,
+        pair_ids=pair_ids,
+        eps_obs=eps,
+        additive=additive,
+        factors_by_k={4: Z * 1e4},
+        k_total_grid=[4],
+        lambda_grid=[0.0, 0.001],
+        n_genes=len(gene_ids),
+        n_folds=3,
+        seed=11,
+        model_factory=lambda: L1Model(),
+        uncovered_tolerance=0.9,
+    )
+    assert (4, 0.001) not in result.theta_by_candidate
+    assert "not representable against" in result.nonviable_candidates[(4, 0.001)]
+    # scaling changes no rank, so the unregularized candidate stays viable and
+    # selection still has a winner — the guard excludes, it does not abort.
+    assert np.isfinite(result.theta_by_candidate[(4, 0.0)])
+    assert result.selected_lambda == 0.0
+
+
 def test_all_nonviable_candidates_invalidate_before_platform_solver(monkeypatch):
     """A grid containing only undefined estimators has no artificial winner."""
     rng = np.random.default_rng(20)

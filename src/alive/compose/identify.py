@@ -75,14 +75,18 @@ def identify_operator(
     ``max(shape) * float64-eps * sigma_max`` cutoff as :func:`rank_diagnostics`;
     this defines Phase-1 rank-deficient recovery without relying on an arbitrary
     singular normal-equation result. Positive ridge penalties use
-    ``(Phi^T Phi + lam I) C^T = Phi^T eps_obs``.
+    ``(Phi^T Phi + lam I) C^T = Phi^T eps_obs``, and are rejected when the
+    penalty is not representable against the Gram's scale (see below).
 
     Raises
     ------
     SingularDesignError
-        If LAPACK cannot compute the least-squares/linear-system solution.
-        Phase-2a OOF selection applies its registered train-fold rank policy
-        before fitting.
+        If LAPACK cannot compute the least-squares/linear-system solution, or if
+        a positive ``lam`` leaves every Gram diagonal entry unchanged — at that
+        factor scale the registered ridge is numerically a no-op, so the design
+        that would be solved is the unregularized one. Phase-2a OOF selection
+        applies its registered train-fold rank policy before fitting, and
+        records a candidate rejected here as non-viable rather than scoring it.
     """
     Z = np.asarray(Z, dtype=np.float64)
     eps_obs = np.asarray(eps_obs, dtype=np.float64)
@@ -107,7 +111,27 @@ def identify_operator(
             ) from exc
         return coef_t.T
 
-    gram = phi.T @ phi + lam * np.eye(phi.shape[1])
+    base = phi.T @ phi
+    gram = base + lam * np.eye(phi.shape[1])
+    # Exact representability of the registered estimator -- NOT a tolerance, and
+    # not a new registered numerical criterion. The penalty is added to each
+    # diagonal entry independently, so a factor bank scaled far enough above
+    # ``lam`` makes ``fl(d_ii + lam) == d_ii`` for EVERY i; the matrix actually
+    # solved is then the unregularized Gram and a positive registered lambda has
+    # been applied as no regularization at all. Nothing upstream bounds the
+    # factor scale (`_verify_factor_banks` binds provenance, and the recorded
+    # condition number is scale-invariant), so this is checked here rather than
+    # assumed. Scope: it detects a penalty that vanished outright; it does not
+    # certify the conditioning of a partially-rounded ridge, which is what the
+    # rank and condition-number gates cover.
+    diag_base = np.diag(base)
+    if diag_base.size and np.array_equal(np.diag(gram), diag_base):
+        raise SingularDesignError(
+            f"ridge penalty lam={lam!r} is not representable against the calibration "
+            f"Gram (largest diagonal {float(diag_base.max())!r}): adding lam*I left "
+            "every diagonal entry unchanged, so the design that would be solved is "
+            "the UNREGULARIZED one rather than the registered (Phi^T Phi + lam I)"
+        )
     rhs = phi.T @ eps_obs
     try:
         coef_t = np.linalg.solve(gram, rhs)  # (sym_dim, p)
