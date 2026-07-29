@@ -5,7 +5,7 @@
 > **이 문서는 아무것도 정의하지 않는다** — 세부(task)는 plan, claim은 spec, exact param은 config,
 > 시간순 audit는 git이 authoritative다([sources of truth](../../CLAUDE.md#sources)). 상태 행이 authoritative
 > 문서와 어긋나면 **authoritative 문서가 옳다**; 이 인덱스를 갱신한다.
-> **Updated:** 2026-07-29 @ `5289211` (branch `compose-v2-archive-binding`)
+> **Updated:** 2026-07-29 @ `fc82c84` (branch `compose-v2-archive-binding`)
 > **갱신 트리거:** sub-project/gate **상태가 바뀔 때만**(커밋마다 아님).
 > **종결 상태:** COMPOSE seal이 정확히 한 번 열리면 이 인덱스는 **frozen/은퇴**한다. 이후 진행상황은
 > seal 결과와 post-hoc analysis가 대신한다.
@@ -283,16 +283,32 @@ branch에서 추적 가능하게 기록한다. `LOCAL` ledger ID만으로는 이
    access can refute the archive by repeating the above; once it expires the JSON is the sole record,
    unfalsifiable, and the grade becomes the entire trust basis. Actions retention here is 90 days, so the
    **v1** artifact — the one carrying the independent grade — expires `2026-08-08`, and the **v2** artifact
-   expires `2026-10-24`. GitHub documents the retention setting as applying to newly created artifacts, so
-   raising it would extend neither; that was not tested here. Any independent verification worth having must
-   therefore happen before those dates, or the primary bytes must be committed while they can still be
-   checked against GitHub. The archive is now bound by tests, which nothing previously did for the v2 file:
+   expires `2026-10-24`. **Owner-approved resolution.** Repository Actions retention was raised 90 → 400 days,
+   which measurably did **not** move either existing artifact's expiry — both were re-queried afterwards and
+   are unchanged — so it protects only future runs, including the one that will back the seal. The primary
+   bytes were therefore downloaded while both artifacts were still live and committed beside their archives as
+   `kernel_isolation_junit_<head_sha>.xml` (v1 `f3f68e01…5826b` from artifact `8618766602`, v2
+   `77c0262a…b84f` from `8631825177`); a parametrized test re-derives each receipt's whole `junit` block and
+   required-testcase roster from those committed bytes through the builder's own parser, so both archives stay
+   reproducible from committed data after the artifacts expire. The archive is now bound by tests, which
+   nothing previously did for the v2 file:
    its digests and launcher roster are pinned, and `archived_by` — free text that no validator constrains
    beyond non-emptiness, and the only field separating v1's independent review from v2's self-review — is
-   pinned to its honest wording, so a grade cannot be upgraded silently. Note that the kernel archive is
-   **not** an item in the runbook §2.5 release gate, whose independent-review line covers leakage, exact
-   roster, response projection, pair alignment, single seal open and final-ledger recovery. Seal state
-   remains **UNOPENED**; execution remains **RELEASE-BLOCKED**.
+   pinned to its honest wording, so a grade cannot be upgraded silently. The v2 archive's own grade stands as
+   recorded, by owner decision: retrofitting an independent grade onto a transitional artifact buys less than
+   requiring one on the archive that will actually back the seal, so the kernel archive is now an explicit
+   runbook §2.5 release-gate item — it previously was not, that gate's independent-review line covering only
+   leakage, exact roster, response projection, pair alignment, single seal open and final-ledger recovery.
+   That gate item corrects an impossibility in the obvious phrasing: an archive at exact SHA `C` **cannot**
+   exist, because archiving a receipt takes a commit and that commit moves HEAD past `C`, breaking the
+   `approved_git_sha == runtime HEAD` binding §2.5 forbids breaking. The gate instead requires an independent
+   `archived_by`, committed primary bytes, and byte-identity of the enumerated isolation closure between the
+   archived commit and `C`. That closure — `network_isolation.py`, `run_network_isolated.py`,
+   `gears_decision_probe.py`, `gears_probe_a.py`, `test_network_isolation.py` — is byte-identical between
+   `2dd23d6` and current `main` across the 22 intervening commits, so the v2 kernel property still covers
+   today's isolation code even though the workflow and receipt builder have since changed (which is why the
+   archived receipt reproduces only from a worktree at `2dd23d6`). Seal state remains **UNOPENED**; execution
+   remains **RELEASE-BLOCKED**.
    **2026-07-25 pre-pod local gate:** the probe-rerun runbook's §2.2 verification roster was run at clean exact
    commit `614017b67e35e9cc07f68d5b512213d8356cf1b2` — **254 passed**, plus `ruff check`/`ruff format --check`
    over the whole repository, `git diff --check`, and an empty `git status --short`. This records local
