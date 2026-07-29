@@ -136,6 +136,17 @@ access to real JUnit bytes, so a receipt whose `junit.sha256` was altered and wh
 (or an independent recomputation from the downloaded artifact) binds a receipt to actual
 CI output. A reviewer must never treat validator acceptance as proof of provenance.
 
+Since 2026-07-29 the **primary JUnit bytes** are committed beside each archive as
+`kernel_isolation_junit_<full-head-sha>.xml`, downloaded from the GitHub artifact while it
+was still live and confirmed byte-identical to the recorded digest. This is what keeps an
+archive checkable once its artifact expires: `tests/alive/compose/test_kernel_isolation_ci.py`
+re-derives each receipt's entire `junit` block and required-testcase roster from the
+committed bytes through the builder's own parser, so the recorded digest has something to
+be checked against permanently rather than only until expiry. An archive whose primary
+bytes are not committed is on a clock. Repository Actions retention was raised 90 → 400
+days at the same time; that was measured to apply to future runs only and does **not**
+extend an artifact already created.
+
 To become `COMPLETE`, each backend must reference a committed
 `compose_smoke_pair_roster_v1` file. The validator reads the actual sorted pair lists,
 recomputes both roster hashes and their intersection, and requires zero overlap. It also
