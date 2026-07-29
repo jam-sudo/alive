@@ -307,6 +307,34 @@ branch에서 추적 가능하게 기록한다. `LOCAL` ledger ID만으로는 이
    different LAPACK drivers (`gesdd` vs `gelsd`), so identical *threshold* does not mean identical computed
    rank at the boundary; reviewers measured 9 disagreements in 4000 random matrices and 0 in 22,500 real
    design-matrix shapes. Seal state remains **UNOPENED**; execution remains **RELEASE-BLOCKED**.
+   **2026-07-29 unrepresentable-ridge guard (closes correction (1) above):** the open item is resolved
+   without registering a new numerical criterion. Reachability was measured first, at the real geometry
+   recorded in `activation-evidence/compose/real_norman_phi_rank_report.json` (41 combo-calibration pairs;
+   `sym_dim` 10/21/36): the registered `lambda_grid` first degrades at factor scale `|z| ~ 1.4e3` and vanishes
+   outright at `~4.6e3` (`lam=0.001`) through `~1.4e4` (`lam=0.1`). Factor scores are an orthonormal projection
+   of their input, so `|z_i| <= ||centered input||`; under the registered response space
+   (`normalize_total_median` + `log1p`, `n_hvg: 1500`) that bounds a single-gene shift by
+   `sqrt(1500) * log1p(1e4) ~= 356` regardless of biology, which the production `build_gene_factors` turns into
+   `|z| <= ~202` — still ~7x below first degradation. At the magnitudes actually recorded in
+   `real_norman_detectable_effect_report.json` (`mean_pair_eps_l2 = 3.046`) `|z| ~ 3.8`, ~370x below. **The
+   bypass is therefore not reachable on the registered data**; the residual gap is that the ESM block's scale
+   is bounded by nothing in the repository and recorded in no report (the recorded `condition_number` is
+   scale-invariant and cannot detect this class of defect at all). The guard added in `identify.py` is an
+   exact-representability check, not a tolerance: for `lam > 0` it rejects a Gram whose every diagonal entry is
+   unchanged by `lam*I`, i.e. the case where the matrix that would be solved is the unregularized one.
+   It registers no threshold, so `config_sha256` and the run identity **do not move**. Instrumenting the whole
+   compose suite recorded 2106 positive-`lambda` fits, all with the penalty fully applied (worst case `|z|`
+   2.33), so the guard fires nowhere the existing corpus reaches. Two further findings are recorded rather
+   than acted on. (a) The earlier reading that a bypassed candidate would merely produce garbage and lose
+   selection is **withdrawn**: with the guard mutated out, the bypassed `lam=0.001` candidate ties on theta and
+   the registered tie-break resolves ties to the LARGER lambda, so selection actively *prefers* it and the run
+   would record a `selected_lambda` it never applied. (b) At `k_total=8` the OOF train folds are structurally
+   rank-deficient on the real 41-pair calibration set (`sym_dim` 36, and a gene-disjoint train fold drops both
+   the held-out and the cross-group pairs), so the `lam=0.0` candidate at `k=8` is expected to be recorded
+   non-viable on real data — a pre-seal-observable prediction, and the regime where the ridge is load-bearing.
+   Scope of the guard: it detects a penalty that vanished outright; it does not certify the conditioning of a
+   partially-rounded ridge, which remains the rank/condition gates' job. Seal state remains **UNOPENED**;
+   execution remains **RELEASE-BLOCKED**.
    **2026-07-25 leakage-guard corrections (branch `compose-network-isolation`, merged as `d4c1ea8`):**
    two development-boundary
    guards were found failing open and were fixed with mutation-verified regression tests. (1) The measurability
