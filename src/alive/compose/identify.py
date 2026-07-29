@@ -87,9 +87,18 @@ def identify_operator(
         that would be solved is not ``(Phi^T Phi + lam I)``. Phase-2a OOF
         selection applies its registered train-fold rank policy before fitting,
         and records a candidate rejected here as non-viable rather than scoring
-        it. This check is not fail-closed under a non-finite ``Z``: a NaN
-        diagonal compares unequal to itself and is not rejected here (the factor
-        builder rejects non-finite inputs upstream).
+        it.
+
+        Scope. The check fires exactly when ``lam <= ulp(d_ii)/2`` on some
+        coordinate. Immediately below that the penalty survives but is quantized
+        to a multiple of ``ulp(d_ii)`` — measured ``applied/lam`` in
+        ``[0.977, 1.953]`` with the guard silent — so "the design solved is the
+        registered one" is not certified, only "no coordinate lost its penalty
+        outright". Ordinary ill-conditioning is likewise out of scope: a
+        well-represented ``lam`` can still be immaterial to the fit. Non-finite
+        ``Z``: ``inf`` diagonals compare equal and DO reject; ``NaN`` compares
+        unequal to itself and does not, so this is not fail-closed under NaN
+        (the factor builder rejects non-finite inputs upstream).
     """
     Z = np.asarray(Z, dtype=np.float64)
     eps_obs = np.asarray(eps_obs, dtype=np.float64)

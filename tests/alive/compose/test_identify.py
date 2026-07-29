@@ -153,6 +153,31 @@ def test_one_over_scaled_factor_block_is_rejected_though_others_keep_the_penalty
         identify_operator(Z_block, pairs, eps, lam=1e-3)
 
 
+def test_a_single_lost_coordinate_is_enough_to_reject():
+    """Pin the boundary of ANY: one lost coordinate out of ten must reject.
+
+    This is the case the guard exists for and the one a weakened rule would slip
+    through — a quorum rule, ``n_lost > 1``, or skipping index 0 all still reject
+    the seven-lost block case, so only a single-coordinate loss pins the actual
+    criterion. It is also what the reachable end-to-end path produces: over-scale
+    one factor coordinate and the full calibration design loses exactly the basis
+    element built from it.
+    """
+    rng = np.random.default_rng(4)
+    Z, _, pairs, eps = _make(rng)
+    Z_one = Z.copy()
+    Z_one[:, 0] *= 1e3
+
+    phi = design_matrix(Z_one, pairs)
+    base = phi.T @ phi
+    lost = np.flatnonzero(np.diag(base + 1e-3 * np.eye(phi.shape[1])) == np.diag(base))
+    # premise: exactly one coordinate, and it is index 0
+    assert lost.tolist() == [0]
+
+    with pytest.raises(SingularDesignError, match="on 1 of 10 coordinates"):
+        identify_operator(Z_one, pairs, eps, lam=1e-3)
+
+
 def _scaled_to_gram_diagonal(Z, pairs, target):
     """Rescale ``Z`` so the largest Gram diagonal lands near ``target``."""
     achieved = np.diag(design_matrix(Z, pairs).T @ design_matrix(Z, pairs)).max()
