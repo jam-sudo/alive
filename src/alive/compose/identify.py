@@ -89,13 +89,19 @@ def identify_operator(
         and records a candidate rejected here as non-viable rather than scoring
         it.
 
-        Scope. The check fires exactly when ``lam <= ulp(d_ii)/2`` on some
-        coordinate. Immediately below that the penalty survives but is quantized
-        to a multiple of ``ulp(d_ii)`` — measured ``applied/lam`` in
-        ``[0.977, 1.953]`` with the guard silent — so "the design solved is the
-        registered one" is not certified, only "no coordinate lost its penalty
-        outright". Ordinary ill-conditioning is likewise out of scope: a
-        well-represented ``lam`` can still be immaterial to the fit. Non-finite
+        Scope. A coordinate is lost when ``lam < ulp(d_ii)/2``, and at the tie
+        ``lam == ulp(d_ii)/2`` only when ``d_ii``'s last mantissa bit is even;
+        no registered lambda is dyadic, so the tie is unreachable here.
+        Wherever the penalty survives it is still quantized to a multiple of
+        ``ulp(d_ii)``, and the ratio actually applied is lambda-specific:
+        measured over all surviving scales, ``applied/lam`` spans
+        ``[0.977, 1.953]`` at ``lam=0.001``, ``[0.781, 1.563]`` at ``0.01`` and
+        ``[0.938, 1.250]`` at ``0.1``. A registered lambda can therefore be
+        applied ~22% below its registered value with this check silent, so "the
+        design solved is the registered one" is not certified — only "no
+        coordinate lost its penalty outright". Ordinary ill-conditioning is
+        likewise out of scope: a well-represented ``lam`` can still be
+        immaterial to the fit. Non-finite
         ``Z``: ``inf`` diagonals compare equal and DO reject; ``NaN`` compares
         unequal to itself and does not, so this is not fail-closed under NaN
         (the factor builder rejects non-finite inputs upstream).
@@ -136,9 +142,12 @@ def identify_operator(
     # single over-scaled block loses the penalty only on the basis elements that
     # involve it -- an all-coordinates rule cannot fire on exactly the input
     # whose scale nothing upstream bounds. It also makes this reproducible from
-    # committed evidence: ``d_ii <= 2 * n_pairs * max||z||**4``, so no
-    # coordinate can lose ``lam`` below a scale that follows from the pair count
-    # alone, without knowing the (uncommitted) Gram spectrum.
+    # committed evidence: ``design_matrix`` rows satisfy
+    # ``||row||**2 = (||z_g||**2 ||z_h||**2 + (z_g . z_h)**2) / 2 <= max||z||**4``
+    # by Cauchy-Schwarz, and ``d_ii <= sum_i d_ii = sum_pairs ||row||**2``, so
+    # ``d_ii <= n_pairs * max||z||**4`` with constant 1 sharp (attained by
+    # ``z_g = z_h = M e_1`` on every pair). The firing scale therefore follows
+    # from the pair count alone, without the (uncommitted) Gram spectrum.
     #
     # Nothing upstream bounds that scale: ``_verify_factor_banks`` binds
     # provenance only, the registered OOF rank policy is keyed to the literal

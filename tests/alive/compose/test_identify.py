@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 import numpy as np
 import pytest
 
@@ -178,6 +180,35 @@ def test_a_single_lost_coordinate_is_enough_to_reject():
         identify_operator(Z_one, pairs, eps, lam=1e-3)
 
 
+def test_an_off_diagonal_second_half_coordinate_alone_is_enough_to_reject():
+    """Every sym-basis coordinate counts, not a privileged subset of them.
+
+    The previous test loses basis element ``(0, 0)`` — index 0, and a DIAGONAL
+    element — so a rule scanning only diagonal elements, or only the first half
+    of the coordinates, still rejects it. A pair whose two genes load disjoint
+    factor coordinates contributes to the OFF-DIAGONAL element alone, which puts
+    the single loss at index 8 = ``(2, 3)``: off-diagonal and in the second half.
+    """
+    rng = np.random.default_rng(0)
+    Z = rng.normal(size=(12, 4)) * 0.1
+    Z[10] = [0.0, 0.0, 1e4, 0.0]
+    Z[11] = [0.0, 0.0, 0.0, 1e4]
+    pairs = [(int(a), int(b)) for a, b in rng.integers(0, 10, size=(30, 2)) if a != b]
+    pairs += [(10, 11)] * 8
+    eps = np.zeros((len(pairs), 3))
+
+    phi = design_matrix(Z, pairs)
+    base = phi.T @ phi
+    lost = np.flatnonzero(np.diag(base + 1e-3 * np.eye(phi.shape[1])) == np.diag(base))
+    row, col = (int(x[8]) for x in np.triu_indices(4))
+    # premise: one loss, off-diagonal, in the second half of the coordinates
+    assert lost.tolist() == [8]
+    assert row != col and 8 >= phi.shape[1] // 2
+
+    with pytest.raises(SingularDesignError, match="on 1 of 10 coordinates"):
+        identify_operator(Z, pairs, eps, lam=1e-3)
+
+
 def _scaled_to_gram_diagonal(Z, pairs, target):
     """Rescale ``Z`` so the largest Gram diagonal lands near ``target``."""
     achieved = np.diag(design_matrix(Z, pairs).T @ design_matrix(Z, pairs)).max()
@@ -185,23 +216,32 @@ def _scaled_to_gram_diagonal(Z, pairs, target):
 
 
 def test_the_guard_tracks_representability_and_not_a_magnitude_threshold():
-    """The criterion is exact representability, so it must bracket lam/eps.
+    """Separate exact representability from a ``lam / eps`` magnitude tolerance.
 
-    A coordinate can only lose ``lam`` once its Gram diagonal exceeds
-    ``lam / eps``. Below that the guard must stay silent no matter how large the
-    Gram is in absolute terms — which is what separates this from an arbitrary
-    magnitude tolerance.
+    Loss requires ``lam < ulp(d)/2``, i.e. ``d >= 2**ceil(53 + log2 lam)``, which
+    for ``lam=0.001`` is ``2**44 ~ 1.76e13``. A tolerance keyed on ``lam / eps``
+    would instead fire from ``~4.5e12``. The band between them is ~3.9x wide and
+    the guard must stay SILENT throughout it — that is the difference between an
+    exact-representability check and a threshold, and the branch's claim to
+    register no new numerical criterion rests on it.
     """
     rng = np.random.default_rng(7)
     Z, _, pairs, eps = _make(rng)
     lam = 1e-3
-    floor = lam / np.finfo(np.float64).eps  # ~4.5e12
+    tolerance_would_fire_from = lam / np.finfo(np.float64).eps  # ~4.5e12
+    exact_fires_from = 2.0 ** math.ceil(53 + math.log2(lam))  # 2**44 ~ 1.76e13
+    assert tolerance_would_fire_from < exact_fires_from
 
-    below = _scaled_to_gram_diagonal(Z, pairs, floor / 100.0)
+    # inside the band: a lam/eps tolerance fires here, exact representability does not
+    inside = _scaled_to_gram_diagonal(Z, pairs, 1.2e13)
+    coef = identify_operator(inside, pairs, eps, lam=lam)
+    assert np.all(np.isfinite(coef))
+
+    below = _scaled_to_gram_diagonal(Z, pairs, tolerance_would_fire_from / 100.0)
     coef = identify_operator(below, pairs, eps, lam=lam)
     assert np.all(np.isfinite(coef))
 
-    above = _scaled_to_gram_diagonal(Z, pairs, floor * 100.0)
+    above = _scaled_to_gram_diagonal(Z, pairs, exact_fires_from * 100.0)
     with pytest.raises(SingularDesignError, match="not representable against"):
         identify_operator(above, pairs, eps, lam=lam)
 
@@ -216,16 +256,17 @@ def test_registered_ridges_survive_every_provably_representable_factor_scale(lam
     Gram spectrum — which is the property that makes the safety argument
     reproducible without committing a factor bank.
 
-    Deliberately NOT asserted at the response-space ceiling. Factor scores
-    project a GENE-CENTERED shift, so the cap is
+    The expression-block ceiling is covered by this. Factor scores project a
+    GENE-CENTERED shift, so that cap is
     ``2 * (1 - 1/n_genes) * max_g ||delta_g||`` — twice the per-gene norm — which
-    for ``sqrt(1500) * log1p(1e4)`` and 73 genes is ~704, ABOVE the ~484 floor
-    for ``lam=0.001`` at this pair count. Whether the guard fires there depends
-    on the spectrum, so no such guarantee exists and none is claimed.
+    for ``sqrt(1500) * log1p(1e4)`` and 73 genes is ~704, BELOW the floor at any
+    pair count used here. It is not a cap on ``||z||``: the ESM block is bounded
+    by nothing in the repository, so no global statement follows from it.
     """
     rng = np.random.default_rng(5)
     Z, _, pairs, eps = _make(rng)
-    floor = (lam / (np.finfo(np.float64).eps * 2 * len(pairs))) ** 0.25
+    floor = (2.0 ** math.ceil(53 + math.log2(lam)) / len(pairs)) ** 0.25
+    assert floor > 704.0  # the expression-block ceiling is inside the safe region
     Z_safe = Z * (0.5 * floor / np.linalg.norm(Z, axis=1).max())
     coef = identify_operator(Z_safe, pairs, eps, lam=lam)
     assert np.all(np.isfinite(coef))

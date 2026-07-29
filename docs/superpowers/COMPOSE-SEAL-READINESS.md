@@ -342,10 +342,13 @@ branch에서 추적 가능하게 기록한다. `LOCAL` ledger ID만으로는 이
    too. (iii) `|z| ~ 3.8` "recorded in" `real_norman_detectable_effect_report.json` is withdrawn: that report
    records the GI-residual L2 (`mean_pair_eps_l2 = 3.046`), not any delta or factor magnitude, and no committed
    artifact records `z`. **What survives:** the guard cannot fire on realistic data — corpus instrumentation
-   found every non-deliberate positive-`lambda` fit fully penalized, and at the recorded spectra the shipped ANY
-   criterion first fires above `max||z|| ~ 2.2e3`-`2.6e3` for `lam=0.001`, three orders above realistic scales.
-   `703.66` is reproduced exactly through the production `build_gene_factors` and equals
-   `2*(1-1/73)*sqrt(1500)*log1p(1e4)`, and `41 * 703.66^4 = 1.007e13 < 2^44`, so **no coordinate can lose any
+   found every non-deliberate positive-`lambda` fit fully penalized. The only spectrum-free statement available
+   is the theorem floor above (`809.35` for `lam=0.001` at 41 pairs); surrogate spectra put the actual ANY
+   firing scale higher still, but over 1200 surrogates review measured it spanning `1.5e3`-`4.3e3`, so no
+   narrower band is quotable and none is claimed here. No margin is stated against realistic `||z||`, because
+   per (iii) no committed artifact records it. `703.66` is reproduced exactly through the production
+   `build_gene_factors` and equals `2*(1-1/73)*sqrt(1500)*log1p(1e4)`, and `41 * 703.66^4 = 1.00516e13 < 2^44`,
+   so **no coordinate can lose any
    registered lambda at that scale with 41 pairs** — the "704 > 484 leaves partial loss unprovable" claim of the
    previous draft is withdrawn as an artifact of the 2x-loose constant. **But `704` caps the EXPRESSION BLOCK
    only.** `z` concatenates expression and ESM scores, and this entry's own residual gap is that nothing bounds
@@ -370,8 +373,8 @@ branch에서 추적 가능하게 기록한다. `LOCAL` ledger ID만으로는 이
    selection actively *prefers* it and the run records a `selected_lambda` it never applied. Reviewers note the
    exact tie is fixture-specific (the fixture is noiseless); under noise the bypassed candidate ties less often
    but still wins outright in a minority of seeds. (b) On the real 41-pair calibration set at `k_total=8`
-   (`sym_dim` 36), `sum_f train_f = 41 + S <= 82 < 108`, so **at least one of the three gene-disjoint folds
-   cannot reach 36 train pairs** and is rank-deficient by construction; the `lam=0.0` candidate at `k=8` is then
+   (`sym_dim` 36), `sum_f train_f = n_pairs + S <= 82 < 108` where `S` is the number of pairs internal to a
+   single held-out group, so **at least one of the three gene-disjoint folds cannot reach 36 train pairs** and is rank-deficient by construction; the `lam=0.0` candidate at `k=8` is then
    expected to be recorded non-viable on real data, because `_oof_theta_for_candidate` raises on the first
    deficient fold. A previous draft of this entry derived "at most ONE fold can reach 36, so at least two are
    rank-deficient" from the same inequality; that entailment is **false** (`72 <= 82`, and review exhibited a
@@ -385,12 +388,17 @@ branch에서 추적 가능하게 기록한다. `LOCAL` ledger ID만으로는 이
    designs reach O(1) relative error against the exact ridge. The `~1.6e-4` coefficient-error figure quoted in
    that draft is also **withdrawn**: it is not reproducible at any recorded spectrum (`cond(Phi)` 15.8/32.9/484
    give ~1e-14), requires `cond(Phi) ~ 3e6`, and is ordinary ill-conditioning rather than penalty loss. The
-   provenance hazard is likewise not confined to the swallowed regime: review measured a 20-40x window in scale
-   where the registered lambda is applied EXACTLY and is nonetheless immaterial to the fit, which the guard
-   cannot see and which strengthens the condition-ceiling open item above. One determinism note, analogous to
-   correction (4) of the preceding entry: `n_lost` is computed from the float Gram, so at the exact boundary the
-   verdict is summation-order dependent (review flipped it by reversing pair row order); this is a knife-edge
-   property, unreachable at the scales real data occupies. Finally, "the
+   provenance hazard is likewise not confined to the swallowed regime. On one anisotropic surrogate, review
+   measured the ridge ceasing to change the fit by more than `1e-6` relative from `max||z|| ~ 116` while the
+   guard did not fire until `~2.3e3`-`5e3` — a band in factor scale where the registered lambda is applied
+   EXACTLY and is nonetheless immaterial. The band's width is surrogate-specific and no figure for it is
+   registered here; what matters is that it exists and the guard cannot see it, which is a second reason for
+   the condition-ceiling open item above. One determinism note, analogous to correction (4) of the preceding
+   entry: `n_lost` is computed from the float Gram, so at the exact boundary the verdict can depend on
+   summation order. One review reproduced verdict flips by reversing pair row order (902 of 16000 probes); a
+   second confirmed that the order changes `d_max` but did not reproduce a flip, so the claim is recorded as
+   mechanism-confirmed and frequency-unsettled. It requires `d_max` within one ulp of the boundary and is
+   unreachable at the scales real data occupies. Finally, "the
    run identity does not move" is literally true but incomplete: the criterion is code-only and therefore
    invisible in the confirmation manifest's `selected_hyperparameters`, unlike the registered
    `unregularized_oof_rank_policy`; scientific mode pins `HEAD == approved_git_sha`, so the owner SHA pin must
