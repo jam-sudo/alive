@@ -180,57 +180,47 @@ def test_a_single_lost_coordinate_is_enough_to_reject():
         identify_operator(Z_one, pairs, eps, lam=1e-3)
 
 
-def test_an_off_diagonal_second_half_coordinate_alone_is_enough_to_reject():
-    """Every sym-basis coordinate counts, not a privileged subset of them.
+def _single_loss_at(index: int, k: int = 4, scale: float = 1e4):
+    """Build a design losing the penalty on exactly the sym-basis ``index``.
 
-    The previous test loses basis element ``(0, 0)`` — index 0, and a DIAGONAL
-    element — so a rule scanning only diagonal elements, or only the first half
-    of the coordinates, still rejects it. A pair whose two genes load disjoint
-    factor coordinates contributes to the OFF-DIAGONAL element alone, which puts
-    the single loss at index 8 = ``(2, 3)``: off-diagonal and in the second half.
+    A pair whose two genes load only coordinates ``i`` and ``j`` contributes to
+    the ``(i, j)`` basis element alone, so one dominant such pair puts the whole
+    loss there — on the diagonal when ``i == j``, off it otherwise.
     """
-    rng = np.random.default_rng(0)
-    Z = rng.normal(size=(12, 4)) * 0.1
-    Z[10] = [0.0, 0.0, 1e4, 0.0]
-    Z[11] = [0.0, 0.0, 0.0, 1e4]
+    row, col = (int(x[index]) for x in np.triu_indices(k))
+    rng = np.random.default_rng(index)
+    Z = rng.normal(size=(12, k)) * 0.1
+    Z[10] = np.zeros(k)
+    Z[11] = np.zeros(k)
+    Z[10][row] = scale
+    Z[11][col] = scale
     pairs = [(int(a), int(b)) for a, b in rng.integers(0, 10, size=(30, 2)) if a != b]
     pairs += [(10, 11)] * 8
-    eps = np.zeros((len(pairs), 3))
+    return Z, pairs, np.zeros((len(pairs), 3)), (row, col)
+
+
+@pytest.mark.parametrize("index", range(10))
+def test_every_sym_basis_coordinate_alone_is_enough_to_reject(index):
+    """No coordinate is exempt — not the first, the last, nor any interior one.
+
+    A rule scanning only diagonal basis elements, only one half of the
+    coordinates, or skipping any single index would pass a loss located
+    elsewhere. Sweeping every index of ``sym_dim`` 10 leaves no such subset rule
+    standing, and it covers both diagonal and off-diagonal basis elements.
+    """
+    Z, pairs, eps, (row, col) = _single_loss_at(index)
 
     phi = design_matrix(Z, pairs)
     base = phi.T @ phi
     lost = np.flatnonzero(np.diag(base + 1e-3 * np.eye(phi.shape[1])) == np.diag(base))
-    row, col = (int(x[8]) for x in np.triu_indices(4))
-    # premise: one loss, off-diagonal, in the second half of the coordinates
-    assert lost.tolist() == [8]
-    assert row != col and 8 >= phi.shape[1] // 2
+    assert lost.tolist() == [index]
 
     with pytest.raises(SingularDesignError, match="on 1 of 10 coordinates"):
         identify_operator(Z, pairs, eps, lam=1e-3)
 
 
-def test_a_loss_at_the_last_coordinate_is_enough_to_reject():
-    """No coordinate is exempt, including the last — an off-by-one must not pass.
-
-    The other single-loss cases sit at index 0 and index 8 of 10, so a rule that
-    scans ``[:-1]`` still rejects both. This one loses the final coordinate.
-    """
-    rng = np.random.default_rng(4)
-    Z, _, pairs, eps = _make(rng)
-    Z_last = Z.copy()
-    Z_last[:, 3] *= 10**3.5
-
-    phi = design_matrix(Z_last, pairs)
-    base = phi.T @ phi
-    lost = np.flatnonzero(np.diag(base + 1e-3 * np.eye(phi.shape[1])) == np.diag(base))
-    assert lost.tolist() == [phi.shape[1] - 1]
-
-    with pytest.raises(SingularDesignError, match="on 1 of 10 coordinates"):
-        identify_operator(Z_last, pairs, eps, lam=1e-3)
-
-
 def test_a_single_loss_rejects_at_the_largest_registered_dimension_too():
-    """One lost coordinate of 36 must reject — a fractional quorum would not.
+    """One lost coordinate of 36 must reject — a lenient quorum would not.
 
     Every other guard test runs at ``k_total=4`` (``sym_dim`` 10), where a single
     loss is 10% of the coordinates and any lenient fraction still rejects. At the
@@ -249,7 +239,9 @@ def test_a_single_loss_rejects_at_the_largest_registered_dimension_too():
     base = phi.T @ phi
     lost = np.flatnonzero(np.diag(base + 1e-3 * np.eye(phi.shape[1])) == np.diag(base))
     assert lost.tolist() == [0]
-    assert len(lost) / phi.shape[1] < 0.05  # below any lenient fractional quorum
+    # below any quorum lenient enough to differ from ANY at a registered sym_dim
+    # (10/21/36); quorums at or below 1/36 are equivalent to ANY throughout
+    assert len(lost) / phi.shape[1] < 0.05
 
     with pytest.raises(SingularDesignError, match="on 1 of 36 coordinates"):
         identify_operator(Z, pairs, eps, lam=1e-3)
@@ -261,25 +253,32 @@ def _scaled_to_gram_diagonal(Z, pairs, target):
     return Z * (target / achieved) ** 0.25
 
 
-def test_the_guard_tracks_representability_and_not_a_magnitude_threshold():
+@pytest.mark.parametrize("lam", [0.001, 0.01, 0.1])
+def test_the_guard_tracks_representability_and_not_a_magnitude_threshold(lam):
     """Separate exact representability from a ``lam / eps`` magnitude tolerance.
 
     Loss requires ``lam < ulp(d)/2``, i.e. ``d >= 2**ceil(53 + log2 lam)``, which
     for ``lam=0.001`` is ``2**44 ~ 1.76e13``. A tolerance keyed on ``lam / eps``
-    would instead fire from ``~4.5e12``. The band between them is ~3.9x wide and
-    the guard must stay SILENT throughout it — that is the difference between an
-    exact-representability check and a threshold, and the branch's claim to
-    register no new numerical criterion rests on it.
+    would instead fire from ``~4.5e12``. The band between them is 2.5x-3.9x wide
+    across the registered grid and the guard must stay SILENT throughout it —
+    that is the difference between an exact-representability check and a
+    threshold, and the branch's claim to register no new numerical criterion
+    rests on it.
+
+    Run at every registered lambda on purpose: the exact threshold scales with
+    ``lam`` while a constant magnitude rule does not, so a single lambda would
+    leave that scaling unpinned.
     """
     rng = np.random.default_rng(7)
     Z, _, pairs, eps = _make(rng)
-    lam = 1e-3
-    tolerance_would_fire_from = lam / np.finfo(np.float64).eps  # ~4.5e12
-    exact_fires_from = 2.0 ** math.ceil(53 + math.log2(lam))  # 2**44 ~ 1.76e13
+    tolerance_would_fire_from = lam / np.finfo(np.float64).eps
+    exact_fires_from = 2.0 ** math.ceil(53 + math.log2(lam))
     assert tolerance_would_fire_from < exact_fires_from
 
     # inside the band: a lam/eps tolerance fires here, exact representability does not
-    inside = _scaled_to_gram_diagonal(Z, pairs, 1.2e13)
+    inside = _scaled_to_gram_diagonal(
+        Z, pairs, (tolerance_would_fire_from * exact_fires_from) ** 0.5
+    )
     coef = identify_operator(inside, pairs, eps, lam=lam)
     assert np.all(np.isfinite(coef))
 

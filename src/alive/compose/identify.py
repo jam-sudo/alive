@@ -97,8 +97,12 @@ def identify_operator(
         is lambda-specific: over all surviving scales ``applied/lam`` spans
         ``[0.977, 1.953]`` at ``lam=0.001``, ``[0.781, 1.563]`` at ``0.01`` and
         ``[0.625, 1.250]`` at ``0.1`` — the low end of the last reached only at
-        the top of a binade, where ``d + lam`` crosses into the next one. It is
-        never applied exactly for ``d >= 2**-7``. A registered lambda can
+        the top of a binade, where ``d + lam`` crosses into the next one. Exact
+        application needs ``ulp(d)`` to divide ``lam``, so writing ``lam`` as an
+        odd multiple of ``2**k`` it becomes impossible from ``d >= 2**(k + 53)``:
+        ``2**-7`` at ``lam=0.001``, ``2**-6`` at ``0.01`` and ``2**-2`` at
+        ``0.1``. Every calibration Gram is far above all three. A registered
+        lambda can
         therefore be applied up to ~37% below its registered value with this
         check silent, so "the design solved is the registered one" is not
         certified — only "no coordinate lost its penalty outright". Ordinary
@@ -152,7 +156,8 @@ def identify_operator(
     # ``z_g = z_h = M e_1`` on every pair). No coordinate can lose ``lam`` below
     # a scale that follows from the pair count alone, without the (uncommitted)
     # Gram spectrum. Only that FLOOR is spectrum-free; where the guard actually
-    # fires is spectrum-dependent and sits above it.
+    # fires is spectrum-dependent and sits AT OR above it — the sharp
+    # configuration attains the bound, so the two coincide there.
     #
     # Nothing upstream bounds that scale: ``_verify_factor_banks`` binds
     # provenance only, the registered OOF rank policy is keyed to the literal
