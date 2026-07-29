@@ -90,16 +90,19 @@ def identify_operator(
         it.
 
         Scope. A coordinate is lost when ``lam < ulp(d_ii)/2``, and at the tie
-        ``lam == ulp(d_ii)/2`` only when ``d_ii``'s last mantissa bit is even;
-        no registered lambda is dyadic, so the tie is unreachable here.
-        Wherever the penalty survives it is still quantized to a multiple of
-        ``ulp(d_ii)``, and the ratio actually applied is lambda-specific:
-        measured over all surviving scales, ``applied/lam`` spans
+        ``lam == ulp(d_ii)/2`` only when ``d_ii``'s last mantissa bit is even.
+        ``ulp(d)/2`` is a power of two and no registered lambda is one, so the
+        tie is unreachable here. Wherever the penalty survives it is still
+        quantized to a multiple of ``ulp(d_ii)``, and the ratio actually applied
+        is lambda-specific: over all surviving scales ``applied/lam`` spans
         ``[0.977, 1.953]`` at ``lam=0.001``, ``[0.781, 1.563]`` at ``0.01`` and
-        ``[0.938, 1.250]`` at ``0.1``. A registered lambda can therefore be
-        applied ~22% below its registered value with this check silent, so "the
-        design solved is the registered one" is not certified — only "no
-        coordinate lost its penalty outright". Ordinary ill-conditioning is
+        ``[0.625, 1.250]`` at ``0.1`` — the low end of the last reached only at
+        the top of a binade, where ``d + lam`` crosses into the next one. It is
+        never applied exactly for ``d >= 2**-7``. A registered lambda can
+        therefore be applied up to ~37% below its registered value with this
+        check silent, so "the design solved is the registered one" is not
+        certified — only "no coordinate lost its penalty outright". Ordinary
+        ill-conditioning is
         likewise out of scope: a well-represented ``lam`` can still be
         immaterial to the fit. Non-finite
         ``Z``: ``inf`` diagonals compare equal and DO reject; ``NaN`` compares
@@ -146,8 +149,10 @@ def identify_operator(
     # ``||row||**2 = (||z_g||**2 ||z_h||**2 + (z_g . z_h)**2) / 2 <= max||z||**4``
     # by Cauchy-Schwarz, and ``d_ii <= sum_i d_ii = sum_pairs ||row||**2``, so
     # ``d_ii <= n_pairs * max||z||**4`` with constant 1 sharp (attained by
-    # ``z_g = z_h = M e_1`` on every pair). The firing scale therefore follows
-    # from the pair count alone, without the (uncommitted) Gram spectrum.
+    # ``z_g = z_h = M e_1`` on every pair). No coordinate can lose ``lam`` below
+    # a scale that follows from the pair count alone, without the (uncommitted)
+    # Gram spectrum. Only that FLOOR is spectrum-free; where the guard actually
+    # fires is spectrum-dependent and sits above it.
     #
     # Nothing upstream bounds that scale: ``_verify_factor_banks`` binds
     # provenance only, the registered OOF rank policy is keyed to the literal

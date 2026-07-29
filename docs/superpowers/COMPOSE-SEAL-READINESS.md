@@ -318,8 +318,8 @@ branch에서 추적 가능하게 기록한다. `LOCAL` ledger ID만으로는 이
    expression and an ESM block, so an over-scaled single block loses the penalty only on the basis elements
    involving it; an all-coordinates rule provably cannot fire on a block imbalance — the one input whose scale
    nothing upstream bounds. It also makes the safety argument reproducible from committed evidence: since
-   `d_ii <= n_pairs * max||z||^4`, the firing scale follows from the pair count alone, without the Gram
-   spectrum. That inequality is a theorem, not a sample: `_sym_to_vec` is a Frobenius isometry, so a design row
+   `d_ii <= n_pairs * max||z||^4`, a FLOOR on the firing scale follows from the pair count alone, without the
+   Gram spectrum; where the guard actually fires is spectrum-dependent and sits above that floor. That inequality is a theorem, not a sample: `_sym_to_vec` is a Frobenius isometry, so a design row
    satisfies `||row||^2 = (||z_g||^2 ||z_h||^2 + (z_g . z_h)^2)/2 <= max||z||^4` by Cauchy-Schwarz, and
    `d_ii <= sum_i d_ii = sum_pairs ||row||^2`. The constant 1 is sharp (attained by `z_g = z_h = M e_1` on every
    pair). An earlier draft asserted the same inequality with constant 2 and justified it by a sampled worst
@@ -390,15 +390,16 @@ branch에서 추적 가능하게 기록한다. `LOCAL` ledger ID만으로는 이
    give ~1e-14), requires `cond(Phi) ~ 3e6`, and is ordinary ill-conditioning rather than penalty loss. The
    provenance hazard is likewise not confined to the swallowed regime. On one anisotropic surrogate, review
    measured the ridge ceasing to change the fit by more than `1e-6` relative from `max||z|| ~ 116` while the
-   guard did not fire until `~2.3e3`-`5e3` — a band in factor scale where the registered lambda is applied
-   EXACTLY and is nonetheless immaterial. The band's width is surrogate-specific and no figure for it is
+   guard did not fire until `~2.3e3`-`5e3` — a band in factor scale where the registered lambda survives this
+   check (applied to within the quantization noted in `identify.py`, never exactly) and is nonetheless
+   immaterial. The band's width is surrogate-specific and no figure for it is
    registered here; what matters is that it exists and the guard cannot see it, which is a second reason for
    the condition-ceiling open item above. One determinism note, analogous to correction (4) of the preceding
    entry: `n_lost` is computed from the float Gram, so at the exact boundary the verdict can depend on
    summation order. One review reproduced verdict flips by reversing pair row order (902 of 16000 probes); a
    second confirmed that the order changes `d_max` but did not reproduce a flip, so the claim is recorded as
-   mechanism-confirmed and frequency-unsettled. It requires `d_max` within one ulp of the boundary and is
-   unreachable at the scales real data occupies. Finally, "the
+   mechanism-confirmed and frequency-unsettled. It requires `d_max` within a few ulps of the boundary (measured spread across row
+   orders: 6 ulps) and is unreachable at the scales real data occupies. Finally, "the
    run identity does not move" is literally true but incomplete: the criterion is code-only and therefore
    invisible in the confirmation manifest's `selected_hyperparameters`, unlike the registered
    `unregularized_oof_rank_policy`; scientific mode pins `HEAD == approved_git_sha`, so the owner SHA pin must

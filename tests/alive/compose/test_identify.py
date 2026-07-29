@@ -209,6 +209,52 @@ def test_an_off_diagonal_second_half_coordinate_alone_is_enough_to_reject():
         identify_operator(Z, pairs, eps, lam=1e-3)
 
 
+def test_a_loss_at_the_last_coordinate_is_enough_to_reject():
+    """No coordinate is exempt, including the last — an off-by-one must not pass.
+
+    The other single-loss cases sit at index 0 and index 8 of 10, so a rule that
+    scans ``[:-1]`` still rejects both. This one loses the final coordinate.
+    """
+    rng = np.random.default_rng(4)
+    Z, _, pairs, eps = _make(rng)
+    Z_last = Z.copy()
+    Z_last[:, 3] *= 10**3.5
+
+    phi = design_matrix(Z_last, pairs)
+    base = phi.T @ phi
+    lost = np.flatnonzero(np.diag(base + 1e-3 * np.eye(phi.shape[1])) == np.diag(base))
+    assert lost.tolist() == [phi.shape[1] - 1]
+
+    with pytest.raises(SingularDesignError, match="on 1 of 10 coordinates"):
+        identify_operator(Z_last, pairs, eps, lam=1e-3)
+
+
+def test_a_single_loss_rejects_at_the_largest_registered_dimension_too():
+    """One lost coordinate of 36 must reject — a fractional quorum would not.
+
+    Every other guard test runs at ``k_total=4`` (``sym_dim`` 10), where a single
+    loss is 10% of the coordinates and any lenient fraction still rejects. At the
+    registered ``k_total=8`` (``sym_dim`` 36) it is 2.8%, below such a rule — and
+    that is the dimension where the OOF train folds are rank-deficient and the
+    ridge is load-bearing, so it is the worst place to be lenient.
+    """
+    rng = np.random.default_rng(9)
+    Z = rng.normal(size=(20, 8))
+    pairs = [(int(a), int(b)) for a, b in rng.integers(0, 20, size=(40, 2)) if a != b]
+    eps = np.zeros((len(pairs), 3))
+    Z[:, 0] *= 1e4
+
+    phi = design_matrix(Z, pairs)
+    assert phi.shape[1] == sym_basis_dim(8) == 36
+    base = phi.T @ phi
+    lost = np.flatnonzero(np.diag(base + 1e-3 * np.eye(phi.shape[1])) == np.diag(base))
+    assert lost.tolist() == [0]
+    assert len(lost) / phi.shape[1] < 0.05  # below any lenient fractional quorum
+
+    with pytest.raises(SingularDesignError, match="on 1 of 36 coordinates"):
+        identify_operator(Z, pairs, eps, lam=1e-3)
+
+
 def _scaled_to_gram_diagonal(Z, pairs, target):
     """Rescale ``Z`` so the largest Gram diagonal lands near ``target``."""
     achieved = np.diag(design_matrix(Z, pairs).T @ design_matrix(Z, pairs)).max()
@@ -241,20 +287,39 @@ def test_the_guard_tracks_representability_and_not_a_magnitude_threshold():
     coef = identify_operator(below, pairs, eps, lam=lam)
     assert np.all(np.isfinite(coef))
 
-    above = _scaled_to_gram_diagonal(Z, pairs, exact_fires_from * 100.0)
+    # silent immediately BELOW the exact threshold and rejecting immediately
+    # ABOVE it: together these bracket any wrong-valued magnitude rule to within
+    # ~1.5% of the exact one, instead of leaving it a wide window to hide in
+    just_below = _scaled_to_gram_diagonal(Z, pairs, exact_fires_from * 0.99)
+    assert np.diag(design_matrix(just_below, pairs).T @ design_matrix(just_below, pairs)).max() < (
+        exact_fires_from
+    )
+    coef = identify_operator(just_below, pairs, eps, lam=lam)
+    assert np.all(np.isfinite(coef))
+
+    above = _scaled_to_gram_diagonal(Z, pairs, exact_fires_from * 1.005)
+    assert np.diag(design_matrix(above, pairs).T @ design_matrix(above, pairs)).max() >= (
+        exact_fires_from
+    )
     with pytest.raises(SingularDesignError, match="not representable against"):
         identify_operator(above, pairs, eps, lam=lam)
+
+    far_above = _scaled_to_gram_diagonal(Z, pairs, exact_fires_from * 100.0)
+    with pytest.raises(SingularDesignError, match="not representable against"):
+        identify_operator(far_above, pairs, eps, lam=lam)
 
 
 @pytest.mark.parametrize("lam", [0.001, 0.01, 0.1])
 def test_registered_ridges_survive_every_provably_representable_factor_scale(lam):
     """No registered lambda may be rejected below the representability floor.
 
-    ``d_ii <= 2 * n_pairs * max||z||**4``, so no coordinate can lose ``lam``
-    until ``max||z||`` reaches ``(lam / (eps * 2 * n_pairs))**0.25``. Below that
+    ``d_ii <= n_pairs * max||z||**4`` with constant 1 sharp, and loss needs
+    ``d >= 2**ceil(53 + log2 lam)``, so no coordinate can lose ``lam`` until
+    ``max||z||`` reaches ``(2**ceil(53 + log2 lam) / n_pairs)**0.25``. Below that
     the guard must stay silent for ANY design of this size, independently of the
     Gram spectrum — which is the property that makes the safety argument
-    reproducible without committing a factor bank.
+    reproducible without committing a factor bank. Only that FLOOR follows from
+    the pair count; where the guard actually fires is spectrum-dependent.
 
     The expression-block ceiling is covered by this. Factor scores project a
     GENE-CENTERED shift, so that cap is
