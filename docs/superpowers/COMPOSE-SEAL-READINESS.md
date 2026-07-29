@@ -318,9 +318,18 @@ branch에서 추적 가능하게 기록한다. `LOCAL` ledger ID만으로는 이
    expression and an ESM block, so an over-scaled single block loses the penalty only on the basis elements
    involving it; an all-coordinates rule provably cannot fire on a block imbalance — the one input whose scale
    nothing upstream bounds. It also makes the safety argument reproducible from committed evidence: since
-   `d_ii <= 2 * n_pairs * max||z||^4` (verified numerically, worst observed ratio 0.054), 41 calibration pairs
-   put the floor for losing `lam=0.001` at `max||z|| ~ 484` and `lam=0.1` at `~1531`, without needing the Gram
-   spectrum. **Quantitative claims from the first draft of this entry are withdrawn.** Independent review
+   `d_ii <= n_pairs * max||z||^4`, the firing scale follows from the pair count alone, without the Gram
+   spectrum. That inequality is a theorem, not a sample: `_sym_to_vec` is a Frobenius isometry, so a design row
+   satisfies `||row||^2 = (||z_g||^2 ||z_h||^2 + (z_g . z_h)^2)/2 <= max||z||^4` by Cauchy-Schwarz, and
+   `d_ii <= sum_i d_ii = sum_pairs ||row||^2`. The constant 1 is sharp (attained by `z_g = z_h = M e_1` on every
+   pair). An earlier draft asserted the same inequality with constant 2 and justified it by a sampled worst
+   ratio — quoted inconsistently as 0.054 here and 0.094 in the commit message; both are withdrawn. The
+   sampled ratio was ~5-9x below the true supremum and would have given false comfort had the constant been
+   chosen from it. Combining the sharp constant with the exact rounding law (`fl(d+lam) == d` iff
+   `lam <= ulp(d)/2`, so loss needs `d >= 2^ceil(53 + log2 lam)`) gives the exact floors at 41 calibration
+   pairs: `max||z|| = 809.35` for `lam=0.001`, `1361.15` for `0.01`, `2289.17` for `0.1`. The floor is a
+   property of the pair set PASSED, not of the guard: at 131 eligible pairs it falls to 605.36. Only
+   `cal_idx_pairs` (41) and its OOF train subsets ever reach the estimator, so 41 is the operative count. **Quantitative claims from the first draft of this entry are withdrawn.** Independent review
    refuted them. (i) The thresholds were NOT measured at the real geometry: `real_norman_phi_rank_report.json`
    records pair counts, rank, condition number and a factor-bank *checksum* — no factor values — and no
    factor bank is committed anywhere, so the Gram diagonal spread that sets the upper edge cannot be derived
@@ -332,12 +341,17 @@ branch에서 추적 가능하게 기록한다. `LOCAL` ledger ID만으로는 이
    same per-gene cap. `median_library` is derived at runtime and registered nowhere, so `1e4` is an assumption
    too. (iii) `|z| ~ 3.8` "recorded in" `real_norman_detectable_effect_report.json` is withdrawn: that report
    records the GI-residual L2 (`mean_pair_eps_l2 = 3.046`), not any delta or factor magnitude, and no committed
-   artifact records `z`. **What survives:** the guard cannot fire on realistic data (the corpus instrumentation
-   found every positive-`lambda` fit fully penalized), and the adversarial response-space cap `~704` sits below
-   the all-coordinates threshold under every spectrum measured. **What does not:** `704 > 484`, so a
-   worst-case-admissible input is NOT provably outside partial penalty loss; reviewers measured ~1.6e-4
-   relative coefficient error there. The bypass remains unreachable on any biologically plausible input, and
-   the guard now rejects the partial case rather than only the total one.
+   artifact records `z`. **What survives:** the guard cannot fire on realistic data — corpus instrumentation
+   found every non-deliberate positive-`lambda` fit fully penalized, and at the recorded spectra the shipped ANY
+   criterion first fires above `max||z|| ~ 2.2e3`-`2.6e3` for `lam=0.001`, three orders above realistic scales.
+   `703.66` is reproduced exactly through the production `build_gene_factors` and equals
+   `2*(1-1/73)*sqrt(1500)*log1p(1e4)`, and `41 * 703.66^4 = 1.007e13 < 2^44`, so **no coordinate can lose any
+   registered lambda at that scale with 41 pairs** — the "704 > 484 leaves partial loss unprovable" claim of the
+   previous draft is withdrawn as an artifact of the 2x-loose constant. **But `704` caps the EXPRESSION BLOCK
+   only.** `z` concatenates expression and ESM scores, and this entry's own residual gap is that nothing bounds
+   the ESM block, so `704` is not a cap on `max||z||` and no global safety statement follows from it. Two
+   earlier margin statements are also corrected: they were quoted against the all-coordinates threshold, which
+   is not the criterion shipped.
    **Correction to the shipped scope claim.** The first draft said a partially-rounded ridge "remains the
    rank/condition gates' job". That is **false** and both reviews refuted it independently: the OOF rank policy
    is keyed to the literal `lam == 0.0` and never runs for a ridge candidate, and `rank_diagnostics` uses a
@@ -356,13 +370,27 @@ branch에서 추적 가능하게 기록한다. `LOCAL` ledger ID만으로는 이
    selection actively *prefers* it and the run records a `selected_lambda` it never applied. Reviewers note the
    exact tie is fixture-specific (the fixture is noiseless); under noise the bypassed candidate ties less often
    but still wins outright in a minority of seeds. (b) On the real 41-pair calibration set at `k_total=8`
-   (`sym_dim` 36), `sum_f train_f <= 82 < 108`, so **at most one of the three gene-disjoint folds can reach 36
-   train pairs** — at least two are rank-deficient by construction and the `lam=0.0` candidate at `k=8` is
-   expected to be recorded non-viable on real data. This is pre-seal observable, and it is the regime where the
-   ridge is load-bearing; it also rules out applying the rank policy to every lambda, which would delete that
-   regime. (c) The numerical failure is confined to the rank-deficient case: with a full-rank design in the
-   swallowed regime the float result is bit-identical to OLS and matches the exact ridge to 1e-15, so there the
-   failure is provenance (a recorded `selected_lambda` never materially applied), not numerics. Finally, "the
+   (`sym_dim` 36), `sum_f train_f = 41 + S <= 82 < 108`, so **at least one of the three gene-disjoint folds
+   cannot reach 36 train pairs** and is rank-deficient by construction; the `lam=0.0` candidate at `k=8` is then
+   expected to be recorded non-viable on real data, because `_oof_theta_for_candidate` raises on the first
+   deficient fold. A previous draft of this entry derived "at most ONE fold can reach 36, so at least two are
+   rank-deficient" from the same inequality; that entailment is **false** (`72 <= 82`, and review exhibited a
+   layout with two folds at 36 realizable under the production builder) and is withdrawn. The downstream
+   prediction is unaffected. This is pre-seal observable, and it is the regime where the ridge is load-bearing;
+   it also rules out applying the rank policy to every lambda, which would delete that regime. (c) In the
+   swallowed FULL-RANK regime the float result is bit-identical to normal-equation OLS and matches the exact
+   ridge to ~1e-15 at the recorded spectra, so there the failure is provenance — a recorded `selected_lambda`
+   never materially applied — rather than numerics. A previous draft went further and said numerical damage is
+   "confined to the rank-deficient case"; that is **withdrawn**, because full-rank but ill-conditioned swallowed
+   designs reach O(1) relative error against the exact ridge. The `~1.6e-4` coefficient-error figure quoted in
+   that draft is also **withdrawn**: it is not reproducible at any recorded spectrum (`cond(Phi)` 15.8/32.9/484
+   give ~1e-14), requires `cond(Phi) ~ 3e6`, and is ordinary ill-conditioning rather than penalty loss. The
+   provenance hazard is likewise not confined to the swallowed regime: review measured a 20-40x window in scale
+   where the registered lambda is applied EXACTLY and is nonetheless immaterial to the fit, which the guard
+   cannot see and which strengthens the condition-ceiling open item above. One determinism note, analogous to
+   correction (4) of the preceding entry: `n_lost` is computed from the float Gram, so at the exact boundary the
+   verdict is summation-order dependent (review flipped it by reversing pair row order); this is a knife-edge
+   property, unreachable at the scales real data occupies. Finally, "the
    run identity does not move" is literally true but incomplete: the criterion is code-only and therefore
    invisible in the confirmation manifest's `selected_hyperparameters`, unlike the registered
    `unregularized_oof_rank_policy`; scientific mode pins `HEAD == approved_git_sha`, so the owner SHA pin must
