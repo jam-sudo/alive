@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from alive.compose.kernel_isolation_ci import (
+    _PROFILE_TESTS,
     CI_ARCHIVE_SCHEMA,
     CI_E2E_TEST,
     CI_PRIMITIVE_TEST,
@@ -19,6 +20,7 @@ from alive.compose.kernel_isolation_ci import (
     CI_TEST_CLASSNAME,
     CI_WORKFLOW_PATH,
     KernelIsolationCIError,
+    _parse_junit,
     build_kernel_isolation_ci_archive,
     build_kernel_isolation_ci_receipt,
     validate_kernel_isolation_ci_archive,
@@ -28,8 +30,12 @@ from alive.provenance import sha256_json
 
 _REPO = Path(__file__).resolve().parents[3]
 _EVIDENCE = _REPO / "docs/activation-evidence/compose"
-_ARCHIVE = _EVIDENCE / "kernel_isolation_ci_614017b67e35e9cc07f68d5b512213d8356cf1b2.json"
-_ARCHIVE_V2 = _EVIDENCE / "kernel_isolation_ci_2dd23d627fc0e31a7d5005a3e81ff20b8dcd9472.json"
+_V1_SHA = "614017b67e35e9cc07f68d5b512213d8356cf1b2"
+_V2_SHA = "2dd23d627fc0e31a7d5005a3e81ff20b8dcd9472"
+_ARCHIVE = _EVIDENCE / f"kernel_isolation_ci_{_V1_SHA}.json"
+_ARCHIVE_V2 = _EVIDENCE / f"kernel_isolation_ci_{_V2_SHA}.json"
+_JUNIT = _EVIDENCE / f"kernel_isolation_junit_{_V1_SHA}.xml"
+_JUNIT_V2 = _EVIDENCE / f"kernel_isolation_junit_{_V2_SHA}.xml"
 
 
 def _write_junit(
@@ -487,3 +493,36 @@ def test_the_v2_archive_still_records_that_it_was_not_independently_reviewed():
         "(adversarial audit + from-primary-bytes recomputation); "
         "not an independent third party"
     )
+
+
+@pytest.mark.parametrize(
+    ("archive_path", "junit_path"),
+    [(_ARCHIVE, _JUNIT), (_ARCHIVE_V2, _JUNIT_V2)],
+    ids=["v1", "v2"],
+)
+def test_committed_junit_bytes_reproduce_the_archived_receipt(archive_path, junit_path):
+    """Keep the archives falsifiable after their GitHub artifacts expire.
+
+    An archive records a JUnit digest, not the JUnit. While the run's artifact is
+    downloadable that is enough -- anyone can refute the archive by fetching the
+    artifact and recomputing -- but Actions retention is finite, and once the
+    artifact is gone the digest has nothing left to be checked against and
+    ``archived_by`` becomes the whole trust basis. The primary bytes are
+    therefore committed beside each archive, and this test is what makes them
+    load-bearing: it re-derives the receipt's entire ``junit`` block and its
+    required-testcase roster from those bytes through the same parser the
+    builder uses, so the archive stays reproducible from committed data alone.
+
+    Both files were confirmed byte-identical to their GitHub artifacts on
+    2026-07-29, while both were still live.
+    """
+    archive = validate_kernel_isolation_ci_archive(
+        json.loads(archive_path.read_text(encoding="utf-8"))
+    )
+    receipt = archive["receipt"]
+    junit, cases = _parse_junit(
+        junit_path,
+        required_tests=_PROFILE_TESTS[receipt["proof_profile"]],
+    )
+    assert junit == receipt["junit"]
+    assert cases == [dict(case) for case in receipt["required_test_cases"]]
