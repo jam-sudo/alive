@@ -404,6 +404,28 @@ branch에서 추적 가능하게 기록한다. `LOCAL` ledger ID만으로는 이
    invisible in the confirmation manifest's `selected_hyperparameters`, unlike the registered
    `unregularized_oof_rank_policy`; scientific mode pins `HEAD == approved_git_sha`, so the owner SHA pin must
    be regenerated regardless. Seal state remains **UNOPENED**; execution remains **RELEASE-BLOCKED**.
+   **2026-07-29 config-bound evidence lineage (survey only; nothing regenerated):** the two committed
+   activation-evidence reports both embed `config_sha256 = d8c65ac4…`, which the current config no longer
+   produces. Recomputing `sha256_json(raw)` at every commit that touched
+   `configs/compose_k562_v1_phase2.yaml` gives the full lineage: `d8c65ac4…` (the digest the reports were
+   generated against at `82a9c83` / `79b01e0`, still current at `0d84d3a`) → `380c4528…` at `d507a09`
+   (**the activation commit itself**, `status: pre-activation → active`, which the config header already
+   flags as intentionally moving run identity) → `a4700194…` at `42d71ce` (predictions/execution-manifest
+   envelope) → `c3e00327…` at `90bc100` (estimator-domain solver and rank policy). **Correction:** an earlier
+   note framed this as a single move `a4700194… → c3e00327…` caused by registering the estimator domain. That
+   is incomplete — the evidence has been three digests stale since activation on its own, and the
+   estimator-domain registration only added the third move. Nothing here is a leakage or seal risk: scientific
+   mode is already fail-closed on all three binding axes (`protocol`, `config_sha256`, and
+   `git_sha == approved_git_sha`) in `config2.py`, both reports carry `activation: BLOCKED`, and the mismatch
+   path has regression tests in `test_config2.py` and `driver/test_scientific_activation_assembly.py`. Exactly
+   two requirements carry this JSON lineage contract (`_CONFIG_BOUND_EVIDENCE_REQUIREMENTS`):
+   `real_norman_phi_rank_and_condition_report` and `regime_specific_detectable_effect_analysis`; the remaining
+   activation requirements point at heterogeneous artifacts and do not. **Regeneration is not a local task.**
+   It needs real Norman data (pod) and, because the `git_sha` axis pins the report to
+   `activation_record.approved_git_sha`, the reports must be produced at the exact commit the owner approves —
+   which is why the §2.5 release-gate ordering (generate at clean detached `C` → publish to the external
+   durable stage → owner approves `C` plus every byte hash) exists rather than committing regenerated evidence
+   back onto the branch. Seal state remains **UNOPENED**; execution remains **RELEASE-BLOCKED**.
    **2026-07-25 leakage-guard corrections (branch `compose-network-isolation`, merged as `d4c1ea8`):**
    two development-boundary
    guards were found failing open and were fixed with mutation-verified regression tests. (1) The measurability
