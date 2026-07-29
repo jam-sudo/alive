@@ -170,6 +170,17 @@ post-seal non-COMPLETE(durable export 미완료 포함), `10` pre-seal rejection
   `approved_git_sha`, bias-null basis config SHA도 독립 재검증한다.
 - 독립 검토자가 leakage, exact roster, response projection, pair alignment, single seal open,
   final-ledger recovery를 확인.
+- Kernel-isolation CI archive가 **독립 archiver**의 것이어야 한다. `archived_by`는 authoring session이
+  파견한 agent가 아니라 독립 제3자임을 기록하고, 그 run의 primary JUnit bytes를 evidence로 함께 commit해
+  artifact 만료 후에도 archive가 committed bytes만으로 재현되게 한다. Archive의 `head_sha`는 `C`와 같을
+  필요가 없고 **같을 수도 없다** — receipt를 archive하려면 commit이 필요하고 그 commit이 HEAD를 `C` 너머로
+  옮겨 아래의 `approved_git_sha == runtime HEAD` 결속을 깨기 때문이다. 대신 isolation closure
+  (`src/alive/compose/network_isolation.py`, `scripts/compose/run_network_isolated.py`,
+  `scripts/compose/gears_decision_probe.py`, `src/alive/compose/gears_probe_a.py`,
+  `tests/alive/compose/test_network_isolation.py`)가 archive된 commit과 `C` 사이에서 byte-identical임을
+  검증하고 기록한다. 이 evidence는 GEARS Probe-A driver 경로를 덮으며 COMPOSE scientific execution 전반이
+  아니고, 어떤 production pod가 올바르게 구성되었음을 established하지도 않는다(그 pod 자신의
+  `capture-runtime` evidence가 필요).
 - 실행할 exact Git SHA `C`를 owner가 승인한다. `C`는 실행 repository의 **마지막 commit**이다. `C` 이후
   report, finalized config, owner-approved ResolvedRunSpec 또는 READY 표기를 repository에 commit하면 HEAD가 이동해
   `approved_git_sha == runtime HEAD == report producer git_sha` 결속이 깨지므로 금지한다.
