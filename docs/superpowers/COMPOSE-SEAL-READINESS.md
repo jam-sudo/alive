@@ -5,7 +5,7 @@
 > **이 문서는 아무것도 정의하지 않는다** — 세부(task)는 plan, claim은 spec, exact param은 config,
 > 시간순 audit는 git이 authoritative다([sources of truth](../../CLAUDE.md#sources)). 상태 행이 authoritative
 > 문서와 어긋나면 **authoritative 문서가 옳다**; 이 인덱스를 갱신한다.
-> **Updated:** 2026-07-30 @ `83c1875` (branch `main`)
+> **Updated:** 2026-07-31 @ `1869c12` (branch `compose-svd-ridge-and-carrier-binding`)
 > **갱신 트리거:** sub-project/gate **상태가 바뀔 때만**(커밋마다 아님).
 > **종결 상태:** COMPOSE seal이 정확히 한 번 열리면 이 인덱스는 **frozen/은퇴**한다. 이후 진행상황은
 > seal 결과와 post-hoc analysis가 대신한다.
@@ -360,11 +360,18 @@ branch에서 추적 가능하게 기록한다. `LOCAL` ledger ID만으로는 이
    rather than a preferred path. (2) **The closure enumeration was still incomplete** — both package
    `__init__.py` files were missing, and `alive/compose/__init__.py` is the one importer node from which growth
    could hide, being a PEP-562 lazy-import gate that exists to keep the subprocess workers off the Phase-1
-   stack; the exact mutation a review said went undetected now fails. (3) **`uv.lock` was dropped from the
-   pin**: it records no CPython build (`grep cpython uv.lock` is empty), so it could not be faithful to the
-   interpreter claim while firing on every unrelated bump — and a check that fires mostly on benign changes gets
-   deleted. **Open item:** record the actual interpreter in the receipt schema; `.python-version` is a minor
-   series and identifies no patch release. (4) **The three history-reading tests would have failed on CI and
+   stack; the exact mutation a review said went undetected now fails. (3) **2026-07-30 correction:** `uv.lock`
+   is included in the pin after all. The proof runs after `uv sync --locked`, and the probe driver the launcher
+   execs (`scripts/compose/gears_decision_probe.py`, module-scope `anndata` / `numpy` / `pandas` / `scipy.sparse`
+   at lines 100-103) pulls the numeric stack in under the seccomp filter, so the resolved dependency graph is
+   part of what passed even though the lock does not identify the CPython build. (`run_network_isolated.py`
+   itself imports only the standard library; an earlier draft of this entry attributed those imports to the
+   launcher.) This is an intentional conservative superset: a dependency-only change requires a fresh proof.
+   **Operational cost, stated so it is not discovered at the wrong moment:** any `uv sync` that rewrites
+   `uv.lock` — including a routine dependency refresh — turns the closure test red until a fresh Linux
+   kernel-isolation CI run is archived and the pin moved to it. The test says so and says not to delete the
+   check; budget the re-archive rather than the deletion. **Open item:** record the actual interpreter in the
+   receipt schema; `.python-version` is a minor series and identifies no patch release. (4) **The three history-reading tests would have failed on CI and
    taken the kernel gate down with them.** The workflow checked out at `fetch-depth: 1`, where the commits the
    archives name do not exist; they pass on any full clone, which is why local green did not catch it. Worse, the
    receipt-build step had no `if:`, so a failing suite skipped it and the upload then failed closed — the only
