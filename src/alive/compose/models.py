@@ -254,11 +254,14 @@ class IDOnlyModel:
         # ``identify_operator``, but ``LinAlgError`` is a bare ``ValueError``
         # subclass and NOT a ``SingularDesignError``, so without this it left
         # the driver's pre-seal roster and produced a traceback plus exit 1 --
-        # outside the exit-code contract, writing no artifact. The exposure is
-        # specifically at ``lam == 0.0``: the intercept column is deliberately
-        # unpenalised, so a positive lam cannot rescue a design that is already
-        # collinear with it, and the registered estimator-domain rank policy can
-        # now leave ``lam == 0.0`` as the only viable candidate.
+        # outside the exit-code contract, writing no artifact. Observed exposure
+        # is confined to ``lam == 0.0``, and the registered estimator-domain rank
+        # policy gates the BILINEAR design, not this one, so it does not exclude
+        # a bank that is full rank there and collinear here. (An earlier version
+        # of this comment explained the confinement by claiming a positive lam
+        # cannot rescue an intercept-collinear design. That is false: with the
+        # intercept unpenalised the Gram is positive definite for every
+        # ``lam > 0``. The confinement is recorded, not derived.)
         try:
             self.weight_ = np.linalg.solve(gram, phi.T @ eps_obs)  # (d+1, p)
         except np.linalg.LinAlgError as exc:

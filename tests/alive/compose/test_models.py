@@ -21,7 +21,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from alive.compose.identify import SingularDesignError
+from alive.compose.identify import SingularDesignError, rank_diagnostics
 from alive.compose.models import (
     IDOnlyModel,
     L1Model,
@@ -307,17 +307,34 @@ def test_id_only_singular_design_raises_the_contracted_type():
 
     This solve is reached from the same post-selection loop in phase2a as the
     bilinear estimator, but ``numpy.linalg.LinAlgError`` is a bare ``ValueError``
-    subclass and not a ``SingularDesignError``, so it was absent from the
-    driver's pre-seal rejection roster and produced a traceback plus exit 1,
-    writing no artifact. Exposure is specifically at ``lam == 0.0``: the
-    intercept is deliberately unpenalised, so a positive lambda cannot rescue a
-    design already collinear with it, and the registered estimator-domain rank
-    policy can leave ``lam == 0.0`` as the only viable candidate.
+    subclass and not a ``SingularDesignError``, so it was absent from the driver's
+    pre-seal rejection roster and produced a traceback plus exit 1, writing no
+    artifact.
+
+    The factor bank here is the input class the fix actually protects, which
+    matters: the BILINEAR design is full rank, so the registered
+    estimator-domain rank policy leaves ``lam == 0.0`` selectable, while the
+    ``id_only`` design — whose features are ``[z_g + z_h, |z_g - z_h|, 1]`` — is
+    rank-deficient because a constant factor coordinate makes it collinear with
+    the intercept. A bank that is rank-deficient bilinearly would be excluded by
+    the policy before this solve is ever reached, and would prove only the type
+    mapping.
+
+    Exposure is confined to ``lam == 0.0``, which the second half asserts rather
+    than argues: an earlier version of this docstring justified it by claiming a
+    positive lambda cannot rescue an intercept-collinear design, and that is
+    false — with the intercept unpenalised the Gram is positive definite for
+    every ``lam > 0``, and ``lam = 1e-12`` solves cleanly on this very input.
     """
-    rng = np.random.default_rng(0)
-    n_genes = 12
-    Z = np.zeros((n_genes, 4))  # every factor coordinate dead
-    pairs = [(int(a), int(b)) for a, b in rng.integers(0, n_genes, size=(30, 2)) if a != b]
-    eps = np.zeros((len(pairs), 3))
+    rng = np.random.default_rng(4)
+    Z = rng.normal(size=(20, 4))
+    Z[:, 2] = 0.75  # one constant coordinate: bilinear full rank, id_only singular
+    pairs = [(int(a), int(b)) for a, b in rng.integers(0, 20, size=(41, 2)) if a != b]
+    eps = rng.normal(size=(len(pairs), 3))
+    assert rank_diagnostics(Z, pairs).is_full_rank
+
     with pytest.raises(SingularDesignError, match="id_only design has no unique ridge solution"):
         IDOnlyModel().fit(Z, pairs, eps, lam=0.0)
+
+    for lam in (1e-12, *(0.001, 0.01, 0.1)):
+        assert IDOnlyModel().fit(Z, pairs, eps, lam=lam).weight_ is not None

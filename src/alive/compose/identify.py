@@ -102,12 +102,12 @@ def identify_operator(
         odd multiple of ``2**k`` it becomes impossible from ``d >= 2**(k + 53)``:
         ``2**-7`` at ``lam=0.001``, ``2**-6`` at ``0.01`` and ``2**-2`` at
         ``0.1``. Whether a real calibration Gram sits above those thresholds is
-        NOT established here: no committed artifact records the absolute factor
-        scale, and read per-coordinate the claim is false in general — at the
-        recorded ``cond=484`` a spectrum-matched surrogate has a 5.1e3x diagonal
-        spread with ``d_min = 1.7e-2 < 2**-2``, so on its smallest coordinates
-        ``lam=0.1`` is applied EXACTLY. That direction is benign, since the bound
-        below is an upper bound either way. A registered
+        NOT established here, and the claim that it does — which an earlier
+        revision asserted — is withdrawn: no committed artifact records the
+        absolute factor scale, and the thresholds apply per coordinate, so a
+        sufficiently spread diagonal can put small coordinates below them while
+        large ones stay above. That direction is benign, since the bound below is
+        an upper bound either way. A registered
         lambda can
         therefore be applied up to ~37% below its registered value with this
         check silent, so "the design solved is the registered one" is not
@@ -173,12 +173,12 @@ def identify_operator(
     # Do not read that as "nothing can see it". ``rank_diagnostics`` is
     # scale-invariant only under a UNIFORM rescale of ``z`` (and even then only
     # up to the last bits, for non-dyadic factors). Under the BLOCK IMBALANCE
-    # this guard exists to catch, its condition number moves a great deal:
-    # scaling the ESM block alone by 1e4 takes a measured 20x8 surrogate from
-    # cond 134.7 to 3.56e9 against the recorded real values 15.8 / 32.9 / 484,
-    # and by 1e8 the rank collapses outright. So the imbalance IS observable in a
-    # registered diagnostic; what is missing is a registered condition CEILING to
-    # reject on -- an open item for the owner, deliberately not invented here.
+    # this guard exists to catch, its condition number does move -- so the
+    # imbalance IS observable in a registered diagnostic. What is missing is a
+    # registered condition CEILING to reject on, an open item for the owner and
+    # deliberately not invented here. No magnitude is quoted: the figures first
+    # written here came from one synthetic surrogate and are not a property of
+    # the real factor bank, whose absolute scale nothing committed records.
     diag_base = np.diag(base)
     n_lost = int(np.sum(np.diag(gram) == diag_base))
     if n_lost:

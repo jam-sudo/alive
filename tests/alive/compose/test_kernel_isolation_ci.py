@@ -530,6 +530,7 @@ def test_committed_junit_bytes_reproduce_the_archived_receipt(archive_path, juni
     assert cases == [dict(case) for case in receipt["required_test_cases"]]
 
 
+@pytest.mark.repo_history
 @pytest.mark.parametrize("archive_path", [_ARCHIVE, _ARCHIVE_V2], ids=["v1", "v2"])
 def test_archived_workflow_digest_reproduces_from_the_recorded_commit(archive_path):
     """Check the one receipt digest that has permanent in-repo ground truth.
@@ -581,15 +582,29 @@ _ISOLATION_CLOSURE = (
     "src/alive/compose/approximation_bias.py",
     "src/alive/compose/baseline_subprocess.py",
     "src/alive/compose/baselines_combo.py",
-    # The interpreter axis: the workflow runs `uv sync --locked`, and the
-    # primitive test asserts a syscall-level distinction (unix socketpair
-    # permitted while unix stream is EPERM) that depends on which syscalls the
-    # resolved CPython actually emits.
+    # Both package __init__ files execute on every `alive.compose.*` import, and
+    # `alive/compose/__init__.py` is not inert: it is a PEP-562 lazy-import gate
+    # whose stated purpose is to keep the subprocess workers from transitively
+    # pulling the Phase-1 stack. Replacing its `_LAZY_EXPORTS` map with eager
+    # imports would change the entire import surface running under the seccomp
+    # filter, and it is the only importer node from which such growth could hide
+    # -- every other importer here is pinned, so closure growth elsewhere trips
+    # this check indirectly.
+    "src/alive/__init__.py",
+    "src/alive/compose/__init__.py",
+    # `.python-version` only, not `uv.lock`. The lock records no CPython build at
+    # all (`grep cpython uv.lock` is empty), so pinning its 1691 lines of ruff,
+    # pytest and torch could not be faithful to the interpreter claim it was
+    # added for, while firing on every unrelated dependency bump -- and a check
+    # that fires mostly on benign changes gets deleted. Recording the actual
+    # interpreter in the receipt schema is the right mechanism and is an open
+    # readiness item; `.python-version` is a minor series (3.12), so even this
+    # does not identify a patch release.
     ".python-version",
-    "uv.lock",
 )
 
 
+@pytest.mark.repo_history
 def test_the_v2_kernel_proof_still_covers_the_shipped_isolation_closure():
     """Fail closed when the archived kernel proof stops covering today's code.
 
@@ -615,6 +630,7 @@ def test_the_v2_kernel_proof_still_covers_the_shipped_isolation_closure():
     )
 
 
+@pytest.mark.repo_history
 def test_the_interpreter_range_the_kernel_proof_assumes_is_unchanged():
     """``requires-python`` is part of the closure but lives in a busy file.
 

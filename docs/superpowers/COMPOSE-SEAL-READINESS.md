@@ -5,7 +5,7 @@
 > **이 문서는 아무것도 정의하지 않는다** — 세부(task)는 plan, claim은 spec, exact param은 config,
 > 시간순 audit는 git이 authoritative다([sources of truth](../../CLAUDE.md#sources)). 상태 행이 authoritative
 > 문서와 어긋나면 **authoritative 문서가 옳다**; 이 인덱스를 갱신한다.
-> **Updated:** 2026-07-30 @ `ce397c2` (branch `main`)
+> **Updated:** 2026-07-30 @ `83c1875` (branch `main`)
 > **갱신 트리거:** sub-project/gate **상태가 바뀔 때만**(커밋마다 아님).
 > **종결 상태:** COMPOSE seal이 정확히 한 번 열리면 이 인덱스는 **frozen/은퇴**한다. 이후 진행상황은
 > seal 결과와 post-hoc analysis가 대신한다.
@@ -347,7 +347,53 @@ branch에서 추적 가능하게 기록한다. `LOCAL` ledger ID만으로는 이
    workflow and receipt builder have since changed (which is why the archived receipt reproduces only from a
    worktree at `2dd23d6`). That identity was asserted in prose only, which meant editing a closure file left the
    suite green while this entry went on claiming the proof applied; it is now enforced by a test that fails
-   closed and tells the reader to re-establish the evidence rather than delete the check. Seal state remains **UNOPENED**; execution
+   closed and tells the reader to re-establish the evidence rather than delete the check.
+   **2026-07-30 corrections to the entry above, from a second review round on the corrections themselves.**
+   (1) **The "strong form preferred" gate was not executable and is withdrawn.** Withdrawing the impossibility
+   argument was right, but the replacement was not: the owner-approval carrier has no slot for the archive's byte
+   hash — `run_spec.py`'s `_SCIENTIFIC_BLOCK_KEYS` is a six-key exact roster that raises on any extra, and
+   `carrier_loader.py:447` requires `activation_evidence.requirements` to equal `config.activation_requirements`
+   exactly — so adding one means editing the config, whose commit moves HEAD past `C` and reinstates the same
+   circularity a level up. `publication_manifest` has no implementation at all. An externally published archive
+   also gets neither `validate_kernel_isolation_ci_archive` nor any test, so the committed path is the only
+   machine-checked one. The runbook now records a `head_sha == C` archive as an **unresolved owner decision**
+   rather than a preferred path. (2) **The closure enumeration was still incomplete** — both package
+   `__init__.py` files were missing, and `alive/compose/__init__.py` is the one importer node from which growth
+   could hide, being a PEP-562 lazy-import gate that exists to keep the subprocess workers off the Phase-1
+   stack; the exact mutation a review said went undetected now fails. (3) **`uv.lock` was dropped from the
+   pin**: it records no CPython build (`grep cpython uv.lock` is empty), so it could not be faithful to the
+   interpreter claim while firing on every unrelated bump — and a check that fires mostly on benign changes gets
+   deleted. **Open item:** record the actual interpreter in the receipt schema; `.python-version` is a minor
+   series and identifies no patch release. (4) **The three history-reading tests would have failed on CI and
+   taken the kernel gate down with them.** The workflow checked out at `fetch-depth: 1`, where the commits the
+   archives name do not exist; they pass on any full clone, which is why local green did not catch it. Worse, the
+   receipt-build step had no `if:`, so a failing suite skipped it and the upload then failed closed — the only
+   kernel-property gate this project has would have gone permanently red and stopped emitting evidence. Checkout
+   is now `fetch-depth: 0`, and those tests carry a `repo_history` marker: deselected from the receipt-producing
+   run and executed after the upload, because the receipt requires a zero-failure JUnit and one of them fires
+   exactly when the archived evidence has gone stale — leaving the check self-blocking, with deletion as the only
+   way to produce the evidence its own failure message demands.
+   **2026-07-30 NEW BLOCKER — the exit-code contract is incomplete beyond the estimator.** Closing the
+   `id_only` singular ridge completed the `.fit` axis (only two `.fit(` call sites exist in `src`; L1 goes
+   through `identify_operator`, L2 delegates to L1, L3 performs no solve, `id_only` is now normalized), but the
+   declared sibling sweep stopped there. Review enumerated the rest of the same `phase2a` path and verified by
+   monkeypatching the real `main()` that each still propagates to a **traceback and exit 1**, outside the
+   registered 0/10/20/30 contract and outside the one-line-stderr output discipline: `HashMismatchError`
+   (stale/tampered factor bank or response artifact), a bare `ValueError` from `_validate_config_contract`
+   (drift between `phase2a_inputs.json` and the pinned config — note `phase2a.py:1416` is present but
+   unreachable; the reachable site is `:678`), **`BaselineUnavailable`** (a GEARS/CPA worker exiting non-zero —
+   arguably the likeliest real pod failure), the seed-variability family on the CONTINUE path,
+   `OutcomeLeakageError` (the project's highest-severity guard, its rejection path uncontracted), `LeakageError`
+   from the measurability gate (not even a `ValueError`, so no broad handler sees it), `FreezeError`, and
+   `Phase2ConfigError`. The spec and runbook define `main`'s returns TOTALLY as 0/10/20/30; the
+   "propagate an unrecognised exception" carve-out exists only in `cli.py`'s docstring. On the pod an operator
+   receiving exit 1 cannot distinguish a documented pre-seal rejection from a driver bug. **Deliberately not
+   fixed here:** admitting eight types into the roster is a change to the registered exit-code contract and
+   needs its own scoped design, spec update and review, not an append inside a guard fix. Related latent item:
+   `select.py`'s per-candidate `except SingularDesignError` is keyed to the exception TYPE, and OOF selection is
+   bound to L1 only by a hard-coded map that nothing asserts — if a non-L1 factory ever reaches
+   `select_hyperparams`, a singular comparator would be recorded as a non-viable hyperparameter candidate. Not
+   reachable today; assert the binding when that roster becomes configurable. Seal state remains **UNOPENED**; execution
    remains **RELEASE-BLOCKED**.
    **2026-07-25 pre-pod local gate:** the probe-rerun runbook's §2.2 verification roster was run at clean exact
    commit `614017b67e35e9cc07f68d5b512213d8356cf1b2` — **254 passed**, plus `ruff check`/`ruff format --check`
@@ -403,10 +449,11 @@ branch에서 추적 가능하게 기록한다. `LOCAL` ledger ID만으로는 이
    expression and an ESM block, so an over-scaled single block loses the penalty only on the basis elements
    involving it; an all-coordinates rule cannot fire while the SMALLER block stays below the loss threshold —
    and that block is the one input whose scale nothing upstream bounds. The stronger phrasing this entry
-   previously carried ("provably cannot fire on a block imbalance") is **withdrawn**: review exhibited an
-   imbalance of ratio 100 (expression x1e4 AND ESM x1e6) that loses all 36 of 36 coordinates, so an
-   all-coordinates rule does fire there. The load-bearing conclusion — ANY is strictly more sensitive than
-   ALL — is unaffected. It also makes the safety argument reproducible from committed evidence: since
+   previously carried ("provably cannot fire on a block imbalance") is **withdrawn as unproven**; the
+   counterexample first offered for it (expression x1e4 AND ESM x1e6) was then shown not to isolate an
+   imbalance — it is a uniform x1e4 rescale times a ratio-100 imbalance, and the smaller block alone already
+   loses all of its own coordinates — so no counterexample is claimed. The load-bearing conclusion, that ANY is
+   strictly more sensitive than ALL, does not depend on either. It also makes the safety argument reproducible from committed evidence: since
    `d_ii <= n_pairs * max||z||^4`, a FLOOR on the firing scale follows from the pair count alone, without the
    Gram spectrum; where the guard actually fires is spectrum-dependent and sits above that floor. That inequality is a theorem, not a sample: `_sym_to_vec` is a Frobenius isometry, so a design row
    satisfies `||row||^2 = (||z_g||^2 ||z_h||^2 + (z_g . z_h)^2)/2 <= max||z||^4` by Cauchy-Schwarz, and
@@ -436,13 +483,18 @@ branch에서 추적 가능하게 기록한다. `LOCAL` ledger ID만으로는 이
    every non-deliberate positive-`lambda` fit fully penalized. The stronger claim this entry previously
    bolded, "the guard cannot fire on realistic data", is **withdrawn as unsupported and self-contradictory**:
    it is a margin statement against realistic `||z||`, which the same paragraph then says cannot be made. Using
-   only this entry's own numbers, an expression block at its admissible ceiling `703.66` plus an ESM-block norm
-   of `~400` gives `||z|| = 809.4 >= 809.35` and fires at `lam=0.001`, and nothing committed excludes `400`.
-   Review also exhibited a band (1.175x wide in factor scale) where the FULL calibration Gram loses the penalty
-   while no OOF train fold does: there selection scores the candidate normally, futility returns CONTINUE, and
-   the post-selection fit then rejects — a contracted pod-time exit 10 after the futility checkpoint. That is
-   fail-closed, but a reader told the guard "cannot fire" would not expect it. **Measuring the ESM-block scale
-   therefore belongs on the pre-pod list.** The only spectrum-free statement available
+   **A replacement exhibit is deliberately NOT offered.** A later review refuted the one first written here
+   (expression at `703.66` plus an ESM norm of `~400`, quoted as firing at `lam=0.001`): `809.35` is a floor
+   derived from the UPPER bound `d_ii <= n*max||z||^4`, so reaching it is NECESSARY, not sufficient — equality
+   needs the whole diagonal mass in one coordinate, which splitting mass across two blocks forbids. Measured
+   through the production `design_matrix`, that configuration gives `d_max = 0.070 * 2^44`, and even the
+   all-mass-in-one-coordinate value `41 * 703.66^4 = 0.571 * 2^44` is below the threshold: it does not fire.
+   The band where the FULL Gram loses the penalty while no OOF train fold does EXISTS as a theorem (train folds
+   are subsets, so the full diagonal dominates elementwise) and its consequence is a contracted pod-time exit 10
+   after the futility checkpoint; its WIDTH is surrogate-specific and no figure for it is registered here.
+   What remains, therefore, is only this: **the ESM-block scale is bounded by nothing committed, so no statement
+   about firing on real data — in either direction — is available, and measuring that scale belongs on the
+   pre-pod list.** The only spectrum-free statement available
    is the theorem floor above (`809.35` for `lam=0.001` at 41 pairs); surrogate spectra put the actual ANY
    firing scale higher still, but over 1200 surrogates review measured it spanning `1.5e3`-`4.3e3`, so no
    narrower band is quotable and none is claimed here. No margin is stated against realistic `||z||`, because
@@ -498,11 +550,11 @@ branch에서 추적 가능하게 기록한다. `LOCAL` ledger ID만으로는 이
    entry: `n_lost` is computed from the float Gram, so at the exact boundary the verdict can depend on
    summation order. One review reproduced verdict flips by reversing pair row order (902 of 16000 probes); a
    second confirmed that the order changes `d_max` but did not reproduce a flip, so the claim is recorded as
-   mechanism-confirmed and frequency-unsettled. It requires `d_max` within a few ulps of the boundary and is unreachable at the scales real data occupies.
-   The "6 ulps" figure previously recorded here was a sample maximum, not a bound: an independent sweep of 4000
-   boundary-placed designs measured spread up to **7 ulps** and, conditional on sitting at the boundary, a
-   **25.8%** verdict-flip rate — which resolves the frequency question above as mechanism-confirmed and
-   frequency-established-conditional-on-boundary-proximity. Finally, "the
+   mechanism-confirmed and **frequency-unsettled**. It requires `d_max` within a few ulps of the boundary and is
+   unreachable at the scales real data occupies. No ulp-spread or flip-rate figure is registered here: the "6
+   ulps" once recorded was a sample maximum, a later review's "7 ulps / 25.8%" replacement was shown to swing
+   from 14.6% to 50.8% with the number of row orders sampled per design — an unrecorded parameter — so both are
+   withdrawn rather than re-stated, and the frequency stays unsettled. Finally, "the
    run identity does not move" is literally true but incomplete: the criterion is code-only and therefore
    invisible in the confirmation manifest's `selected_hyperparameters`, unlike the registered
    `unregularized_oof_rank_policy`; scientific mode pins `HEAD == approved_git_sha`, so the owner SHA pin must

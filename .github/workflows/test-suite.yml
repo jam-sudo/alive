@@ -30,7 +30,12 @@ jobs:
       - name: Check out the commit under test
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          fetch-depth: 1
+          # Full history, not depth 1. The repository-history checks below read
+          # blobs at the commits the archived kernel-isolation evidence names, and
+          # those commit objects do not exist in a shallow checkout -- the checks
+          # pass on any full clone and fail only here, which is how they shipped
+          # once already.
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Assert the runner is a real Linux x86_64 kernel
@@ -64,7 +69,14 @@ jobs:
           uv run ruff format --check src tests scripts
 
       - name: Full test suite
-        run: uv run pytest -q -p no:randomly --junitxml=junit.xml
+        # Deselect the repository-history checks: they run after the receipt is
+        # built, because the receipt requires a JUnit with zero failures and one
+        # of those checks fires exactly when the archived kernel evidence has gone
+        # stale. Leaving it here made the check self-blocking -- a legitimate
+        # closure change would fail the suite, skip the receipt build, and leave
+        # deleting the check as the only way to produce the evidence its own
+        # failure message demands.
+        run: uv run pytest -q -p no:randomly -m "not repo_history" --junitxml=junit.xml
 
       - name: Build the canonical kernel-isolation proof receipt
         run: |
@@ -107,3 +119,10 @@ jobs:
           # the seal. Keep this equal to the repository limit; the archive's
           # committed primary bytes, not this window, are the durable record.
           retention-days: 400
+
+      - name: Repository-history checks
+        # Gates the branch but NOT the receipt: these run after the upload so a
+        # stale-evidence verdict cannot block producing the evidence that would
+        # refresh it. They need real history, hence fetch-depth 0 above.
+        if: always()
+        run: uv run pytest -q -p no:randomly -m repo_history

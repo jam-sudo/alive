@@ -39,6 +39,9 @@ ignore = []
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "repo_history: needs real Git history (reads blobs at recorded commits); fails in a shallow clone or a .git-less export, and is deselected from the run that produces the kernel-isolation CI receipt",
+]
 
 [build-system]
 requires = ["hatchling"]

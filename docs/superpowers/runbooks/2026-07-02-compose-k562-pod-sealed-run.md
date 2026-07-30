@@ -174,20 +174,29 @@ post-seal non-COMPLETE(durable export 미완료 포함), `10` pre-seal rejection
   파견한 agent가 아니라 독립 제3자임을 기록한다. **주의: 이 필드는 non-empty string 외에 아무 validator도
   강제하지 않는다** — 자동 검사가 아니라 owner가 확인할 항목이다. 그 run의 primary JUnit bytes도 함께
   보존한다.
-- **선호 경로(strong form): `head_sha == C`인 run을 external durable stage에 게시한다.** `C`를 push해 CI가
-  `C`에서 실행되고 runner가 receipt를 만든 뒤, archive wrapper를 repository에 commit하지 않고
-  approved-artifacts root에 게시하고 owner가 `C`·모든 byte hash·immutable object version을 승인한다. 이러면
-  HEAD가 `C`에 남아 `approved_git_sha == runtime HEAD` 결속이 유지된다. (이 항목의 이전 판은 "`C`에서의
-  archive는 불가능하다"고 적었는데 **틀렸다** — §2.5와 readiness가 analytical report에 대해 이미 이 구성을
-  규정하고 있고, 이 archive는 config의 `activation_requirements`에 속하지도 않는다.)
-- **fallback: archive의 `head_sha`가 `C`에 선행하는 경우**, isolation closure가 archive된 commit과 `C`
+- **`head_sha == C`인 archive는 미해결 owner 결정이다.** 이 항목의 이전 두 판이 모두 틀렸다. (i) "`C`에서의
+  archive는 불가능하다"는 논증은 **unsound**다 — workflow가 `on: push: branches: ['**']`이므로 `head_sha == C`
+  실행은 얻을 수 있고, commit하지 않고 approved-artifacts root에 게시하면 HEAD는 `C`에 남는다. (ii) 그러나
+  이를 "선호 경로"로 규정한 것도 **실행 불가능**하다: owner 승인 carrier인 ResolvedRunSpec의
+  `_SCIENTIFIC_BLOCK_KEYS`가 6키 exact roster이고(`run_spec.py:682`가 불일치 시 raise),
+  `carrier_loader.py:447`은 `activation_evidence.requirements`가 `config.activation_requirements`와 **정확히
+  같을 것**을 요구해 extra key를 거부한다. 즉 archive의 byte hash를 실을 슬롯이 없고, 슬롯을 만들려면 config를
+  고쳐야 하는데 그 commit이 HEAD를 `C` 너머로 옮겨 같은 순환이 한 단계 위에서 재발한다. `publication_manifest`도
+  구현이 없다(`src`/`scripts`에서 0건). 또한 external 게시본은 `validate_kernel_isolation_ci_archive`도
+  regression test도 받지 못한다 — **machine-checked 경로는 아래의 committed 경로뿐이다.** 이 carrier 공백을
+  메우려면 owner가 별도로 결정해야 한다.
+- **현재 실행 가능한 경로: archive의 `head_sha`가 `C`에 선행하는 경우**, isolation closure가 archive된 commit과 `C`
   사이에서 byte-identical임을 검증하고 기록한다. Closure는 직접 참여 5개 파일
   (`src/alive/compose/network_isolation.py`, `scripts/compose/run_network_isolated.py`,
   `scripts/compose/gears_decision_probe.py`, `src/alive/compose/gears_probe_a.py`,
   `tests/alive/compose/test_network_isolation.py`)에 더해 transitive `alive` import closure
   (`provenance.py`, `io.py`, `roles.py`, `response.py`, `fit_role.py`, `gene_universe.py`,
   `worker_bundle.py`, `activation_evidence.py`, `approximation_bias.py`, `baseline_subprocess.py`,
-  `baselines_combo.py`)와 interpreter 축(`.python-version`, `uv.lock`, `requires-python`)을 포함한다.
+  `baselines_combo.py`), 두 package `__init__.py`(`src/alive/`, `src/alive/compose/` — 후자는 PEP-562
+  lazy-import gate이고 eager import로 바꾸면 seccomp 하 import surface가 달라진다), 그리고
+  `.python-version`을 포함한다. **`uv.lock`은 제외한다** — CPython build를 전혀 기록하지 않아 interpreter
+  주장에 충실할 수 없고 무관한 dependency bump마다 발화한다. Receipt schema에 실제 interpreter를 기록하는 것이
+  옳은 기제이며 **미해결 항목**이다(`.python-version`은 minor series라 patch release를 식별하지 못한다).
   `tests/alive/compose/test_kernel_isolation_ci.py`가 이를 fail-closed로 강제한다.
 - 이 evidence는 GEARS Probe-A driver 경로를 덮으며 COMPOSE scientific execution 전반이 아니고, 어떤
   production pod가 올바르게 구성되었음을 established하지도 않는다(그 pod 자신의 `capture-runtime` evidence가
