@@ -5,7 +5,7 @@
 > **이 문서는 아무것도 정의하지 않는다** — 세부(task)는 plan, claim은 spec, exact param은 config,
 > 시간순 audit는 git이 authoritative다([sources of truth](../../CLAUDE.md#sources)). 상태 행이 authoritative
 > 문서와 어긋나면 **authoritative 문서가 옳다**; 이 인덱스를 갱신한다.
-> **Updated:** 2026-07-31 @ `b31ee9d` (branch `compose-svd-ridge-and-carrier-binding`)
+> **Updated:** 2026-07-31 @ `6f58979` (branch `compose-svd-ridge-and-carrier-binding`)
 > **갱신 트리거:** sub-project/gate **상태가 바뀔 때만**(커밋마다 아님).
 > **종결 상태:** COMPOSE seal이 정확히 한 번 열리면 이 인덱스는 **frozen/은퇴**한다. 이후 진행상황은
 > seal 결과와 post-hoc analysis가 대신한다.
@@ -606,6 +606,25 @@ branch에서 추적 가능하게 기록한다. `LOCAL` ledger ID만으로는 이
    invisible in the confirmation manifest's `selected_hyperparameters`, unlike the registered
    `unregularized_oof_rank_policy`; scientific mode pins `HEAD == approved_git_sha`, so the owner SHA pin must
    be regenerated regardless. Seal state remains **UNOPENED**; execution remains **RELEASE-BLOCKED**.
+   **2026-07-31 — scientific stage-1 `factor_bank.json` is now a bound artifact, not a stub.** Recorded here
+   because it changes a MANDATORY pre-seal input contract, independently of the ridge-solver work above. The
+   scientific carrier previously left `Phase2aInputs.factor_banks_by_k` unset, which
+   `_verify_factor_banks(require_banks=True)` rejects — and scientific execution is exactly
+   `fixture_execution=False` (`phase2a.py:1410`), so the scientific path could not have completed Phase 2a.
+   `carrier_loader._load_phase2a_inputs` now takes `require_factor_banks` and, for scientific mode,
+   deserializes `factor_bank.json` through `zfactor.deserialize_factor_bank_collection`: a closed-schema
+   `compose_factor_bank_collection_v1` payload carrying one lossless, self-checksummed `GeneFactorBank` report
+   per `k_total`, whose aggregate digest must equal `phase2a_inputs.factor_checksum`. The loader additionally
+   re-verifies the reconstructed `Phase2aInputs.content_checksum`, which is the only semantic check standing
+   behind the spec's byte digests once a forger re-signs both the file and `self_checksum`; a regression test
+   defeating both byte layers now pins it (`test_scientific_carrier_rejects_resigned_phase2a_inputs_field_edit`).
+   Fixture mode is untouched (`require_factor_banks=False`, old thin payload). **Consequence for the pod:** any
+   producer of a scientific PREPARE carrier must emit the collection via
+   `zfactor.serialize_factor_bank_collection`. No such producer exists in `src/` or `scripts/` — as is true of
+   every other scientific stage-1 artifact, whose only writer today is the test-support module — so this changes
+   what that future producer owes, not the current inventory. The as-built plan snippet in
+   `plans/2026-07-12-compose-scientific-prepare-carrier.md` (Task 1) prescribed the retired three-key stub and
+   now carries a dated supersession banner.
    **2026-07-29 config-bound evidence lineage (survey only; nothing regenerated):** the two committed
    activation-evidence reports both embed `config_sha256 = d8c65ac4…`, which the current config no longer
    produces. Recomputing `sha256_json(raw)` at every commit that touched
