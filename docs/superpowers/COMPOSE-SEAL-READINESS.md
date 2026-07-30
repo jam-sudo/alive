@@ -5,7 +5,7 @@
 > **이 문서는 아무것도 정의하지 않는다** — 세부(task)는 plan, claim은 spec, exact param은 config,
 > 시간순 audit는 git이 authoritative다([sources of truth](../../CLAUDE.md#sources)). 상태 행이 authoritative
 > 문서와 어긋나면 **authoritative 문서가 옳다**; 이 인덱스를 갱신한다.
-> **Updated:** 2026-07-31 @ `1869c12` (branch `compose-svd-ridge-and-carrier-binding`)
+> **Updated:** 2026-07-31 @ `3130fae` (branch `compose-svd-ridge-and-carrier-binding`)
 > **갱신 트리거:** sub-project/gate **상태가 바뀔 때만**(커밋마다 아님).
 > **종결 상태:** COMPOSE seal이 정확히 한 번 열리면 이 인덱스는 **frozen/은퇴**한다. 이후 진행상황은
 > seal 결과와 post-hoc analysis가 대신한다.
@@ -400,7 +400,21 @@ branch에서 추적 가능하게 기록한다. `LOCAL` ledger ID만으로는 이
    `select.py`'s per-candidate `except SingularDesignError` is keyed to the exception TYPE, and OOF selection is
    bound to L1 only by a hard-coded map that nothing asserts — if a non-L1 factory ever reaches
    `select_hyperparams`, a singular comparator would be recorded as a non-viable hyperparameter candidate. Not
-   reachable today; assert the binding when that roster becomes configurable. Seal state remains **UNOPENED**; execution
+   reachable today; assert the binding when that roster becomes configurable.
+   **2026-07-31 addendum — the 2026-07-30 solver replacement widened this blocker's surface.** The new input
+   guards in `identify_operator` (non-2-D/empty `Z`, misaligned `eps_obs`, non-finite `Z`/`eps_obs`) and in
+   `IDOnlyModel.fit` (invalid `lam`, non-finite factors/targets, misaligned targets) raise a BARE `ValueError`,
+   which is neither a `SingularDesignError` nor covered by any other roster entry, so they land in exactly the
+   traceback-and-exit-1 hole enumerated above. This is a widening of the recorded blocker, **not a new defect
+   and not an inconsistency in the new code**: the module's convention is that an INPUT-contract violation is a
+   bare `ValueError` (as the pre-existing `lam must be finite and non-negative` has always been) while a
+   non-finite DECOMPOSITION or ESTIMATE is a `SingularDesignError`, and the new guards follow it. They are also
+   defense-in-depth for conditions rejected upstream — `deserialize_factor_bank_collection`'s
+   `_validated_factor_array` and `_verify_factor_banks` both reject a non-finite factor bank before Phase 2a —
+   and exit 1 is not a contracted success, so the path fails closed. Deliberately **not** remapped here for the
+   same reason the eight types above were not: choosing the type and exit code for these is a change to the
+   registered exit-code contract. Fold them into that scoped design rather than appending a mapping.
+   Seal state remains **UNOPENED**; execution
    remains **RELEASE-BLOCKED**.
    **2026-07-25 pre-pod local gate:** the probe-rerun runbook's §2.2 verification roster was run at clean exact
    commit `614017b67e35e9cc07f68d5b512213d8356cf1b2` — **254 passed**, plus `ruff check`/`ruff format --check`
