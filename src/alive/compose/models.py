@@ -42,7 +42,7 @@ from typing import Protocol, runtime_checkable
 
 import numpy as np
 
-from alive.compose.identify import SingularDesignError, identify_operator
+from alive.compose.identify import SingularDesignError, identify_operator, solve_ridge_svd
 from alive.compose.operator import bilinear_predict
 from alive.provenance import sha256_json
 
@@ -244,30 +244,53 @@ class IDOnlyModel:
         """Ridge-fit ``eps_obs`` on the symmetric pair feature (intercept unpenalised)."""
         Z = np.asarray(Z, dtype=np.float64)
         eps_obs = np.asarray(eps_obs, dtype=np.float64)
+        lam = float(lam)
+        if not np.isfinite(lam) or lam < 0.0:
+            raise ValueError(f"lam must be finite and non-negative, got {lam!r}")
+        if eps_obs.ndim == 1:
+            eps_obs = eps_obs[:, np.newaxis]
+        if not np.all(np.isfinite(Z)) or not np.all(np.isfinite(eps_obs)):
+            raise ValueError("ID-only factors and targets must contain only finite values")
         phi = self._design(Z, pairs)  # (n, d+1)
         d1 = phi.shape[1]
-        reg = float(lam) * np.eye(d1)
-        reg[-1, -1] = 0.0  # do not penalise the intercept
-        gram = phi.T @ phi + reg
-        # Normalize to the same contracted type the bilinear estimator raises.
-        # This solve is reached from the SAME post-selection loop in phase2a as
-        # ``identify_operator``, but ``LinAlgError`` is a bare ``ValueError``
-        # subclass and NOT a ``SingularDesignError``, so without this it left
-        # the driver's pre-seal roster and produced a traceback plus exit 1 --
-        # outside the exit-code contract, writing no artifact. Observed exposure
-        # is confined to ``lam == 0.0``, and the registered estimator-domain rank
-        # policy gates the BILINEAR design, not this one, so it does not exclude
-        # a bank that is full rank there and collinear here. (An earlier version
-        # of this comment explained the confinement by claiming a positive lam
-        # cannot rescue an intercept-collinear design. That is false: with the
-        # intercept unpenalised the Gram is positive definite for every
-        # ``lam > 0``. The confinement is recorded, not derived.)
-        try:
-            self.weight_ = np.linalg.solve(gram, phi.T @ eps_obs)  # (d+1, p)
-        except np.linalg.LinAlgError as exc:
+        if eps_obs.ndim != 2 or eps_obs.shape[0] != phi.shape[0]:
+            raise ValueError("ID-only targets must be row-aligned with the pair roster")
+
+        if lam == 0.0:
+            # Preserve the preregistered full-rank requirement for this comparator,
+            # but compute its unique solution without squaring the condition number.
+            rcond = float(max(phi.shape) * np.finfo(np.float64).eps)
+            try:
+                weight, _, rank, _ = np.linalg.lstsq(phi, eps_obs, rcond=rcond)
+            except np.linalg.LinAlgError as exc:
+                raise SingularDesignError(
+                    f"id_only unregularized solver failed at lam={lam!r}: {exc}"
+                ) from exc
+            if int(rank) < d1:
+                raise SingularDesignError(
+                    f"id_only design has no unique ridge solution at lam={lam!r}: "
+                    f"rank={rank} < feature_dim={d1}"
+                )
+            self.weight_ = np.asarray(weight, dtype=np.float64)
+            return self
+
+        # Eliminating the unpenalised intercept by centering reduces the problem
+        # exactly to ridge on the feature columns.  The shared SVD filter-factor
+        # solver then applies lambda without ever forming a Gram matrix.
+        features = phi[:, :-1]
+        feature_mean = np.mean(features, axis=0)
+        target_mean = np.mean(eps_obs, axis=0)
+        slopes = solve_ridge_svd(
+            features - feature_mean,
+            eps_obs - target_mean,
+            lam=lam,
+        )
+        intercept = target_mean - feature_mean @ slopes
+        self.weight_ = np.vstack([slopes, intercept])
+        if not np.all(np.isfinite(self.weight_)):
             raise SingularDesignError(
-                f"id_only design has no unique ridge solution at lam={float(lam)!r}: {exc}"
-            ) from exc
+                f"id_only regularized solver produced non-finite weights at lam={lam!r}"
+            )
         return self
 
     def predict_eps(self, Z: np.ndarray, g: int, h: int) -> np.ndarray:

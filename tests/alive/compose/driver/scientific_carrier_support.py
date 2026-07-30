@@ -16,10 +16,11 @@ import json
 import os
 import shutil
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import yaml
 
 from alive.compose.approximation_bias import (
@@ -43,7 +44,8 @@ from alive.compose.driver.run_spec import (
 )
 from alive.compose.fit_role import build_response_projection
 from alive.compose.split import ROLE_NAMES, build_split_manifest
-from alive.provenance import sha256_file, sha256_json
+from alive.compose.zfactor import GeneFactorBank, serialize_factor_bank_collection
+from alive.provenance import sha256_bytes, sha256_file, sha256_json
 
 _CANON_CONFIG = "configs/compose_k562_v1_phase2.yaml"
 _EVIDENCE_ROOT = Path("docs/activation-evidence/compose")
@@ -65,6 +67,36 @@ class ScientificCarrierBundle:
     approved_git_sha: str
     config_sha256: str
     activation_requirements: tuple[str, ...]
+
+
+def _build_scientific_factor_banks(
+    instance: dict[str, Any], *, sequence_mapping_hash: str
+) -> dict[int, GeneFactorBank]:
+    """Bind each synthetic scientific matrix to a complete per-k provenance bank."""
+    gene_order = tuple(sorted(instance["gene_index"], key=lambda gene: gene.encode("utf-8")))
+    banks: dict[int, GeneFactorBank] = {}
+    for raw_k, raw_matrix in instance["factors_by_k"].items():
+        k_total = int(raw_k)
+        matrix = np.asarray(raw_matrix, dtype=np.float64)
+        esm_dim = min(2, k_total - 1)
+        expression_dim = k_total - esm_dim
+        bank = GeneFactorBank(
+            k_total=k_total,
+            expression_dim=expression_dim,
+            esm_dim=esm_dim,
+            gene_order=gene_order,
+            z_by_gene={
+                gene: matrix[int(instance["gene_index"][gene])].copy() for gene in gene_order
+            },
+            expression_explained_variance=np.zeros(expression_dim, dtype=np.float64),
+            esm_explained_variance=np.zeros(esm_dim, dtype=np.float64),
+            expression_components=np.zeros((expression_dim, int(instance["p"])), dtype=np.float64),
+            esm_components=np.zeros((esm_dim, esm_dim), dtype=np.float64),
+            encoder_revision="synthetic-scientific-carrier-v1",
+            sequence_mapping_hash=sequence_mapping_hash,
+        )
+        banks[k_total] = replace(bank, checksum=sha256_bytes(bank.artifact_bytes()))
+    return banks
 
 
 def init_synthetic_repo(repo_root: Path) -> str:
@@ -464,8 +496,6 @@ def _build_activation_evidence(
 
 
 def build_scientific_carrier_fixture(root: Path, *, repo_root: Path) -> ScientificCarrierBundle:
-    import numpy as np
-
     from alive.compose.driver.seal_boundary import scientific_protocol_seal_audit_path
 
     root = Path(os.path.realpath(str(root)))
@@ -516,6 +546,10 @@ def build_scientific_carrier_fixture(root: Path, *, repo_root: Path) -> Scientif
     data_card_digest = fb._fixture_digest("data_card")
     raw_or_source_digest = fb._fixture_digest("raw_or_source")
     sequence_mapping_digest = fb._fixture_digest("sequence_mapping")
+    factor_banks = _build_scientific_factor_banks(
+        instance, sequence_mapping_hash=sequence_mapping_digest
+    )
+    factor_bank_payload = serialize_factor_bank_collection(factor_banks)
     run_id = compute_compose_run_id(
         config_digest=config_sha,
         data_card_digest=data_card_digest,
@@ -524,7 +558,7 @@ def build_scientific_carrier_fixture(root: Path, *, repo_root: Path) -> Scientif
     )
     checksums = {
         "response_space_checksum": response_combined,
-        "factor_checksum": fb._fixture_digest("factor_bank"),
+        "factor_checksum": factor_bank_payload["factor_checksum"],
         "manifest_checksum": manifest["checksum"],
         "environment_checksum": fb._fixture_digest("environment"),
         "data_card_checksum": data_card_digest,
@@ -536,6 +570,7 @@ def build_scientific_carrier_fixture(root: Path, *, repo_root: Path) -> Scientif
     phase2a_inputs = fb._build_phase2a_inputs(
         instance, config=cfg, run_id=run_id, checksums=checksums
     )
+    phase2a_inputs = replace(phase2a_inputs, factor_banks_by_k=factor_banks)
 
     # 4. dev-store DATA — source_kind="audited_unsealed" (scientific evidence).
     dev_source = {
@@ -644,11 +679,7 @@ def build_scientific_carrier_fixture(root: Path, *, repo_root: Path) -> Scientif
     )
     factor_bank_path = fb._write_json(
         stage1 / "factor_bank.json",
-        {
-            "schema": "compose_factor_bank_scientific_v1",
-            "factor_checksum": checksums["factor_checksum"],
-            "k_grid": [int(k) for k in cfg.total_k_grid],
-        },
+        factor_bank_payload,
     )
 
     # 7. worker files — gears/cpa requirements_lock pin the real revisions. Each method

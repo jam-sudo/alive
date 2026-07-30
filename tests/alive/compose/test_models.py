@@ -338,3 +338,24 @@ def test_id_only_singular_design_raises_the_contracted_type():
 
     for lam in (1e-12, *(0.001, 0.01, 0.1)):
         assert IDOnlyModel().fit(Z, pairs, eps, lam=lam).weight_ is not None
+
+
+def test_id_only_positive_ridge_survives_feature_scale_that_erases_gram_penalties():
+    """The shared SVD path must also protect the non-bilinear comparator."""
+    rng = np.random.default_rng(17)
+    Z = rng.normal(size=(22, 4))
+    Z[-2, 0] = 1e8
+    Z[-1, 0] = 0.0
+    pairs = [(int(a), int(b)) for a, b in rng.integers(0, 20, size=(45, 2)) if a != b]
+    pairs += [(20, 21)] * 10
+    eps = rng.normal(size=(len(pairs), 3))
+    design = IDOnlyModel._design(Z, pairs)
+    reg = 1e-3 * np.eye(design.shape[1])
+    reg[-1, -1] = 0.0
+    base = design.T @ design
+    lost = np.flatnonzero(np.diag(base + reg) == np.diag(base))
+    assert lost.size > 0
+
+    model = IDOnlyModel().fit(Z, pairs, eps, lam=1e-3)
+    assert model.weight_ is not None
+    assert np.all(np.isfinite(model.weight_))

@@ -5,7 +5,7 @@
 > **이 문서는 아무것도 정의하지 않는다** — 세부(task)는 plan, claim은 spec, exact param은 config,
 > 시간순 audit는 git이 authoritative다([sources of truth](../../CLAUDE.md#sources)). 상태 행이 authoritative
 > 문서와 어긋나면 **authoritative 문서가 옳다**; 이 인덱스를 갱신한다.
-> **Updated:** 2026-07-30 @ `83c1875` (branch `main`)
+> **Updated:** 2026-07-31 @ `6f58979` (branch `compose-svd-ridge-and-carrier-binding`)
 > **갱신 트리거:** sub-project/gate **상태가 바뀔 때만**(커밋마다 아님).
 > **종결 상태:** COMPOSE seal이 정확히 한 번 열리면 이 인덱스는 **frozen/은퇴**한다. 이후 진행상황은
 > seal 결과와 post-hoc analysis가 대신한다.
@@ -360,11 +360,18 @@ branch에서 추적 가능하게 기록한다. `LOCAL` ledger ID만으로는 이
    rather than a preferred path. (2) **The closure enumeration was still incomplete** — both package
    `__init__.py` files were missing, and `alive/compose/__init__.py` is the one importer node from which growth
    could hide, being a PEP-562 lazy-import gate that exists to keep the subprocess workers off the Phase-1
-   stack; the exact mutation a review said went undetected now fails. (3) **`uv.lock` was dropped from the
-   pin**: it records no CPython build (`grep cpython uv.lock` is empty), so it could not be faithful to the
-   interpreter claim while firing on every unrelated bump — and a check that fires mostly on benign changes gets
-   deleted. **Open item:** record the actual interpreter in the receipt schema; `.python-version` is a minor
-   series and identifies no patch release. (4) **The three history-reading tests would have failed on CI and
+   stack; the exact mutation a review said went undetected now fails. (3) **2026-07-30 correction:** `uv.lock`
+   is included in the pin after all. The proof runs after `uv sync --locked`, and the probe driver the launcher
+   execs (`scripts/compose/gears_decision_probe.py`, module-scope `anndata` / `numpy` / `pandas` / `scipy.sparse`
+   at lines 100-103) pulls the numeric stack in under the seccomp filter, so the resolved dependency graph is
+   part of what passed even though the lock does not identify the CPython build. (`run_network_isolated.py`
+   itself imports only the standard library; an earlier draft of this entry attributed those imports to the
+   launcher.) This is an intentional conservative superset: a dependency-only change requires a fresh proof.
+   **Operational cost, stated so it is not discovered at the wrong moment:** any `uv sync` that rewrites
+   `uv.lock` — including a routine dependency refresh — turns the closure test red until a fresh Linux
+   kernel-isolation CI run is archived and the pin moved to it. The test says so and says not to delete the
+   check; budget the re-archive rather than the deletion. **Open item:** record the actual interpreter in the
+   receipt schema; `.python-version` is a minor series and identifies no patch release. (4) **The three history-reading tests would have failed on CI and
    taken the kernel gate down with them.** The workflow checked out at `fetch-depth: 1`, where the commits the
    archives name do not exist; they pass on any full clone, which is why local green did not catch it. Worse, the
    receipt-build step had no `if:`, so a failing suite skipped it and the upload then failed closed — the only
@@ -393,7 +400,21 @@ branch에서 추적 가능하게 기록한다. `LOCAL` ledger ID만으로는 이
    `select.py`'s per-candidate `except SingularDesignError` is keyed to the exception TYPE, and OOF selection is
    bound to L1 only by a hard-coded map that nothing asserts — if a non-L1 factory ever reaches
    `select_hyperparams`, a singular comparator would be recorded as a non-viable hyperparameter candidate. Not
-   reachable today; assert the binding when that roster becomes configurable. Seal state remains **UNOPENED**; execution
+   reachable today; assert the binding when that roster becomes configurable.
+   **2026-07-31 addendum — the 2026-07-30 solver replacement widened this blocker's surface.** The new input
+   guards in `identify_operator` (non-2-D/empty `Z`, misaligned `eps_obs`, non-finite `Z`/`eps_obs`) and in
+   `IDOnlyModel.fit` (invalid `lam`, non-finite factors/targets, misaligned targets) raise a BARE `ValueError`,
+   which is neither a `SingularDesignError` nor covered by any other roster entry, so they land in exactly the
+   traceback-and-exit-1 hole enumerated above. This is a widening of the recorded blocker, **not a new defect
+   and not an inconsistency in the new code**: the module's convention is that an INPUT-contract violation is a
+   bare `ValueError` (as the pre-existing `lam must be finite and non-negative` has always been) while a
+   non-finite DECOMPOSITION or ESTIMATE is a `SingularDesignError`, and the new guards follow it. They are also
+   defense-in-depth for conditions rejected upstream — `deserialize_factor_bank_collection`'s
+   `_validated_factor_array` and `_verify_factor_banks` both reject a non-finite factor bank before Phase 2a —
+   and exit 1 is not a contracted success, so the path fails closed. Deliberately **not** remapped here for the
+   same reason the eight types above were not: choosing the type and exit code for these is a change to the
+   registered exit-code contract. Fold them into that scoped design rather than appending a mapping.
+   Seal state remains **UNOPENED**; execution
    remains **RELEASE-BLOCKED**.
    **2026-07-25 pre-pod local gate:** the probe-rerun runbook's §2.2 verification roster was run at clean exact
    commit `614017b67e35e9cc07f68d5b512213d8356cf1b2` — **254 passed**, plus `ruff check`/`ruff format --check`
@@ -438,7 +459,33 @@ branch에서 추적 가능하게 기록한다. `LOCAL` ledger ID만으로는 이
    different LAPACK drivers (`gesdd` vs `gelsd`), so identical *threshold* does not mean identical computed
    rank at the boundary; reviewers measured 9 disagreements in 4000 random matrices and 0 in 22,500 real
    design-matrix shapes. Seal state remains **UNOPENED**; execution remains **RELEASE-BLOCKED**.
-   **2026-07-29 unrepresentable-ridge guard (closes correction (1) above):** the open item is resolved without
+   **2026-07-30 supersession — stable registered ridge solver:** the 2026-07-29 exact-equality guard described
+   below is no longer the shipped solver. It rejected only complete penalty loss, still allowed quantized or
+   numerically immaterial penalties, and left ID-only on the same normal-equation hazard. Positive bilinear and
+   ID-only ridge now use SVD filter factors on the design matrix (ID-only first eliminates its unpenalised
+   intercept by centering), never form `Phi.T @ Phi + lambda I`, and fail closed on non-finite inputs/results or
+   LAPACK failure. `identification.regularized_solver: svd_ridge_filter_factors` is now config-registered and
+   copied into `selected_hyperparameters`; this intentionally moves the config digest and makes all prior
+   config-bound evidence stale. The resulting canonical config digest is
+   `2a8b1bc37b4b952b29dd57cf128d2aa27a2a698693e1376e569544ff119e85eb`; it must be the config axis of
+   any replacement evidence and run identity.
+   **Carried forward, NOT superseded — the registered condition ceiling.** The 2026-07-29 entry below opened
+   this as a new item, and removing the representability guard makes it more load-bearing, not less: that guard
+   incidentally rejected an extreme block-scale imbalance, and nothing now does. Measured 2026-07-31 on the
+   exhibit from the deleted `test_one_over_scaled_factor_block_is_rejected…` (that file's `_make` at seed 6,
+   `z` with the ESM block scaled by `1e6`): `rank_diagnostics` reports full rank with condition number
+   `3.71e12` against `10.4218` for the same bank unscaled, and `identify_operator(lam=1e-3)` now returns a
+   finite estimate with no rejection where it previously raised. That estimate is not wrong — it is the exact
+   ridge solution for that design — so this is a scientific admissibility question, not a numerical one, which
+   is precisely why the old guard's coarse answer should not be reinstated. The available signal is unchanged:
+   the condition number is exactly scale-invariant under a UNIFORM rescale (`10.4218` at `1x` and at `1e6x`)
+   but moves 11.55 orders of magnitude under this block imbalance, and `diagnostics2`'s `isfinite` check still
+   fires iff `rank < sym_dim` (`rank_diagnostics` returns `inf` exactly then). A ceiling is
+   a registered numerical criterion — a new config field that moves the digest — and is still deliberately not
+   invented here. **Open item, owner decision.**
+   The remainder of this 2026-07-29 entry is retained as historical analysis of
+   the replaced guard, not a description of current execution.
+   **2026-07-29 unrepresentable-ridge guard (historical; superseded above):** the open item was resolved without
    registering a new numerical criterion. `identify.py` now rejects a positive `lam` that leaves ANY Gram
    diagonal entry unchanged by `lam*I` — on those coordinates the design solved carries no penalty, so it is
    not the registered `(Phi^T Phi + lam I)`. Exact equality, no tolerance, so `config_sha256` and `run_id` do
@@ -559,6 +606,25 @@ branch에서 추적 가능하게 기록한다. `LOCAL` ledger ID만으로는 이
    invisible in the confirmation manifest's `selected_hyperparameters`, unlike the registered
    `unregularized_oof_rank_policy`; scientific mode pins `HEAD == approved_git_sha`, so the owner SHA pin must
    be regenerated regardless. Seal state remains **UNOPENED**; execution remains **RELEASE-BLOCKED**.
+   **2026-07-31 — scientific stage-1 `factor_bank.json` is now a bound artifact, not a stub.** Recorded here
+   because it changes a MANDATORY pre-seal input contract, independently of the ridge-solver work above. The
+   scientific carrier previously left `Phase2aInputs.factor_banks_by_k` unset, which
+   `_verify_factor_banks(require_banks=True)` rejects — and scientific execution is exactly
+   `fixture_execution=False` (`phase2a.py:1410`), so the scientific path could not have completed Phase 2a.
+   `carrier_loader._load_phase2a_inputs` now takes `require_factor_banks` and, for scientific mode,
+   deserializes `factor_bank.json` through `zfactor.deserialize_factor_bank_collection`: a closed-schema
+   `compose_factor_bank_collection_v1` payload carrying one lossless, self-checksummed `GeneFactorBank` report
+   per `k_total`, whose aggregate digest must equal `phase2a_inputs.factor_checksum`. The loader additionally
+   re-verifies the reconstructed `Phase2aInputs.content_checksum`, which is the only semantic check standing
+   behind the spec's byte digests once a forger re-signs both the file and `self_checksum`; a regression test
+   defeating both byte layers now pins it (`test_scientific_carrier_rejects_resigned_phase2a_inputs_field_edit`).
+   Fixture mode is untouched (`require_factor_banks=False`, old thin payload). **Consequence for the pod:** any
+   producer of a scientific PREPARE carrier must emit the collection via
+   `zfactor.serialize_factor_bank_collection`. No such producer exists in `src/` or `scripts/` — as is true of
+   every other scientific stage-1 artifact, whose only writer today is the test-support module — so this changes
+   what that future producer owes, not the current inventory. The as-built plan snippet in
+   `plans/2026-07-12-compose-scientific-prepare-carrier.md` (Task 1) prescribed the retired three-key stub and
+   now carries a dated supersession banner.
    **2026-07-29 config-bound evidence lineage (survey only; nothing regenerated):** the two committed
    activation-evidence reports both embed `config_sha256 = d8c65ac4…`, which the current config no longer
    produces. Recomputing `sha256_json(raw)` at every commit that touched

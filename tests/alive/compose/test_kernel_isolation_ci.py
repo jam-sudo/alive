@@ -592,14 +592,11 @@ _ISOLATION_CLOSURE = (
     # this check indirectly.
     "src/alive/__init__.py",
     "src/alive/compose/__init__.py",
-    # `.python-version` only, not `uv.lock`. The lock records no CPython build at
-    # all (`grep cpython uv.lock` is empty), so pinning its 1691 lines of ruff,
-    # pytest and torch could not be faithful to the interpreter claim it was
-    # added for, while firing on every unrelated dependency bump -- and a check
-    # that fires mostly on benign changes gets deleted. Recording the actual
-    # interpreter in the receipt schema is the right mechanism and is an open
-    # readiness item; `.python-version` is a minor series (3.12), so even this
-    # does not identify a patch release.
+    # The proof ran after `uv sync --locked`; the resolved import/runtime graph is
+    # therefore decision-relevant even though uv.lock does not identify the
+    # CPython build. Pin the lock as an intentional conservative superset, and
+    # keep exact interpreter patch/build identity as a separate receipt gap.
+    "uv.lock",
     ".python-version",
 )
 

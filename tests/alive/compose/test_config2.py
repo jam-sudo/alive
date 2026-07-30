@@ -28,6 +28,7 @@ from alive.compose.config2 import (
     assert_scientific_mode_allowed,
     load_compose_phase2_config,
 )
+from alive.compose.identify import REGULARIZED_SOLVER
 from alive.compose.split import ROLE_NAMES
 from alive.provenance import sha256_json
 
@@ -345,6 +346,7 @@ def test_runtime_contract_values_are_exposed_and_hashed():
     cfg = load_compose_phase2_config(CANON)
     assert cfg.lambda_grid == (0.0, 0.001, 0.01, 0.1)
     assert cfg.unregularized_solver == "svd_lstsq_minimum_norm"
+    assert cfg.regularized_solver == REGULARIZED_SOLVER == "svd_ridge_filter_factors"
     assert cfg.unregularized_oof_rank_policy == "require_full_rank_each_train_fold"
     assert cfg.rank_tolerance_rule == "max_shape_times_float64_eps_times_sigma_max"
     assert cfg.oof_folds == 3
@@ -371,6 +373,7 @@ def test_runtime_contract_values_are_exposed_and_hashed():
     [
         ("estimator", "unregistered_solver"),
         ("unregularized_solver", "singular_normal_equations"),
+        ("regularized_solver", "normal_equation_solve"),
         ("selection", "row_random_cv"),
         ("unregularized_oof_rank_policy", "score_arbitrary_solution"),
         ("rank_tolerance_rule", "lapack_solver_outcome"),
@@ -656,6 +659,10 @@ _MISSING_KEY_CASES = [
     (
         "identification",
         lambda raw: raw["identification"].pop("unregularized_solver"),
+    ),
+    (
+        "identification",
+        lambda raw: raw["identification"].pop("regularized_solver"),
     ),
     (
         "identification",

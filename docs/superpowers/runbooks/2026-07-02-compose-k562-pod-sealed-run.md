@@ -194,9 +194,15 @@ post-seal non-COMPLETE(durable export 미완료 포함), `10` pre-seal rejection
   `worker_bundle.py`, `activation_evidence.py`, `approximation_bias.py`, `baseline_subprocess.py`,
   `baselines_combo.py`), 두 package `__init__.py`(`src/alive/`, `src/alive/compose/` — 후자는 PEP-562
   lazy-import gate이고 eager import로 바꾸면 seccomp 하 import surface가 달라진다), 그리고
-  `.python-version`을 포함한다. **`uv.lock`은 제외한다** — CPython build를 전혀 기록하지 않아 interpreter
-  주장에 충실할 수 없고 무관한 dependency bump마다 발화한다. Receipt schema에 실제 interpreter를 기록하는 것이
-  옳은 기제이며 **미해결 항목**이다(`.python-version`은 minor series라 patch release를 식별하지 못한다).
+  `.python-version`과 `uv.lock`을 포함한다. 후자는 CPython build 자체를 기록하지 않지만 실제 proof가
+  `uv sync --locked` 뒤 실행되고, launcher가 exec하는 probe driver(`scripts/compose/gears_decision_probe.py`가
+  `anndata`/`numpy`/`pandas`/`scipy.sparse`를 module scope에서 import)가 seccomp filter 아래에서 수치 stack을
+  끌어들이므로 resolved dependency graph 전체를 보수적 closure로 취급한다(`run_network_isolated.py` 자체는
+  standard library만 import한다 — 이전 판이 이 import를 launcher에 귀속시킨 것은 오기다).
+  **운영 비용:** `uv.lock`을 다시 쓰는 모든 `uv sync`는 통상적인 dependency refresh를 포함해 closure test를
+  red로 만들며, 새 Linux kernel-isolation CI run을 archive하고 pin을 옮기기 전까지 유지된다. check 삭제가
+  아니라 re-archive를 예산에 넣는다. Receipt schema에 실제 interpreter를 기록하는 것은
+  여전히 **미해결 항목**이다(`.python-version`은 minor series라 patch release를 식별하지 못한다).
   `tests/alive/compose/test_kernel_isolation_ci.py`가 이를 fail-closed로 강제한다.
 - 이 evidence는 GEARS Probe-A driver 경로를 덮으며 COMPOSE scientific execution 전반이 아니고, 어떤
   production pod가 올바르게 구성되었음을 established하지도 않는다(그 pod 자신의 `capture-runtime` evidence가

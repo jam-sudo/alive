@@ -17,6 +17,8 @@ All fixtures are tiny synthetic numpy arrays — ACTIVATION remains BLOCKED.
 
 from __future__ import annotations
 
+import copy
+
 import numpy as np
 import pytest
 
@@ -24,6 +26,8 @@ from alive.compose.zfactor import (
     GeneFactorBank,
     build_factor_grid,
     build_gene_factors,
+    deserialize_factor_bank_collection,
+    serialize_factor_bank_collection,
 )
 
 ENCODER_REVISION = "esm2_t33_650M_UR50D_mean_pool"
@@ -335,3 +339,35 @@ def test_build_factor_grid_rejects_infeasible_k():
             encoder_revision=ENCODER_REVISION,
             sequence_mapping_hash=SEQ_MAP_HASH,
         )
+
+
+def test_factor_bank_collection_round_trip_is_lossless_and_bound():
+    delta_by_gene, sequence_by_gene = _synthetic_inputs(seed=13)
+    banks = build_factor_grid(
+        delta_by_gene=delta_by_gene,
+        sequence_by_gene=sequence_by_gene,
+        total_k_grid=(4, 6, 8),
+        esm_dim=2,
+        encoder_revision=ENCODER_REVISION,
+        sequence_mapping_hash=SEQ_MAP_HASH,
+    )
+    payload = serialize_factor_bank_collection(banks)
+    loaded, aggregate = deserialize_factor_bank_collection(payload)
+
+    assert aggregate == payload["factor_checksum"]
+    assert set(loaded) == set(banks)
+    for k_total in banks:
+        assert loaded[k_total].checksum == banks[k_total].checksum
+        for gene in banks[k_total].gene_order:
+            np.testing.assert_array_equal(
+                loaded[k_total].z_by_gene[gene], banks[k_total].z_by_gene[gene]
+            )
+
+
+def test_factor_bank_collection_rejects_internal_numeric_tamper():
+    payload = serialize_factor_bank_collection({6: _build(seed=14, k_total=6)})
+    tampered = copy.deepcopy(payload)
+    first_gene = tampered["factor_banks_by_k"]["6"]["gene_order"][0]
+    tampered["factor_banks_by_k"]["6"]["z_by_gene"][first_gene][0] += 1.0
+    with pytest.raises(ValueError, match="factor-bank checksum does not verify"):
+        deserialize_factor_bank_collection(tampered)

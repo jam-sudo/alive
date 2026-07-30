@@ -3,6 +3,10 @@
 > **Status update (2026-07-19): IMPLEMENTED + MERGED to the B-boundary.** 아래 task는 as-built
 > record이며 current work queue가 아니다. Scientific execution remains RELEASE-BLOCKED.
 
+> **Partial supersession (2026-07-31).** Task 1(test-only scientific carrier fixture support)의 scientific
+> stage-1 `factor_bank.json` payload는 더 이상 현행 loader가 받아들이지 않는다. 해당 코드 블록에 붙은 dated
+> banner를 참조한다. 이 문서의 나머지 as-built record는 유효하다.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development
 > (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use
 > checkbox (`- [ ]`) syntax for tracking. Each task is written test-first (TDD: RED → GREEN →
@@ -531,6 +535,19 @@ Steps:
               "k_grid": [int(k) for k in cfg.total_k_grid],
           },
       )
+
+> **SUPERSEDED 2026-07-31 — the scientific `factor_bank.json` contract above no longer loads.** The three-key
+> stub was replaced by a full serialized factor-bank collection. The shipped loader
+> (`alive.compose.zfactor.deserialize_factor_bank_collection`, reached from
+> `carrier_loader._load_phase2a_inputs(..., require_factor_banks=True)`) rejects the payload above on BOTH the
+> schema string (now `compose_factor_bank_collection_v1`) and a closed key roster that additionally requires
+> `factor_banks_by_k` — one lossless, self-checksummed `GeneFactorBank` report per `k_total`, whose aggregate
+> digest must equal `phase2a_inputs.factor_checksum`. Producers must emit it via
+> `alive.compose.zfactor.serialize_factor_bank_collection`, not by hand. Fixture mode is unaffected: it loads
+> with `require_factor_banks=False` and `fixture_builder.py` still writes the old thin
+> `compose_factor_bank_fixture_v1` shape. The as-written snippet is preserved above as the 2026-07-19 as-built
+> record. Current authority: `src/alive/compose/zfactor.py` and
+> `docs/superpowers/COMPOSE-SEAL-READINESS.md`.
 
       # 7. worker files — gears/cpa requirements_lock pin the real revisions.
       worker_bundle = fb.build_worker_bundle(

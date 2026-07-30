@@ -84,6 +84,7 @@ from alive.compose.phase2b import (
     build_activation_provenance_inputs,
 )
 from alive.compose.response import ResponseSpace
+from alive.compose.zfactor import deserialize_factor_bank_collection
 from alive.provenance import EnvironmentInfo, sha256_bytes
 
 __all__ = [
@@ -317,7 +318,7 @@ def load_run_spec_carrier(
         )
         return RunSpecCarrier._fixture(
             spec_path=spec_path,
-            phase2a_inputs=_load_phase2a_inputs(spec),
+            phase2a_inputs=_load_phase2a_inputs(spec, require_factor_banks=False),
             dev_store_audit=_load_dev_store_audit(spec),
             response_artifact=_load_response_artifact(spec),
             sealed_outcome=_load_sealed_outcome(spec),
@@ -362,7 +363,7 @@ def load_run_spec_carrier(
     # §5.7: construct through the scientific-only constructor.
     return RunSpecCarrier._scientific(
         spec_path=spec_path,
-        phase2a_inputs=_load_phase2a_inputs(spec),
+        phase2a_inputs=_load_phase2a_inputs(spec, require_factor_banks=True),
         dev_store_audit=_load_dev_store_audit(spec),
         response_artifact=_load_response_artifact(spec),
         sealed_outcome=_load_scientific_sealed_outcome(spec),
@@ -536,7 +537,7 @@ def _read_json(path: str | Path) -> dict[str, Any]:
 # --------------------------------------------------------------------------- #
 
 
-def _load_phase2a_inputs(spec: ResolvedRunSpec) -> Phase2aInputs:
+def _load_phase2a_inputs(spec: ResolvedRunSpec, *, require_factor_banks: bool) -> Phase2aInputs:
     """Rehydrate the live :class:`~alive.compose.phase2a.Phase2aInputs`.
 
     Inverse of ``fixture_builder._serialize_phase2a_inputs``: reconstructs every
@@ -546,7 +547,19 @@ def _load_phase2a_inputs(spec: ResolvedRunSpec) -> Phase2aInputs:
     reproduces the serialized value because every field is byte-faithful.
     """
     payload = _read_json(spec.pre_seal["phase2a_inputs"].path)
-    return Phase2aInputs(
+    factor_banks_by_k = None
+    if require_factor_banks:
+        factor_payload = _read_json(spec.pre_seal["factor_bank"].path)
+        try:
+            factor_banks_by_k, aggregate = deserialize_factor_bank_collection(factor_payload)
+        except (TypeError, ValueError) as exc:
+            raise RunSpecError(f"invalid scientific factor-bank artifact: {exc}") from exc
+        if aggregate != payload.get("factor_checksum"):
+            raise RunSpecError(
+                "scientific factor-bank aggregate checksum disagrees with phase2a_inputs"
+            )
+
+    inputs = Phase2aInputs(
         run_id=payload["run_id"],
         gene_index={str(g): int(i) for g, i in payload["gene_index"].items()},
         factors_by_k={
@@ -578,7 +591,13 @@ def _load_phase2a_inputs(spec: ResolvedRunSpec) -> Phase2aInputs:
         data_card_checksum=str(payload["data_card_checksum"]),
         raw_data_checksum=str(payload["raw_data_checksum"]),
         sequence_mapping_checksum=str(payload["sequence_mapping_checksum"]),
+        factor_banks_by_k=factor_banks_by_k,
     )
+    if payload.get("content_checksum") != inputs.content_checksum:
+        raise RunSpecError(
+            "phase2a_inputs content_checksum does not verify after carrier reconstruction"
+        )
+    return inputs
 
 
 def _load_dev_store_audit(spec: ResolvedRunSpec) -> dict[str, Any]:

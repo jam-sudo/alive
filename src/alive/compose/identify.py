@@ -26,6 +26,13 @@ class SingularDesignError(ValueError):
     """
 
 
+#: Exact positive-ridge implementation pinned by the Phase-2 config.  The
+#: filter-factor form applies lambda to singular values directly and never forms
+#: ``Phi.T @ Phi``, whose squaring of the condition number can erase a small
+#: registered penalty before the solve starts.
+REGULARIZED_SOLVER = "svd_ridge_filter_factors"
+
+
 @dataclass(frozen=True)
 class RankReport:
     """Algebraic-identifiability diagnostics for a calibration pair set."""
@@ -61,6 +68,59 @@ def rank_diagnostics(Z: np.ndarray, pairs: list[tuple[int, int]]) -> RankReport:
     )
 
 
+def solve_ridge_svd(design: np.ndarray, target: np.ndarray, *, lam: float) -> np.ndarray:
+    """Solve positive ridge regression with stable SVD filter factors.
+
+    Returns ``argmin_W ||design W - target||² + lam ||W||²``.  Computing
+    ``s / (s² + lam)`` naively can itself overflow or underflow; the two algebraic
+    branches below keep every division in a bounded ratio while applying the
+    registered ``lam`` without constructing normal equations.
+    """
+    design = np.asarray(design, dtype=np.float64)
+    target = np.asarray(target, dtype=np.float64)
+    lam = float(lam)
+    if not np.isfinite(lam) or lam <= 0.0:
+        raise ValueError(f"lam must be finite and positive for ridge SVD, got {lam!r}")
+    if design.ndim != 2 or design.shape[0] == 0 or design.shape[1] == 0:
+        raise ValueError(f"design must be a non-empty 2-D matrix, got shape {design.shape!r}")
+    if target.ndim == 1:
+        target = target[:, np.newaxis]
+    if target.ndim != 2 or target.shape[0] != design.shape[0]:
+        raise ValueError(
+            "target must be 1-D/2-D and row-aligned with design: "
+            f"design={design.shape!r}, target={target.shape!r}"
+        )
+    if not np.all(np.isfinite(design)) or not np.all(np.isfinite(target)):
+        raise ValueError("ridge design and target must contain only finite values")
+
+    try:
+        u, singular_values, vt = np.linalg.svd(design, full_matrices=False)
+    except np.linalg.LinAlgError as exc:
+        raise SingularDesignError(f"regularized SVD solver failed at lam={lam!r}: {exc}") from exc
+    if not (
+        np.all(np.isfinite(u)) and np.all(np.isfinite(singular_values)) and np.all(np.isfinite(vt))
+    ):
+        raise SingularDesignError(
+            f"regularized SVD solver produced a non-finite decomposition at lam={lam!r}"
+        )
+
+    root_lam = float(np.sqrt(lam))
+    gains = np.empty_like(singular_values)
+    large = singular_values >= root_lam
+    # s >= sqrt(lam): (1/s) / (1 + lam/s²), avoiding s² overflow.
+    gains[large] = (1.0 / singular_values[large]) / (1.0 + (root_lam / singular_values[large]) ** 2)
+    # s < sqrt(lam): (s/lam) / (1 + s²/lam), including s == 0.
+    gains[~large] = (singular_values[~large] / lam) / (
+        1.0 + (singular_values[~large] / root_lam) ** 2
+    )
+    solution = (vt.T * gains) @ (u.T @ target)
+    if not np.all(np.isfinite(solution)):
+        raise SingularDesignError(
+            f"regularized SVD solver produced a non-finite estimate at lam={lam!r}"
+        )
+    return np.asarray(solution, dtype=np.float64)
+
+
 def identify_operator(
     Z: np.ndarray,
     pairs: list[tuple[int, int]],
@@ -68,62 +128,27 @@ def identify_operator(
     *,
     lam: float = 0.0,
 ) -> np.ndarray:
-    """Estimate ``coef`` (p, sym_dim) by ridge least squares on the design matrix.
+    """Estimate ``coef`` (p, sym_dim) by ridge least squares.
 
-    Solves ``min_C ||Phi C^T - eps_obs||^2 + lam ||C||^2``. At ``lam == 0`` it
-    uses the SVD minimum-norm least-squares solution with the same
-    ``max(shape) * float64-eps * sigma_max`` cutoff as :func:`rank_diagnostics`;
-    this defines Phase-1 rank-deficient recovery without relying on an arbitrary
-    singular normal-equation result. Positive ridge penalties use
-    ``(Phi^T Phi + lam I) C^T = Phi^T eps_obs``, and are rejected when the
-    penalty is not representable against the Gram's scale (see below).
-
-    Raises
-    ------
-    SingularDesignError
-        If LAPACK cannot compute the least-squares/linear-system solution, or if
-        a positive ``lam`` leaves any Gram diagonal entry unchanged — on those
-        coordinates the registered ridge is numerically absent, so the design
-        that would be solved is not ``(Phi^T Phi + lam I)``. Phase-2a OOF
-        selection applies its registered train-fold rank policy before fitting,
-        and records a candidate rejected here as non-viable rather than scoring
-        it.
-
-        Scope. A coordinate is lost when ``lam < ulp(d_ii)/2``, and at the tie
-        ``lam == ulp(d_ii)/2`` only when ``d_ii``'s last mantissa bit is even.
-        ``ulp(d)/2`` is a power of two and no registered lambda is one, so the
-        tie is unreachable here. Wherever the penalty survives it is still
-        quantized to a multiple of ``ulp(d_ii)``, and the ratio actually applied
-        is lambda-specific: over all surviving scales ``applied/lam`` spans
-        ``[0.977, 1.953]`` at ``lam=0.001``, ``[0.781, 1.563]`` at ``0.01`` and
-        ``[0.625, 1.250]`` at ``0.1`` — the low end of the last reached only at
-        the top of a binade, where ``d + lam`` crosses into the next one. Exact
-        application needs ``ulp(d)`` to divide ``lam``, so writing ``lam`` as an
-        odd multiple of ``2**k`` it becomes impossible from ``d >= 2**(k + 53)``:
-        ``2**-7`` at ``lam=0.001``, ``2**-6`` at ``0.01`` and ``2**-2`` at
-        ``0.1``. Whether a real calibration Gram sits above those thresholds is
-        NOT established here, and the claim that it does — which an earlier
-        revision asserted — is withdrawn: no committed artifact records the
-        absolute factor scale, and the thresholds apply per coordinate, so a
-        sufficiently spread diagonal can put small coordinates below them while
-        large ones stay above. That direction is benign, since the bound below is
-        an upper bound either way. A registered
-        lambda can
-        therefore be applied up to ~37% below its registered value with this
-        check silent, so "the design solved is the registered one" is not
-        certified — only "no coordinate lost its penalty outright". Ordinary
-        ill-conditioning is
-        likewise out of scope: a well-represented ``lam`` can still be
-        immaterial to the fit. Non-finite
-        ``Z``: ``inf`` diagonals compare equal and DO reject; ``NaN`` compares
-        unequal to itself and does not, so this is not fail-closed under NaN
-        (the factor builder rejects non-finite inputs upstream).
+    ``lam == 0`` uses the registered SVD minimum-norm least-squares cutoff.
+    Positive penalties use :data:`REGULARIZED_SOLVER`: SVD filter factors on
+    ``Phi`` itself.  This avoids both condition-number squaring and the prior
+    ``Phi.T @ Phi + lam I`` failure mode where floating-point addition silently
+    erased or quantized the registered penalty on large factor coordinates.
     """
     Z = np.asarray(Z, dtype=np.float64)
     eps_obs = np.asarray(eps_obs, dtype=np.float64)
     lam = float(lam)
     if not np.isfinite(lam) or lam < 0.0:
         raise ValueError(f"lam must be finite and non-negative, got {lam!r}")
+    if Z.ndim != 2 or Z.shape[0] == 0 or Z.shape[1] == 0:
+        raise ValueError(f"Z must be a non-empty 2-D matrix, got shape {Z.shape!r}")
+    if eps_obs.ndim == 1:
+        eps_obs = eps_obs[:, np.newaxis]
+    if eps_obs.ndim != 2 or len(pairs) != eps_obs.shape[0] or not pairs:
+        raise ValueError("eps_obs must be 1-D/2-D and row-aligned with a non-empty pair roster")
+    if not np.all(np.isfinite(Z)) or not np.all(np.isfinite(eps_obs)):
+        raise ValueError("Z and eps_obs must contain only finite values")
 
     phi = design_matrix(Z, pairs)
     if lam == 0.0:
@@ -142,59 +167,4 @@ def identify_operator(
             ) from exc
         return coef_t.T
 
-    base = phi.T @ phi
-    gram = base + lam * np.eye(phi.shape[1])
-    # Exact representability of the registered estimator -- NOT a tolerance, and
-    # not a new registered numerical criterion. The penalty is added to each
-    # diagonal entry independently, so on a factor bank scaled far enough above
-    # ``lam`` the addition rounds away and ``fl(d_ii + lam) == d_ii``: on those
-    # coordinates the design that gets solved carries no penalty at all, and a
-    # positive registered lambda has been applied as something other than
-    # itself. Rejecting on ANY such coordinate rather than on all of them is
-    # deliberate. ``z`` concatenates an expression block and an ESM block, so a
-    # single over-scaled block loses the penalty only on the basis elements that
-    # involve it -- an all-coordinates rule cannot fire on exactly the input
-    # whose scale nothing upstream bounds. It also makes this reproducible from
-    # committed evidence: ``design_matrix`` rows satisfy
-    # ``||row||**2 = (||z_g||**2 ||z_h||**2 + (z_g . z_h)**2) / 2 <= max||z||**4``
-    # by Cauchy-Schwarz, and ``d_ii <= sum_i d_ii = sum_pairs ||row||**2``, so
-    # ``d_ii <= n_pairs * max||z||**4`` with constant 1 sharp (attained by
-    # ``z_g = z_h = M e_1`` on every pair). No coordinate can lose ``lam`` below
-    # a scale that follows from the pair count alone, without the (uncommitted)
-    # Gram spectrum. Only that FLOOR is spectrum-free; where the guard actually
-    # fires is spectrum-dependent and sits AT OR above it — the sharp
-    # configuration attains the bound, so the two coincide there.
-    #
-    # Nothing upstream bounds that scale: ``_verify_factor_banks`` binds
-    # provenance only, and the registered OOF rank policy is keyed to the literal
-    # ``lam == 0.0`` and so never runs for a ridge candidate. No registered
-    # diagnostic *rejects* on it, which is why it is checked at the point of use.
-    #
-    # Do not read that as "nothing can see it". ``rank_diagnostics`` is
-    # scale-invariant only under a UNIFORM rescale of ``z`` (and even then only
-    # up to the last bits, for non-dyadic factors). Under the BLOCK IMBALANCE
-    # this guard exists to catch, its condition number does move -- so the
-    # imbalance IS observable in a registered diagnostic. What is missing is a
-    # registered condition CEILING to reject on, an open item for the owner and
-    # deliberately not invented here. No magnitude is quoted: the figures first
-    # written here came from one synthetic surrogate and are not a property of
-    # the real factor bank, whose absolute scale nothing committed records.
-    diag_base = np.diag(base)
-    n_lost = int(np.sum(np.diag(gram) == diag_base))
-    if n_lost:
-        raise SingularDesignError(
-            f"ridge penalty lam={lam!r} is not representable against the calibration "
-            f"Gram on {n_lost} of {diag_base.size} coordinates: adding lam*I left those "
-            "diagonal entries unchanged, so the design that would be solved is not the "
-            "registered (Phi^T Phi + lam I). The usual cause is a factor bank scaled far "
-            "above the registered penalty; a non-finite (inf) factor entry reaches this "
-            "same check, since inf diagonals also compare equal"
-        )
-    rhs = phi.T @ eps_obs
-    try:
-        coef_t = np.linalg.solve(gram, rhs)  # (sym_dim, p)
-    except np.linalg.LinAlgError as exc:
-        raise SingularDesignError(
-            f"calibration design has no unique least-squares solution at lam={lam!r}: {exc}"
-        ) from exc
-    return coef_t.T
+    return solve_ridge_svd(phi, eps_obs, lam=lam).T
