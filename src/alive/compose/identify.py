@@ -101,7 +101,13 @@ def identify_operator(
         application needs ``ulp(d)`` to divide ``lam``, so writing ``lam`` as an
         odd multiple of ``2**k`` it becomes impossible from ``d >= 2**(k + 53)``:
         ``2**-7`` at ``lam=0.001``, ``2**-6`` at ``0.01`` and ``2**-2`` at
-        ``0.1``. Every calibration Gram is far above all three. A registered
+        ``0.1``. Whether a real calibration Gram sits above those thresholds is
+        NOT established here: no committed artifact records the absolute factor
+        scale, and read per-coordinate the claim is false in general — at the
+        recorded ``cond=484`` a spectrum-matched surrogate has a 5.1e3x diagonal
+        spread with ``d_min = 1.7e-2 < 2**-2``, so on its smallest coordinates
+        ``lam=0.1`` is applied EXACTLY. That direction is benign, since the bound
+        below is an upper bound either way. A registered
         lambda can
         therefore be applied up to ~37% below its registered value with this
         check silent, so "the design solved is the registered one" is not
@@ -160,12 +166,19 @@ def identify_operator(
     # configuration attains the bound, so the two coincide there.
     #
     # Nothing upstream bounds that scale: ``_verify_factor_banks`` binds
-    # provenance only, the registered OOF rank policy is keyed to the literal
-    # ``lam == 0.0`` and so never runs for a ridge candidate, and
-    # ``rank_diagnostics`` uses a tolerance relative to ``sigma_max`` and is
-    # therefore exactly scale-invariant -- its rank and condition number are
-    # unchanged across many orders of magnitude of ``||z||``. No registered
-    # diagnostic observes this, which is why it is checked at the point of use.
+    # provenance only, and the registered OOF rank policy is keyed to the literal
+    # ``lam == 0.0`` and so never runs for a ridge candidate. No registered
+    # diagnostic *rejects* on it, which is why it is checked at the point of use.
+    #
+    # Do not read that as "nothing can see it". ``rank_diagnostics`` is
+    # scale-invariant only under a UNIFORM rescale of ``z`` (and even then only
+    # up to the last bits, for non-dyadic factors). Under the BLOCK IMBALANCE
+    # this guard exists to catch, its condition number moves a great deal:
+    # scaling the ESM block alone by 1e4 takes a measured 20x8 surrogate from
+    # cond 134.7 to 3.56e9 against the recorded real values 15.8 / 32.9 / 484,
+    # and by 1e8 the rank collapses outright. So the imbalance IS observable in a
+    # registered diagnostic; what is missing is a registered condition CEILING to
+    # reject on -- an open item for the owner, deliberately not invented here.
     diag_base = np.diag(base)
     n_lost = int(np.sum(np.diag(gram) == diag_base))
     if n_lost:
@@ -173,8 +186,9 @@ def identify_operator(
             f"ridge penalty lam={lam!r} is not representable against the calibration "
             f"Gram on {n_lost} of {diag_base.size} coordinates: adding lam*I left those "
             "diagonal entries unchanged, so the design that would be solved is not the "
-            "registered (Phi^T Phi + lam I). The factor bank is scaled too far above "
-            "the registered penalty for that penalty to be applied as registered"
+            "registered (Phi^T Phi + lam I). The usual cause is a factor bank scaled far "
+            "above the registered penalty; a non-finite (inf) factor entry reaches this "
+            "same check, since inf diagonals also compare equal"
         )
     rhs = phi.T @ eps_obs
     try:

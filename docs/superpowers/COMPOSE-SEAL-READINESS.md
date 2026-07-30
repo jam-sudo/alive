@@ -5,7 +5,7 @@
 > **이 문서는 아무것도 정의하지 않는다** — 세부(task)는 plan, claim은 spec, exact param은 config,
 > 시간순 audit는 git이 authoritative다([sources of truth](../../CLAUDE.md#sources)). 상태 행이 authoritative
 > 문서와 어긋나면 **authoritative 문서가 옳다**; 이 인덱스를 갱신한다.
-> **Updated:** 2026-07-29 @ `364e71c` (branch `main`)
+> **Updated:** 2026-07-30 @ `ce397c2` (branch `main`)
 > **갱신 트리거:** sub-project/gate **상태가 바뀔 때만**(커밋마다 아님).
 > **종결 상태:** COMPOSE seal이 정확히 한 번 열리면 이 인덱스는 **frozen/은퇴**한다. 이후 진행상황은
 > seal 결과와 post-hoc analysis가 대신한다.
@@ -266,12 +266,19 @@ branch에서 추적 가능하게 기록한다. `LOCAL` ledger ID만으로는 이
    **UNOPENED**; execution remains **RELEASE-BLOCKED**.
    **2026-07-29 v2 archive provenance, binding, and the falsifiability clock:** the committed v2 archive was
    re-derived from primary bytes, and the "review standing" caveat above **understates** the receipt's
-   provenance. The receipt embedded in the archive is byte-identical to `kernel-isolation-ci-receipt.json`
-   inside GitHub artifact `8631825177`, which the workflow itself builds on the runner (`test-suite.yml`
-   invokes the builder with `--output kernel-isolation-ci-receipt.json`) and uploads beside the JUnit. The
-   archiving session therefore transcribed a receipt the CI job produced rather than authoring one. That
-   removes hand-transcription from the trust base; it does **not** remove workflow authorship, which the same
-   session holds, so Actions' own execution integrity remains what backs the run. Verified against the live
+   provenance. The receipt embedded in the archive equals, field for field, the
+   `kernel-isolation-ci-receipt.json` inside GitHub artifact `8631825177`, which the workflow itself builds on
+   the runner (`test-suite.yml` invokes the builder with `--output kernel-isolation-ci-receipt.json`) and
+   uploads beside the JUnit. (The builder compares the two as dicts, and the archive's `receipt_sha256` is a
+   canonical-JSON digest while the CI file is written indented — so "byte-identical", used in an earlier version
+   of this entry, is the wrong word for a value equality that no byte comparison would pass.) The archiving
+   session therefore transcribed a receipt the CI job produced rather than authoring one. That narrows the trust
+   base by removing hand-transcription of the receipt BODY; it does **not** remove workflow authorship, which
+   the same session holds, so Actions' own execution integrity remains what backs the run. It also does not
+   cover the wrapper: `artifact_id`, `artifact_name`, `expires_at_utc`, `archived_at_utc` and `archived_by`
+   remain hand-supplied archiver arguments — including `expires_at_utc`, which the clock argument below rests
+   on. And it does not transfer to v1: the workflow at `614017b` had no receipt step, so the
+   independently-graded archive's receipt **is** hand-authored, the opposite of the property credited here. Verified against the live
    artifact: run `30200634662` conclusion `success`, `head_sha` `2dd23d6…`, `run_attempt` 1; artifact zip
    SHA-256 `1707a4dc…22ad` = `source_artifact.archive_sha256`; `junit.xml` SHA-256 `77c0262a…b84f` = both
    `junit_sha256` fields; `sha256_json` of the CI receipt = `receipt_sha256` `a6e6c024…a06b`; and both roster
@@ -283,14 +290,34 @@ branch에서 추적 가능하게 기록한다. `LOCAL` ledger ID만으로는 이
    access can refute the archive by repeating the above; once it expires the JSON is the sole record,
    unfalsifiable, and the grade becomes the entire trust basis. Actions retention here is 90 days, so the
    **v1** artifact — the one carrying the independent grade — expires `2026-08-08`, and the **v2** artifact
-   expires `2026-10-24`. **Owner-approved resolution.** Repository Actions retention was raised 90 → 400 days,
-   which measurably did **not** move either existing artifact's expiry — both were re-queried afterwards and
-   are unchanged — so it protects only future runs, including the one that will back the seal. The primary
+   expires `2026-10-24`. **Correction (independent review):** an earlier version of this entry attributed both
+   dates to a single 90-day repository retention, which cannot produce v1's (2026-07-25 + 90 d is 2026-10-23).
+   The dates are right, the mechanism was wrong and generalized from the v2 measurement alone: the workflow at
+   `614017b` uploaded with `retention-days: 14`, and `2dd23d6` changed it to 90. **Owner-approved resolution,
+   as corrected.** Repository Actions retention was raised 90 → 400 days, which measurably did **not** move
+   either existing artifact's expiry — both were re-queried afterwards and are unchanged. Raising it alone also
+   protected no FUTURE run, because the workflow hard-coded `retention-days: 90` on the upload step and an
+   explicit per-upload value overrides the repository setting downward; that line is now `400`, so the claim
+   that the raise protects the seal-backing run is true only from that fix forward. The primary
    bytes were therefore downloaded while both artifacts were still live and committed beside their archives as
    `kernel_isolation_junit_<head_sha>.xml` (v1 `f3f68e01…5826b` from artifact `8618766602`, v2
    `77c0262a…b84f` from `8631825177`); a parametrized test re-derives each receipt's whole `junit` block and
-   required-testcase roster from those committed bytes through the builder's own parser, so both archives stay
-   reproducible from committed data after the artifacts expire. The archive is now bound by tests, which
+   required-testcase roster from those committed bytes through the builder's own parser. **Scope, corrected.**
+   "Both archives stay reproducible from committed data" was too strong and is withdrawn. What the committed
+   bytes establish permanently is the `junit` block, the required-testcase roster, and — via a second new test
+   reading `git cat-file blob <head_sha>:<workflow>` — `workflow_sha256`. The committed JUnit carries **no
+   runner identity at all**: zero occurrences of `Linux`, `6.17.0` or `azure`, and no head SHA; its only runner
+   trace is `hostname="runnervmvrwv9"`. So `runner.os`, `runner.architecture`, `runner.kernel_release`,
+   `head_sha`, `run_id`, `run_attempt` and every `source_artifact` field remain unfalsifiable from the
+   repository once the artifact expires — and those are exactly the fields carrying the claim "these two tests
+   executed on a real x86_64 Linux kernel at commit X", which is the whole point of the proof. **This makes the
+   independent review grade MORE important than the entry below concluded, not less**, because after expiry the
+   grade is the only thing standing behind precisely those fields. The honest property of the committed bytes is
+   tamper-evidence and reproducibility of the parts they cover, not falsifiability of the archive as a whole.
+   One thing checked and cleared: the validator compares only recorded fields (no `datetime.now` anywhere in
+   `src/alive/compose/`), so the committed archives do **not** start failing when their artifacts expire; the
+   side effect is that `archived_at_utc` is bounded above only by a self-declared field, so an archive assembled
+   later can backdate itself into a closed window and pass. The archive is now bound by tests, which
    nothing previously did for the v2 file:
    its digests and launcher roster are pinned, and `archived_by` — free text that no validator constrains
    beyond non-emptiness, and the only field separating v1's independent review from v2's self-review — is
@@ -299,15 +326,28 @@ branch에서 추적 가능하게 기록한다. `LOCAL` ledger ID만으로는 이
    requiring one on the archive that will actually back the seal, so the kernel archive is now an explicit
    runbook §2.5 release-gate item — it previously was not, that gate's independent-review line covering only
    leakage, exact roster, response projection, pair alignment, single seal open and final-ledger recovery.
-   That gate item corrects an impossibility in the obvious phrasing: an archive at exact SHA `C` **cannot**
-   exist, because archiving a receipt takes a commit and that commit moves HEAD past `C`, breaking the
-   `approved_git_sha == runtime HEAD` binding §2.5 forbids breaking. The gate instead requires an independent
-   `archived_by`, committed primary bytes, and byte-identity of the enumerated isolation closure between the
-   archived commit and `C`. That closure — `network_isolation.py`, `run_network_isolated.py`,
-   `gears_decision_probe.py`, `gears_probe_a.py`, `test_network_isolation.py` — is byte-identical between
-   `2dd23d6` and current `main` across the 22 intervening commits, so the v2 kernel property still covers
-   today's isolation code even though the workflow and receipt builder have since changed (which is why the
-   archived receipt reproduces only from a worktree at `2dd23d6`). Seal state remains **UNOPENED**; execution
+   **Correction (independent review): the impossibility argument this entry originally used is unsound and is
+   withdrawn.** It claimed an archive at exact SHA `C` cannot exist because archiving a receipt takes a commit
+   that moves HEAD past `C`. But §2.5 and this index already prescribe the construction that defeats it, for the
+   analytical reports: publish to the **external durable stage** under the approved-artifacts root instead of
+   committing, and have the owner approve `C` plus every byte hash and immutable object version. HEAD then stays
+   at `C` and the binding holds. Nothing requires this archive to be in-repo — it is not among the config's
+   `activation_requirements`, and `_CONFIG_BOUND_EVIDENCE_REQUIREMENTS` contains only the two analytical
+   reports. So a run at `C` archived externally is achievable, and it is the strong form of the gate; a weaker
+   one was adopted on a false premise. The gate now requires an independent `archived_by`, committed or durably
+   published primary bytes, and — where the archive's `head_sha` precedes `C` — byte-identity of the isolation
+   closure between that commit and `C`. **That enumeration was also incomplete** and is corrected: beyond
+   `network_isolation.py`, `run_network_isolated.py`, `gears_decision_probe.py`, `gears_probe_a.py` and
+   `test_network_isolation.py`, the transitive `alive` import closure adds `provenance.py` (every receipt
+   checksum), `io.py`, `roles.py`, `response.py`, `fit_role.py`, `gene_universe.py` (the self-check's exception
+   branch), `worker_bundle.py`, `activation_evidence.py`, `approximation_bias.py`, `baseline_subprocess.py` and
+   `baselines_combo.py`, plus the interpreter axis (`.python-version`, `uv.lock`, and `requires-python`) that
+   the tests' syscall-level assertions depend on. The whole corrected closure is byte-identical between
+   `2dd23d6` and current `main`, so the v2 kernel property still covers today's isolation code even though the
+   workflow and receipt builder have since changed (which is why the archived receipt reproduces only from a
+   worktree at `2dd23d6`). That identity was asserted in prose only, which meant editing a closure file left the
+   suite green while this entry went on claiming the proof applied; it is now enforced by a test that fails
+   closed and tells the reader to re-establish the evidence rather than delete the check. Seal state remains **UNOPENED**; execution
    remains **RELEASE-BLOCKED**.
    **2026-07-25 pre-pod local gate:** the probe-rerun runbook's §2.2 verification roster was run at clean exact
    commit `614017b67e35e9cc07f68d5b512213d8356cf1b2` — **254 passed**, plus `ruff check`/`ruff format --check`
@@ -361,8 +401,12 @@ branch에서 추적 가능하게 기록한다. `LOCAL` ledger ID만으로는 이
    set being a superset of every train fold, trips first as factor scale rises.
    **Rejecting on ANY coordinate rather than all of them is the load-bearing choice.** `z` concatenates an
    expression and an ESM block, so an over-scaled single block loses the penalty only on the basis elements
-   involving it; an all-coordinates rule provably cannot fire on a block imbalance — the one input whose scale
-   nothing upstream bounds. It also makes the safety argument reproducible from committed evidence: since
+   involving it; an all-coordinates rule cannot fire while the SMALLER block stays below the loss threshold —
+   and that block is the one input whose scale nothing upstream bounds. The stronger phrasing this entry
+   previously carried ("provably cannot fire on a block imbalance") is **withdrawn**: review exhibited an
+   imbalance of ratio 100 (expression x1e4 AND ESM x1e6) that loses all 36 of 36 coordinates, so an
+   all-coordinates rule does fire there. The load-bearing conclusion — ANY is strictly more sensitive than
+   ALL — is unaffected. It also makes the safety argument reproducible from committed evidence: since
    `d_ii <= n_pairs * max||z||^4`, a FLOOR on the firing scale follows from the pair count alone, without the
    Gram spectrum; where the guard actually fires is spectrum-dependent and sits above that floor. That inequality is a theorem, not a sample: `_sym_to_vec` is a Frobenius isometry, so a design row
    satisfies `||row||^2 = (||z_g||^2 ||z_h||^2 + (z_g . z_h)^2)/2 <= max||z||^4` by Cauchy-Schwarz, and
@@ -370,8 +414,10 @@ branch에서 추적 가능하게 기록한다. `LOCAL` ledger ID만으로는 이
    pair). An earlier draft asserted the same inequality with constant 2 and justified it by a sampled worst
    ratio — quoted inconsistently as 0.054 here and 0.094 in the commit message; both are withdrawn. The
    sampled ratio was ~5-9x below the true supremum and would have given false comfort had the constant been
-   chosen from it. Combining the sharp constant with the exact rounding law (`fl(d+lam) == d` iff
-   `lam <= ulp(d)/2`, so loss needs `d >= 2^ceil(53 + log2 lam)`) gives the exact floors at 41 calibration
+   chosen from it. Combining the sharp constant with the exact rounding law (`fl(d+lam) == d` iff `lam < ulp(d)/2`, or
+   `lam == ulp(d)/2` with `d`'s last mantissa bit even — the compressed `<=` form this entry previously used is
+   **false at the tie**, e.g. `lam = 2^-53` against `d = 1 + 2^-52`; the derived floors are unaffected because
+   `53 + log2 lam` is non-integral for all three registered lambdas, so loss needs `d >= 2^ceil(53 + log2 lam)`) gives the exact floors at 41 calibration
    pairs: `max||z|| = 809.35` for `lam=0.001`, `1361.15` for `0.01`, `2289.17` for `0.1`. The floor is a
    property of the pair set PASSED, not of the guard: at 131 eligible pairs it falls to 605.36. Only
    `cal_idx_pairs` (41) and its OOF train subsets ever reach the estimator, so 41 is the operative count. **Quantitative claims from the first draft of this entry are withdrawn.** Independent review
@@ -386,8 +432,17 @@ branch에서 추적 가능하게 기록한다. `LOCAL` ledger ID만으로는 이
    same per-gene cap. `median_library` is derived at runtime and registered nowhere, so `1e4` is an assumption
    too. (iii) `|z| ~ 3.8` "recorded in" `real_norman_detectable_effect_report.json` is withdrawn: that report
    records the GI-residual L2 (`mean_pair_eps_l2 = 3.046`), not any delta or factor magnitude, and no committed
-   artifact records `z`. **What survives:** the guard cannot fire on realistic data — corpus instrumentation
-   found every non-deliberate positive-`lambda` fit fully penalized. The only spectrum-free statement available
+   artifact records `z`. **What survives:** no fit in this repository's synthetic corpus fires the guard — instrumentation found
+   every non-deliberate positive-`lambda` fit fully penalized. The stronger claim this entry previously
+   bolded, "the guard cannot fire on realistic data", is **withdrawn as unsupported and self-contradictory**:
+   it is a margin statement against realistic `||z||`, which the same paragraph then says cannot be made. Using
+   only this entry's own numbers, an expression block at its admissible ceiling `703.66` plus an ESM-block norm
+   of `~400` gives `||z|| = 809.4 >= 809.35` and fires at `lam=0.001`, and nothing committed excludes `400`.
+   Review also exhibited a band (1.175x wide in factor scale) where the FULL calibration Gram loses the penalty
+   while no OOF train fold does: there selection scores the candidate normally, futility returns CONTINUE, and
+   the post-selection fit then rejects — a contracted pod-time exit 10 after the futility checkpoint. That is
+   fail-closed, but a reader told the guard "cannot fire" would not expect it. **Measuring the ESM-block scale
+   therefore belongs on the pre-pod list.** The only spectrum-free statement available
    is the theorem floor above (`809.35` for `lam=0.001` at 41 pairs); surrogate spectra put the actual ANY
    firing scale higher still, but over 1200 surrogates review measured it spanning `1.5e3`-`4.3e3`, so no
    narrower band is quotable and none is claimed here. No margin is stated against realistic `||z||`, because
@@ -443,8 +498,11 @@ branch에서 추적 가능하게 기록한다. `LOCAL` ledger ID만으로는 이
    entry: `n_lost` is computed from the float Gram, so at the exact boundary the verdict can depend on
    summation order. One review reproduced verdict flips by reversing pair row order (902 of 16000 probes); a
    second confirmed that the order changes `d_max` but did not reproduce a flip, so the claim is recorded as
-   mechanism-confirmed and frequency-unsettled. It requires `d_max` within a few ulps of the boundary (measured spread across row
-   orders: 6 ulps) and is unreachable at the scales real data occupies. Finally, "the
+   mechanism-confirmed and frequency-unsettled. It requires `d_max` within a few ulps of the boundary and is unreachable at the scales real data occupies.
+   The "6 ulps" figure previously recorded here was a sample maximum, not a bound: an independent sweep of 4000
+   boundary-placed designs measured spread up to **7 ulps** and, conditional on sitting at the boundary, a
+   **25.8%** verdict-flip rate — which resolves the frequency question above as mechanism-confirmed and
+   frequency-established-conditional-on-boundary-proximity. Finally, "the
    run identity does not move" is literally true but incomplete: the criterion is code-only and therefore
    invisible in the confirmation manifest's `selected_hyperparameters`, unlike the registered
    `unregularized_oof_rank_policy`; scientific mode pins `HEAD == approved_git_sha`, so the owner SHA pin must
@@ -454,7 +512,7 @@ branch에서 추적 가능하게 기록한다. `LOCAL` ledger ID만으로는 이
    produces. Recomputing `sha256_json(raw)` at every commit that touched
    `configs/compose_k562_v1_phase2.yaml` gives the full lineage: `d8c65ac4…` (the digest the reports were
    generated against at `82a9c83` / `79b01e0`, still current at `0d84d3a`) → `380c4528…` at `d507a09`
-   (**the activation commit itself**, `status: pre-activation → active`, which the config header already
+   (**the activation commit itself**, `status: preregistered_activation_blocked → active`, which the config header already
    flags as intentionally moving run identity) → `a4700194…` at `42d71ce` (predictions/execution-manifest
    envelope) → `c3e00327…` at `90bc100` (estimator-domain solver and rank policy). **Correction:** an earlier
    note framed this as a single move `a4700194… → c3e00327…` caused by registering the estimator domain. That

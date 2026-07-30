@@ -138,14 +138,30 @@ CI output. A reviewer must never treat validator acceptance as proof of provenan
 
 Since 2026-07-29 the **primary JUnit bytes** are committed beside each archive as
 `kernel_isolation_junit_<full-head-sha>.xml`, downloaded from the GitHub artifact while it
-was still live and confirmed byte-identical to the recorded digest. This is what keeps an
-archive checkable once its artifact expires: `tests/alive/compose/test_kernel_isolation_ci.py`
-re-derives each receipt's entire `junit` block and required-testcase roster from the
-committed bytes through the builder's own parser, so the recorded digest has something to
-be checked against permanently rather than only until expiry. An archive whose primary
-bytes are not committed is on a clock. Repository Actions retention was raised 90 → 400
-days at the same time; that was measured to apply to future runs only and does **not**
-extend an artifact already created.
+was still live and confirmed byte-identical to the recorded digest. Reproduce the
+acquisition with `gh api repos/jam-sudo/alive/actions/artifacts/<artifact_id>/zip`, while
+the artifact lasts. `tests/alive/compose/test_kernel_isolation_ci.py` re-derives each
+receipt's `junit` block and required-testcase roster from the committed bytes through the
+builder's own parser, and separately re-derives `workflow_sha256` from
+`git cat-file blob <head_sha>:<workflow>`, so those parts stay checkable permanently rather
+than only until expiry.
+
+**What the committed bytes do NOT cover.** The JUnit carries no runner identity — no `Linux`,
+no kernel release, no head SHA — so `runner.os`, `runner.architecture`,
+`runner.kernel_release`, `head_sha`, `run_id`, `run_attempt` and every `source_artifact`
+field remain backed only by the archive JSON once the artifact expires. Those are precisely
+the fields carrying "these tests ran on a real x86_64 Linux kernel at commit X", so the
+honest property here is tamper-evidence and partial reproducibility, not falsifiability of
+the archive as a whole — and the archive's review grade matters most for exactly the fields
+the bytes cannot reach. Relatedly, the "a truncated JUnit still reconciles" caveat above
+keeps its conclusion but not its stated reason: the receipt **does** record
+`tests/passed/failures/errors/skipped` and the parser enforces them, so what is missing is a
+registered minimum suite size, not suite-size attestation.
+
+Repository Actions retention was raised 90 → 400 days, measured to apply to future runs only
+and **not** to extend an artifact already created. Raising it alone changed nothing, because
+the workflow hard-coded `retention-days: 90` on the upload step and an explicit per-upload
+value overrides the repository setting downward; that line is now `400`.
 
 To become `COMPLETE`, each backend must reference a committed
 `compose_smoke_pair_roster_v1` file. The validator reads the actual sorted pair lists,
