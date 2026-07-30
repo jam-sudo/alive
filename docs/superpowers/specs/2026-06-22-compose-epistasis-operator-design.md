@@ -444,7 +444,11 @@ train fold라도 미달이면 그 `(k_total, lambda)`는 estimator가 정의되�
 SVD minimum-norm least-squares(`svd_lstsq_minimum_norm`)로 계산해 singular normal equation의 임의 해를
 사용하지 않는다. `lambda>0` ridge 후보는 이 unregularized-domain gate의 대상이 아니지만, 선택된
 `k_total`은 위의 full-calibration 실제 $\Phi$ rank/condition futility gate를 그대로 통과해야 한다.
-정확한 solver/policy/rule 문자열은 config `identification.unregularized_solver`,
+양의 ridge는 normal equation을 만들지 않고 $\Phi$의 SVD filter factor
+$s/(s^2+\lambda)$를 수치적으로 안전한 분기식으로 계산하는
+`svd_ridge_filter_factors`를 사용한다. 이 방식은 condition number를 제곱하지 않으며 큰 factor scale에서
+`Phi.T @ Phi + lambda I`의 lambda가 반올림으로 소실되는 경로를 제거한다. 정확한 solver/policy/rule
+문자열은 config `identification.unregularized_solver`, `identification.regularized_solver`,
 `identification.unregularized_oof_rank_policy`, `identification.rank_tolerance_rule`에 동결한다.
 
 ### 10.5 Baselines, metric and inference

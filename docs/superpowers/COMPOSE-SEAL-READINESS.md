@@ -5,7 +5,7 @@
 > **이 문서는 아무것도 정의하지 않는다** — 세부(task)는 plan, claim은 spec, exact param은 config,
 > 시간순 audit는 git이 authoritative다([sources of truth](../../CLAUDE.md#sources)). 상태 행이 authoritative
 > 문서와 어긋나면 **authoritative 문서가 옳다**; 이 인덱스를 갱신한다.
-> **Updated:** 2026-07-31 @ `3130fae` (branch `compose-svd-ridge-and-carrier-binding`)
+> **Updated:** 2026-07-31 @ `b31ee9d` (branch `compose-svd-ridge-and-carrier-binding`)
 > **갱신 트리거:** sub-project/gate **상태가 바뀔 때만**(커밋마다 아님).
 > **종결 상태:** COMPOSE seal이 정확히 한 번 열리면 이 인덱스는 **frozen/은퇴**한다. 이후 진행상황은
 > seal 결과와 post-hoc analysis가 대신한다.
@@ -459,7 +459,33 @@ branch에서 추적 가능하게 기록한다. `LOCAL` ledger ID만으로는 이
    different LAPACK drivers (`gesdd` vs `gelsd`), so identical *threshold* does not mean identical computed
    rank at the boundary; reviewers measured 9 disagreements in 4000 random matrices and 0 in 22,500 real
    design-matrix shapes. Seal state remains **UNOPENED**; execution remains **RELEASE-BLOCKED**.
-   **2026-07-29 unrepresentable-ridge guard (closes correction (1) above):** the open item is resolved without
+   **2026-07-30 supersession — stable registered ridge solver:** the 2026-07-29 exact-equality guard described
+   below is no longer the shipped solver. It rejected only complete penalty loss, still allowed quantized or
+   numerically immaterial penalties, and left ID-only on the same normal-equation hazard. Positive bilinear and
+   ID-only ridge now use SVD filter factors on the design matrix (ID-only first eliminates its unpenalised
+   intercept by centering), never form `Phi.T @ Phi + lambda I`, and fail closed on non-finite inputs/results or
+   LAPACK failure. `identification.regularized_solver: svd_ridge_filter_factors` is now config-registered and
+   copied into `selected_hyperparameters`; this intentionally moves the config digest and makes all prior
+   config-bound evidence stale. The resulting canonical config digest is
+   `2a8b1bc37b4b952b29dd57cf128d2aa27a2a698693e1376e569544ff119e85eb`; it must be the config axis of
+   any replacement evidence and run identity.
+   **Carried forward, NOT superseded — the registered condition ceiling.** The 2026-07-29 entry below opened
+   this as a new item, and removing the representability guard makes it more load-bearing, not less: that guard
+   incidentally rejected an extreme block-scale imbalance, and nothing now does. Measured 2026-07-31 on the
+   exhibit from the deleted `test_one_over_scaled_factor_block_is_rejected…` (that file's `_make` at seed 6,
+   `z` with the ESM block scaled by `1e6`): `rank_diagnostics` reports full rank with condition number
+   `3.71e12` against `10.4218` for the same bank unscaled, and `identify_operator(lam=1e-3)` now returns a
+   finite estimate with no rejection where it previously raised. That estimate is not wrong — it is the exact
+   ridge solution for that design — so this is a scientific admissibility question, not a numerical one, which
+   is precisely why the old guard's coarse answer should not be reinstated. The available signal is unchanged:
+   the condition number is exactly scale-invariant under a UNIFORM rescale (`10.4218` at `1x` and at `1e6x`)
+   but moves 11.55 orders of magnitude under this block imbalance, and `diagnostics2`'s `isfinite` check still
+   fires iff `rank < sym_dim` (`rank_diagnostics` returns `inf` exactly then). A ceiling is
+   a registered numerical criterion — a new config field that moves the digest — and is still deliberately not
+   invented here. **Open item, owner decision.**
+   The remainder of this 2026-07-29 entry is retained as historical analysis of
+   the replaced guard, not a description of current execution.
+   **2026-07-29 unrepresentable-ridge guard (historical; superseded above):** the open item was resolved without
    registering a new numerical criterion. `identify.py` now rejects a positive `lam` that leaves ANY Gram
    diagonal entry unchanged by `lam*I` — on those coordinates the design solved carries no penalty, so it is
    not the registered `(Phi^T Phi + lam I)`. Exact equality, no tolerance, so `config_sha256` and `run_id` do

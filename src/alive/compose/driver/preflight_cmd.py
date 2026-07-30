@@ -398,6 +398,7 @@ def _selected_hyperparameters(
         "total_k_grid": [int(k) for k in config.total_k_grid],
         "lambda_grid": [float(x) for x in config.lambda_grid],
         "unregularized_solver": str(config.unregularized_solver),
+        "regularized_solver": str(config.regularized_solver),
         "unregularized_oof_rank_policy": str(config.unregularized_oof_rank_policy),
         "rank_tolerance_rule": str(config.rank_tolerance_rule),
         "oof_folds": int(config.oof_folds),
