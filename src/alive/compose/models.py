@@ -42,7 +42,7 @@ from typing import Protocol, runtime_checkable
 
 import numpy as np
 
-from alive.compose.identify import identify_operator
+from alive.compose.identify import SingularDesignError, identify_operator
 from alive.compose.operator import bilinear_predict
 from alive.provenance import sha256_json
 
@@ -249,7 +249,22 @@ class IDOnlyModel:
         reg = float(lam) * np.eye(d1)
         reg[-1, -1] = 0.0  # do not penalise the intercept
         gram = phi.T @ phi + reg
-        self.weight_ = np.linalg.solve(gram, phi.T @ eps_obs)  # (d+1, p)
+        # Normalize to the same contracted type the bilinear estimator raises.
+        # This solve is reached from the SAME post-selection loop in phase2a as
+        # ``identify_operator``, but ``LinAlgError`` is a bare ``ValueError``
+        # subclass and NOT a ``SingularDesignError``, so without this it left
+        # the driver's pre-seal roster and produced a traceback plus exit 1 --
+        # outside the exit-code contract, writing no artifact. The exposure is
+        # specifically at ``lam == 0.0``: the intercept column is deliberately
+        # unpenalised, so a positive lam cannot rescue a design that is already
+        # collinear with it, and the registered estimator-domain rank policy can
+        # now leave ``lam == 0.0`` as the only viable candidate.
+        try:
+            self.weight_ = np.linalg.solve(gram, phi.T @ eps_obs)  # (d+1, p)
+        except np.linalg.LinAlgError as exc:
+            raise SingularDesignError(
+                f"id_only design has no unique ridge solution at lam={float(lam)!r}: {exc}"
+            ) from exc
         return self
 
     def predict_eps(self, Z: np.ndarray, g: int, h: int) -> np.ndarray:

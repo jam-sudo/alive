@@ -21,6 +21,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+from alive.compose.identify import SingularDesignError
 from alive.compose.models import (
     IDOnlyModel,
     L1Model,
@@ -299,3 +300,24 @@ def test_fitted_model_checksum_rejects_unregistered_type():
 
     with pytest.raises(TypeError, match="unregistered fitted model type"):
         fitted_model_checksum(DuckModel())  # type: ignore[arg-type]
+
+
+def test_id_only_singular_design_raises_the_contracted_type():
+    """A singular ``id_only`` ridge must not escape the driver's exit-code contract.
+
+    This solve is reached from the same post-selection loop in phase2a as the
+    bilinear estimator, but ``numpy.linalg.LinAlgError`` is a bare ``ValueError``
+    subclass and not a ``SingularDesignError``, so it was absent from the
+    driver's pre-seal rejection roster and produced a traceback plus exit 1,
+    writing no artifact. Exposure is specifically at ``lam == 0.0``: the
+    intercept is deliberately unpenalised, so a positive lambda cannot rescue a
+    design already collinear with it, and the registered estimator-domain rank
+    policy can leave ``lam == 0.0`` as the only viable candidate.
+    """
+    rng = np.random.default_rng(0)
+    n_genes = 12
+    Z = np.zeros((n_genes, 4))  # every factor coordinate dead
+    pairs = [(int(a), int(b)) for a, b in rng.integers(0, n_genes, size=(30, 2)) if a != b]
+    eps = np.zeros((len(pairs), 3))
+    with pytest.raises(SingularDesignError, match="id_only design has no unique ridge solution"):
+        IDOnlyModel().fit(Z, pairs, eps, lam=0.0)
