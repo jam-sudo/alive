@@ -43,12 +43,13 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
+from typing import Any, Mapping
 
 import numpy as np
 from numpy.typing import NDArray
 from sklearn.decomposition import PCA
 
-from alive.provenance import sha256_bytes
+from alive.provenance import sha256_bytes, sha256_json
 
 ZFACTOR_ALGORITHM = "compose_zfactor_pca"
 ZFACTOR_VERSION = "2a.1"
@@ -58,6 +59,12 @@ ORIENTATION_POLICY = "sign_of_largest_magnitude_loading_positive"
 
 #: Default ESM projection dimension (config ``factor_z.esm_projection_dim``).
 DEFAULT_ESM_DIM = 2
+
+#: On-disk collection schema used by scientific stage-1 carriers.  A collection
+#: is deliberately separate from an individual bank's self-checksummed report:
+#: the former binds the exact registered k-grid and aggregate factor checksum,
+#: while the latter remains the canonical per-k provenance artifact.
+FACTOR_BANK_COLLECTION_SCHEMA = "compose_factor_bank_collection_v1"
 
 
 # ---------------------------------------------------------------------------
@@ -156,6 +163,283 @@ class GeneFactorBank:
         rep = self._payload()
         rep["checksum"] = self.checksum
         return rep
+
+
+def serialize_factor_bank_collection(
+    factor_banks_by_k: Mapping[int, GeneFactorBank],
+) -> dict[str, Any]:
+    """Return the canonical scientific-carrier representation of factor banks.
+
+    Every individual checksum is independently recomputed before any bytes are
+    emitted.  The collection checksum is the same aggregate digest consumed by
+    :func:`alive.compose.phase2a._verify_factor_banks`, so the stage-1 artifact,
+    ``Phase2aInputs.factor_checksum`` and the runtime matrices share one identity.
+    """
+    if not factor_banks_by_k:
+        raise ValueError("factor_banks_by_k must be non-empty")
+    banks: dict[int, GeneFactorBank] = {}
+    for raw_k, bank in factor_banks_by_k.items():
+        if isinstance(raw_k, bool) or not isinstance(raw_k, (int, np.integer)):
+            raise ValueError(f"factor-bank key must be an integer, got {raw_k!r}")
+        k_total = int(raw_k)
+        if k_total in banks:
+            raise ValueError(f"duplicate factor-bank key after integer normalization: {k_total}")
+        if not isinstance(bank, GeneFactorBank):
+            raise TypeError(f"factor bank k={k_total} is not a GeneFactorBank")
+        if int(bank.k_total) != k_total:
+            raise ValueError(
+                f"factor-bank key {k_total} disagrees with bank.k_total={bank.k_total}"
+            )
+        observed = sha256_bytes(bank.artifact_bytes())
+        if observed != bank.checksum:
+            raise ValueError(
+                f"factor bank k={k_total} checksum does not verify: "
+                f"declared={bank.checksum!r}, observed={observed!r}"
+            )
+        banks[k_total] = bank
+
+    aggregate = sha256_json(
+        {"factor_banks_by_k": {str(k): banks[k].checksum for k in sorted(banks)}}
+    )
+    reports = {str(k): _lossless_carrier_report(banks[k]) for k in sorted(banks)}
+    for report in reports.values():
+        _deserialize_gene_factor_bank(report)
+    return {
+        "schema": FACTOR_BANK_COLLECTION_SCHEMA,
+        "factor_checksum": aggregate,
+        "k_grid": [int(k) for k in sorted(banks)],
+        "factor_banks_by_k": reports,
+    }
+
+
+def _lossless_carrier_report(bank: GeneFactorBank) -> dict[str, Any]:
+    """Return a checksummed report whose numeric arrays round-trip exactly.
+
+    ``GeneFactorBank.report`` intentionally rounds numeric payloads to 12 decimal
+    places for a stable scientific checksum.  A runtime carrier has a second,
+    stricter need: its factor matrix must remain byte-for-byte equal to the bank
+    rows after JSON reconstruction.  Preserve the original float64 values in the
+    collection while retaining the registered rounded checksum semantics.
+    """
+    report = bank.report()
+    report["z_by_gene"] = {
+        gene: np.asarray(bank.z_by_gene[gene], dtype=np.float64).tolist()
+        for gene in bank.gene_order
+    }
+    report["expression_explained_variance"] = np.asarray(
+        bank.expression_explained_variance, dtype=np.float64
+    ).tolist()
+    report["esm_explained_variance"] = np.asarray(
+        bank.esm_explained_variance, dtype=np.float64
+    ).tolist()
+    report["expression_components"] = np.asarray(
+        bank.expression_components, dtype=np.float64
+    ).tolist()
+    report["esm_components"] = np.asarray(bank.esm_components, dtype=np.float64).tolist()
+    return report
+
+
+def deserialize_factor_bank_collection(
+    payload: Mapping[str, Any],
+) -> tuple[dict[int, GeneFactorBank], str]:
+    """Strictly reconstruct and authenticate a scientific factor-bank collection.
+
+    The loader accepts no derived defaults: schema fields, shapes, gene ordering,
+    per-bank checksums, k-grid identity and aggregate checksum must all agree.
+    This makes a carrier load fail before Phase 2a if a bank is missing, reordered,
+    truncated or edited independently from its registered factor matrices.
+    """
+    expected_collection_keys = {
+        "schema",
+        "factor_checksum",
+        "k_grid",
+        "factor_banks_by_k",
+    }
+    if not isinstance(payload, Mapping) or set(payload) != expected_collection_keys:
+        raise ValueError(
+            f"factor-bank collection keys must be exactly {sorted(expected_collection_keys)!r}"
+        )
+    if payload["schema"] != FACTOR_BANK_COLLECTION_SCHEMA:
+        raise ValueError(f"unsupported factor-bank collection schema {payload['schema']!r}")
+
+    raw_banks = payload["factor_banks_by_k"]
+    if not isinstance(raw_banks, Mapping) or not raw_banks:
+        raise ValueError("factor_banks_by_k must be a non-empty object")
+    banks: dict[int, GeneFactorBank] = {}
+    for raw_key, report in raw_banks.items():
+        if not isinstance(raw_key, str) or not raw_key.isdecimal():
+            raise ValueError(f"factor-bank collection key must be a decimal string: {raw_key!r}")
+        k_total = int(raw_key)
+        if raw_key != str(k_total) or k_total in banks:
+            raise ValueError(f"non-canonical or duplicate factor-bank key {raw_key!r}")
+        bank = _deserialize_gene_factor_bank(report)
+        if bank.k_total != k_total:
+            raise ValueError(
+                f"factor-bank key {k_total} disagrees with report k_total={bank.k_total}"
+            )
+        banks[k_total] = bank
+
+    raw_grid = payload["k_grid"]
+    if not isinstance(raw_grid, list) or any(
+        isinstance(k, bool) or not isinstance(k, int) for k in raw_grid
+    ):
+        raise ValueError("factor-bank k_grid must be a list of integers")
+    expected_grid = sorted(banks)
+    if raw_grid != expected_grid:
+        raise ValueError(
+            f"factor-bank k_grid {raw_grid!r} does not match bank keys {expected_grid!r}"
+        )
+
+    aggregate = sha256_json(
+        {"factor_banks_by_k": {str(k): banks[k].checksum for k in expected_grid}}
+    )
+    if payload["factor_checksum"] != aggregate:
+        raise ValueError(
+            "factor-bank aggregate checksum does not verify: "
+            f"declared={payload['factor_checksum']!r}, observed={aggregate!r}"
+        )
+    return banks, aggregate
+
+
+def _deserialize_gene_factor_bank(report: Any) -> GeneFactorBank:
+    """Reconstruct one bank from its exact, self-checksummed report."""
+    payload_keys = {
+        "algorithm",
+        "version",
+        "orientation_policy",
+        "k_total",
+        "expression_dim",
+        "esm_dim",
+        "gene_order",
+        "z_by_gene",
+        "expression_explained_variance",
+        "esm_explained_variance",
+        "expression_components",
+        "esm_components",
+        "encoder_revision",
+        "sequence_mapping_hash",
+        "checksum",
+    }
+    if not isinstance(report, Mapping) or set(report) != payload_keys:
+        raise ValueError(f"factor-bank report keys must be exactly {sorted(payload_keys)!r}")
+    if report["algorithm"] != ZFACTOR_ALGORITHM or report["version"] != ZFACTOR_VERSION:
+        raise ValueError("factor-bank algorithm/version does not match the registered contract")
+    if report["orientation_policy"] != ORIENTATION_POLICY:
+        raise ValueError("factor-bank orientation policy does not match the registered contract")
+
+    dimensions: list[int] = []
+    for name in ("k_total", "expression_dim", "esm_dim"):
+        value = report[name]
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError(f"factor-bank {name} must be a non-negative integer")
+        dimensions.append(int(value))
+    k_total, expression_dim, esm_dim = dimensions
+    if k_total <= 0 or expression_dim + esm_dim != k_total:
+        raise ValueError("factor-bank dimensions must satisfy k_total > 0 and expr + esm = total")
+
+    raw_order = report["gene_order"]
+    if (
+        not isinstance(raw_order, list)
+        or not raw_order
+        or any(not isinstance(gene, str) or not gene for gene in raw_order)
+    ):
+        raise ValueError("factor-bank gene_order must be a non-empty list of non-empty strings")
+    gene_order = tuple(raw_order)
+    if len(set(gene_order)) != len(gene_order) or gene_order != tuple(
+        sorted(gene_order, key=lambda gene: gene.encode("utf-8"))
+    ):
+        raise ValueError("factor-bank gene_order must be unique and UTF-8 sorted")
+    raw_z = report["z_by_gene"]
+    if not isinstance(raw_z, Mapping) or set(raw_z) != set(gene_order):
+        raise ValueError("factor-bank z_by_gene keys must exactly match gene_order")
+    z_by_gene = {
+        gene: _validated_factor_array(raw_z[gene], f"z_by_gene[{gene!r}]", (k_total,))
+        for gene in gene_order
+    }
+    expression_variance = _validated_factor_array(
+        report["expression_explained_variance"],
+        "expression_explained_variance",
+        (expression_dim,),
+    )
+    esm_variance = _validated_factor_array(
+        report["esm_explained_variance"], "esm_explained_variance", (esm_dim,)
+    )
+    if np.any(expression_variance < 0.0) or np.any(esm_variance < 0.0):
+        raise ValueError("factor-bank explained variances must be non-negative")
+    expression_components = _validated_factor_matrix(
+        report["expression_components"], "expression_components", expression_dim
+    )
+    esm_components = _validated_factor_matrix(report["esm_components"], "esm_components", esm_dim)
+    encoder_revision = report["encoder_revision"]
+    sequence_mapping_hash = report["sequence_mapping_hash"]
+    checksum = report["checksum"]
+    if not isinstance(encoder_revision, str) or not encoder_revision:
+        raise ValueError("factor-bank encoder_revision must be a non-empty string")
+    if not _is_sha256_hex(sequence_mapping_hash):
+        raise ValueError("factor-bank sequence_mapping_hash must be a 64-hex SHA-256 digest")
+    if not _is_sha256_hex(checksum):
+        raise ValueError("factor-bank checksum must be a 64-character SHA-256 hex string")
+
+    bank = GeneFactorBank(
+        k_total=k_total,
+        expression_dim=expression_dim,
+        esm_dim=esm_dim,
+        gene_order=gene_order,
+        z_by_gene=z_by_gene,
+        expression_explained_variance=expression_variance,
+        esm_explained_variance=esm_variance,
+        expression_components=expression_components,
+        esm_components=esm_components,
+        encoder_revision=encoder_revision,
+        sequence_mapping_hash=sequence_mapping_hash,
+        checksum=checksum,
+    )
+    observed = sha256_bytes(bank.artifact_bytes())
+    if observed != checksum:
+        raise ValueError(
+            f"factor-bank checksum does not verify: declared={checksum!r}, observed={observed!r}"
+        )
+    return bank
+
+
+def _validated_factor_array(value: Any, name: str, shape: tuple[int, ...]) -> NDArray[np.float64]:
+    try:
+        array = np.asarray(value, dtype=np.float64)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"factor-bank {name} is not numeric") from exc
+    if array.shape != shape or not np.all(np.isfinite(array)):
+        raise ValueError(
+            f"factor-bank {name} must have finite shape {shape!r}, got {array.shape!r}"
+        )
+    return np.ascontiguousarray(array)
+
+
+def _validated_factor_matrix(value: Any, name: str, n_rows: int) -> NDArray[np.float64]:
+    try:
+        array = np.asarray(value, dtype=np.float64)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"factor-bank {name} is not numeric") from exc
+    if n_rows == 0 and array.size == 0:
+        return np.empty((0, 0), dtype=np.float64)
+    if (
+        array.ndim != 2
+        or array.shape[0] != n_rows
+        or array.shape[1] == 0
+        or not np.all(np.isfinite(array))
+    ):
+        raise ValueError(
+            f"factor-bank {name} must be a finite 2-D matrix with {n_rows} rows, "
+            f"got {array.shape!r}"
+        )
+    return np.ascontiguousarray(array)
+
+
+def _is_sha256_hex(value: Any) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(char in "0123456789abcdef" for char in value)
+    )
 
 
 # ---------------------------------------------------------------------------
