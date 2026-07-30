@@ -100,4 +100,10 @@ jobs:
           if-no-files-found: error
           # Transport window only. Operational approval requires a subsequent
           # version-controlled archive wrapper under activation evidence.
-          retention-days: 90
+          #
+          # An explicit per-upload value overrides the repository retention
+          # setting DOWNWARD, so raising the repository limit to 400 days did
+          # nothing while this said 90 -- including for the run that will back
+          # the seal. Keep this equal to the repository limit; the archive's
+          # committed primary bytes, not this window, are the durable record.
+          retention-days: 400

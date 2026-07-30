@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import tomllib
 import zipfile
 from pathlib import Path
 
@@ -20,13 +21,14 @@ from alive.compose.kernel_isolation_ci import (
     CI_TEST_CLASSNAME,
     CI_WORKFLOW_PATH,
     KernelIsolationCIError,
+    _git,
     _parse_junit,
     build_kernel_isolation_ci_archive,
     build_kernel_isolation_ci_receipt,
     validate_kernel_isolation_ci_archive,
     validate_kernel_isolation_ci_receipt,
 )
-from alive.provenance import sha256_json
+from alive.provenance import sha256_bytes, sha256_json
 
 _REPO = Path(__file__).resolve().parents[3]
 _EVIDENCE = _REPO / "docs/activation-evidence/compose"
@@ -526,3 +528,102 @@ def test_committed_junit_bytes_reproduce_the_archived_receipt(archive_path, juni
     )
     assert junit == receipt["junit"]
     assert cases == [dict(case) for case in receipt["required_test_cases"]]
+
+
+@pytest.mark.parametrize("archive_path", [_ARCHIVE, _ARCHIVE_V2], ids=["v1", "v2"])
+def test_archived_workflow_digest_reproduces_from_the_recorded_commit(archive_path):
+    """Check the one receipt digest that has permanent in-repo ground truth.
+
+    ``workflow_sha256`` is re-derivable forever from ``git cat-file blob
+    <head_sha>:<workflow>`` — unlike ``run_id``, ``runner`` or
+    ``source_artifact``, which no committed byte can ever confirm. It was
+    nonetheless the only such digest that nothing checked: rewriting it takes a
+    four-field edit inside one JSON (the value plus the three checksums that
+    cover it) and no test-file edit at all. That matters because the readiness
+    entry names this field as the carrier of the suite-scope property the schema
+    deliberately does not enforce, so a forged value re-points the evidence at a
+    workflow that never ran these tests.
+
+    Read the blob directly rather than through ``_workflow_bytes_at_commit``:
+    that helper additionally requires the WORKING TREE workflow to equal the
+    recorded blob, which is false by design here — the workflow has changed since
+    both archived runs.
+    """
+    archive = validate_kernel_isolation_ci_archive(
+        json.loads(archive_path.read_text(encoding="utf-8"))
+    )
+    receipt = archive["receipt"]
+    assert receipt["workflow_path"] == CI_WORKFLOW_PATH
+    blob = _git(_REPO, "cat-file", "blob", f"{receipt['head_sha']}:{CI_WORKFLOW_PATH}")
+    assert sha256_bytes(blob) == receipt["workflow_sha256"]
+
+
+# The files whose bytes determine what the two Linux kernel-isolation tests
+# prove. The five direct participants plus the transitive ``alive`` import
+# closure of the launcher and the probe driver: ``network_isolation`` routes
+# every receipt checksum through ``provenance``, and ``gears_decision_probe``
+# imports nine ``alive`` modules at module scope, so a behaviour change in any of
+# them changes what the archived pass means.
+_ISOLATION_CLOSURE = (
+    "src/alive/compose/network_isolation.py",
+    "src/alive/compose/gears_probe_a.py",
+    "scripts/compose/run_network_isolated.py",
+    "scripts/compose/gears_decision_probe.py",
+    "tests/alive/compose/test_network_isolation.py",
+    "src/alive/provenance.py",
+    "src/alive/io.py",
+    "src/alive/compose/roles.py",
+    "src/alive/compose/response.py",
+    "src/alive/compose/fit_role.py",
+    "src/alive/compose/gene_universe.py",
+    "src/alive/compose/worker_bundle.py",
+    "src/alive/compose/activation_evidence.py",
+    "src/alive/compose/approximation_bias.py",
+    "src/alive/compose/baseline_subprocess.py",
+    "src/alive/compose/baselines_combo.py",
+    # The interpreter axis: the workflow runs `uv sync --locked`, and the
+    # primitive test asserts a syscall-level distinction (unix socketpair
+    # permitted while unix stream is EPERM) that depends on which syscalls the
+    # resolved CPython actually emits.
+    ".python-version",
+    "uv.lock",
+)
+
+
+def test_the_v2_kernel_proof_still_covers_the_shipped_isolation_closure():
+    """Fail closed when the archived kernel proof stops covering today's code.
+
+    The v2 archive proves the seccomp policy and the launcher -> execve -> driver
+    path at commit ``2dd23d6``. Its relevance to the shipped code rests entirely
+    on those bytes being unchanged since, and that was asserted only in prose:
+    editing ``network_isolation.py`` left the whole suite green while the
+    readiness entry went on claiming the proof still applied.
+
+    A failure here is not necessarily a defect — it means the kernel evidence
+    must be re-established by a fresh Linux CI run and a new archive at the
+    changed code, and that this pin must then move to that run's commit.
+    """
+    drifted = []
+    for rel in _ISOLATION_CLOSURE:
+        recorded = _git(_REPO, "cat-file", "blob", f"{_V2_SHA}:{rel}")
+        if (_REPO / rel).read_bytes() != recorded:
+            drifted.append(rel)
+    assert not drifted, (
+        f"the v2 kernel-isolation proof at {_V2_SHA[:7]} no longer covers these shipped files: "
+        f"{drifted}. Re-run the Linux kernel-isolation CI at the changed code, archive a new "
+        "receipt, and move this pin -- do not delete the check"
+    )
+
+
+def test_the_interpreter_range_the_kernel_proof_assumes_is_unchanged():
+    """``requires-python`` is part of the closure but lives in a busy file.
+
+    Pinning all of ``pyproject.toml`` would fire on unrelated tooling edits, so
+    only the field that changes which interpreter the proof was established
+    against is pinned here.
+    """
+    recorded = tomllib.loads(
+        _git(_REPO, "cat-file", "blob", f"{_V2_SHA}:pyproject.toml").decode("utf-8")
+    )
+    current = tomllib.loads((_REPO / "pyproject.toml").read_text(encoding="utf-8"))
+    assert current["project"]["requires-python"] == recorded["project"]["requires-python"]
