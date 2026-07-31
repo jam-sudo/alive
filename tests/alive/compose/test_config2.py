@@ -519,6 +519,13 @@ def test_secondary_metrics_definitions():
             assert spec.material_regression_margin >= 0.0
 
 
+def test_secondary_metrics_cannot_be_promoted_to_verdict_gates(tmp_path):
+    raw = _raw()
+    raw["metric"]["secondary_are_verdict_gates"] = True
+    with pytest.raises(Phase2ConfigError, match="must remain false"):
+        load_compose_phase2_config(_write(tmp_path, raw))
+
+
 def test_unknown_secondary_metric_rejected(tmp_path):
     raw = _raw()
     raw["metric"]["secondary"] = [
@@ -543,6 +550,13 @@ def test_bootstrap_replicates_change_rejected(tmp_path):
     raw = _raw()
     raw["inference"]["bootstrap_replicates"] = 1000
     with pytest.raises(Phase2ConfigError):
+        load_compose_phase2_config(_write(tmp_path, raw))
+
+
+def test_bootstrap_resamples_must_remain_shared_across_contrasts(tmp_path):
+    raw = _raw()
+    raw["inference"]["shared_resamples_across_contrasts"] = False
+    with pytest.raises(Phase2ConfigError, match="must remain true"):
         load_compose_phase2_config(_write(tmp_path, raw))
 
 

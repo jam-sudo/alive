@@ -101,8 +101,10 @@ _EXPECTED_METRIC_FORMULA = (
 )
 _EXPECTED_MATERIAL_MARGIN_VS_ADDITIVE = 0.05
 _EXPECTED_LEARNED_COMPARATOR_MARGIN = 0.0
+_EXPECTED_SECONDARY_ARE_VERDICT_GATES = False
 _EXPECTED_INFERENCE_METHOD = "max_deviation_bootstrap"
 _EXPECTED_RESAMPLING_UNIT = "perturbation_pair"
+_EXPECTED_SHARED_RESAMPLES_ACROSS_CONTRASTS = True
 _EXPECTED_FAMILY_CONFIDENCE = 0.95
 _EXPECTED_BOOTSTRAP_REPLICATES = 10000
 _EXPECTED_ESM_MODEL = "esm2_t33_650M_UR50D_mean_pool"
@@ -1167,6 +1169,11 @@ def _validate_metric(
     secondary_are_gates = _require(block, "secondary_are_verdict_gates", "metric")
     if not isinstance(secondary_are_gates, bool):
         raise Phase2ConfigError("metric.secondary_are_verdict_gates must be a boolean")
+    if secondary_are_gates is not _EXPECTED_SECONDARY_ARE_VERDICT_GATES:
+        raise Phase2ConfigError(
+            "metric.secondary_are_verdict_gates must remain false; secondary metrics "
+            "are descriptive-only and cannot become sealed-verdict gates"
+        )
 
     secondary_raw = _require(block, "secondary", "metric")
     if not isinstance(secondary_raw, list) or not all(isinstance(x, str) for x in secondary_raw):
@@ -1239,6 +1246,11 @@ def _validate_inference(
     shared = _require(block, "shared_resamples_across_contrasts", "inference")
     if not isinstance(shared, bool):
         raise Phase2ConfigError("inference.shared_resamples_across_contrasts must be a boolean")
+    if shared is not _EXPECTED_SHARED_RESAMPLES_ACROSS_CONTRASTS:
+        raise Phase2ConfigError(
+            "inference.shared_resamples_across_contrasts must remain true; the registered "
+            "max-deviation bootstrap uses one shared resample across every contrast"
+        )
 
     family_confidence = float(_require(block, "family_confidence", "inference"))
     if family_confidence != _EXPECTED_FAMILY_CONFIDENCE:

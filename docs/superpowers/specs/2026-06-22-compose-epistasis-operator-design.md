@@ -474,6 +474,12 @@ resample에서 각 replicate의 두 mean error를 다시 계산하고, 그 resam
 secondary = GI-explained fraction과 구조 복원이며 verdict gate로 사용하지 않고 effect size,
 simultaneous interval, chance/null definition과 함께 전부 보고한다.
 
+위 두 성질은 config에 boolean으로 동결한다: `metric.secondary_are_verdict_gates: false`(secondary는
+descriptive-only이며 sealed verdict gate가 될 수 없다)와
+`inference.shared_resamples_across_contrasts: true`(등록된 max-deviation bootstrap은 replicate마다
+하나의 resample을 모든 contrast에 공유한다). 두 값은 loader가 정확히 강제하며 config 변경으로
+뒤집을 수 없다.
+
 ### 10.6 Two-phase execution and seal
 
 - **Phase 2a (dev, seal 무접촉):** real calibration-role δ/ε + z_g(+ESM) +
