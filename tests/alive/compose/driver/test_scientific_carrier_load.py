@@ -227,7 +227,8 @@ def test_wrong_head_fails_closed(tmp_path):
         )
 
 
-def test_a_leakage_rejection_escapes_the_carrier_under_its_own_class(tmp_path, monkeypatch):
+@pytest.mark.parametrize("typed", ["OutcomeLeakageError", "InputContractError"])
+def test_a_typed_rejection_escapes_the_carrier_under_its_own_class(tmp_path, monkeypatch, typed):
     """The re-raise ORDERING is the loader's stated safety property; pin it.
 
     ``_load_phase2a_inputs`` wraps the ``Phase2aInputs`` construction so a malformed
@@ -237,18 +238,29 @@ def test_a_leakage_rejection_escapes_the_carrier_under_its_own_class(tmp_path, m
     operator would be told ``RunSpecError`` -- erasing the project's highest-severity
     signal (CLAUDE.md#invariants). Deleting that clause changes no exit code and no
     stderr shape, so nothing else in the suite notices (2026-08-01 review).
+
+    Honest about the method: ``Phase2aInputs.__post_init__`` currently raises neither
+    class -- it coerces and checksums -- so the clause is defence-in-depth and a
+    monkeypatched constructor is the only way to exercise the ordering. Re-review
+    confirmed the earlier single-class version left the ``InputContractError`` arm
+    unpinned, so both are parametrized here.
     """
     from alive.compose.driver import carrier_loader
     from alive.compose.freeze import OutcomeLeakageError
+    from alive.compose.phase2a import InputContractError
 
+    exc_type = {
+        "OutcomeLeakageError": OutcomeLeakageError,
+        "InputContractError": InputContractError,
+    }[typed]
     bundle = build_scientific_carrier_fixture(tmp_path / "a", repo_root=tmp_path / "r")
 
-    def _leaky(*_args, **_kwargs):
-        raise OutcomeLeakageError("development outcome store reports a non-zero sealed access")
+    def _raiser(*_args, **_kwargs):
+        raise exc_type("typed rejection from the constructor")
 
-    monkeypatch.setattr(carrier_loader, "Phase2aInputs", _leaky)
+    monkeypatch.setattr(carrier_loader, "Phase2aInputs", _raiser)
 
-    with pytest.raises(OutcomeLeakageError):
+    with pytest.raises(exc_type):
         load_run_spec_carrier(
             bundle.spec_path,
             approved_artifacts_root=bundle.approved_artifacts_root,

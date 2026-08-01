@@ -5,7 +5,7 @@
 > **이 문서는 아무것도 정의하지 않는다** — 세부(task)는 plan, claim은 spec, exact param은 config,
 > 시간순 audit는 git이 authoritative다([sources of truth](../../CLAUDE.md#sources)). 상태 행이 authoritative
 > 문서와 어긋나면 **authoritative 문서가 옳다**; 이 인덱스를 갱신한다.
-> **Updated:** 2026-08-01 @ `c7d82c9` (branch `compose-exit-code-contract`)
+> **Updated:** 2026-08-01 @ `98fd1be` (branch `compose-exit-code-contract`)
 > **갱신 트리거:** sub-project/gate **상태가 바뀔 때만**(커밋마다 아님).
 > **종결 상태:** COMPOSE seal이 정확히 한 번 열리면 이 인덱스는 **frozen/은퇴**한다. 이후 진행상황은
 > seal 결과와 post-hoc analysis가 대신한다.
@@ -444,8 +444,9 @@ branch에서 추적 가능하게 기록한다. `LOCAL` ledger ID만으로는 이
    the tests fail closed both ways: an unclassified new class, and a `PRESEAL_REJECTION` no roster entry
    catches. Reachability is computed from a STATIC AST import graph, not a `sys.modules` probe — the probe
    misses `config2`'s function-local import of `activation_evidence` and would have called it unreachable — and
-   a test asserts the static graph is a superset of what a FRESH interpreter loads (60 modules ⊇ 58; empty
-   difference). The roster grew from **15 to 41** entries, covering **43** classified `PRESEAL_REJECTION`
+   a test asserts the static graph is a superset of what a FRESH interpreter loads (64 modules ⊇ 59; empty
+   difference — the static side deliberately over-approximates, counting the PEP-562 lazy-export gate's
+   targets, which an import never triggers). The roster grew from **15 to 41** entries, covering **43** classified `PRESEAL_REJECTION`
    classes (two are reached through a base: `UnsupportedModeError` via `RunSpecError`,
    `ApproximationBiasReportError` via `Phase2bError`). Each classified type, injected **at the CLI dispatch
    seam**, produces the contracted exit code, exactly one stderr line, and an empty stdout across all four
@@ -501,6 +502,36 @@ branch에서 추적 가능하게 기록한다. `LOCAL` ledger ID만으로는 이
    contracted rejection. What the reviewers tried and could NOT break: the claim that widening the roster
    cannot mislabel a consumed seal, for `phase2a`/`preflight`/`phase2b`. Seal state remains **UNOPENED**;
    execution remains **RELEASE-BLOCKED**.
+   **2026-08-01 re-review of those corrections (mutation-executed, not read-only).** A second independent
+   round re-ran the first round's attacks against the fixes. **Closed and mutation-verified:** the
+   contrapositive (five variants, including a new class added WITH its table entry and the pinned counts
+   bumped — it still fired), and the pinned counts (dropping a roster entry fails six tests). The `recover`
+   change is pinned end to end: reverting it fails 45 cases, including two real-CLI tests, not just table
+   lookups. **Fixed in response to this round:** a class under `src/alive` whose NAME collides with a builtin
+   exception was silently dropped from discovery — unclassified, invisible to the contrapositive, yet still
+   caught by the roster — now failed on at the source; the `AnnAssign` repair had no regression test, so
+   reverting it left the suite green, now pinned; the loader-ordering test pinned only one of the clause's two
+   arms; `ComposeSealingError`'s replacement justification traded one inaccuracy for another (it is raised both
+   pre- and post-claim); and the runbook's `TerminalError` message claim, its "recover 실패는 전부 durable
+   export 미완료" flag, and `main`'s public `Returns` docstring were all corrected. The runbook's bucket C also
+   still sanctioned deleting `phase2a`'s own write-once outputs — its entry roster requires an EMPTY `run_dir`,
+   so after a CONTINUE the "condition to fix" is the frozen bundle, run ledger, OOF manifest and
+   seed-variability report; the protected list now covers every run-produced write-once artifact and says a
+   non-empty `run_dir` is a new-run-identity signal, not a cleanup target.
+   **NEW Important, recorded and NOT fixed here — `phase2b` has the same defect `recover` just had.**
+   `phase2b_cmd` runs `assert_run_dir_roster(run_dir, "phase2b")` at step 0, BEFORE the
+   `except Exception`/`_seal_consumed` wrapper, and the phase2b entry roster forbids terminal and audit
+   artifacts. So a leftover `phase2b_complete.json` — itself proof that a seal WAS consumed — raises
+   `RunDirStateError`, reaches the CLI, and returns exit `10`, "the seal was NOT consumed". That is the exact
+   argument used to move `recover` to 30, unapplied to the subcommand a real scientific run will actually hit,
+   and it falsifies the "an exception reaching the CLI from phase2b is pre-seal too" reasoning the
+   classification module states. It is deliberately not fixed in this wave because the correction belongs in
+   `phase2b_cmd.py`, a `CLAUDE.md#enforcement` guard file, and guard changes must not ride along inside a
+   contract-tidying wave; it is queued with the four items above for the owner-approved guard branch. The
+   runbook already routes this case to "stop and report". Two accepted residuals: a class created by `type()`
+   or with a computed base is still invisible to discovery, and the static graph's over-approximation moves two
+   classes from machine-checked to justification-only. Seal state remains **UNOPENED**; execution remains
+   **RELEASE-BLOCKED**.
    **2026-07-25 pre-pod local gate:** the probe-rerun runbook's §2.2 verification roster was run at clean exact
    commit `614017b67e35e9cc07f68d5b512213d8356cf1b2` — **254 passed**, plus `ruff check`/`ruff format --check`
    over the whole repository, `git diff --check`, and an empty `git status --short`. This records local

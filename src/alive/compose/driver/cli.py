@@ -373,9 +373,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     Returns
     -------
     int
-        ``0`` on success; ``10`` on a pre-seal validation rejection; ``20`` on
-        ``phase2a`` FUTILITY_STOPPED; ``30`` on a post-seal non-``COMPLETE``
-        terminal or incomplete durable export.
+        ``0`` on success; ``10`` on a pre-seal validation rejection from
+        ``phase2a``/``preflight``/``phase2b``; ``20`` on ``phase2a``
+        FUTILITY_STOPPED; ``30`` on a post-seal non-``COMPLETE`` terminal, an
+        incomplete durable export, OR any ``recover`` rejection (recover runs on a
+        run whose seal may already be burned, so it cannot return ``10``).
 
     Raises
     ------
@@ -409,6 +411,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             # incomplete"; a rejection that escapes it is that same outcome reached
             # another way, so it gets the same code. This is why the roster is
             # shared but the exit code is not.
+            #
+            # Not a perfect fit either, and re-review was right to say so: 30's
+            # registered meaning presupposes the seal opened, so a recover against a
+            # typo'd --run-dir that never sealed anything also reports 30. That is
+            # the CONSERVATIVE direction -- the dangerous falsehood is claiming "not
+            # consumed" when it was, never the reverse.
             _report_rejection("recover", exc)
             return POSTSEAL_NONCOMPLETE_EXIT
 

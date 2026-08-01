@@ -249,7 +249,7 @@ _CLASSIFICATION: dict[str, tuple[str, str]] = {
     ),
     "alive.compose.outcome_store::ComposeSealingError": (
         PRESEAL_REJECTION,
-        "Raised post-claim inside materialize_claimed; safe ONLY via phase2b_cmd's _seal_consumed.",
+        "Raised both pre- and post-claim; the post-claim sites are safe only via _seal_consumed.",
     ),
     "alive.compose.preflight::PreflightError": (
         PRESEAL_REJECTION,
@@ -433,7 +433,7 @@ def _static_import_graph(root: str) -> set[str]:
     return seen
 
 
-def _exception_classes() -> tuple[dict[str, str], set[str]]:
+def _exception_classes() -> tuple[dict[str, str], set[str], set[str]]:
     """Discover exception classes, and report base names the closure could not resolve.
 
     The second element is what makes discovery honest. The closure is keyed on the
@@ -462,22 +462,28 @@ def _exception_classes() -> tuple[dict[str, str], set[str]]:
             if name not in known and any(base in known for base in bases):
                 known.add(name)
                 changed = True
+    # NOTE the exclusion is by NAME, which is why `_shadowing` below exists: a class
+    # under src/alive literally named e.g. ``TypeError`` would be dropped here, never
+    # classified, and never seen by the contrapositive test -- while the roster would
+    # still catch it. Re-review demonstrated exactly that swallow, so shadowing is now
+    # reported and failed on rather than silently filtered.
     classes = {
         f"{module}::{name}": module
         for module, name, _bases in pending
         if name in known and name not in _BUILTIN_BASES
     }
+    shadowing = {f"{module}::{name}" for module, name, _bases in pending if name in _BUILTIN_BASES}
     unresolved = {
         base
         for _module, _name, bases in pending
         for base in bases
         if base not in known and base not in _KNOWN_NON_EXCEPTION_BASES
     }
-    return classes, unresolved
+    return classes, unresolved, shadowing
 
 
 _GRAPH = _static_import_graph(_ROOT_MODULE)
-_CLASSES, _UNRESOLVED_BASES = _exception_classes()
+_CLASSES, _UNRESOLVED_BASES, _SHADOWING_CLASSES = _exception_classes()
 
 
 # --------------------------------------------------------------------------- #
@@ -682,3 +688,35 @@ def test_the_enumeration_counts_are_pinned():
     assert len(cli._KNOWN_PRESEAL_REJECTIONS) == 41, (
         f"roster size: {len(cli._KNOWN_PRESEAL_REJECTIONS)}"
     )
+
+
+def test_no_class_shadows_a_builtin_exception_name():
+    """The one swallow the contrapositive misses, closed at the source.
+
+    ``_exception_classes`` filters on ``name not in _BUILTIN_BASES`` so the seed
+    names never become table rows. That filter is by NAME, so a project class
+    literally called ``TypeError`` would vanish from ``_CLASSES`` -- unclassified,
+    invisible to :func:`test_no_non_preseal_class_is_caught_by_the_roster` -- while
+    ``except _KNOWN_PRESEAL_REJECTIONS`` still caught it. Re-review built that class
+    and watched the suite stay green.
+    """
+    assert not _SHADOWING_CLASSES, (
+        "these classes shadow a builtin exception name and would be dropped from "
+        f"discovery unclassified: {sorted(_SHADOWING_CLASSES)}. Rename the class; do "
+        "not widen the filter."
+    )
+
+
+def test_the_lazy_export_gate_is_actually_parsed():
+    """Pin the AnnAssign fix. The bug it repaired was silent, and would be again.
+
+    ``_LAZY_EXPORTS`` is an ANNOTATED assignment, so an earlier version matching only
+    ``ast.Assign`` never read it while the docstring claimed the PEP-562 gate was
+    covered. Reverting that one isinstance left the suite fully green, so the repair
+    needs its own witness: the gate's targets must appear in the graph.
+    """
+    gate = _SRC / "alive" / "compose" / "__init__.py"
+    lazily_exported = _imported_alive_modules(gate)
+    assert lazily_exported, "the _LAZY_EXPORTS gate parsed to nothing -- the branch is dead again"
+    missing = sorted(m for m in lazily_exported if m not in _GRAPH and _module_path(m))
+    assert not missing, f"lazily exported modules absent from the graph: {missing}"
