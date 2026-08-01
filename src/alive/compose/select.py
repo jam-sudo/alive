@@ -47,6 +47,7 @@ from numpy.random import PCG64, Generator
 
 from alive.compose.identify import SingularDesignError, rank_diagnostics
 from alive.compose.metric2 import paired_relative_error_reduction
+from alive.compose.models import L1Model
 from alive.io import atomic_write_once
 from alive.provenance import sha256_json
 
@@ -60,6 +61,13 @@ OOF_RANK_TOLERANCE_RULE = "max_shape_times_float64_eps_times_sigma_max"
 #: A typed model factory: a zero-arg callable returning a fresh symmetric model
 #: exposing ``fit(Z, pairs, eps_obs, *, lam)`` and ``predict_eps(Z, g, h)``.
 ModelFactory = Callable[[], object]
+
+#: The ONE estimator whose singular design OOF selection may read as hyperparameter
+#: non-viability. ``phase2a`` binds selection to ``L1Model`` through a hard-coded
+#: ``model_factories["l1_bilinear_identifiable"]`` lookup; this makes that binding
+#: assertable at the only point where getting it wrong would corrupt a recorded
+#: result (see the ``SingularDesignError`` handler in :func:`select_hyperparams`).
+_OOF_SELECTION_MODEL: type = L1Model
 
 
 class SelectionError(ValueError):
@@ -1019,6 +1027,24 @@ def select_hyperparams(
                     require_full_rank_unregularized=True,
                 )
             except SingularDesignError as exc:
+                # Reading a singular design as "this HYPERPARAMETER is non-viable"
+                # is only correct for the REGISTERED headline estimator, whose
+                # unregularized rank policy is what defines viability. ``phase2a``
+                # binds ``model_factory`` through a hard-coded
+                # ``model_factories["l1_bilinear_identifiable"]`` lookup that
+                # nothing asserted, so for any other estimator this branch would
+                # silently record a singular comparator as a bad lambda and drop it
+                # from the score map. Unreachable today; pinned so it stays that way
+                # if the comparator roster ever becomes configurable. The check
+                # lives HERE, not at entry, so known-answer stubs that never raise
+                # SingularDesignError keep working.
+                if type(model_factory()) is not _OOF_SELECTION_MODEL:
+                    raise SelectionError(
+                        "OOF non-viability is registered for "
+                        f"{_OOF_SELECTION_MODEL.__name__} only; candidate {candidate} "
+                        f"used {type(model_factory()).__name__}, whose singular design "
+                        f"would be misrecorded as a non-viable hyperparameter: {exc}"
+                    ) from exc
                 nonviable_candidates[candidate] = str(exc)
                 continue
             if not np.isfinite(theta):
