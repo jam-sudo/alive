@@ -5,7 +5,7 @@
 > **이 문서는 아무것도 정의하지 않는다** — 세부(task)는 plan, claim은 spec, exact param은 config,
 > 시간순 audit는 git이 authoritative다([sources of truth](../../CLAUDE.md#sources)). 상태 행이 authoritative
 > 문서와 어긋나면 **authoritative 문서가 옳다**; 이 인덱스를 갱신한다.
-> **Updated:** 2026-08-01 @ `4e5757f` (branch `compose-exit-code-contract`)
+> **Updated:** 2026-08-01 @ `c7d82c9` (branch `compose-exit-code-contract`)
 > **갱신 트리거:** sub-project/gate **상태가 바뀔 때만**(커밋마다 아님).
 > **종결 상태:** COMPOSE seal이 정확히 한 번 열리면 이 인덱스는 **frozen/은퇴**한다. 이후 진행상황은
 > seal 결과와 post-hoc analysis가 대신한다.
@@ -444,21 +444,63 @@ branch에서 추적 가능하게 기록한다. `LOCAL` ledger ID만으로는 이
    the tests fail closed both ways: an unclassified new class, and a `PRESEAL_REJECTION` no roster entry
    catches. Reachability is computed from a STATIC AST import graph, not a `sys.modules` probe — the probe
    misses `config2`'s function-local import of `activation_evidence` and would have called it unreachable — and
-   a test asserts the static graph is a superset of what a real import loads (60 modules ⊇ 58; empty
-   difference). The roster grew from 16 to **42** admitted types. Every one of them, injected into the real
-   `main()`, was verified to produce exit `10`, exactly one stderr line, and an **empty stdout**, across all
-   four subcommands (168 parametrized cases); an unclassified exception was verified to propagate with stdout
-   still empty. Dropping one roster entry was mutation-verified to fail the completeness test.
+   a test asserts the static graph is a superset of what a FRESH interpreter loads (60 modules ⊇ 58; empty
+   difference). The roster grew from **15 to 41** entries, covering **43** classified `PRESEAL_REJECTION`
+   classes (two are reached through a base: `UnsupportedModeError` via `RunSpecError`,
+   `ApproximationBiasReportError` via `Phase2bError`). Each classified type, injected **at the CLI dispatch
+   seam**, produces the contracted exit code, exactly one stderr line, and an empty stdout across all four
+   subcommands (172 parametrized cases); an unclassified exception propagates with stdout still empty. Note
+   what that injection does and does not show: it pins the catch/report/exit mapping, **not** that each type is
+   genuinely pre-seal at its real raise site. Dropping a roster entry, and the base-class swallow described
+   below, are both mutation-verified to fail.
    **One structural fact made this safe to do at all:** `phase2b_cmd` already branches on
    `_seal_consumed(audit_path)` — filesystem evidence, not the exception type — returning `30` when the seal
    was consumed and re-raising otherwise. So widening the roster cannot mislabel a consumed seal as a pre-seal
-   rejection. **One pre-existing semantic is recorded, not changed:** the `recover` branch maps its rejections
-   to `10` = "pre-seal, seal not consumed", yet `recover` runs precisely when a seal may already have been
-   consumed. That reading was already there for `RecoverSubcommandError`; it is flagged here for review rather
-   than altered. Also closed: `select.py`'s latent OOF↔L1 binding, now asserted at the `SingularDesignError`
+   rejection. **The `recover` semantic was NOT merely recorded — it was corrected (see the review entry
+   below).** Also closed: `select.py`'s latent OOF↔L1 binding, now asserted at the `SingularDesignError`
    handler — the only point where a non-L1 estimator's singular design would be misrecorded as a non-viable
    hyperparameter — rather than at entry, so known-answer stubs still work. Seal state remains **UNOPENED**;
    execution remains **RELEASE-BLOCKED**; nothing here authorizes a run.
+   **2026-08-01 independent adversarial review of the entry above, and the corrections it forced.** Three
+   independent reviewers read the committed branch tip under distinct lenses (seal-safety/leakage/governance;
+   classification correctness; test adequacy), read-only, against a `git archive` snapshot rather than a
+   moving working tree. Verdict: **0 Critical on seal safety**, but **1 Critical on the mechanism itself** plus
+   several classification and documentation defects — most of them introduced by the wave, not pre-existing.
+   Reviewers disagreed on one point and the disagreement was resolved by reading the code, not by preferring a
+   reviewer: `TerminalError` DOES escape `recover` unwrapped, via
+   `recover_cmd` → `recover_phase2b_durable_outputs` → `finalize_phase2b_durable_outputs` →
+   `_assert_no_raw_outcomes`; the wrap one reviewer cited covers `recover_aborted_after_seal`, a different call.
+   **Corrections applied.** (1) **`recover` now returns `30`, not `10`.** Exit `10` asserts "the seal was NOT
+   consumed" and `recover` runs only on a run whose seal may already be burned; two of its rejections are
+   reachable *only* post-seal (`run_dir_state` on two terminal artifacts; the `TerminalError` path above).
+   `recover_cmd` already mapped the one type it catches itself to `30` = "durable export incomplete", so this
+   makes the wrapper agree with the subcommand. The stderr line is unchanged. (2) **The classification table
+   was missing its contrapositive** — nothing asserted that a `BUG`/`POSTSEAL` class is NOT caught by the
+   roster, so a one-token base change (`NoTerminalWritten(TerminalError)`) made a BUG sentinel report as a
+   documented rejection with every test still green. Now asserted and mutation-verified against that exact
+   attack. (3) **`metric2.MetricError` was misclassified `POSTSEAL`**; it is reachable pre-seal from `phase2a`
+   via `select.py`'s OOF theta call, whose handler catches `SingularDesignError` only, through `diagnostics2`
+   (no `except` clauses at all). Reclassified and admitted. (4) **Four justification strings asserted things
+   the code contradicts** (`ComposeSealingError`, `Phase2bError`/`ApproximationBiasReportError`,
+   `TerminalError`) — each is saved in effect by `_seal_consumed`, not by the stated reason — and
+   `BootstrapError` was `POSTSEAL` when COMPOSE imports only a helper that raises nothing. The table's value is
+   its reasons, so all five were corrected. (5) **The `_LAZY_EXPORTS` branch was dead code**: the assignment is
+   an `ast.AnnAssign`, which `ast.Assign` never matches, so the documented PEP-562 safeguard did not exist.
+   (6) **Discovery rested on a hand-written 9-name seed**, so `class X(FileNotFoundError)` would never have been
+   discovered and never required to be classified — the exact hand-enumeration failure this file exists to
+   prevent. It now fails closed on any unresolved base name. (7) **The loader's stated re-raise ordering had no
+   test**; deleting the clause changed no exit code and no stderr shape. Now pinned and mutation-verified.
+   (8) Enumeration counts are pinned, the runbook operator table was re-bucketed (a `RunDirStateError` on
+   `phase2b` reads as "delete `audit.jsonl` and the terminal, then re-run" under the old bucket C wording), and
+   the overclaimed prose above was narrowed. **Recorded, NOT fixed here, and each needs its own scope:**
+   `_seal_consumed` fails open on an `OSError` from `Path.exists` and has a TOCTOU inside its own handler
+   (`phase2b_cmd.py` is a `CLAUDE.md#enforcement` guard file); `_reread_durable_commit` can raise `KeyError`/
+   `OSError` post-seal and exit `1` where `30` is the registered signal; `identify.py:150` still raises a bare
+   `ValueError` for a non-finite factor bank, an operator-facing PREPARE rejection that exits `1`; and two
+   `OutcomeLeakageError` raise sites are self-declared internal-invariant violations, so a BUG reports as a
+   contracted rejection. What the reviewers tried and could NOT break: the claim that widening the roster
+   cannot mislabel a consumed seal, for `phase2a`/`preflight`/`phase2b`. Seal state remains **UNOPENED**;
+   execution remains **RELEASE-BLOCKED**.
    **2026-07-25 pre-pod local gate:** the probe-rerun runbook's §2.2 verification roster was run at clean exact
    commit `614017b67e35e9cc07f68d5b512213d8356cf1b2` — **254 passed**, plus `ruff check`/`ruff format --check`
    over the whole repository, `git diff --check`, and an empty `git status --short`. This records local

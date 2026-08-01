@@ -125,6 +125,10 @@ exit code 계약: `0` 성공, `20` phase2a futility(`FUTILITY_STOPPED`, `phase2b
 post-seal non-COMPLETE(durable export 미완료 포함), `10` pre-seal rejection, **`1` uncontracted driver bug**
 (2026-08-01 등록). `2`는 argparse의 사용법 오류다.
 
+⚑ **`recover`는 rejection을 `10`이 아니라 `30`으로 반환한다**(2026-08-01 리뷰). `10`의 등록된 의미는
+"seal이 소비되지 않았다"인데, `recover`는 seal이 이미 소비됐을 수 있는 run에서만 실행되므로 그 주장을
+할 수 없다. `recover`의 실패는 전부 "durable export 미완료"다.
+
 **`1`을 받으면 재실행하지 않는다.** `1`은 등록된 rejection roster 밖의 예외가 전파된 것이고, 계약된
 성공도 계약된 거부도 아니다. full traceback이 stderr에 남고 stdout은 비어 있다. 정지하고 traceback째로
 보고한다. `10`/`20`/`30`은 정상 계약 경로이고, 그 외 어떤 값도 계약 밖이다.
@@ -137,10 +141,10 @@ stderr 한 줄이 나르는 **exception class 이름**이 정한다(형식: `sta
 
 | 대응 | exception | 조치 |
 |------|-----------|------|
-| **A. 정지·보고 (재실행 금지)** | `OutcomeLeakageError` · `LeakageError` · `ComposeSealingError` · `FitRoleArtifactError` | leakage/seal 경계 위반이다. **재실행하지 않는다.** artifact를 보존하고 owner에게 보고한다. lineage 자체가 의심 대상이다 |
-| **B. 상류 재생성 후 재실행** | `HashMismatchError` · `ConfigContractError` · `InputContractError` · `ProvenanceError` · `AssemblerError` · `Phase2ConfigError` · `ActivationEvidenceError` · `ApproximationBiasValidationError` · `ApproximationBiasDeclarationError` · `DataCardError` · `ScientificModeError` · `FreezeError` · `OOFFoldManifestError` | artifact·config·evidence가 기록된 identity와 불일치한다. PREPARE 산출물을 다시 만든다. **config/evidence field를 바꾸면 새 run identity다** |
-| **C. 조건 수정 후 동일 identity로 재실행** | `BaselineUnavailable` · `PayloadError` · `WorkerBundleError` · `RunDirStateError` · `ScientificRuntimeError` · `TerminalError` · `RunSpecError`(`UnsupportedModeError` 포함) · `ConfirmationError` · `LedgerError` · `Phase2aSubcommandError` · `PreflightSubcommandError` · `Phase2bSubcommandError` · `RecoverSubcommandError` | 환경·운영 실패다. `BaselineUnavailable`(GEARS/CPA worker non-zero exit)이 pod에서 가장 흔할 후보다. 명시된 조건을 고치고 같은 run identity로 다시 실행한다 |
-| **D. 과학적 무효 — 조사 후 판단** | `SelectionError` · `SingularDesignError` · `SeedVariabilityContractError` · `SeedVariabilityReportError` · `SeedVariabilityPreflightError` · `FoldJobError` · `FoldExecutionError` · `SeedAssemblyError` · `PreflightError` · `Phase2bError` | 주어진 입력으로 유효한 결과를 만들 수 없다는 판정이다. **반복 재실행이 아니라 원인 조사**로 간다. 이유는 stderr 한 줄에 담긴다 |
+| **A. 정지·보고 (재실행 금지)** | `OutcomeLeakageError` · `LeakageError` · `ComposeSealingError` · `FitRoleArtifactError` · `TerminalError` · **`phase2b`/`recover`에서의 `RunDirStateError`** | leakage/seal 경계 위반이다. **재실행하지 않는다.** artifact를 하나도 지우지 말고 보존한 뒤 owner에게 보고한다. ⚑ `RunDirStateError`가 `phase2b`에서 말하는 "forbidden basename" 목록에는 `audit.jsonl`·terminal이 들어갈 수 있는데, 그 조건을 "고친다"는 것은 **write-once seal 기록을 지운다**는 뜻이므로 절대 하지 않는다. `TerminalError`의 pre-seal 발생 지점은 `Phase2bTerminal.acquire()`이고 그 메시지는 "seal이 이미 열렸다"이다 |
+| **B. 상류 재생성 후 재실행** | `HashMismatchError` · `ConfigContractError` · `InputContractError` · `ProvenanceError` · `AssemblerError` · `Phase2ConfigError` · `ActivationEvidenceError` · `ApproximationBiasValidationError` · `ApproximationBiasDeclarationError` · `DataCardError` · `ScientificModeError` · `FreezeError` · `OOFFoldManifestError` · `Phase2bSubcommandError` | artifact·config·evidence가 기록된 identity와 불일치한다. **먼저 현 artifact를 보존한다**(`HashMismatchError`는 변조 신호일 수 있고 상류 재생성은 그 증거를 지운다). 그 뒤 PREPARE 산출물을 다시 만든다. `Phase2bSubcommandError`는 sealed-source digest 불일치를 포함하는데, 이는 환경 문제가 아니라 lineage 사건이다. **config/evidence field를 바꾸면 새 run identity다** |
+| **C. 조건 수정 후 동일 identity로 재실행** | `BaselineUnavailable` · `PayloadError` · `WorkerBundleError` · `ScientificRuntimeError` · `RunSpecError`(`UnsupportedModeError` 포함) · `ConfirmationError` · `LedgerError` · `Phase2aSubcommandError` · `PreflightSubcommandError` · `RecoverSubcommandError` · **`phase2a`에서의 `RunDirStateError`** | 환경·운영 실패다. `BaselineUnavailable`(GEARS/CPA worker non-zero exit)이 pod에서 가장 흔할 후보다. **어떤 경우에도 seal-adjacent artifact(audit·terminal·pre-access ledger·durable marker)를 지워서 조건을 충족시키지 않는다** — 그런 상황이면 A로 간다 |
+| **D. 과학적 무효 — 조사 후 판단** | `SelectionError` · `SingularDesignError` · `MetricError` · `SeedVariabilityContractError` · `SeedVariabilityReportError` · `SeedVariabilityPreflightError` · `FoldJobError` · `FoldExecutionError` · `SeedAssemblyError` · `PreflightError` · `Phase2bError`(`ApproximationBiasReportError` 포함) | 주어진 입력으로 유효한 결과를 만들 수 없다는 판정이다. **반복 재실행이 아니라 원인 조사**로 간다. 이유는 stderr 한 줄에 담긴다. 단 `Phase2bError` 중 argument-wiring 실패(예: `oof_manifest_path`와 `seed_variability_report_path`를 함께 주지 않음)는 C에 가깝다 |
 
 > **Note (2026-07-07, sub-project C 설계 조정).** 위 stage-1 입력(`Phase2aInputs`/fit-role/response/
 > manifest)은 driver 상위의 **PREPARE**(별도 sub-project)가 만들며 §3 step 8처럼 pre-built로 sync된다.
