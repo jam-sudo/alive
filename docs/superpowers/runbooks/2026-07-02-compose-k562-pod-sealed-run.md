@@ -122,7 +122,25 @@ driver는 `Phase2aInputs`, development/sealed stores, manifest, response artifac
 frozen bundle checksum, clean tree와 confirmation token을 재검증해야 한다.
 
 exit code 계약: `0` 성공, `20` phase2a futility(`FUTILITY_STOPPED`, `phase2b` 금지), `30` phase2b/recover의
-post-seal non-COMPLETE(durable export 미완료 포함), `10` pre-seal rejection.
+post-seal non-COMPLETE(durable export 미완료 포함), `10` pre-seal rejection, **`1` uncontracted driver bug**
+(2026-08-01 등록). `2`는 argparse의 사용법 오류다.
+
+**`1`을 받으면 재실행하지 않는다.** `1`은 등록된 rejection roster 밖의 예외가 전파된 것이고, 계약된
+성공도 계약된 거부도 아니다. full traceback이 stderr에 남고 stdout은 비어 있다. 정지하고 traceback째로
+보고한다. `10`/`20`/`30`은 정상 계약 경로이고, 그 외 어떤 값도 계약 밖이다.
+
+**`10`(pre-seal rejection) 운영 대응표.** `10`은 "seal이 소비되지 않았다"만 말한다. 무엇을 해야 하는지는
+stderr 한 줄이 나르는 **exception class 이름**이 정한다(형식: `stage: ExceptionName: message`). leakage에
+전용 exit code를 두지 않는 것이 등록된 결정이므로(2026-08-01), 이 표가 severity를 나르는 유일한 장소다.
+분류의 근거는 `tests/alive/compose/driver/test_exit_code_contract.py`의 `_CLASSIFICATION`에 class별 1줄로
+기록되어 있다.
+
+| 대응 | exception | 조치 |
+|------|-----------|------|
+| **A. 정지·보고 (재실행 금지)** | `OutcomeLeakageError` · `LeakageError` · `ComposeSealingError` · `FitRoleArtifactError` | leakage/seal 경계 위반이다. **재실행하지 않는다.** artifact를 보존하고 owner에게 보고한다. lineage 자체가 의심 대상이다 |
+| **B. 상류 재생성 후 재실행** | `HashMismatchError` · `ConfigContractError` · `InputContractError` · `ProvenanceError` · `AssemblerError` · `Phase2ConfigError` · `ActivationEvidenceError` · `ApproximationBiasValidationError` · `ApproximationBiasDeclarationError` · `DataCardError` · `ScientificModeError` · `FreezeError` · `OOFFoldManifestError` | artifact·config·evidence가 기록된 identity와 불일치한다. PREPARE 산출물을 다시 만든다. **config/evidence field를 바꾸면 새 run identity다** |
+| **C. 조건 수정 후 동일 identity로 재실행** | `BaselineUnavailable` · `PayloadError` · `WorkerBundleError` · `RunDirStateError` · `ScientificRuntimeError` · `TerminalError` · `RunSpecError`(`UnsupportedModeError` 포함) · `ConfirmationError` · `LedgerError` · `Phase2aSubcommandError` · `PreflightSubcommandError` · `Phase2bSubcommandError` · `RecoverSubcommandError` | 환경·운영 실패다. `BaselineUnavailable`(GEARS/CPA worker non-zero exit)이 pod에서 가장 흔할 후보다. 명시된 조건을 고치고 같은 run identity로 다시 실행한다 |
+| **D. 과학적 무효 — 조사 후 판단** | `SelectionError` · `SingularDesignError` · `SeedVariabilityContractError` · `SeedVariabilityReportError` · `SeedVariabilityPreflightError` · `FoldJobError` · `FoldExecutionError` · `SeedAssemblyError` · `PreflightError` · `Phase2bError` | 주어진 입력으로 유효한 결과를 만들 수 없다는 판정이다. **반복 재실행이 아니라 원인 조사**로 간다. 이유는 stderr 한 줄에 담긴다 |
 
 > **Note (2026-07-07, sub-project C 설계 조정).** 위 stage-1 입력(`Phase2aInputs`/fit-role/response/
 > manifest)은 driver 상위의 **PREPARE**(별도 sub-project)가 만들며 §3 step 8처럼 pre-built로 sync된다.

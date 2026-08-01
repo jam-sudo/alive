@@ -5,7 +5,7 @@
 > **이 문서는 아무것도 정의하지 않는다** — 세부(task)는 plan, claim은 spec, exact param은 config,
 > 시간순 audit는 git이 authoritative다([sources of truth](../../CLAUDE.md#sources)). 상태 행이 authoritative
 > 문서와 어긋나면 **authoritative 문서가 옳다**; 이 인덱스를 갱신한다.
-> **Updated:** 2026-07-31 @ `6f58979` (branch `compose-svd-ridge-and-carrier-binding`)
+> **Updated:** 2026-08-01 @ `4e5757f` (branch `compose-exit-code-contract`)
 > **갱신 트리거:** sub-project/gate **상태가 바뀔 때만**(커밋마다 아님).
 > **종결 상태:** COMPOSE seal이 정확히 한 번 열리면 이 인덱스는 **frozen/은퇴**한다. 이후 진행상황은
 > seal 결과와 post-hoc analysis가 대신한다.
@@ -416,6 +416,49 @@ branch에서 추적 가능하게 기록한다. `LOCAL` ledger ID만으로는 이
    registered exit-code contract. Fold them into that scoped design rather than appending a mapping.
    Seal state remains **UNOPENED**; execution
    remains **RELEASE-BLOCKED**.
+   **2026-08-01 — the exit-code blocker above and its 2026-07-31 widening are CLOSED.** The scoped design the
+   two entries asked for was done as a spec amendment plus a mechanically-enumerated roster, not as an append.
+   Four owner decisions were registered first: leakage keeps exit `10` and the severity distinction moves to a
+   runbook exception-name table (D1); the condition ceiling is registered at `1.0e8` on `rank_diagnostics(Φ)`
+   (D2, not yet implemented — that is the next wave); the uniform-scale "immaterial λ" band is recorded as a
+   registered limitation rather than invented as a criterion (D3); the receipt's interpreter identity is done
+   now (D4). Plan: `plans/2026-08-01-compose-pre-pod-local-closure.md`.
+   **The contract is no longer stated as total.** Driver design spec 1.1 now registers exit `1` as the
+   uncontracted-driver-bug escape — full traceback on stderr, stdout empty, blind retry forbidden — because the
+   carve-out previously existed only in `cli.py`'s docstring while the spec and runbook described `main`'s
+   returns as totally 0/10/20/30. It also registers the ADMISSION RULE, which is what the earlier entry's
+   "admit eight types" framing got wrong: `src/alive/compose` raises a bare `ValueError` in **218** places,
+   nearly all of them internal-invariant violations, so admitting the builtin — or wrapping a whole library
+   call in `except ValueError` — would report unclassified BUGS as documented pre-seal rejections. Only typed
+   classes defined under `src/alive` may enter the roster. The contracted raise sites were therefore TYPED
+   first: 28 of `phase2a.py`'s 29 bare-`ValueError` sites became `InputContractError` (PREPARE-supplied
+   artifact structure/alignment) or `ConfigContractError` (runtime-vs-preregistration drift). The 29th
+   (`model_factories` missing the headline model) stays bare on purpose — `_validate_config_contract` shadows
+   it because `config2` pins the ladder to start at `l1_bilinear_identifiable`, so reaching it means an
+   internal invariant broke, which the registered classification calls a BUG. `carrier_loader`'s
+   `Phase2aInputs` construction is wrapped narrowly (untrusted-payload deserialization only) with typed
+   rejections re-raised FIRST, so a leakage rejection is never re-labelled as a `RunSpecError`.
+   **The enumeration is mechanical, because hand-enumeration has failed twice here** (this roster, and the
+   kernel-isolation closure). All **72** exception classes under `src/alive` are now classified
+   `PRESEAL_REJECTION` / `POSTSEAL` / `BUG` / `UNREACHABLE_FROM_DRIVER` with a one-line justification each, and
+   the tests fail closed both ways: an unclassified new class, and a `PRESEAL_REJECTION` no roster entry
+   catches. Reachability is computed from a STATIC AST import graph, not a `sys.modules` probe — the probe
+   misses `config2`'s function-local import of `activation_evidence` and would have called it unreachable — and
+   a test asserts the static graph is a superset of what a real import loads (60 modules ⊇ 58; empty
+   difference). The roster grew from 16 to **42** admitted types. Every one of them, injected into the real
+   `main()`, was verified to produce exit `10`, exactly one stderr line, and an **empty stdout**, across all
+   four subcommands (168 parametrized cases); an unclassified exception was verified to propagate with stdout
+   still empty. Dropping one roster entry was mutation-verified to fail the completeness test.
+   **One structural fact made this safe to do at all:** `phase2b_cmd` already branches on
+   `_seal_consumed(audit_path)` — filesystem evidence, not the exception type — returning `30` when the seal
+   was consumed and re-raising otherwise. So widening the roster cannot mislabel a consumed seal as a pre-seal
+   rejection. **One pre-existing semantic is recorded, not changed:** the `recover` branch maps its rejections
+   to `10` = "pre-seal, seal not consumed", yet `recover` runs precisely when a seal may already have been
+   consumed. That reading was already there for `RecoverSubcommandError`; it is flagged here for review rather
+   than altered. Also closed: `select.py`'s latent OOF↔L1 binding, now asserted at the `SingularDesignError`
+   handler — the only point where a non-L1 estimator's singular design would be misrecorded as a non-viable
+   hyperparameter — rather than at entry, so known-answer stubs still work. Seal state remains **UNOPENED**;
+   execution remains **RELEASE-BLOCKED**; nothing here authorizes a run.
    **2026-07-25 pre-pod local gate:** the probe-rerun runbook's §2.2 verification roster was run at clean exact
    commit `614017b67e35e9cc07f68d5b512213d8356cf1b2` — **254 passed**, plus `ruff check`/`ruff format --check`
    over the whole repository, `git diff --check`, and an empty `git status --short`. This records local
