@@ -225,3 +225,32 @@ def test_wrong_head_fails_closed(tmp_path):
             approved_artifacts_root=bundle.approved_artifacts_root,
             trusted_repo_root=bundle.repo_root,
         )
+
+
+def test_a_leakage_rejection_escapes_the_carrier_under_its_own_class(tmp_path, monkeypatch):
+    """The re-raise ORDERING is the loader's stated safety property; pin it.
+
+    ``_load_phase2a_inputs`` wraps the ``Phase2aInputs`` construction so a malformed
+    untrusted payload becomes a contracted ``RunSpecError``. But ``OutcomeLeakageError``
+    and ``InputContractError`` are both ``ValueError`` subclasses, so without the
+    earlier ``except ... : raise`` clause the widest clause would swallow them and the
+    operator would be told ``RunSpecError`` -- erasing the project's highest-severity
+    signal (CLAUDE.md#invariants). Deleting that clause changes no exit code and no
+    stderr shape, so nothing else in the suite notices (2026-08-01 review).
+    """
+    from alive.compose.driver import carrier_loader
+    from alive.compose.freeze import OutcomeLeakageError
+
+    bundle = build_scientific_carrier_fixture(tmp_path / "a", repo_root=tmp_path / "r")
+
+    def _leaky(*_args, **_kwargs):
+        raise OutcomeLeakageError("development outcome store reports a non-zero sealed access")
+
+    monkeypatch.setattr(carrier_loader, "Phase2aInputs", _leaky)
+
+    with pytest.raises(OutcomeLeakageError):
+        load_run_spec_carrier(
+            bundle.spec_path,
+            approved_artifacts_root=bundle.approved_artifacts_root,
+            trusted_repo_root=bundle.repo_root,
+        )

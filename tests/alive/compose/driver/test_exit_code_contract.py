@@ -60,6 +60,14 @@ _BUILTIN_BASES = frozenset(
     }
 )
 
+#: Base names that are known NOT to be exceptions. Anything a class inherits from
+#: that is neither a discovered exception nor listed here fails the discovery test,
+#: so a new builtin base (``FileNotFoundError``), an aliased import, or a
+#: third-party base cannot slip through unclassified.
+_KNOWN_NON_EXCEPTION_BASES = frozenset(
+    {"ComposeOutcomeStore", "Enum", "Protocol", "Structure", "str"}
+)
+
 PRESEAL_REJECTION = "PRESEAL_REJECTION"
 POSTSEAL = "POSTSEAL"
 BUG = "BUG"
@@ -99,7 +107,7 @@ _CLASSIFICATION: dict[str, tuple[str, str]] = {
     ),
     "alive.compose.driver.recover_cmd::RecoverSubcommandError": (
         PRESEAL_REJECTION,
-        "recover opens no seal; it consumes immutable terminal/audit artifacts only.",
+        "Rostered, but recover maps rejections to 30: it cannot claim the seal is unconsumed.",
     ),
     "alive.compose.driver.confirmation::ConfirmationError": (
         PRESEAL_REJECTION,
@@ -177,7 +185,7 @@ _CLASSIFICATION: dict[str, tuple[str, str]] = {
     ),
     "alive.compose.terminal::TerminalError": (
         PRESEAL_REJECTION,
-        "Illegal terminal transition or lock refusal, reachable from recover / run-dir validation.",
+        "Its one pre-seal driver site is Phase2bTerminal.acquire; recover's sites map to exit 30.",
     ),
     # ---- estimation and selection ----------------------------------------------
     "alive.compose.select::SelectionError": (
@@ -205,7 +213,7 @@ _CLASSIFICATION: dict[str, tuple[str, str]] = {
         PRESEAL_REJECTION,
         "Worker-bundle construction or validation failed closed.",
     ),
-    # ---- development seed variability (phase2a CONTINUE path) -------------------
+    # ---- development seed variability (phase2a CONTINUE + phase2b pre-access) ---
     "alive.compose.seed_variability::SeedVariabilityPreflightError": (
         PRESEAL_REJECTION,
         "Self-described pre-access seed-variability binding/verification failure.",
@@ -233,15 +241,15 @@ _CLASSIFICATION: dict[str, tuple[str, str]] = {
     # ---- phase2b orchestration (outside the seal boundary) ---------------------
     "alive.compose.phase2b::Phase2bError": (
         PRESEAL_REJECTION,
-        "Self-described orchestration precondition failure OUTSIDE the seal boundary.",
+        "Orchestration precondition failure; sites inside terminal.protect are absorbed by 30.",
     ),
     "alive.compose.phase2b::ApproximationBiasReportError": (
         PRESEAL_REJECTION,
-        "Phase2bError subclass: the pinned bias report failed fail-closed loading.",
+        "Phase2bError subclass raised in build_registered_evaluation_summary, past the claim.",
     ),
     "alive.compose.outcome_store::ComposeSealingError": (
         PRESEAL_REJECTION,
-        "The sealed-read guard refusing access; the seal is not consumed by a refusal.",
+        "Raised post-claim inside materialize_claimed; safe ONLY via phase2b_cmd's _seal_consumed.",
     ),
     "alive.compose.preflight::PreflightError": (
         PRESEAL_REJECTION,
@@ -257,8 +265,8 @@ _CLASSIFICATION: dict[str, tuple[str, str]] = {
         "simultaneous_theta_bounds runs on sealed outcomes inside the phase2b dispatch.",
     ),
     "alive.compose.metric2::MetricError": (
-        POSTSEAL,
-        "Sealed-evaluation metric input rejection (invalidate-run policy) inside the dispatch.",
+        PRESEAL_REJECTION,
+        "Also PRE-seal: select.py's OOF theta call reaches it, catching SingularDesignError only.",
     ),
     "alive.compose.scoring2::ComposeScoringError": (
         POSTSEAL,
@@ -269,8 +277,8 @@ _CLASSIFICATION: dict[str, tuple[str, str]] = {
         "sealed_verdict runs after the seal is consumed.",
     ),
     "alive.eval.bootstrap::BootstrapError": (
-        POSTSEAL,
-        "Bootstrap primitive used by sealed inference, after the seal opens.",
+        UNREACHABLE_FROM_DRIVER,
+        "COMPOSE imports only _replicate_indices from this module, and that helper raises nothing.",
     ),
     # ---- bugs: internal invariants, not operator-facing input rejections -------
     "alive.compose.terminal::NoTerminalWritten": (
@@ -391,8 +399,14 @@ def _imported_alive_modules(path: Path) -> set[str]:
                 continue
             found.add(node.module)
             found.update(f"{node.module}.{a.name}" for a in node.names)
-        elif isinstance(node, ast.Assign):
-            if any(isinstance(t, ast.Name) and t.id == "_LAZY_EXPORTS" for t in node.targets):
+        elif isinstance(node, (ast.Assign, ast.AnnAssign)):
+            # `_LAZY_EXPORTS: dict[str, str] = {...}` is an ANNOTATED assignment, so
+            # matching only ast.Assign made this branch dead code and the docstring
+            # above it false (2026-08-01 review). AnnAssign has `.target`, singular.
+            targets = [node.target] if isinstance(node, ast.AnnAssign) else list(node.targets)
+            if node.value is not None and any(
+                isinstance(t, ast.Name) and t.id == "_LAZY_EXPORTS" for t in targets
+            ):
                 found.update(
                     v.value
                     for v in ast.walk(node.value)
@@ -419,8 +433,16 @@ def _static_import_graph(root: str) -> set[str]:
     return seen
 
 
-def _exception_classes() -> dict[str, str]:
-    """``module::ClassName -> module``, for every exception class under ``src/alive``."""
+def _exception_classes() -> tuple[dict[str, str], set[str]]:
+    """Discover exception classes, and report base names the closure could not resolve.
+
+    The second element is what makes discovery honest. The closure is keyed on the
+    WRITTEN base name, so ``class X(FileNotFoundError)`` would be silently skipped --
+    not in the seed, not defined under ``src`` -- and would then never be required to
+    appear in the table, which is precisely the hand-enumeration failure this file
+    exists to prevent (2026-08-01 review). Returning the unresolved names lets a test
+    fail closed on them instead.
+    """
     pending: list[tuple[str, str, list[str]]] = []
     for path in sorted(_SRC.rglob("*.py")):
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
@@ -440,15 +462,22 @@ def _exception_classes() -> dict[str, str]:
             if name not in known and any(base in known for base in bases):
                 known.add(name)
                 changed = True
-    return {
+    classes = {
         f"{module}::{name}": module
         for module, name, _bases in pending
         if name in known and name not in _BUILTIN_BASES
     }
+    unresolved = {
+        base
+        for _module, _name, bases in pending
+        for base in bases
+        if base not in known and base not in _KNOWN_NON_EXCEPTION_BASES
+    }
+    return classes, unresolved
 
 
 _GRAPH = _static_import_graph(_ROOT_MODULE)
-_CLASSES = _exception_classes()
+_CLASSES, _UNRESOLVED_BASES = _exception_classes()
 
 
 # --------------------------------------------------------------------------- #
@@ -602,3 +631,54 @@ def test_the_registered_exit_codes_are_unchanged(name):
         "POSTSEAL_NONCOMPLETE_EXIT": 30,
     }
     assert getattr(cli, name) == expected[name]
+
+
+def test_no_non_preseal_class_is_caught_by_the_roster():
+    """The contrapositive. Without it the whole table is one base class from useless.
+
+    The two roster tests above prove ``PRESEAL_REJECTION => caught`` and
+    ``rostered => PRESEAL_REJECTION``. Neither notices a class classified ``BUG`` or
+    ``POSTSEAL`` that becomes catchable by INHERITANCE. Independent review
+    demonstrated the one-token version: change ``NoTerminalWritten(RuntimeError)`` to
+    ``NoTerminalWritten(TerminalError)`` and a BUG sentinel is reported to a pod
+    operator as a documented rejection, with every other test in this file and its
+    sibling still green. Same shape for ``DurableLedgerError(Phase2bSubcommandError)``
+    or ``ComposeVerdictError(Phase2bError)``, both POSTSEAL.
+    """
+    rostered = tuple(cli._KNOWN_PRESEAL_REJECTIONS)
+    swallowed: list[str] = []
+    for key, (classification, _why) in sorted(_CLASSIFICATION.items()):
+        if classification == PRESEAL_REJECTION:
+            continue
+        module_name, _, class_name = key.partition("::")
+        exc_type = getattr(__import__(module_name, fromlist=[class_name]), class_name)
+        caught_by = [r.__name__ for r in rostered if issubclass(exc_type, r)]
+        if caught_by:
+            swallowed.append(f"{key} ({classification}) is caught by {caught_by}")
+    assert not swallowed, (
+        "these classes are NOT classified PRESEAL_REJECTION yet a roster entry catches "
+        "them, so they would be reported as contracted rejections:\n  " + "\n  ".join(swallowed)
+    )
+
+
+def test_no_class_base_name_went_unresolved():
+    """Fail closed when a class inherits from something discovery cannot place."""
+    assert not _UNRESOLVED_BASES, (
+        f"unrecognised class base names under src/alive: {sorted(_UNRESOLVED_BASES)}. "
+        "If a base is an exception, seed it in _BUILTIN_BASES; if it is not, add it to "
+        "_KNOWN_NON_EXCEPTION_BASES. Do not delete this check -- an unresolved base "
+        "means its subclasses were never required to be classified."
+    )
+
+
+def test_the_enumeration_counts_are_pinned():
+    """Silent shrinkage is the failure mode these numbers exist to catch.
+
+    The readiness index commits to all three; assert them so a partial edit is loud
+    rather than a quietly smaller table. Update deliberately, never to pass.
+    """
+    assert len(_CLASSES) == 72, f"exception classes under src/alive: {len(_CLASSES)}"
+    assert len(_CLASSIFICATION) == 72, f"classification entries: {len(_CLASSIFICATION)}"
+    assert len(cli._KNOWN_PRESEAL_REJECTIONS) == 41, (
+        f"roster size: {len(cli._KNOWN_PRESEAL_REJECTIONS)}"
+    )
