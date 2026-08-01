@@ -153,7 +153,7 @@ class만** 넣는다. **bare `ValueError`(및 `Exception`·`RuntimeError` 같은
 
 | 분류 | 의미 | driver 종료 |
 |------|------|------------|
-| `PRESEAL_REJECTION` | 외부 공급 입력(config·artifact·data·environment)에 대한 fail-closed 검증 거부. seal 미소비 | `10` + stderr 정확히 1줄 |
+| `PRESEAL_REJECTION` | 외부 공급 입력(config·artifact·data·environment)에 대한 fail-closed 검증 거부. seal 미소비 | `10` + stderr 정확히 1줄 (**`recover`만 `30`**, 아래) |
 | `POSTSEAL` | seal 개봉 이후의 종결. subcommand가 내부에서 처리하고 스스로 코드를 반환한다 | `30` |
 | `BUG` | 내부 불변식 위반. 올바른 입력으로는 발생할 수 없음 | `1` + traceback |
 | `UNREACHABLE_FROM_DRIVER` | driver의 네 subcommand 경로에서 도달 불가(다른 entry point 전용) | 해당 없음 |
@@ -166,6 +166,14 @@ isolation closure 열거는 지금까지 두 번 모두 손으로 세다 누락�
 필요)은 exit code가 아니라 stderr 한 줄이 나르는 **exception class 이름**으로 표현하고, 대응표는 runbook이
 갖는다. leakage 계열(`OutcomeLeakageError`·`LeakageError`)에 전용 exit code를 부여하지 않는 것은 등록된
 owner 결정이다(2026-08-01). 숫자 계약을 넓히는 대신 이름 기반 표를 쓴다.
+
+**`recover`의 rejection은 `10`이 아니라 `30`이다 (MUST).** roster는 네 subcommand가 공유하지만 exit code는
+공유하지 않는다. `10`의 등록된 의미는 "pre-seal rejection, seal 미소비"인데 `recover`는 seal이 이미
+소비됐을 수 있는 run에서만 실행되므로 그 주장을 할 수 없고, 실제로 `run_dir_state`의 terminal 2개 검출과
+`finalize_phase2b_durable_outputs`의 `_assert_no_raw_outcomes`는 **seal이 소비된 뒤에만 도달 가능**하다.
+`recover_cmd`는 자신이 잡는 유일한 타입(`DurableLedgerError`)을 이미 `30`("durable export 미완료")으로
+매핑하므로, 거기서 탈출한 rejection도 같은 결과다. `30`은 어느 경우에도 seal 상태에 대해 거짓을 주장하지
+않는다. stderr 한 줄의 형식은 동일하다.
 
 Normal path의 세 subcommand는 하나의 ResolvedRunSpec과 하나의 `run_dir`을 공유하되 **독립 프로세스**로
 호출된다. `recover`는 run_dir의 immutable terminal/pre-access/audit artifact만 소비하며(단
