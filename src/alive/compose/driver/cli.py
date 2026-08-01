@@ -84,7 +84,13 @@ import sys
 from pathlib import Path
 from typing import Sequence
 
-from alive.compose.config2 import ScientificModeError
+from alive.compose.activation_evidence import ActivationEvidenceError
+from alive.compose.approximation_bias import ApproximationBiasValidationError
+from alive.compose.baseline_subprocess import PayloadError
+from alive.compose.baselines_combo import BaselineUnavailable
+from alive.compose.config2 import Phase2ConfigError, ScientificModeError
+from alive.compose.datacard import DataCardError
+from alive.compose.driver.bias_report_preseal import ApproximationBiasDeclarationError
 from alive.compose.driver.carrier_loader import (
     RunSpecCarrier,
     UnsupportedModeError,
@@ -102,10 +108,26 @@ from alive.compose.driver.recover_cmd import RecoverSubcommandError, run_recover
 from alive.compose.driver.run_dir_state import RunDirStateError
 from alive.compose.driver.run_spec import RunSpecError
 from alive.compose.driver.scientific_runtime import ScientificRuntimeError
+from alive.compose.fit_role import FitRoleArtifactError
+from alive.compose.freeze import FreezeError, OutcomeLeakageError
+from alive.compose.gates import LeakageError
 from alive.compose.identify import SingularDesignError
 from alive.compose.outcome_store import ComposeSealingError
+from alive.compose.phase2a import ConfigContractError, HashMismatchError, InputContractError
+from alive.compose.phase2b import Phase2bError
 from alive.compose.preflight import PreflightError
-from alive.compose.select import SelectionError
+from alive.compose.provenance2 import ProvenanceError
+from alive.compose.seed_variability import (
+    FoldExecutionError,
+    FoldJobError,
+    SeedAssemblyError,
+    SeedVariabilityContractError,
+    SeedVariabilityPreflightError,
+    SeedVariabilityReportError,
+)
+from alive.compose.select import OOFFoldManifestError, SelectionError
+from alive.compose.terminal import TerminalError
+from alive.compose.worker_bundle import WorkerBundleError
 from alive.provenance import LedgerError
 
 __all__ = [
@@ -187,6 +209,57 @@ _KNOWN_PRESEAL_REJECTIONS: tuple[type[Exception], ...] = (
     # that handler. It is therefore a fail-closed pre-seal rejection belonging in
     # the contracted single-stderr-line + exit 10 roster.
     SingularDesignError,
+    # ------------------------------------------------------------------ #
+    # 2026-08-01 completion of the roster (spec §1.1).
+    #
+    # Everything below was enumerated MECHANICALLY, not by hand: every exception
+    # class defined under ``src/alive`` is classified in
+    # ``tests/alive/compose/driver/test_exit_code_contract.py::_CLASSIFICATION``
+    # with a one-line justification, and that test fails closed both ways — an
+    # unclassified new class, and a class classified ``PRESEAL_REJECTION`` that no
+    # entry here catches. Read the per-class WHY there; this list stays a list.
+    #
+    # Before this, each of these propagated to a traceback and exit 1, outside the
+    # contract and outside the one-line-stderr discipline, so a pod operator could
+    # not tell a documented rejection from a driver bug. Note what is NOT admitted:
+    # no builtin base. ``src/alive/compose`` raises a bare ``ValueError`` in over
+    # two hundred places, most of them internal-invariant violations, so admitting
+    # the builtin would report unclassified BUGS as documented rejections. The
+    # contracted raise sites were given typed classes instead.
+    # ------------------------------------------------------------------ #
+    # config, activation and evidence gates
+    Phase2ConfigError,
+    ActivationEvidenceError,
+    ApproximationBiasValidationError,
+    ApproximationBiasDeclarationError,
+    DataCardError,
+    # stage-1 inputs, provenance, leakage
+    HashMismatchError,
+    InputContractError,
+    ConfigContractError,
+    FreezeError,
+    OutcomeLeakageError,
+    LeakageError,  # NOT a ValueError subclass, so no other entry could cover it
+    FitRoleArtifactError,
+    ProvenanceError,
+    TerminalError,
+    OOFFoldManifestError,
+    # deep baselines and workers
+    BaselineUnavailable,  # a GEARS/CPA worker exiting non-zero: the likeliest pod failure
+    PayloadError,
+    WorkerBundleError,
+    # development seed variability (phase2a CONTINUE path)
+    SeedVariabilityPreflightError,
+    SeedVariabilityContractError,
+    SeedVariabilityReportError,
+    FoldJobError,
+    FoldExecutionError,
+    SeedAssemblyError,
+    # phase2b orchestration OUTSIDE the seal boundary; covers the
+    # ApproximationBiasReportError subclass. Post-seal failures never arrive here:
+    # ``phase2b_cmd`` branches on ``_seal_consumed(audit_path)`` — filesystem
+    # evidence, not the exception type — and returns 30 itself.
+    Phase2bError,
 )
 
 
