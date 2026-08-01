@@ -98,6 +98,33 @@ class HashMismatchError(ValueError):
     """
 
 
+class InputContractError(ValueError):
+    """Raised when an externally supplied Phase-2a input violates its contract.
+
+    Covers the structural and alignment validation of artifacts PREPARE produces
+    and the driver only reads: the ``Phase2aInputs`` payload, the response
+    artifact, the fit-role binding, and the gene/pair alignment between those
+    inputs and the development outcome store. Every one of these is a fail-closed
+    rejection of untrusted input, so it is a registered ``PRESEAL_REJECTION``
+    reaching the driver's exit-code contract as ``10`` under its own class name
+    (driver design spec 1.1). It is deliberately NOT a bare ``ValueError``: the
+    driver may never admit a builtin base into its rejection roster, because an
+    internal invariant violation raising the same builtin would then be reported
+    as a documented rejection.
+    """
+
+
+class ConfigContractError(ValueError):
+    """Raised when runtime inputs disagree with the preregistered config.
+
+    Distinct from :class:`~alive.compose.config2.Phase2ConfigError`, which means
+    the config itself is invalid. This one means the config is fine and the
+    runtime inputs drifted from it -- a different operator response (re-derive the
+    inputs, not edit the config), so it carries its own class name into the
+    contracted stderr line.
+    """
+
+
 @dataclass(frozen=True)
 class OutcomeAccessAudit:
     """Manifest-bound proof that only the calibration role was materialised."""
@@ -146,12 +173,12 @@ class DevelopmentOutcomeStore:
         )
         eps = np.asarray(self.combo_calibration_eps, dtype=float)
         if eps.ndim != 2 or eps.shape[0] != len(self.combo_calibration_pair_ids):
-            raise ValueError(
+            raise InputContractError(
                 "combo_calibration_eps must be a 2-D array aligned row-for-row "
                 "with combo_calibration_pair_ids"
             )
         if not np.all(np.isfinite(eps)):
-            raise ValueError("combo_calibration_eps contains non-finite values")
+            raise InputContractError("combo_calibration_eps contains non-finite values")
         if self.access_audit.role != CALIBRATION_ROLE_NAME:
             raise OutcomeLeakageError(
                 f"development outcome audit role must be {CALIBRATION_ROLE_NAME!r}, "
@@ -162,11 +189,11 @@ class DevelopmentOutcomeStore:
                 "development outcome store reports a non-zero sealed access count"
             )
         if self.access_audit.source_kind not in {"synthetic_fixture", "audited_unsealed"}:
-            raise ValueError(
+            raise InputContractError(
                 "outcome audit source_kind must be 'synthetic_fixture' or 'audited_unsealed'"
             )
         if not self.access_audit.manifest_checksum or not self.access_audit.source_checksum:
-            raise ValueError("outcome access audit checksums must be non-empty")
+            raise InputContractError("outcome access audit checksums must be non-empty")
         eps_snapshot = eps.copy()
         eps_snapshot.setflags(write=False)
         object.__setattr__(self, "combo_calibration_eps", eps_snapshot)
@@ -385,22 +412,24 @@ def build_subprocess_fit_payload(
 
     Raises
     ------
-    ValueError
+    InputContractError
         On a malformed response artifact, a fold/pair misalignment, a
         raw-data / gene-order digest mismatch between the fit-role artifact and
         the response source, or a projection whose ``response_artifact_sha256``
         does not equal the independently verified ``inputs.response_space_checksum``.
     """
     if set(response_artifact) != {"response_space", "control_mean"}:
-        raise ValueError("response_artifact must contain exactly response_space + control_mean")
+        raise InputContractError(
+            "response_artifact must contain exactly response_space + control_mean"
+        )
     response_space = response_artifact["response_space"]
     control_mean = np.asarray(response_artifact["control_mean"], dtype=float)
     if control_mean.shape != (inputs.response_dim,):
-        raise ValueError("response artifact control_mean is not response_dim aligned")
+        raise InputContractError("response artifact control_mean is not response_dim aligned")
     if len(oof_folds) != len(inputs.cal_pair_ids):
-        raise ValueError("oof_folds must align one-to-one with calibration pairs")
+        raise InputContractError("oof_folds must align one-to-one with calibration pairs")
     if outcome_store.combo_calibration_pair_ids != tuple(tuple(p) for p in inputs.cal_pair_ids):
-        raise ValueError("development outcomes are not aligned with calibration pair IDs")
+        raise InputContractError("development outcomes are not aligned with calibration pair IDs")
 
     projection = build_response_projection(
         response_space,
@@ -409,13 +438,17 @@ def build_subprocess_fit_payload(
         raw_data_sha256=raw_data_sha256,
     )
     if projection["response_artifact_sha256"] != inputs.response_space_checksum:
-        raise ValueError("projection does not match the independently verified response artifact")
+        raise InputContractError(
+            "projection does not match the independently verified response artifact"
+        )
     fit_role_block = fit_role_spec.to_payload_block()
     bound = bind_response_source(gene_order=gene_order, raw_data_sha256=raw_data_sha256)
     if fit_role_block["raw_data_sha256"] != bound["raw_data_sha256"]:
-        raise ValueError("fit-role artifact raw_data_sha256 does not match response source")
+        raise InputContractError("fit-role artifact raw_data_sha256 does not match response source")
     if fit_role_block["gene_order_sha256"] != bound["gene_order_sha256"]:
-        raise ValueError("fit-role artifact gene_order_sha256 does not match response source")
+        raise InputContractError(
+            "fit-role artifact gene_order_sha256 does not match response source"
+        )
 
     genes = tuple(sorted(inputs.delta_by_gene, key=lambda gene: gene.encode("utf-8")))
     calibration_delta = np.asarray(inputs.additive_cal, dtype=float) + np.asarray(
@@ -675,7 +708,7 @@ def _validate_config_contract(
     if runtime_learned != learned_roster:
         mismatches.append("model_roster")
     if mismatches:
-        raise ValueError(
+        raise ConfigContractError(
             "runtime inputs differ from the preregistered config: " + ", ".join(mismatches)
         )
 
@@ -700,29 +733,29 @@ def _validate_pair_alignment(
 ) -> None:
     """Fail closed unless gene identities, pair indices and aligned rows agree."""
     if isinstance(inputs.n_genes, bool) or not isinstance(inputs.n_genes, int):
-        raise ValueError("n_genes must be an int")
+        raise InputContractError("n_genes must be an int")
     if inputs.n_genes <= 0:
-        raise ValueError("n_genes must be positive")
+        raise InputContractError("n_genes must be positive")
 
     gene_index = dict(inputs.gene_index)
     if len(gene_index) != inputs.n_genes:
-        raise ValueError(
+        raise InputContractError(
             f"gene_index has {len(gene_index)} genes, expected n_genes={inputs.n_genes}"
         )
     if not all(isinstance(g, str) and g for g in gene_index):
-        raise ValueError("gene_index keys must be non-empty gene strings")
+        raise InputContractError("gene_index keys must be non-empty gene strings")
     values = list(gene_index.values())
     if any(isinstance(i, bool) or not isinstance(i, (int, np.integer)) for i in values):
-        raise ValueError("gene_index values must be integer row indices")
+        raise InputContractError("gene_index values must be integer row indices")
     integer_values = [int(i) for i in values]
     if set(integer_values) != set(range(inputs.n_genes)):
-        raise ValueError("gene_index values must be a bijection onto range(n_genes)")
+        raise InputContractError("gene_index values must be a bijection onto range(n_genes)")
 
     delta_genes = set(inputs.delta_by_gene)
     if delta_genes != set(gene_index):
         missing = sorted(set(gene_index) - delta_genes)
         extra = sorted(delta_genes - set(gene_index))
-        raise ValueError(
+        raise InputContractError(
             "delta_by_gene must cover the gene_index universe exactly "
             f"(missing={missing}, extra={extra})"
         )
@@ -730,14 +763,14 @@ def _validate_pair_alignment(
     for k_total, factors in inputs.factors_by_k.items():
         rows = np.asarray(factors)
         if rows.ndim != 2 or rows.shape[0] != inputs.n_genes:
-            raise ValueError(
+            raise InputContractError(
                 f"factors_by_k[{k_total!r}] must have n_genes={inputs.n_genes} rows; "
                 f"got shape {rows.shape}"
             )
 
     input_ids = tuple(tuple(p) for p in inputs.cal_pair_ids)
     if outcome_store.combo_calibration_pair_ids != input_ids:
-        raise ValueError(
+        raise InputContractError(
             "combo_calibration outcome pair IDs are not exactly aligned with cal_pair_ids"
         )
     n = len(input_ids)
@@ -750,20 +783,22 @@ def _validate_pair_alignment(
     }
     bad = {name: count for name, count in aligned.items() if count != n}
     if bad:
-        raise ValueError(f"calibration row alignment mismatch: expected {n}, got {bad}")
+        raise InputContractError(f"calibration row alignment mismatch: expected {n}, got {bad}")
 
     def _validate_id_pair(raw_pair, *, context: str) -> tuple[str, str]:
         pair = tuple(raw_pair)
         if len(pair) != 2 or not all(isinstance(g, str) and g for g in pair):
-            raise ValueError(f"{context} must be a pair of non-empty gene strings: {pair!r}")
+            raise InputContractError(
+                f"{context} must be a pair of non-empty gene strings: {pair!r}"
+            )
         g, h = pair
         if g == h:
-            raise ValueError(f"{context} cannot be a self-pair: {pair!r}")
+            raise InputContractError(f"{context} cannot be a self-pair: {pair!r}")
         if g.encode("utf-8") > h.encode("utf-8"):
-            raise ValueError(f"{context} is not UTF-8 canonical: {pair!r}")
+            raise InputContractError(f"{context} is not UTF-8 canonical: {pair!r}")
         missing = [gene for gene in pair if gene not in gene_index]
         if missing:
-            raise ValueError(f"{context} contains genes absent from gene_index: {missing}")
+            raise InputContractError(f"{context} contains genes absent from gene_index: {missing}")
         return g, h
 
     for row, (pair_id, raw_idx_pair) in enumerate(zip(input_ids, inputs.cal_idx_pairs)):
@@ -772,11 +807,11 @@ def _validate_pair_alignment(
         if len(idx_pair) != 2 or any(
             isinstance(i, bool) or not isinstance(i, (int, np.integer)) for i in idx_pair
         ):
-            raise ValueError(f"cal_idx_pairs[{row}] must be a pair of integer indices")
+            raise InputContractError(f"cal_idx_pairs[{row}] must be a pair of integer indices")
         observed = {int(idx_pair[0]), int(idx_pair[1])}
         expected = {int(gene_index[g]), int(gene_index[h])}
         if observed != expected or len(observed) != 2:
-            raise ValueError(
+            raise InputContractError(
                 f"calibration pair mismatch at row {row}: ID pair {(g, h)!r} maps to "
                 f"{tuple(sorted(expected))!r}, got index pair {idx_pair!r}"
             )
@@ -1412,6 +1447,16 @@ def _run_phase2a_core(
 
     # Step 3: selection + real calibration / futility checkpoint on DEVELOPMENT
     # roles only. The L1 model drives selection (headline ablation).
+    #
+    # This guard stays a BARE ``ValueError`` on purpose: it is SHADOWED by
+    # ``_validate_config_contract`` above, which compares the runtime learned
+    # roster against ``config.method_roster`` -- and ``config2`` pins the ladder
+    # to start at ``l1_bilinear_identifiable``, so inputs missing the headline
+    # model always fail there first with ``ConfigContractError``. Reaching this
+    # line therefore means an internal invariant broke, which the registered
+    # classification calls a BUG: traceback + exit 1, never a contracted
+    # rejection (driver design spec 1.1). ``test_the_headline_model_guard_is_shadowed
+    # _by_the_config_contract`` pins that ordering.
     if "l1_bilinear_identifiable" not in inputs.model_factories:
         raise ValueError("model_factories must include 'l1_bilinear_identifiable' (headline model)")
     l1_factory = inputs.model_factories["l1_bilinear_identifiable"]
