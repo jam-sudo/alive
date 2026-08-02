@@ -350,15 +350,21 @@ def test_recover_dispatches_with_run_dir_only_and_maps_library_result(
     tmp_path: Path, capsys: pytest.CaptureFixture
 ) -> None:
     """``recover`` takes no ``--run-spec``; an empty ``run_dir`` fails the
-    ``recover`` roster (``RunDirStateError``, one of the KNOWN pre-seal
-    rejections) -> 10, proving argparse wired ``--run-dir`` through to
-    ``run_recover_subcommand`` rather than silently no-op'ing."""
+    ``recover`` roster (``RunDirStateError``, a KNOWN rejection) -> **30**, proving
+    argparse wired ``--run-dir`` through to ``run_recover_subcommand`` rather than
+    silently no-op'ing.
+
+    30, not 10, since 2026-08-01. Exit 10's registered meaning is "pre-seal
+    rejection, the seal was NOT consumed", and ``recover`` runs only on a run whose
+    seal may already be burned -- some of its rejections are reachable ONLY
+    post-seal. 30 = "durable export incomplete" asserts nothing false about the seal
+    in either case, which is why it is the conservative mapping here."""
     empty_run_dir = tmp_path / "run"
     empty_run_dir.mkdir()
 
     rc = main(["recover", "--run-dir", str(empty_run_dir)])
 
-    assert rc == 10
+    assert rc == 30
     captured = capsys.readouterr()
     assert captured.out == ""
     assert "recover: RunDirStateError:" in captured.err
@@ -380,7 +386,7 @@ def test_recover_accepts_external_seal_audit_path(tmp_path, capsys) -> None:
         ]
     )
 
-    assert rc == 10
+    assert rc == 30  # see the sibling test: recover never claims "seal not consumed"
     assert "recover: RunDirStateError:" in capsys.readouterr().err
 
 

@@ -122,7 +122,33 @@ driver는 `Phase2aInputs`, development/sealed stores, manifest, response artifac
 frozen bundle checksum, clean tree와 confirmation token을 재검증해야 한다.
 
 exit code 계약: `0` 성공, `20` phase2a futility(`FUTILITY_STOPPED`, `phase2b` 금지), `30` phase2b/recover의
-post-seal non-COMPLETE(durable export 미완료 포함), `10` pre-seal rejection.
+post-seal non-COMPLETE(durable export 미완료 포함), `10` pre-seal rejection, **`1` uncontracted driver bug**
+(2026-08-01 등록). `2`는 argparse의 사용법 오류다.
+
+⚑ **`recover`는 rejection을 `10`이 아니라 `30`으로 반환한다**(2026-08-01 리뷰). `10`의 등록된 의미는
+"seal이 소비되지 않았다"인데, `recover`는 seal이 이미 소비됐을 수 있는 run에서만 실행되므로 그 주장을
+할 수 없다. 다만 `30`도 정확한 표현은 아니다 — `30`의 등록된 의미는 seal이 열렸음을 전제한다. `--run-dir`
+오타처럼 아무것도 sealing되지 않은 recover 실패도 `30`이 된다. **보수적인 방향이라서 택한 것**이며,
+위험한 거짓은 "소비되지 않았다"고 주장하는 쪽이지 그 반대가 아니다.
+
+**`1`을 받으면 재실행하지 않는다.** `1`은 등록된 rejection roster 밖의 예외가 전파된 것이고, 계약된
+성공도 계약된 거부도 아니다. full traceback이 stderr에 남고 stdout은 비어 있다. 정지하고 traceback째로
+보고한다. `10`/`20`/`30`은 정상 계약 경로이고, 그 외 어떤 값도 계약 밖이다.
+
+**exception-name 운영 대응표(`10`과 `30` 공통).** exit code 자체는 "seal이 소비되지 않았다"(`10`) 또는
+"post-seal non-COMPLETE / durable export 미완료"(`30`)만 말한다. `recover`의 모든 rejection과 §7.1의
+exit-30 상황도 이 표를 쓴다. 무엇을 해야 하는지는
+stderr 한 줄이 나르는 **exception class 이름**이 정한다(형식: `stage: ExceptionName: message`). leakage에
+전용 exit code를 두지 않는 것이 등록된 결정이므로(2026-08-01), 이 표가 severity를 나르는 유일한 장소다.
+분류의 근거는 `tests/alive/compose/driver/test_exit_code_contract.py`의 `_CLASSIFICATION`에 class별 1줄로
+기록되어 있다.
+
+| 대응 | exception | 조치 |
+|------|-----------|------|
+| **A. 정지·보고 (재실행 금지)** | `OutcomeLeakageError` · `LeakageError` · `ComposeSealingError` · `FitRoleArtifactError` · `TerminalError` · **`phase2b`/`recover`에서의 `RunDirStateError`** | leakage/seal 경계 위반이다. **재실행하지 않는다.** artifact를 하나도 지우지 말고 보존한 뒤 owner에게 보고한다. ⚑ `RunDirStateError`가 `phase2b`에서 말하는 "forbidden basename" 목록에는 `audit.jsonl`·terminal이 들어갈 수 있는데, 그 조건을 "고친다"는 것은 **write-once seal 기록을 지운다**는 뜻이므로 절대 하지 않는다. `TerminalError`가 exit 10으로 도달하는 경우는 `Phase2bTerminal.acquire()`의 lock 점유 또는 run_dir 부재이며, audit에 기록이 있다는 거부는 `_seal_consumed` 안쪽이라 30으로 나간다 |
+| **B. 상류 재생성 후 재실행** | `HashMismatchError` · `ConfigContractError` · `InputContractError` · `ProvenanceError` · `AssemblerError` · `Phase2ConfigError` · `ActivationEvidenceError` · `ApproximationBiasValidationError` · `ApproximationBiasDeclarationError` · `DataCardError` · `ScientificModeError` · `FreezeError` · `OOFFoldManifestError` · `Phase2bSubcommandError` | artifact·config·evidence가 기록된 identity와 불일치한다. **먼저 현 artifact를 보존한다**(`HashMismatchError`는 변조 신호일 수 있고 상류 재생성은 그 증거를 지운다). 그 뒤 PREPARE 산출물을 다시 만든다. `Phase2bSubcommandError`는 sealed-source digest 불일치를 포함하는데, 이는 환경 문제가 아니라 lineage 사건이다. "상류 재생성"은 **PREPARE 입력에 한정**하며 C의 write-once 삭제 금지 규칙이 여기에도 그대로 적용된다. **config/evidence field를 바꾸면 새 run identity다** |
+| **C. 조건 수정 후 동일 identity로 재실행** | `BaselineUnavailable` · `PayloadError` · `WorkerBundleError` · `ScientificRuntimeError` · `RunSpecError`(`UnsupportedModeError` 포함) · `ConfirmationError` · `LedgerError` · `Phase2aSubcommandError` · `PreflightSubcommandError` · `RecoverSubcommandError` · **`phase2a`에서의 `RunDirStateError`** | 환경·운영 실패다. `BaselineUnavailable`(GEARS/CPA worker non-zero exit)이 pod에서 가장 흔할 후보다. **어떤 경우에도 run-produced write-once artifact를 지워서 조건을 충족시키지 않는다** — audit·terminal·pre-access ledger·durable marker뿐 아니라 **`phase2a`가 만든 frozen bundle·run ledger·OOF fold manifest·seed-variability report도 포함**한다. ⚑ `phase2a`의 entry roster는 **빈 `run_dir`** 을 요구하므로, CONTINUE 이후 비어 있지 않은 `run_dir`에서 나는 `RunDirStateError`의 "조건"은 그 산출물들이다. 그것을 지우고 재실행하는 것은 [existing run 덮어쓰기](../../../CLAUDE.md#provenance)이며 ledger와 seed-variability 증거를 파괴한다. **비어 있지 않은 `run_dir`은 cleanup 대상이 아니라 새 run identity 신호다** |
+| **D. 과학적 무효 — 조사 후 판단** | `SelectionError` · `SingularDesignError` · `MetricError` · `SeedVariabilityContractError` · `SeedVariabilityReportError` · `SeedVariabilityPreflightError` · `FoldJobError` · `FoldExecutionError` · `SeedAssemblyError` · `PreflightError` · `Phase2bError`(`ApproximationBiasReportError` 포함) | 주어진 입력으로 유효한 결과를 만들 수 없다는 판정이다. **반복 재실행이 아니라 원인 조사**로 간다. 이유는 stderr 한 줄에 담긴다. 단 `Phase2bError` 중 argument-wiring 실패(예: `oof_manifest_path`와 `seed_variability_report_path`를 함께 주지 않음)는 C에 가깝다 |
 
 > **Note (2026-07-07, sub-project C 설계 조정).** 위 stage-1 입력(`Phase2aInputs`/fit-role/response/
 > manifest)은 driver 상위의 **PREPARE**(별도 sub-project)가 만들며 §3 step 8처럼 pre-built로 sync된다.

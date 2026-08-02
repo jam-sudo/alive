@@ -26,11 +26,14 @@ FUTILITY_STOPPED (a valid stop; ``phase2b`` forbidden); ``30`` = a post-seal
 non-``COMPLETE`` terminal or an incomplete durable export. Every non-``phase2a``
 subcommand's own return value is ALREADY one of these exact codes (``preflight``
 returns 0/10 itself, ``phase2b``/``recover`` return 0/30 themselves) — ``main``
-passes that integer straight through. ``main`` only ADDS the ``10`` mapping for
-the driver's own KNOWN pre-seal rejection exception types (see
-:data:`_KNOWN_PRESEAL_REJECTIONS`); an unrecognised exception is a genuine bug
-and is left to propagate with its full traceback (never silently swallowed).
-Unknown subcommand / missing required flag is argparse's own exit ``2``.
+passes that integer straight through. ``main`` ADDS a mapping only for the
+driver's own KNOWN rejection exception types (see
+:data:`_KNOWN_PRESEAL_REJECTIONS`): ``10`` for ``phase2a``/``preflight``/
+``phase2b``, and ``30`` for ``recover``, which runs only on a run whose seal may
+already be consumed and therefore can never truthfully report "seal not
+consumed". An unrecognised exception is a genuine bug and is left to propagate
+with its full traceback (never silently swallowed) — the spec registers that as
+exit ``1``. Unknown subcommand / missing required flag is argparse's own ``2``.
 
 Output discipline (spec §1.1 / CLAUDE.md operational-diagnostics convention,
 matching Task 10's ``recover`` fail-closed print): on a caught pre-seal
@@ -84,7 +87,13 @@ import sys
 from pathlib import Path
 from typing import Sequence
 
-from alive.compose.config2 import ScientificModeError
+from alive.compose.activation_evidence import ActivationEvidenceError
+from alive.compose.approximation_bias import ApproximationBiasValidationError
+from alive.compose.baseline_subprocess import PayloadError
+from alive.compose.baselines_combo import BaselineUnavailable
+from alive.compose.config2 import Phase2ConfigError, ScientificModeError
+from alive.compose.datacard import DataCardError
+from alive.compose.driver.bias_report_preseal import ApproximationBiasDeclarationError
 from alive.compose.driver.carrier_loader import (
     RunSpecCarrier,
     UnsupportedModeError,
@@ -102,10 +111,27 @@ from alive.compose.driver.recover_cmd import RecoverSubcommandError, run_recover
 from alive.compose.driver.run_dir_state import RunDirStateError
 from alive.compose.driver.run_spec import RunSpecError
 from alive.compose.driver.scientific_runtime import ScientificRuntimeError
+from alive.compose.fit_role import FitRoleArtifactError
+from alive.compose.freeze import FreezeError, OutcomeLeakageError
+from alive.compose.gates import LeakageError
 from alive.compose.identify import SingularDesignError
+from alive.compose.metric2 import MetricError
 from alive.compose.outcome_store import ComposeSealingError
+from alive.compose.phase2a import ConfigContractError, HashMismatchError, InputContractError
+from alive.compose.phase2b import Phase2bError
 from alive.compose.preflight import PreflightError
-from alive.compose.select import SelectionError
+from alive.compose.provenance2 import ProvenanceError
+from alive.compose.seed_variability import (
+    FoldExecutionError,
+    FoldJobError,
+    SeedAssemblyError,
+    SeedVariabilityContractError,
+    SeedVariabilityPreflightError,
+    SeedVariabilityReportError,
+)
+from alive.compose.select import OOFFoldManifestError, SelectionError
+from alive.compose.terminal import TerminalError
+from alive.compose.worker_bundle import WorkerBundleError
 from alive.provenance import LedgerError
 
 __all__ = [
@@ -117,9 +143,11 @@ __all__ = [
     "main",
 ]
 
-#: Exit-code contract (spec §1.1). ``FUTILITY_EXIT`` / ``POSTSEAL_NONCOMPLETE_EXIT``
-#: are documented here for readers of this module; ``main`` never constructs
-#: them itself — they are the subcommands' OWN return values, passed through.
+#: Exit-code contract (spec §1.1). ``FUTILITY_EXIT`` is never constructed here —
+#: it is ``phase2a``'s own return value, passed through.
+#: ``POSTSEAL_NONCOMPLETE_EXIT`` is likewise usually a pass-through, with one
+#: exception: ``main`` constructs it for a ``recover`` rejection (see the recover
+#: branch for why 10 would be a false claim there).
 SUCCESS_EXIT = 0
 PRESEAL_REJECT_EXIT = 10
 FUTILITY_EXIT = 20
@@ -187,6 +215,63 @@ _KNOWN_PRESEAL_REJECTIONS: tuple[type[Exception], ...] = (
     # that handler. It is therefore a fail-closed pre-seal rejection belonging in
     # the contracted single-stderr-line + exit 10 roster.
     SingularDesignError,
+    # ------------------------------------------------------------------ #
+    # 2026-08-01 completion of the roster (spec §1.1).
+    #
+    # Everything below was enumerated MECHANICALLY, not by hand: every exception
+    # class defined under ``src/alive`` is classified in
+    # ``tests/alive/compose/driver/test_exit_code_contract.py::_CLASSIFICATION``
+    # with a one-line justification, and that test fails closed both ways — an
+    # unclassified new class, and a class classified ``PRESEAL_REJECTION`` that no
+    # entry here catches. Read the per-class WHY there; this list stays a list.
+    #
+    # Before this, each of these propagated to a traceback and exit 1, outside the
+    # contract and outside the one-line-stderr discipline, so a pod operator could
+    # not tell a documented rejection from a driver bug. Note what is NOT admitted:
+    # no builtin base. ``src/alive/compose`` raises a bare ``ValueError`` in over
+    # two hundred places, most of them internal-invariant violations, so admitting
+    # the builtin would report unclassified BUGS as documented rejections. The
+    # contracted raise sites were given typed classes instead.
+    # ------------------------------------------------------------------ #
+    # config, activation and evidence gates
+    Phase2ConfigError,
+    ActivationEvidenceError,
+    ApproximationBiasValidationError,
+    ApproximationBiasDeclarationError,
+    DataCardError,
+    # stage-1 inputs, provenance, leakage
+    HashMismatchError,
+    InputContractError,
+    ConfigContractError,
+    FreezeError,
+    OutcomeLeakageError,
+    LeakageError,  # NOT a ValueError subclass, so no other entry could cover it
+    FitRoleArtifactError,
+    ProvenanceError,
+    TerminalError,
+    OOFFoldManifestError,
+    # estimation / scoring reachable PRE-SEAL from phase2a. metric2.MetricError was
+    # first filed POSTSEAL; review traced select.py's `paired_relative_error_reduction`
+    # call, whose per-candidate handler catches SingularDesignError ONLY, through
+    # diagnostics2 (no except clauses at all) to phase2a. A non-finite prediction
+    # there is the sibling condition SingularDesignError is already admitted for.
+    MetricError,
+    # deep baselines and workers
+    BaselineUnavailable,  # a GEARS/CPA worker exiting non-zero: the likeliest pod failure
+    PayloadError,
+    WorkerBundleError,
+    # development seed variability (phase2a CONTINUE path)
+    SeedVariabilityPreflightError,
+    SeedVariabilityContractError,
+    SeedVariabilityReportError,
+    FoldJobError,
+    FoldExecutionError,
+    SeedAssemblyError,
+    # phase2b orchestration OUTSIDE the seal boundary; covers the
+    # ApproximationBiasReportError subclass. Post-seal failures never arrive here:
+    # ``phase2b_cmd`` branches on ``_seal_consumed(audit_path)`` — filesystem
+    # evidence, not the exception type — and returns 30 itself.
+    Phase2bError,
 )
 
 
@@ -288,9 +373,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     Returns
     -------
     int
-        ``0`` on success; ``10`` on a pre-seal validation rejection; ``20`` on
-        ``phase2a`` FUTILITY_STOPPED; ``30`` on a post-seal non-``COMPLETE``
-        terminal or incomplete durable export.
+        ``0`` on success; ``10`` on a pre-seal validation rejection from
+        ``phase2a``/``preflight``/``phase2b``; ``20`` on ``phase2a``
+        FUTILITY_STOPPED; ``30`` on a post-seal non-``COMPLETE`` terminal, an
+        incomplete durable export, OR any ``recover`` rejection (recover runs on a
+        run whose seal may already be burned, so it cannot return ``10``).
 
     Raises
     ------
@@ -312,8 +399,26 @@ def main(argv: Sequence[str] | None = None) -> int:
                 seal_audit_path=args.seal_audit_path,
             )
         except _KNOWN_PRESEAL_REJECTIONS as exc:
-            _report_preseal_rejection("recover", exc)
-            return PRESEAL_REJECT_EXIT
+            # NOT exit 10, deliberately (2026-08-01 review). Exit 10's registered
+            # meaning is "pre-seal rejection, the seal was NOT consumed", and
+            # ``recover`` can never truthfully assert that: it runs precisely on a
+            # run whose seal may already be burned, and several of its rejections
+            # are only REACHABLE post-seal — ``run_dir_state`` raising on two
+            # terminal artifacts, or ``_assert_no_raw_outcomes`` raising
+            # ``TerminalError`` out of ``finalize_phase2b_durable_outputs`` on the
+            # marker-absent salvage path. ``recover_cmd`` already maps the one type
+            # it catches itself (``DurableLedgerError``) to 30 = "durable export
+            # incomplete"; a rejection that escapes it is that same outcome reached
+            # another way, so it gets the same code. This is why the roster is
+            # shared but the exit code is not.
+            #
+            # Not a perfect fit either, and re-review was right to say so: 30's
+            # registered meaning presupposes the seal opened, so a recover against a
+            # typo'd --run-dir that never sealed anything also reports 30. That is
+            # the CONSERVATIVE direction -- the dangerous falsehood is claiming "not
+            # consumed" when it was, never the reverse.
+            _report_rejection("recover", exc)
+            return POSTSEAL_NONCOMPLETE_EXIT
 
     try:
         carrier = _build_run_spec_carrier(
@@ -335,10 +440,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             confirm_seal_token=args.confirm_seal,
         )
     except _KNOWN_PRESEAL_REJECTIONS as exc:
-        _report_preseal_rejection(args.subcommand, exc)
+        _report_rejection(args.subcommand, exc)
         return PRESEAL_REJECT_EXIT
 
 
-def _report_preseal_rejection(stage: str, exc: Exception) -> None:
-    """Write the T10-convention diagnostic line to STDERR only (never STDOUT)."""
+def _report_rejection(stage: str, exc: Exception) -> None:
+    """Write the T10-convention diagnostic line to STDERR only (never STDOUT).
+
+    Shared by both rejection paths. The LINE is identical; the exit code is not —
+    ``phase2a``/``preflight``/``phase2b`` return 10 (pre-seal, seal not consumed)
+    while ``recover`` returns 30 (durable export incomplete), because recover runs
+    only on a run whose seal may already be burned.
+    """
     print(f"{stage}: {type(exc).__name__}: {exc}", file=sys.stderr)

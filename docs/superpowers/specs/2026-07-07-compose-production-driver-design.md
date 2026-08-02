@@ -136,6 +136,45 @@ Fixture tests만 fixture builder가 반환한 tmp root와 fixture ResolvedRunSpe
 phase2b 금지)`, `30=post-seal INVALID/ABORTED 또는 durable export 미완료`를 반환한다. 예외 class와 stage는
 stderr에 기록하되 outcome array·cell value·per-pair error는 출력하지 않는다.
 
+**이 계약은 전면적(total)이 아니며 `1`은 등록된 코드다 (2026-08-01 정정).** 위 네 값에 더해 argparse의
+`2`(알 수 없는 subcommand·필수 flag 누락)와 **`1` = uncontracted driver bug**가 등록된 종료 코드다. `1`은
+`_KNOWN_PRESEAL_REJECTIONS` roster에 없는 예외가 전파된 결과이며, 그때 driver는 full traceback을 stderr에
+남기고 **stdout에는 아무것도 쓰지 않는다.** `1`은 계약된 성공도 계약된 거부도 아니므로 **operator는
+재실행하지 않고 정지·보고한다.** 이 carve-out은 이전에 `cli.py` docstring에만 있었고 spec과 runbook은
+반환값을 0/10/20/30으로 전면적으로 서술했다. 그 서술이 부정확했으므로 여기서 정정한다.
+
+**roster 편입 규칙 (MUST).** `_KNOWN_PRESEAL_REJECTIONS`에는 **`src/alive` 안에 정의된 typed exception
+class만** 넣는다. **bare `ValueError`(및 `Exception`·`RuntimeError` 같은 builtin base)는 어떤 경우에도
+편입하지 않는다** — `src/alive/compose`에만 bare `ValueError` raise가 218곳 있고 대부분은 내부 불변식
+위반, 즉 버그다. builtin을 편입하면 미분류 버그가 "등록된 pre-seal 거부"로 보고되는 fail-open이 된다.
+계약되어야 하는 거부 조건은 **raise 지점에 typed class를 부여해서** 편입한다.
+
+**분류 어휘 (MUST).** `src/alive`에 정의된 모든 exception class는 정확히 하나로 분류하고 근거 1줄을 남긴다.
+
+| 분류 | 의미 | driver 종료 |
+|------|------|------------|
+| `PRESEAL_REJECTION` | 외부 공급 입력(config·artifact·data·environment)에 대한 fail-closed 검증 거부. seal 미소비 | `10` + stderr 정확히 1줄 (**`recover`만 `30`**, 아래) |
+| `POSTSEAL` | seal 개봉 이후의 종결. subcommand가 내부에서 처리하고 스스로 코드를 반환한다 | `30` |
+| `BUG` | 내부 불변식 위반. 올바른 입력으로는 발생할 수 없음 | `1` + traceback |
+| `UNREACHABLE_FROM_DRIVER` | driver의 네 subcommand 경로에서 도달 불가(다른 entry point 전용) | 해당 없음 |
+
+분류표는 코드에 존재하며 test가 닫힌 상태로 강제한다. `src/alive`에 새 exception class가 생겼는데
+분류되지 않으면 suite가 실패하고, 실패 메시지는 검사를 삭제하지 말고 분류하라고 지시한다. **roster와
+isolation closure 열거는 지금까지 두 번 모두 손으로 세다 누락되었으므로, 열거는 기계가 한다.**
+
+`PRESEAL_REJECTION` 안의 severity 구분(조건만 고치면 재시도 가능 vs lineage 오염이라 새 run identity가
+필요)은 exit code가 아니라 stderr 한 줄이 나르는 **exception class 이름**으로 표현하고, 대응표는 runbook이
+갖는다. leakage 계열(`OutcomeLeakageError`·`LeakageError`)에 전용 exit code를 부여하지 않는 것은 등록된
+owner 결정이다(2026-08-01). 숫자 계약을 넓히는 대신 이름 기반 표를 쓴다.
+
+**`recover`의 rejection은 `10`이 아니라 `30`이다 (MUST).** roster는 네 subcommand가 공유하지만 exit code는
+공유하지 않는다. `10`의 등록된 의미는 "pre-seal rejection, seal 미소비"인데 `recover`는 seal이 이미
+소비됐을 수 있는 run에서만 실행되므로 그 주장을 할 수 없고, 실제로 `run_dir_state`의 terminal 2개 검출과
+`finalize_phase2b_durable_outputs`의 `_assert_no_raw_outcomes`는 **seal이 소비된 뒤에만 도달 가능**하다.
+`recover_cmd`는 자신이 잡는 유일한 타입(`DurableLedgerError`)을 이미 `30`("durable export 미완료")으로
+매핑하므로, 거기서 탈출한 rejection도 같은 결과다. `30`은 어느 경우에도 seal 상태에 대해 거짓을 주장하지
+않는다. stderr 한 줄의 형식은 동일하다.
+
 Normal path의 세 subcommand는 하나의 ResolvedRunSpec과 하나의 `run_dir`을 공유하되 **독립 프로세스**로
 호출된다. `recover`는 run_dir의 immutable terminal/pre-access/audit artifact만 소비하며(단
 audit=1·terminal=0이면 §3.4대로 `ABORTED_AFTER_SEAL` terminal을 write-once로 **생성**할 수 있다)

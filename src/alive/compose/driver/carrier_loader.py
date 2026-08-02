@@ -77,8 +77,9 @@ from alive.compose.driver.run_spec import (
 )
 from alive.compose.driver.scientific_runtime import resolve_scientific_runtime_context
 from alive.compose.fit_role import FitRoleArtifactSpec
+from alive.compose.freeze import OutcomeLeakageError
 from alive.compose.outcome_store import FIXTURE_CORPUS_V1
-from alive.compose.phase2a import OutcomeAccessAudit, Phase2aInputs
+from alive.compose.phase2a import InputContractError, OutcomeAccessAudit, Phase2aInputs
 from alive.compose.phase2b import (
     ActivationProvenanceInputs,
     build_activation_provenance_inputs,
@@ -559,40 +560,58 @@ def _load_phase2a_inputs(spec: ResolvedRunSpec, *, require_factor_banks: bool) -
                 "scientific factor-bank aggregate checksum disagrees with phase2a_inputs"
             )
 
-    inputs = Phase2aInputs(
-        run_id=payload["run_id"],
-        gene_index={str(g): int(i) for g, i in payload["gene_index"].items()},
-        factors_by_k={
-            int(k): np.asarray(v, dtype=np.float64) for k, v in payload["factors_by_k"].items()
-        },
-        cal_idx_pairs=[(int(a), int(b)) for a, b in payload["cal_idx_pairs"]],
-        cal_pair_ids=[(str(a), str(b)) for a, b in payload["cal_pair_ids"]],
-        additive_cal=np.asarray(payload["additive_cal"], dtype=np.float64),
-        eps_split_a=np.asarray(payload["eps_split_a"], dtype=np.float64),
-        eps_split_b=np.asarray(payload["eps_split_b"], dtype=np.float64),
-        k_total_grid=[int(x) for x in payload["k_total_grid"]],
-        lambda_grid=[float(x) for x in payload["lambda_grid"]],
-        n_genes=int(payload["n_genes"]),
-        n_folds=int(payload["n_folds"]),
-        seed=int(payload["seed"]),
-        uncovered_tolerance=float(payload["uncovered_tolerance"]),
-        sealed_double_pair_ids=[(str(a), str(b)) for a, b in payload["sealed_double_pair_ids"]],
-        sealed_single_pair_ids=[(str(a), str(b)) for a, b in payload["sealed_single_pair_ids"]],
-        delta_by_gene={
-            str(g): np.asarray(v, dtype=np.float64) for g, v in payload["delta_by_gene"].items()
-        },
-        model_factories={name: _MODEL_CLASS_BY_NAME[name] for name in payload["model_roster"]},
-        response_dim=int(payload["response_dim"]),
-        response_space_checksum=str(payload["response_space_checksum"]),
-        factor_checksum=str(payload["factor_checksum"]),
-        manifest_checksum=str(payload["manifest_checksum"]),
-        environment_checksum=str(payload["environment_checksum"]),
-        registered_seeds=[int(x) for x in payload["registered_seeds"]],
-        data_card_checksum=str(payload["data_card_checksum"]),
-        raw_data_checksum=str(payload["raw_data_checksum"]),
-        sequence_mapping_checksum=str(payload["sequence_mapping_checksum"]),
-        factor_banks_by_k=factor_banks_by_k,
-    )
+    try:
+        inputs = Phase2aInputs(
+            run_id=payload["run_id"],
+            gene_index={str(g): int(i) for g, i in payload["gene_index"].items()},
+            factors_by_k={
+                int(k): np.asarray(v, dtype=np.float64) for k, v in payload["factors_by_k"].items()
+            },
+            cal_idx_pairs=[(int(a), int(b)) for a, b in payload["cal_idx_pairs"]],
+            cal_pair_ids=[(str(a), str(b)) for a, b in payload["cal_pair_ids"]],
+            additive_cal=np.asarray(payload["additive_cal"], dtype=np.float64),
+            eps_split_a=np.asarray(payload["eps_split_a"], dtype=np.float64),
+            eps_split_b=np.asarray(payload["eps_split_b"], dtype=np.float64),
+            k_total_grid=[int(x) for x in payload["k_total_grid"]],
+            lambda_grid=[float(x) for x in payload["lambda_grid"]],
+            n_genes=int(payload["n_genes"]),
+            n_folds=int(payload["n_folds"]),
+            seed=int(payload["seed"]),
+            uncovered_tolerance=float(payload["uncovered_tolerance"]),
+            sealed_double_pair_ids=[(str(a), str(b)) for a, b in payload["sealed_double_pair_ids"]],
+            sealed_single_pair_ids=[(str(a), str(b)) for a, b in payload["sealed_single_pair_ids"]],
+            delta_by_gene={
+                str(g): np.asarray(v, dtype=np.float64) for g, v in payload["delta_by_gene"].items()
+            },
+            model_factories={name: _MODEL_CLASS_BY_NAME[name] for name in payload["model_roster"]},
+            response_dim=int(payload["response_dim"]),
+            response_space_checksum=str(payload["response_space_checksum"]),
+            factor_checksum=str(payload["factor_checksum"]),
+            manifest_checksum=str(payload["manifest_checksum"]),
+            environment_checksum=str(payload["environment_checksum"]),
+            registered_seeds=[int(x) for x in payload["registered_seeds"]],
+            data_card_checksum=str(payload["data_card_checksum"]),
+            raw_data_checksum=str(payload["raw_data_checksum"]),
+            sequence_mapping_checksum=str(payload["sequence_mapping_checksum"]),
+            factor_banks_by_k=factor_banks_by_k,
+        )
+    except (InputContractError, OutcomeLeakageError):
+        # Typed rejections reach the CLI under their OWN class name -- the
+        # contracted diagnostic is ``stage: TypeName: message``, and re-wrapping a
+        # leakage rejection as a RunSpecError would erase the project's
+        # highest-severity signal (CLAUDE.md#invariants).
+        raise
+    except (TypeError, ValueError, KeyError) as exc:
+        # What is left is a builtin / third-party failure while parsing an
+        # UNTRUSTED stage-1 payload: numpy dtype coercion, ``int()``/``str()`` on a
+        # malformed field, a missing key, an unknown model name. This boundary is
+        # pure deserialization of caller-supplied bytes, so mapping it to the
+        # registered ``RunSpecError`` rejection is NOT the forbidden "admit a
+        # builtin into the roster" -- the far wider ``run_phase2a`` body, where a
+        # genuine bug could raise the same builtins, is deliberately not wrapped.
+        raise RunSpecError(
+            f"phase2a_inputs does not satisfy the Phase2aInputs contract: {exc}"
+        ) from exc
     if payload.get("content_checksum") != inputs.content_checksum:
         raise RunSpecError(
             "phase2a_inputs content_checksum does not verify after carrier reconstruction"
