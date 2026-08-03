@@ -151,6 +151,10 @@ _CLASSIFICATION: dict[str, tuple[str, str]] = {
         PRESEAL_REJECTION,
         "A bound upstream hash disagrees with its expected value; aborts before selection.",
     ),
+    "alive.compose.phase2a::Phase2aInvariantError": (
+        BUG,
+        "CONTINUE without the persisted OOF manifest is a code invariant, not leakage.",
+    ),
     "alive.compose.phase2a::InputContractError": (
         PRESEAL_REJECTION,
         "Structural/alignment rejection of the PREPARE-supplied stage-1 artifacts.",
@@ -195,6 +199,10 @@ _CLASSIFICATION: dict[str, tuple[str, str]] = {
     "alive.compose.select::OOFFoldManifestError": (
         PRESEAL_REJECTION,
         "Invalid, inconsistent or tampered OOF fold manifest.",
+    ),
+    "alive.compose.identify::EstimatorInputError": (
+        PRESEAL_REJECTION,
+        "Non-finite/misshapen factor bank or eps_obs; nothing upstream checks finiteness.",
     ),
     "alive.compose.identify::SingularDesignError": (
         PRESEAL_REJECTION,
@@ -683,9 +691,9 @@ def test_the_enumeration_counts_are_pinned():
     The readiness index commits to all three; assert them so a partial edit is loud
     rather than a quietly smaller table. Update deliberately, never to pass.
     """
-    assert len(_CLASSES) == 72, f"exception classes under src/alive: {len(_CLASSES)}"
-    assert len(_CLASSIFICATION) == 72, f"classification entries: {len(_CLASSIFICATION)}"
-    assert len(cli._KNOWN_PRESEAL_REJECTIONS) == 41, (
+    assert len(_CLASSES) == 74, f"exception classes under src/alive: {len(_CLASSES)}"
+    assert len(_CLASSIFICATION) == 74, f"classification entries: {len(_CLASSIFICATION)}"
+    assert len(cli._KNOWN_PRESEAL_REJECTIONS) == 42, (
         f"roster size: {len(cli._KNOWN_PRESEAL_REJECTIONS)}"
     )
 

@@ -114,7 +114,7 @@ from alive.compose.driver.scientific_runtime import ScientificRuntimeError
 from alive.compose.fit_role import FitRoleArtifactError
 from alive.compose.freeze import FreezeError, OutcomeLeakageError
 from alive.compose.gates import LeakageError
-from alive.compose.identify import SingularDesignError
+from alive.compose.identify import EstimatorInputError, SingularDesignError
 from alive.compose.metric2 import MetricError
 from alive.compose.outcome_store import ComposeSealingError
 from alive.compose.phase2a import ConfigContractError, HashMismatchError, InputContractError
@@ -215,6 +215,10 @@ _KNOWN_PRESEAL_REJECTIONS: tuple[type[Exception], ...] = (
     # that handler. It is therefore a fail-closed pre-seal rejection belonging in
     # the contracted single-stderr-line + exit 10 roster.
     SingularDesignError,
+    # The estimator's INPUT contract, as opposed to SingularDesignError's decomposition
+    # /estimate contract. Nothing upstream checks factor-bank finiteness, so a NaN in a
+    # PREPARE bank is an operator-facing pre-seal rejection (2026-08-02 review).
+    EstimatorInputError,
     # ------------------------------------------------------------------ #
     # 2026-08-01 completion of the roster (spec §1.1).
     #

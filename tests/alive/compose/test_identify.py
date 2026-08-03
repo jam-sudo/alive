@@ -165,3 +165,46 @@ def test_non_finite_regression_inputs_are_rejected(field):
         eps[0, 0] = np.inf
     with pytest.raises(ValueError, match="finite"):
         identify_operator(Z, pairs, eps, lam=1e-3)
+
+
+def test_a_non_finite_factor_bank_is_a_typed_preseal_rejection():
+    """A NaN in a PREPARE factor bank must reach the operator as a contracted 10.
+
+    Nothing upstream checks factor-bank finiteness -- ``select._validate_inputs``
+    looks at ndim/shape, ``phase2a._validate_pair_alignment`` at shape -- so this is
+    the first gate that sees it, and while it raised a bare ``ValueError`` the driver
+    exited 1 (the registered bug escape) for an ordinary bad input (2026-08-02
+    review). Still a ``ValueError`` subclass, so every existing caller is unaffected.
+    """
+    import numpy as np
+    import pytest
+
+    from alive.compose.driver.cli import _KNOWN_PRESEAL_REJECTIONS
+    from alive.compose.identify import EstimatorInputError, identify_operator
+
+    Z = np.array([[1.0, 0.0], [0.0, 1.0], [np.nan, 1.0]], dtype=float)
+    pairs = [(0, 1), (0, 2)]
+    eps = np.zeros((2, 2), dtype=float)
+
+    with pytest.raises(EstimatorInputError):
+        identify_operator(Z, pairs, eps, lam=1e-3)
+
+    assert issubclass(EstimatorInputError, ValueError)
+    assert isinstance(EstimatorInputError("x"), _KNOWN_PRESEAL_REJECTIONS)
+
+
+def test_the_phase2a_invariant_class_is_a_bug_not_a_contracted_rejection():
+    """The other half of the split: an internal invariant must stay exit 1.
+
+    ``CONTINUE`` without the persisted OOF fold manifest used to raise
+    ``OutcomeLeakageError``, so a code invariant was reported to a pod operator as a
+    documented pre-seal rejection. The genuine leakage assertion in step 9 keeps its
+    own class -- that one really does mean a sealed outcome was touched.
+    """
+    from alive.compose.driver.cli import _KNOWN_PRESEAL_REJECTIONS
+    from alive.compose.freeze import OutcomeLeakageError
+    from alive.compose.phase2a import Phase2aInvariantError
+
+    assert not isinstance(Phase2aInvariantError("x"), _KNOWN_PRESEAL_REJECTIONS)
+    assert not issubclass(Phase2aInvariantError, OutcomeLeakageError)
+    assert isinstance(OutcomeLeakageError("x"), _KNOWN_PRESEAL_REJECTIONS)

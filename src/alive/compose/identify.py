@@ -15,6 +15,23 @@ import numpy as np
 from alive.compose.operator import design_matrix, sym_basis_dim
 
 
+class EstimatorInputError(ValueError):
+    """Raised when an externally supplied estimator input violates its contract.
+
+    Covers a non-finite or misshapen factor bank, an ``eps_obs`` that is not
+    row-aligned with the pair roster, and a ``lam`` outside its registered domain.
+    Distinct from :class:`SingularDesignError`, which means the DECOMPOSITION or the
+    ESTIMATE came out non-finite: this one means the caller's inputs were never
+    admissible. That split is the module's long-standing convention; what changes
+    (2026-08-02) is that the input side is now TYPED rather than a bare
+    ``ValueError``, because nothing upstream checks factor-bank finiteness -- not
+    ``select._validate_inputs`` (ndim/shape only) and not
+    ``phase2a._validate_pair_alignment`` (shape only) -- so a NaN in a PREPARE factor
+    bank is an operator-facing pre-seal rejection that used to exit 1 instead of the
+    contracted 10.
+    """
+
+
 class SingularDesignError(ValueError):
     """The registered least-squares solver failed to produce an estimate.
 
@@ -80,18 +97,20 @@ def solve_ridge_svd(design: np.ndarray, target: np.ndarray, *, lam: float) -> np
     target = np.asarray(target, dtype=np.float64)
     lam = float(lam)
     if not np.isfinite(lam) or lam <= 0.0:
-        raise ValueError(f"lam must be finite and positive for ridge SVD, got {lam!r}")
+        raise EstimatorInputError(f"lam must be finite and positive for ridge SVD, got {lam!r}")
     if design.ndim != 2 or design.shape[0] == 0 or design.shape[1] == 0:
-        raise ValueError(f"design must be a non-empty 2-D matrix, got shape {design.shape!r}")
+        raise EstimatorInputError(
+            f"design must be a non-empty 2-D matrix, got shape {design.shape!r}"
+        )
     if target.ndim == 1:
         target = target[:, np.newaxis]
     if target.ndim != 2 or target.shape[0] != design.shape[0]:
-        raise ValueError(
+        raise EstimatorInputError(
             "target must be 1-D/2-D and row-aligned with design: "
             f"design={design.shape!r}, target={target.shape!r}"
         )
     if not np.all(np.isfinite(design)) or not np.all(np.isfinite(target)):
-        raise ValueError("ridge design and target must contain only finite values")
+        raise EstimatorInputError("ridge design and target must contain only finite values")
 
     try:
         u, singular_values, vt = np.linalg.svd(design, full_matrices=False)
@@ -140,15 +159,17 @@ def identify_operator(
     eps_obs = np.asarray(eps_obs, dtype=np.float64)
     lam = float(lam)
     if not np.isfinite(lam) or lam < 0.0:
-        raise ValueError(f"lam must be finite and non-negative, got {lam!r}")
+        raise EstimatorInputError(f"lam must be finite and non-negative, got {lam!r}")
     if Z.ndim != 2 or Z.shape[0] == 0 or Z.shape[1] == 0:
-        raise ValueError(f"Z must be a non-empty 2-D matrix, got shape {Z.shape!r}")
+        raise EstimatorInputError(f"Z must be a non-empty 2-D matrix, got shape {Z.shape!r}")
     if eps_obs.ndim == 1:
         eps_obs = eps_obs[:, np.newaxis]
     if eps_obs.ndim != 2 or len(pairs) != eps_obs.shape[0] or not pairs:
-        raise ValueError("eps_obs must be 1-D/2-D and row-aligned with a non-empty pair roster")
+        raise EstimatorInputError(
+            "eps_obs must be 1-D/2-D and row-aligned with a non-empty pair roster"
+        )
     if not np.all(np.isfinite(Z)) or not np.all(np.isfinite(eps_obs)):
-        raise ValueError("Z and eps_obs must contain only finite values")
+        raise EstimatorInputError("Z and eps_obs must contain only finite values")
 
     phi = design_matrix(Z, pairs)
     if lam == 0.0:
