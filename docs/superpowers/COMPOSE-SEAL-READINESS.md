@@ -5,7 +5,7 @@
 > **이 문서는 아무것도 정의하지 않는다** — 세부(task)는 plan, claim은 spec, exact param은 config,
 > 시간순 audit는 git이 authoritative다([sources of truth](../../CLAUDE.md#sources)). 상태 행이 authoritative
 > 문서와 어긋나면 **authoritative 문서가 옳다**; 이 인덱스를 갱신한다.
-> **Updated:** 2026-08-03 @ `34cbb9d` (branch `compose-seal-consumed-hardening`)
+> **Updated:** 2026-08-03 @ `9eb1b1f` (branch `compose-seal-consumed-hardening`)
 > **갱신 트리거:** sub-project/gate **상태가 바뀔 때만**(커밋마다 아님).
 > **종결 상태:** COMPOSE seal이 정확히 한 번 열리면 이 인덱스는 **frozen/은퇴**한다. 이후 진행상황은
 > seal 결과와 post-hoc analysis가 대신한다.
@@ -561,6 +561,37 @@ branch에서 추적 가능하게 기록한다. `LOCAL` ledger ID만으로는 이
    artifact and do not re-run"), which matters now that the driver catches it and the traceback is gone. Every
    fix is mutation-verified, including the mutations that widen a gate too far. Guard files were touched in the
    fail-CLOSED direction only. Seal state remains **UNOPENED**; execution remains **RELEASE-BLOCKED**.
+   **2026-08-03 independent review of the guard branch, and a CORRECTION to the entry above.** The reviewer
+   executed rather than read, and refuted two things the previous entry asserted. **(a) The recorded premise
+   for editing `_seal_consumed` was false.** That entry, the commit message, the guard-file comment and a test
+   docstring all claimed `Path.exists()` "SWALLOWS `OSError`" and named EACCES/ESTALE/EIO/EMFILE. On the pinned
+   interpreter (3.12, `requires-python >=3.11,<3.13`) `Path.exists()` ignores exactly
+   ENOENT/ENOTDIR/EBADF/ELOOP; the four errnos named all RAISE, so they never produced a false "not consumed" —
+   they escaped as the uncontracted exit `1`, replacing the caller's original post-seal exception. Re-verified
+   here independently. Both behaviours are defects and the fix is still right, but the false-`10` path was the
+   IGNORED errnos and the raising ones were an exit-`1` path; the claim as written did not survive execution
+   (`CLAUDE.md#invariants` 18). All four sites are corrected. **(b) The step-9 `sealed_access_count != 0` check
+   is unreachable by construction, so the basis for keeping `OutcomeLeakageError` there is withdrawn.**
+   `FutilityResult` has one construction site hardcoding `0`, and `DevelopmentOutcomeStore.__post_init__` — the
+   REAL detection — refuses a non-zero count on a frozen dataclass. That is the same argument used to demote
+   its sibling, so the previous entry reached opposite conclusions from identical reachability. It is now
+   `Phase2aInvariantError` too: exit `1` with its traceback, which is louder than the rostered `10` it had, and
+   the genuine detection is untouched. **Also fixed from this round:** the step-0 evidence gate consulted
+   terminals only and so still reported the audit-burned / terminal-absent crash state — precisely the state
+   `_assert_recover_roster` ACCEPTS as post-seal — as a pre-seal rejection, two rosters in one module
+   disagreeing about one directory; it now consults the run-local seal audit as well. The step-0 diagnostic had
+   dropped the exception class name, which is the key the runbook's operator table is looked up by. Runbook row
+   A still said "stop, do not re-run" for a `phase2b` `RunDirStateError` that the code now routes to `30` +
+   "use `recover`". `models.py` implemented the SAME three estimator-input checks as `identify.py` and was left
+   untyped one module away — the fixed-here-missed-the-sibling pattern, for the third time in this work.
+   **Accepted and recorded, not fixed:** `_assert_audit_destination_free` keeps the ignoring `exists()`
+   (harmless today because `os.link` fails `EEXIST`, but the two now apply different evidence rules to one
+   path); a genuine internal bug inside the step-6 re-read is swallowed as a documented `30` with its class
+   name but without its traceback; and two `solve_ridge_svd` checks are internal invariants on the
+   `identify_operator` path. Independently recomputed: **74** exception classes, symmetric difference against
+   the table empty both ways. No other `CLAUDE.md#enforcement` guard file was modified — and `run_dir_state.py`
+   is not on that list, contrary to how this branch's own review brief described it. Seal state remains
+   **UNOPENED**; execution remains **RELEASE-BLOCKED**.
    **2026-07-25 pre-pod local gate:** the probe-rerun runbook's §2.2 verification roster was run at clean exact
    commit `614017b67e35e9cc07f68d5b512213d8356cf1b2` — **254 passed**, plus `ruff check`/`ruff format --check`
    over the whole repository, `git diff --check`, and an empty `git status --short`. This records local

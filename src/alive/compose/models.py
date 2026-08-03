@@ -42,7 +42,12 @@ from typing import Protocol, runtime_checkable
 
 import numpy as np
 
-from alive.compose.identify import SingularDesignError, identify_operator, solve_ridge_svd
+from alive.compose.identify import (
+    EstimatorInputError,
+    SingularDesignError,
+    identify_operator,
+    solve_ridge_svd,
+)
 from alive.compose.operator import bilinear_predict
 from alive.provenance import sha256_json
 
@@ -246,15 +251,15 @@ class IDOnlyModel:
         eps_obs = np.asarray(eps_obs, dtype=np.float64)
         lam = float(lam)
         if not np.isfinite(lam) or lam < 0.0:
-            raise ValueError(f"lam must be finite and non-negative, got {lam!r}")
+            raise EstimatorInputError(f"lam must be finite and non-negative, got {lam!r}")
         if eps_obs.ndim == 1:
             eps_obs = eps_obs[:, np.newaxis]
         if not np.all(np.isfinite(Z)) or not np.all(np.isfinite(eps_obs)):
-            raise ValueError("ID-only factors and targets must contain only finite values")
+            raise EstimatorInputError("ID-only factors and targets must contain only finite values")
         phi = self._design(Z, pairs)  # (n, d+1)
         d1 = phi.shape[1]
         if eps_obs.ndim != 2 or eps_obs.shape[0] != phi.shape[0]:
-            raise ValueError("ID-only targets must be row-aligned with the pair roster")
+            raise EstimatorInputError("ID-only targets must be row-aligned with the pair roster")
 
         if lam == 0.0:
             # Preserve the preregistered full-rank requirement for this comparator,
@@ -447,22 +452,22 @@ def fitted_model_artifact(model: SymmetricModel) -> dict:
     """
     if isinstance(model, L1Model):
         if model.coef_ is None:
-            raise ValueError("cannot serialize an unfitted L1Model")
+            raise EstimatorInputError("cannot serialize an unfitted L1Model")
         state = {"coef": _array_state(model.coef_)}
     elif isinstance(model, L2Model):
         if model.l1_.coef_ is None or model.scale_ is None:
-            raise ValueError("cannot serialize an unfitted L2Model")
+            raise EstimatorInputError("cannot serialize an unfitted L2Model")
         state = {
             "l1_coef": _array_state(model.l1_.coef_),
             "scale": _array_state(model.scale_),
         }
     elif isinstance(model, IDOnlyModel):
         if model.weight_ is None:
-            raise ValueError("cannot serialize an unfitted IDOnlyModel")
+            raise EstimatorInputError("cannot serialize an unfitted IDOnlyModel")
         state = {"weight": _array_state(model.weight_)}
     elif isinstance(model, L3Model):
         if model.weights_ is None or model._dims is None:
-            raise ValueError("cannot serialize an unfitted L3Model")
+            raise EstimatorInputError("cannot serialize an unfitted L3Model")
         state = {
             "dims": list(model._dims),
             "hidden": list(model._HIDDEN),

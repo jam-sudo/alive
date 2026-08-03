@@ -23,7 +23,7 @@ import pytest
 
 from alive.compose.driver.phase2b_cmd import (
     PHASE2B_NONCOMPLETE_EXIT,
-    _prior_terminal_present,
+    _prior_seal_evidence,
     _seal_consumed,
     run_phase2b_subcommand,
 )
@@ -61,11 +61,14 @@ def test_a_non_empty_audit_is_consumed(tmp_path):
     ids=["EACCES", "EIO", "ESTALE", "EMFILE"],
 )
 def test_an_unreadable_audit_fails_closed_toward_consumed(tmp_path, monkeypatch, error):
-    """The defect this replaced: ``Path.exists()`` swallows these and returns False.
+    """Any I/O failure other than a plain absence leaves consumption UNKNOWN.
 
-    A post-seal exception was then re-raised and reported as exit 10 -- "the seal was
-    NOT consumed" -- about a seal that may have been burned. An NFS-backed approved
-    root going stale, or a remount changing permissions, is an ordinary pod event.
+    CORRECTION (2026-08-03): an earlier docstring here said ``Path.exists()``
+    "swallows these and returns False". It does not -- it ignores exactly
+    ENOENT/ENOTDIR/EBADF/ELOOP, so these four RAISED and escaped as the uncontracted
+    exit 1, replacing the caller's original post-seal exception. The false-"not
+    consumed" path was the ignored errnos, not these. Both are wrong; this test pins
+    the fix for the raising ones, and the absence cases are covered above.
     """
     audit = tmp_path / "audit.jsonl"
     audit.write_text('{"claim": 1}\n', encoding="utf-8")
@@ -98,18 +101,18 @@ def test_the_audit_vanishing_mid_check_does_not_replace_the_caller_s_exception(
 
 
 # --------------------------------------------------------------------------- #
-# _prior_terminal_present / phase2b step 0
+# _prior_seal_evidence / phase2b step 0
 # --------------------------------------------------------------------------- #
 
 
 def test_no_terminal_means_no_prior_consumption(tmp_path):
-    assert _prior_terminal_present(tmp_path) is False
+    assert _prior_seal_evidence(tmp_path) is False
 
 
 @pytest.mark.parametrize("basename", sorted(TERMINAL_BASENAMES))
 def test_each_terminal_artifact_counts_as_prior_consumption(tmp_path, basename):
     (tmp_path / basename).write_text("{}", encoding="utf-8")
-    assert _prior_terminal_present(tmp_path) is True
+    assert _prior_seal_evidence(tmp_path) is True
 
 
 def test_an_unreadable_run_dir_fails_closed_toward_consumed(tmp_path, monkeypatch):
@@ -117,7 +120,7 @@ def test_an_unreadable_run_dir_fails_closed_toward_consumed(tmp_path, monkeypatc
         raise PermissionError(13, "Permission denied")
 
     monkeypatch.setattr(Path, "iterdir", _raise)
-    assert _prior_terminal_present(tmp_path) is True
+    assert _prior_seal_evidence(tmp_path) is True
 
 
 def test_phase2b_reports_30_not_a_false_preseal_rejection_when_a_terminal_exists(tmp_path):
@@ -199,3 +202,42 @@ def test_a_malformed_durable_marker_returns_30_rather_than_a_bug_traceback(
     )
     assert code == phase2b_cmd.PHASE2B_NONCOMPLETE_EXIT
     assert "post-seal" in capsys.readouterr().err
+
+
+def test_a_burned_audit_without_a_terminal_is_still_prior_consumption(tmp_path):
+    """The state ``recover``'s own roster ACCEPTS as post-seal, which step 0 missed.
+
+    The seal is claimed by writing the audit; the terminal is written after. Between
+    them a crash leaves audit=1 / terminal=0 -- ``_assert_recover_roster`` state 2.
+    Checking terminals alone left ``phase2b`` reporting that directory as a pre-seal
+    rejection ("the seal was NOT consumed") while the recover roster in the same
+    module read it as post-seal. Two rosters, one directory, opposite answers
+    (2026-08-03 review).
+    """
+    from alive.compose.durable import SEAL_AUDIT_FILENAME
+
+    (tmp_path / SEAL_AUDIT_FILENAME).write_text('{"claim": 1}\n', encoding="utf-8")
+    assert not (set(p.name for p in tmp_path.iterdir()) & TERMINAL_BASENAMES)
+    assert _prior_seal_evidence(tmp_path) is True
+
+
+def test_the_step_0_diagnostic_keeps_the_registered_class_name(tmp_path, capsys):
+    """The runbook's operator table is keyed on the exception CLASS NAME.
+
+    The first version of this line dropped it, so an operator who got 30 had no
+    lookup key in the one table the runbook calls the only carrier of severity.
+    """
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (run_dir / "terminal_complete.json").write_text("{}", encoding="utf-8")
+
+    code = run_phase2b_subcommand(
+        object(),
+        approved_artifacts_root=tmp_path / "root",
+        run_dir=run_dir,
+        confirm_seal_token="unused",
+    )
+    err = capsys.readouterr().err
+    assert code == PHASE2B_NONCOMPLETE_EXIT
+    assert err.startswith("phase2b: RunDirStateError: ")
+    assert len(err.splitlines()) == 1

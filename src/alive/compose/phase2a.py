@@ -1658,14 +1658,19 @@ def _run_phase2a_core(
 
     # Step 9: confirm the sealed access count is ZERO (it never opened a seal).
     if futility.sealed_access_count != 0 or outcome_store.access_audit.sealed_access_count != 0:
-        raise OutcomeLeakageError(
+        raise Phase2aInvariantError(
             "Phase2a step 9: sealed access count is NOT zero — a sealed outcome was "
             f"touched during development (futility={futility.sealed_access_count}, "
             f"store audit={outcome_store.access_audit.sealed_access_count}, "
             f"role={outcome_store.access_audit.role!r}, "
             f"source_kind={outcome_store.access_audit.source_kind!r}). "
-            "This is a leakage event, not an internal invariant: preserve every "
-            "artifact and do not re-run."
+            "The REAL detection is DevelopmentOutcomeStore.__post_init__, which "
+            "refuses a non-zero count on a frozen dataclass, and FutilityResult's "
+            "one construction site hardcodes 0 -- so reaching this line means an "
+            "internal invariant broke, which is why it is Phase2aInvariantError and "
+            "exits 1 with its traceback. A 2026-08-02 draft kept OutcomeLeakageError "
+            "here on the belief that it was a live leakage detection; review refuted "
+            "that by construction (2026-08-03). Preserve every artifact and report."
         )
 
     return Phase2aResult(

@@ -106,7 +106,11 @@ from alive.compose.driver.seal_boundary import (
     fixture_seal_audit_path,
     scientific_protocol_seal_audit_path,
 )
-from alive.compose.durable import COMMIT_CHECKSUM_FIELD, DURABLE_COMMIT_FILENAME
+from alive.compose.durable import (
+    COMMIT_CHECKSUM_FIELD,
+    DURABLE_COMMIT_FILENAME,
+    SEAL_AUDIT_FILENAME,
+)
 from alive.compose.freeze import FrozenPredictionBundle
 from alive.compose.outcome_store import (
     ComposeOutcomeStore,
@@ -236,10 +240,15 @@ def run_phase2b_subcommand(
             # the dispatch, not on the exception type. The scientific audit is
             # protocol-global rather than run-local, so the terminal is the reliable
             # local witness in both modes.
-            if _prior_terminal_present(run_dir):
+            if _prior_seal_evidence(run_dir):
+                # Keep the registered ``stage: ExceptionName: message`` shape: the
+                # runbook's operator table is keyed on the CLASS NAME, and the first
+                # version of this line dropped it, leaving the operator without a
+                # lookup key (2026-08-03 review).
                 print(
-                    "phase2b: run_dir already holds a phase2b terminal; the seal was "
-                    f"consumed by an earlier run -- use `recover`: {exc}",
+                    f"phase2b: {type(exc).__name__}: {exc} "
+                    "[run_dir carries a terminal or a burned seal audit: an earlier "
+                    "run consumed the seal -- use `recover`, do not re-run phase2b]",
                     file=sys.stderr,
                 )
                 return PHASE2B_NONCOMPLETE_EXIT
@@ -742,13 +751,24 @@ def _assert_audit_destination_free(audit_path: Path, *, expected_parent: Path) -
         )
 
 
-def _prior_terminal_present(run_dir: Path) -> bool:
-    """Is a phase2b terminal already installed in ``run_dir``?
+def _prior_seal_evidence(run_dir: Path) -> bool:
+    """Does ``run_dir`` carry local evidence that a previous run consumed the seal?
 
-    A terminal is written only after the seal is opened, so its presence is
-    local, mode-independent evidence that a previous run consumed the seal. Used
-    by step 0 to avoid reporting such a run dir as a pre-seal rejection. Reads
-    names only -- no contents, no store, no audit.
+    Two witnesses, both written only after the seal is claimed:
+
+    * a phase2b terminal (``TERMINAL_BASENAMES``);
+    * the run-local seal audit (``SEAL_AUDIT_FILENAME``), which is the fixture-mode
+      consumption boundary and is exactly the state
+      :func:`~alive.compose.driver.run_dir_state.assert_run_dir_roster` ACCEPTS for
+      ``recover`` -- audit burned, terminal not yet written.
+
+    An earlier version of this check looked at terminals only (2026-08-02) and so
+    still reported that audit-only crash state as a pre-seal rejection, while the
+    recover roster in the same module accepted the same directory as post-seal. Two
+    rosters disagreeing about one directory is the defect; the audit was the witness
+    already imported next door (2026-08-03 review).
+
+    Reads NAMES only -- no contents, no store, no audit records.
     """
     try:
         present = {entry.name for entry in run_dir.iterdir()}
@@ -756,16 +776,19 @@ def _prior_terminal_present(run_dir: Path) -> bool:
         # Unreadable run_dir: consumption unknown. Same asymmetry as
         # ``_seal_consumed`` -- never claim "not consumed" on missing information.
         return True
-    return bool(present & TERMINAL_BASENAMES)
+    return bool(present & (TERMINAL_BASENAMES | {SEAL_AUDIT_FILENAME}))
 
 
 def _seal_consumed(audit_path: Path) -> bool:
     """Return ``True`` once the seal's durable audit carries content (§3.3 step 5).
 
     The seal — opened EXACTLY once inside ``run_phase2b[_fixture]`` — burns the
-    mode-specific audit path as its durable consumption boundary, the exact
-    inverse of the absence :func:`_assert_audit_destination_free` requires
-    BEFORE store construction. A post-dispatch exception with a non-empty audit is
+    mode-specific audit path as its durable consumption boundary, the counterpart to
+    the absence :func:`_assert_audit_destination_free` requires BEFORE store
+    construction. NOT its exact inverse any more: that function still uses
+    ``Path.exists()``/``Path.is_symlink()``, so the two apply different evidence
+    rules to the same path (harmless today -- ``os.link`` fails ``EEXIST`` -- but
+    recorded rather than left implied). A post-dispatch exception with a non-empty audit is
     therefore a POST-seal failure (the caller returns exit ``30`` + ``recover``
     salvages the terminal); an empty/absent audit means nothing was consumed (the
     caller re-raises so the CLI's pre-seal mapping stays correct).
@@ -781,13 +804,24 @@ def _seal_consumed(audit_path: Path) -> bool:
         ``True`` if the audit exists and is non-empty, and ``True`` on ANY I/O
         error other than a plain absence -- see below.
     """
-    # Fails CLOSED, deliberately (2026-08-02 review). The previous form was
+    # Fails CLOSED, deliberately. The previous form was
     # ``audit_path.exists() and audit_path.stat().st_size > 0``, which had two
-    # defects. (1) ``Path.exists()`` SWALLOWS ``OSError`` and returns ``False``, so
-    # an audit that is merely unreadable -- EACCES after a remount, ESTALE on an
-    # NFS-backed approved root, EIO, EMFILE -- read as "nothing was consumed". A
-    # post-seal exception was then re-raised and reported by the CLI as exit 10,
-    # "the seal was NOT consumed", about a seal that may well have been burned.
+    # defects.
+    #
+    # (1) ``Path.exists()`` ignores exactly ``ENOENT``/``ENOTDIR``/``EBADF``/
+    # ``ELOOP`` and returns ``False`` for them, so a path that resolved through a
+    # non-directory, a symlink loop, or a bad descriptor read as "nothing was
+    # consumed" -- and a post-seal exception was then re-raised and reported by the
+    # CLI as exit 10, "the seal was NOT consumed", about a seal that may well have
+    # been burned. CORRECTION (2026-08-03 review): the first draft of this comment,
+    # its commit message and the readiness entry all claimed ``exists()`` swallows
+    # ``OSError`` GENERALLY and named EACCES/ESTALE/EIO/EMFILE. That is false on the
+    # pinned interpreter -- those four RAISE, and so escaped as the uncontracted
+    # exit 1 rather than as a false 10. Both are defects, but only the four errnos
+    # above produced the false "not consumed". For the raising errnos this change is
+    # exit 1 -> the contracted 30, which is also right (the seal state is unknown,
+    # and the original post-seal exception is no longer replaced).
+    #
     # (2) Between ``exists()`` and ``stat()`` the file could vanish, raising
     # ``FileNotFoundError`` from INSIDE the caller's ``except`` block and replacing
     # the original exception. One ``stat()`` closes both.
