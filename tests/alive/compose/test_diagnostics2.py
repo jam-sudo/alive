@@ -130,8 +130,10 @@ def _run(inst, **overrides):
         "rank_tolerance_rule": "max_shape_times_float64_eps_times_sigma_max",
         # Effectively unbounded, so the tests in THIS file keep testing what they
         # were written to test. The ceiling itself is exercised in
-        # ``test_condition_ceiling.py`` against the registered 1.0e8.
-        "condition_ceiling": float("inf"),
+        # ``test_condition_ceiling.py`` against the registered 1.0e8. Finite, not
+        # ``inf``: selection refuses a non-finite ceiling precisely because it
+        # would silence the screen rather than widen it.
+        "condition_ceiling": 1e300,
     }
     kwargs.update(overrides)
     return real_calibration_diagnostics(**kwargs)

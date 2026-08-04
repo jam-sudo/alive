@@ -35,6 +35,12 @@ from alive.compose.select import (
     select_hyperparams,
 )
 
+# Effectively unbounded: this module tests SELECTION, not the registered
+# conditioning screen, which has its own file (``test_condition_ceiling.py``).
+# Finite because selection refuses a nan/inf ceiling -- an infinite one would
+# silence the screen, which is exactly the failure that refusal exists to stop.
+_NO_CEILING = 1e300
+
 # --------------------------------------------------------------------------- #
 # helpers
 # --------------------------------------------------------------------------- #
@@ -165,6 +171,7 @@ def test_select_runs_with_p_not_equal_k_and_returns_result():
         seed=11,
         model_factory=lambda: L1Model(),
         uncovered_tolerance=0.9,
+        condition_ceiling=_NO_CEILING,
     )
     assert isinstance(result, SelectionResult)
     assert result.selected_k_total == 4
@@ -197,6 +204,7 @@ def test_select_picks_known_best_lambda():
         seed=11,
         model_factory=lambda: L1Model(),
         uncovered_tolerance=0.9,
+        condition_ceiling=_NO_CEILING,
     )
     # noiseless recovery: lambda=0 must be the argmax theta
     thetas = result.theta_by_candidate
@@ -234,6 +242,7 @@ def test_select_picks_known_best_k_total():
         seed=11,
         model_factory=lambda: L1Model(),
         uncovered_tolerance=0.9,
+        condition_ceiling=_NO_CEILING,
     )
     assert result.selected_k_total == 4
 
@@ -272,6 +281,7 @@ def test_tie_break_lower_k_then_larger_lambda():
         seed=11,
         model_factory=lambda: _ConstModel(),
         uncovered_tolerance=0.9,
+        condition_ceiling=_NO_CEILING,
     )
     # exact tie in theta (model ignores k_total) -> lower k_total wins
     assert np.isclose(result.theta_by_candidate[(4, 0.0)], result.theta_by_candidate[(6, 0.0)])
@@ -307,6 +317,7 @@ def test_tie_break_larger_lambda_when_k_equal():
         seed=11,
         model_factory=lambda: _ConstModel(),
         uncovered_tolerance=0.9,
+        condition_ceiling=_NO_CEILING,
     )
     # all lambdas give the same theta (model ignores lambda) -> largest lambda wins
     vals = list(result.theta_by_candidate.values())
@@ -343,6 +354,7 @@ def test_additive_must_be_response_dimensional_not_factor_shaped():
             seed=11,
             model_factory=lambda: L1Model(),
             uncovered_tolerance=0.7,
+            condition_ceiling=_NO_CEILING,
         )
 
 
@@ -375,6 +387,7 @@ def test_empty_fold_invalidates_selection():
             seed=11,
             model_factory=lambda: L1Model(),
             uncovered_tolerance=0.9,
+            condition_ceiling=_NO_CEILING,
         )
 
 
@@ -399,6 +412,7 @@ def test_uncovered_pair_fraction_above_tolerance_invalidates():
             seed=11,
             model_factory=lambda: L1Model(),
             uncovered_tolerance=0.0,
+            condition_ceiling=_NO_CEILING,
         )
 
 
@@ -420,6 +434,7 @@ def test_empty_grid_rejected():
             seed=11,
             model_factory=lambda: L1Model(),
             uncovered_tolerance=0.7,
+            condition_ceiling=_NO_CEILING,
         )
 
 
@@ -441,6 +456,7 @@ def test_missing_factor_bank_for_k_rejected():
             seed=11,
             model_factory=lambda: L1Model(),
             uncovered_tolerance=0.7,
+            condition_ceiling=_NO_CEILING,
         )
 
 
@@ -468,6 +484,7 @@ def test_singular_candidate_is_explicitly_nonviable_and_never_wins():
         seed=11,
         model_factory=lambda: L1Model(),
         uncovered_tolerance=0.9,
+        condition_ceiling=_NO_CEILING,
     )
     assert (4, 0.0) not in result.theta_by_candidate
     assert "non-identifiable" in result.nonviable_candidates[(4, 0.0)]
@@ -494,6 +511,7 @@ def test_ridge_candidate_remains_viable_when_gram_addition_would_lose_lambda():
         seed=11,
         model_factory=lambda: L1Model(),
         uncovered_tolerance=0.9,
+        condition_ceiling=_NO_CEILING,
     )
     assert np.isfinite(result.theta_by_candidate[(4, 0.001)])
     assert (4, 0.001) not in result.nonviable_candidates
@@ -529,6 +547,7 @@ def test_all_nonviable_candidates_invalidate_before_platform_solver(monkeypatch)
             seed=11,
             model_factory=lambda: L1Model(),
             uncovered_tolerance=0.9,
+            condition_ceiling=_NO_CEILING,
         )
     assert not called
 
@@ -552,4 +571,5 @@ def test_invalid_or_duplicate_lambda_grid_is_rejected(bad_grid):
             seed=11,
             model_factory=lambda: L1Model(),
             uncovered_tolerance=0.9,
+            condition_ceiling=_NO_CEILING,
         )

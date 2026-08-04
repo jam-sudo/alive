@@ -39,6 +39,13 @@ from alive.compose.select import (
 )
 from alive.provenance import sha256_json
 
+# Effectively unbounded: this module tests the OOF fold manifest, not the
+# registered conditioning screen (see ``test_condition_ceiling.py``). Finite
+# because selection refuses a nan/inf ceiling -- an infinite one would silence
+# the screen, which is exactly the failure that refusal exists to stop.
+_NO_CEILING = 1e300
+
+
 # --------------------------------------------------------------------------- #
 # fixture — DERIVE the seed-11 gene groups, then build deliberate pairs
 # --------------------------------------------------------------------------- #
@@ -116,6 +123,7 @@ def _select(inst):
         seed=_SEED,
         model_factory=lambda: L1Model(),
         uncovered_tolerance=0.75,
+        condition_ceiling=_NO_CEILING,
     )
 
 

@@ -715,6 +715,7 @@ def _validate_inputs(
     k_total_grid: Sequence[int],
     lambda_grid: Sequence[float],
     uncovered_tolerance: float,
+    condition_ceiling: float,
 ) -> tuple[np.ndarray, np.ndarray, int]:
     """Validate every selection input; return ``(eps_obs, additive, p)``.
 
@@ -746,6 +747,17 @@ def _validate_inputs(
         raise SelectionError("lambda_grid contains duplicate numeric values")
     if not (0.0 <= float(uncovered_tolerance) <= 1.0):
         raise SelectionError(f"uncovered_tolerance must be in [0, 1], got {uncovered_tolerance}")
+    # Both directions are unusable and they fail in OPPOSITE ways, which is why
+    # neither is admitted: ``cond > nan`` and ``cond > inf`` are always False, so
+    # such a ceiling silences the screen on every candidate; a non-positive one is
+    # always True, so it rejects every candidate including a perfect design.
+    ceiling = float(condition_ceiling)
+    if not np.isfinite(ceiling) or ceiling <= 0.0:
+        raise SelectionError(
+            "condition_ceiling must be finite and positive -- a nan or infinite "
+            "ceiling silences the conditioning screen and a non-positive one "
+            f"rejects every candidate, got {condition_ceiling!r}"
+        )
 
     n_pairs = len(idx_pairs)
     if n_pairs == 0:
@@ -895,6 +907,7 @@ def select_hyperparams(
     seed: int,
     model_factory: ModelFactory,
     uncovered_tolerance: float,
+    condition_ceiling: float,
     unregularized_oof_rank_policy: str = UNREGULARIZED_OOF_RANK_POLICY,
     rank_tolerance_rule: str = OOF_RANK_TOLERANCE_RULE,
 ) -> SelectionResult:
@@ -973,6 +986,7 @@ def select_hyperparams(
         k_total_grid,
         lambda_grid,
         uncovered_tolerance,
+        condition_ceiling,
     )
 
     folds = build_gene_disjoint_folds(idx_pairs, n_genes=n_genes, n_folds=n_folds, seed=seed)
@@ -1008,8 +1022,34 @@ def select_hyperparams(
             raise SelectionError(
                 f"factors_by_k[{k_total}] has {Z.shape[0]} gene rows, expected {n_genes}"
             )
+        # Registered conditioning screen (spec, identification section). ``cond(Phi)``
+        # is a function of ``Z`` and the calibration pair roster only -- no outcome
+        # enters it -- so screening every CANDIDATE is exactly as pre-registrable as
+        # screening the winner, and it records WHY a dimension was dropped instead of
+        # terminating a run that had an admissible alternative in the same registered
+        # grid. It is the same shape as the unregularized rank policy below.
+        #
+        # Deliberately restricted to FINITE condition numbers. ``rank_diagnostics``
+        # returns ``inf`` exactly when the design is rank-deficient, and rank
+        # deficiency is owned by the registered rank futility gate in
+        # ``diagnostics2``. Screening it out here would make that gate unreachable:
+        # selection would quietly move to a full-rank dimension and the run would
+        # CONTINUE where the protocol says it must stop.
+        candidate_condition = float(rank_diagnostics(Z, list(idx_pairs)).condition_number)
+        inadmissible: str | None = None
+        if np.isfinite(candidate_condition) and candidate_condition > float(condition_ceiling):
+            inadmissible = (
+                "conditioning above the registered ceiling: "
+                f"condition_number={candidate_condition} > "
+                f"condition_ceiling={float(condition_ceiling)} "
+                "(registered identification.condition_ceiling; the design is full rank "
+                "but numerically inadmissible)"
+            )
         for lam in lambda_grid:
             candidate = (int(k_total), float(lam))
+            if inadmissible is not None:
+                nonviable_candidates[candidate] = inadmissible
+                continue
             # The estimator decides unregularized rank viability before LAPACK.
             # Keep an explicit audit reason and omit the candidate from the finite
             # score map; ``-inf`` is neither a measurement nor strict JSON.
