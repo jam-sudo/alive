@@ -1576,6 +1576,7 @@ def assert_scientific_mode_allowed(
                 expected_total_k_grid=config.total_k_grid,
                 expected_esm_model=config.esm_model.removesuffix("_mean_pool"),
                 expected_esm_dim=config.esm_projection_dim,
+                expected_condition_ceiling=config.condition_ceiling,
             )
         except ValueError as exc:
             raise ScientificModeError(

@@ -39,6 +39,7 @@ import anndata as ad
 import numpy as np
 import yaml
 
+from alive.compose.config2 import load_compose_phase2_config
 from alive.compose.phi_rank import PHI_RANK_ACTIVATION_SCHEMA, compute_phi_rank_report
 from alive.compose.response import fit_response_space
 from alive.data.features import Esm2Encoder
@@ -139,17 +140,36 @@ def main(argv: list[str] | None = None) -> int:
         sequence_mapping_hash=seq_mapping_hash,
     )
 
+    # READY must mean "the run can use every registered dimension", not merely
+    # "every dimension is full rank". The conditioning ceiling is the run's
+    # registered admissibility criterion (`select_hyperparams` screens candidates
+    # against exactly this statistic on exactly this design), so a report that
+    # certified an over-ceiling dimension would green-light a design the run then
+    # rejects. Read through the VALIDATED loader, not the raw mapping: the raw
+    # value can be a string (YAML 1.1 parses `1.0e8` that way), and a coerced
+    # comparison would certify silently. Never hardcoded here.
+    ceiling = float(load_compose_phase2_config(args.config).condition_ceiling)
     rank_ready = all(
         block["is_full_rank"]
         and block["rank"] == block["sym_dim"]
         and block["n_calibration_pairs_skipped"] == 0
         for block in report["per_k_total"]
     )
-    activation = (
-        "READY — every registered factor grid is full rank; sealed outcomes remain unread"
-        if rank_ready
-        else "BLOCKED — at least one registered factor grid failed the rank gate; no seal"
+    conditioning_ready = all(
+        float(block["condition_number"]) <= ceiling for block in report["per_k_total"]
     )
+    if rank_ready and conditioning_ready:
+        activation = (
+            "READY — every registered factor grid is full rank and conditioned at or "
+            f"below the registered ceiling {ceiling}; sealed outcomes remain unread"
+        )
+    elif not rank_ready:
+        activation = "BLOCKED — at least one registered factor grid failed the rank gate; no seal"
+    else:
+        activation = (
+            "BLOCKED — every registered factor grid is full rank but at least one is "
+            f"conditioned above the registered ceiling {ceiling}; no seal"
+        )
     envelope = {
         "schema": PHI_RANK_ACTIVATION_SCHEMA,
         "deliverable": "real_norman_phi_rank_and_condition_report",

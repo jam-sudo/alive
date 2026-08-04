@@ -131,8 +131,18 @@ def validate_phi_rank_activation_report(
     expected_total_k_grid: Sequence[int],
     expected_esm_model: str,
     expected_esm_dim: int,
+    expected_condition_ceiling: float,
 ) -> dict[str, int]:
-    """Validate a READY rank report and return its independently bound role counts."""
+    """Validate a READY rank report and return its independently bound role counts.
+
+    ``expected_condition_ceiling`` is the registered
+    ``identification.condition_ceiling``. This report computes the SAME statistic
+    on the SAME design as the admissibility screen in
+    :func:`alive.compose.select.select_hyperparams`, so accepting a block the
+    screen would reject would certify as READY a design the run cannot use. The
+    two must agree; the check costs nothing and runs before an owner approves a
+    SHA or a pod trip is spent.
+    """
     top = _exact_object(envelope, _ENVELOPE_KEYS, "phi-rank envelope")
     if top["schema"] != PHI_RANK_ACTIVATION_SCHEMA:
         raise ValueError("phi-rank schema mismatch")
@@ -238,6 +248,16 @@ def validate_phi_rank_activation_report(
         ):
             raise ValueError(
                 f"phi-rank invalid or non-full-rank factor block for k_total={expected_k}"
+            )
+        # Separate message: this block is well-formed and full rank, it is simply
+        # inadmissible under the registered ceiling. Reporting it as "invalid or
+        # non-full-rank" would send an operator looking for the wrong defect.
+        if float(condition) > float(expected_condition_ceiling):
+            raise ValueError(
+                f"phi-rank factor block for k_total={expected_k} is full rank but "
+                f"conditioned above the registered ceiling: {float(condition)} > "
+                f"{float(expected_condition_ceiling)}; the run's admissibility screen "
+                "would reject this dimension, so the report cannot certify it READY"
             )
         _full_hex(block["factor_bank_checksum"], "phi-rank factor-bank checksum", lengths=(64,))
     return pair_counts
