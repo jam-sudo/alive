@@ -76,6 +76,13 @@ identification:
   rank_tolerance_rule: max_shape_times_float64_eps_times_sigma_max
   oof_folds: 3
   uncovered_tolerance: 0.75
+  # Admissibility bound on cond(Phi) at the SELECTED k_total. Anchor is data-free:
+  # 1/sqrt(float64 eps) ~= 6.7e7, rounded up. Invariant to a uniform rescale of z
+  # (to round-off); moves ~11 orders under ESM-vs-expression block imbalance.
+  # Exceeding it is FUTILITY_STOPPED, not a retryable rejection.
+  # The `+` is required: YAML 1.1 parses an unsigned exponent (`1.0e8`) as a
+  # STRING, which the loader rejects as non-numeric rather than coercing.
+  condition_ceiling: 1.0e+8
 
 metric:
   pair_error: mean_squared_error_over_pca_coordinates
