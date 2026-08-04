@@ -76,12 +76,15 @@ identification:
   rank_tolerance_rule: max_shape_times_float64_eps_times_sigma_max
   oof_folds: 3
   uncovered_tolerance: 0.75
-  # Admissibility bound on cond(Phi) at the SELECTED k_total. Anchor is data-free:
-  # 1/sqrt(float64 eps) ~= 6.7e7, rounded up. Invariant to a uniform rescale of z
-  # (to round-off); moves ~11 orders under ESM-vs-expression block imbalance.
-  # Exceeding it is FUTILITY_STOPPED, not a retryable rejection.
-  # The `+` is required: YAML 1.1 parses an unsigned exponent (`1.0e8`) as a
-  # STRING, which the loader rejects as non-numeric rather than coercing.
+  # Admissibility bound on cond(Phi), screened PER CANDIDATE k_total inside
+  # selection. Anchor is data-free: 1/sqrt(float64 eps) ~= 6.7e7, rounded up.
+  # Invariant to a uniform rescale of z (to round-off); moves ~11 orders under
+  # ESM-vs-expression block imbalance. An over-ceiling k_total is recorded
+  # non-viable; only if EVERY candidate is, selection itself fails (exit 10).
+  # Spelling matters: YAML 1.1 needs <digits>.<digits>[eE][+-]<digits>, so both
+  # `1.0e8` and `1e+8` parse as STRINGS, which the loader rejects rather than
+  # coercing. A plain integer would also have worked; the digest depends on the
+  # parsed value, not the spelling.
   condition_ceiling: 1.0e+8
 
 metric:

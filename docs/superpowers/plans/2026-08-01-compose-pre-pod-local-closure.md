@@ -1,5 +1,13 @@
 # COMPOSE-K562-v1 — pre-pod local closure Plan (초안)
 
+> **⚠ 2026-08-04 부분 SUPERSEDED.** L1은 완료됐고 L2는 **여기 적힌 것과 다른 설계로** 구현됐다.
+> L2-T3의 "`DesignConditionError` 신설 → roster 편입 → exit 10" 안과, D2 항목의 처분 서술은 더 이상
+> 유효하지 않다. 현재 계약은 spec의 *Registered conditioning ceiling* 문단이며, ceiling은 selection의
+> **후보별 admissibility 심사**다(모든 후보 부적격일 때만 `SelectionError` → exit 10). 아래 §4의
+> "조건수는 uniform rescale에 **정확히 불변**" 서술도 정정됐다 — 반올림 오차 범위에서 불변이다.
+> §7 task #14의 "live `2a8b1bc3…`"도 stale이며 현재 digest는 `b158417a…`다.
+> 진행 상태와 종결 근거는 `docs/superpowers/COMPOSE-SEAL-READINESS.md`가 authoritative다.
+
 > **상태:** DRAFT — owner decision gate D1–D4 미결. 아래 work package는 **전부 로컬(MacBook + GitHub
 > Actions)에서 완결 가능한 항목만** 담는다. real Norman data·pod·owner key가 필요한 항목은 §7에 명시적으로
 > 제외한다.

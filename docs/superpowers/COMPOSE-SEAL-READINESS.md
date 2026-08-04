@@ -5,7 +5,7 @@
 > **이 문서는 아무것도 정의하지 않는다** — 세부(task)는 plan, claim은 spec, exact param은 config,
 > 시간순 audit는 git이 authoritative다([sources of truth](../../CLAUDE.md#sources)). 상태 행이 authoritative
 > 문서와 어긋나면 **authoritative 문서가 옳다**; 이 인덱스를 갱신한다.
-> **Updated:** 2026-08-04 @ `aa46403` (branch `compose-condition-ceiling`)
+> **Updated:** 2026-08-04 @ `143e56f` (branch `compose-condition-ceiling`)
 > **갱신 트리거:** sub-project/gate **상태가 바뀔 때만**(커밋마다 아님).
 > **종결 상태:** COMPOSE seal이 정확히 한 번 열리면 이 인덱스는 **frozen/은퇴**한다. 이후 진행상황은
 > seal 결과와 post-hoc analysis가 대신한다.
@@ -645,55 +645,75 @@ branch에서 추적 가능하게 기록한다. `LOCAL` ledger ID만으로는 이
    config-bound evidence stale. The resulting canonical config digest is
    `2a8b1bc37b4b952b29dd57cf128d2aa27a2a698693e1376e569544ff119e85eb`; it must be the config axis of
    any replacement evidence and run identity.
-   **2026-08-04 CLOSED — the condition ceiling is registered.** The open item below is resolved by owner
-   decision: statistic `rank_diagnostics(Φ).condition_number` on the full-calibration `Φ` at the SELECTED
-   `k_total`, bound `identification.condition_ceiling: 1.0e+8`, anchored data-free at
-   `1/sqrt(float64 eps) ≈ 6.7e7` rounded up. **Disposition is `FUTILITY_STOPPED`, not a pre-seal rejection**,
-   which reverses the drafted plan's exit-10 proposal: the spec already calls this a *futility* gate, the
-   registered futility vocabulary already contains `rank_condition_fail` while no rejection slot exists, the
-   sibling non-finite branch is already futility (so exit 10 would make the verdict discontinuous at the exact
-   boundary where the two events coincide), a stop preserves the rank report/spectrum/selected hyperparameters
-   that a rejection discards, and "fix and retry" would here mean rescaling blocks until the gate passes — a
-   post-hoc change made after seeing a development diagnostic. A `NaN` or non-positive ceiling silently
-   disables the gate (`cond > NaN` is False), so both the loader and the checkpoint refuse one. Fourteen
-   mutations were run against the committed code and all fourteen are caught: deleting the gate, widening
-   `elif` to `if` (which would append a second conditioning line to every rank-deficient run), dropping or
-   narrowing the checkpoint refusal, dropping either loader check, coercing instead of refusing a non-numeric
-   value, removing the key from the closed schema, moving the checkpoint refusal to either side of its two
-   ordering constraints, flipping `>` to `>=` at the bound, and three hardcoded literals in the `phase2a`
-   call site. Those orderings are themselves choices and are now pinned: the refusal runs **after** the
-   measurability gate, so a call that is both requesting a sealed role and carrying an unusable ceiling
-   reports the LEAKAGE attempt rather than the config bug that would hide it, and **before** selection, so it
-   is never discovered after the expensive OOF fit. The first draft had it at the top of the function, with a
-   test pinning that order.
-   **Three of the fourteen were found by re-running the set after the code had moved, and are recorded because
-   the first pass claimed more than it had shown.** An earlier version of this entry said "ten mutations, all
-   caught"; those ten had been run BEFORE the refusal was repositioned and the loader tests split, so they
-   were not evidence about the committed code. Re-running found that (a) `>` → `>=` survived — the inclusive
-   bound the wording registers ("at or below") had no test near it, now pinned one ulp either side by moving
-   the ceiling onto a measured condition number, since a design at exactly `1.0e8` cannot be constructed; and
-   (b) **nothing asserted `phase2a` forwards the CONFIG value at all.** Deleting the argument is a `TypeError`
-   the required parameter already catches, but a hardcoded `float("inf")` would have left the gate dead in
-   production with every test green — the exact failure mode this ceiling exists to prevent. The forwarding
-   test uses a sentinel config value, so a literal is caught even when it equals the registered one (checked:
-   a hardcoded `1.0e8` fails it). Its two sibling config-bound policies deliberately keep the weaker check —
-   `select.py` pins both to registered constants and raises `SelectionError` on anything else, so a literal
-   there cannot silently diverge; the ceiling has no such second guard, which is why it needed this one.
-   **Two recorded measurements are corrected here.** (a) The entry below says the condition number is
-   "exactly scale-invariant under a UNIFORM rescale". Re-measured: `10.421787979549746` at `1x` versus
-   `10.421787979549734` at `1e6x` — invariant to round-off, not exactly, and the test asserts `rel=1e-9`
-   rather than equality. (b) The committed config must write `1.0e+8`: YAML 1.1 parses an unsigned exponent
-   (`1.0e8`) as a **string**, which the loader refused as non-numeric — caught on the first load, and now
-   pinned by a test. **This moves the config digest**, as planned and as the 2026-07-30 entry anticipated:
+   **2026-08-04 CLOSED — the condition ceiling is registered, and the first design of it was WRONG.**
+   The open item below is resolved: statistic `rank_diagnostics(Φ).condition_number` on the
+   full-calibration `Φ`, bound `identification.condition_ceiling: 1.0e+8`, anchored data-free at
+   `1/sqrt(float64 eps) ≈ 6.7e7` rounded up. It is applied as a **per-candidate admissibility screen inside
+   `select_hyperparams`** — the same shape as the sibling `unregularized_oof_rank_policy` — recording an
+   over-ceiling `k_total` in `nonviable_candidates` and selecting among the rest. Only when EVERY candidate is
+   inadmissible does selection become invalid: `SelectionError`, already a contracted pre-seal rejection
+   (exit 10) and already in the runbook's category D, so **no new exception class and no new futility
+   condition**; the registered `futility.conditions` list is deliberately unchanged. The screen is restricted
+   to FINITE condition numbers — `rank_diagnostics` returns `inf` exactly for a rank-deficient design, which
+   the registered rank futility gate owns, and screening it here would have made that gate unreachable by
+   letting selection move quietly to a full-rank dimension. The same bound is now enforced by the phi-rank
+   activation validator and the producer's READY verdict, which compute the identical statistic on the
+   identical design; without it a report could certify as READY a dimension the run then refuses, at the cost
+   of an owner approval and a pod trip.
+   **The first implementation made it a `FUTILITY_STOPPED` condition on the SELECTED `k_total`, and three
+   independent adversarial reviews rejected that on both axes.** (a) It terminated the study permanently
+   whenever the best-scoring dimension was over the ceiling, even when the same registered grid held an
+   admissible alternative — reproduced: grid `[4, 6]` stops, grid `[4]` alone CONTINUEs at θ=0.43. (b) Two of
+   the five reasons recorded for choosing futility were **factually false about this repository**, and are
+   withdrawn: the runbook does NOT say exit 10 means "fix and retry" (it says the exit code carries only
+   seal-consumption, and category D says "investigate, do not re-run"), and the durable futility report does
+   NOT persist the `singular_values` spectrum it was said to preserve — `grep -rn singular_values src/alive`
+   reaches only `diagnostics2`. Two more were weakened: "no rejection slot exists" was a tautology about the
+   *futility* vocabulary while the sibling threshold in the same config block (`uncovered_tolerance`) is a
+   `SelectionError`, and `EstimatorInputError` was rostered as exit 10 two days earlier on the identical
+   "nothing upstream checks this property of the PREPARE factor bank" reasoning; and the "discontinuity at the
+   boundary" argument was imprecise, since `is_full_rank ⟺ isfinite(condition_number)` holds identically
+   (independently re-verified here over 1500 random designs, 0 divergences) so the two events are mutually
+   exclusive by construction. The owner re-decided on the corrected record.
+   **Two recorded measurements are corrected, and one of them was introduced by this branch.** (a) The entry
+   below says the condition number is "exactly scale-invariant under a UNIFORM rescale". Re-measured:
+   `10.421787979549746` at `1x` versus `10.421787979549734` at `1e6x` — invariant to round-off, not exactly.
+   (b) **The committed exhibit test did not reproduce the registered numbers at all.** It claimed the same
+   construction as the deleted `test_one_over_scaled_factor_block_is_rejected…` but dropped that helper's
+   `coef_true` draw as unused — it is unused, and it advances the RNG, so the pair set changed from 37 to 39
+   and the exhibit silently became `9.91 → 4.15e12` while the spec and this file kept quoting
+   `10.42 → 3.71e12`. Two reviewers found it independently. The draw is restored and the test now asserts the
+   registered values exactly (`rel=1e-12`), so the documents and the code cannot drift again. Also corrected:
+   the YAML rule is `<digits>.<digits>[eE][+-]<digits>`, not "the `+` is required" (`1e+8` is also a string,
+   and a plain integer literal would have worked); and the spec mis-dated the deleted guard, which was
+   introduced 2026-07-29 and removed 2026-07-31.
+   **This moves the config digest**, as planned:
    `2a8b1bc37b4b952b29dd57cf128d2aa27a2a698693e1376e569544ff119e85eb` →
    `b158417a76e888bff2bf6836bea622e0cbf596f0743f3fe89aea2ffe0864a9fd`. That digest, not the prior one, must be
    the config axis of any replacement evidence and run identity; the two activation-evidence reports pinned to
    `d8c65ac4…` remain stale and their regeneration remains open (task #14). Independently checked against the
-   committed `real_norman_phi_rank_report.json`: the recorded real designs sit at condition numbers `15.82`,
-   `32.86` and `484.20` for `k_total` 4/6/8 — more than five orders of magnitude below the ceiling — so the
-   registered bound does not trivially reject the study it governs, and the test reads those from the evidence
-   file rather than transcribing them. Seal state remains **UNOPENED**; execution remains **RELEASE-BLOCKED**;
-   nothing here authorizes a run.
+   committed `real_norman_phi_rank_report.json`: the recorded real designs sit at `15.82`, `32.86` and
+   `484.20` for `k_total` 4/6/8 — more than five orders of magnitude below the ceiling — so the registered
+   bound does not trivially reject the study it governs, the committed evidence still passes the newly bound
+   validator, and the test reads those values from the evidence file rather than transcribing them.
+   **Mutation coverage is stated as of the committed code, not of an earlier draft.** The previous version of
+   this entry claimed "fourteen mutations, all caught" for code that had since been repositioned; that claim
+   is withdrawn as unsupported. Against the current design six mutations were run and all six caught: deleting
+   the selection screen; letting the screen fire on non-finite conditioning (which would make the rank futility
+   gate unreachable); `>` → `>=` at the bound; deleting the activation-validator binding; replacing the
+   validator's ceiling with a literal; and a `phase2a` call-site literal EQUAL to the registered value. Two
+   known-surviving mutations are recorded rather than papered over: replacing `cfg.rank_tolerance_rule` or
+   `cfg.unregularized_oof_rank_policy` with their registered string literals is undetectable by the forwarding
+   test, because `select.py` re-pins both to registered constants — the property is real, the test is not what
+   provides it. **Recorded, not closed:** fold-level conditioning is still ungated (`select.py` computes each
+   OOF train fold's condition number and discards it, reading only `is_full_rank`), so a degeneracy confined
+   to one gene-disjoint group can leave `cond(full Φ)` at 6.5 while a fold design sits at `3e12` and the run
+   CONTINUEs; the ceiling's exclusive coverage band is `(1e8, ~1e14)` because beyond that the same defect
+   reports as rank deficiency; a `numpy.linalg.LinAlgError` from `np.linalg.svd` at extreme factor scale still
+   exits `1` rather than a contracted code (pre-existing); `condition_ceiling` is absent from the preflight
+   confirmation manifest's `selected_hyperparameters`, unlike `dev_oof_threshold`; and a ceiling-screened run's
+   report does not mark which statistics were computed before the screen. Seal state remains **UNOPENED**;
+   execution remains **RELEASE-BLOCKED**; nothing here authorizes a run.
    **Carried forward, NOT superseded — the registered condition ceiling.** The 2026-07-29 entry below opened
    this as a new item, and removing the representability guard makes it more load-bearing, not less: that guard
    incidentally rejected an extreme block-scale imbalance, and nothing now does. Measured 2026-07-31 on the
