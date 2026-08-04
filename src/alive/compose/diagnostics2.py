@@ -22,10 +22,21 @@ What it computes (all on development inputs):
 Decision (spec §10.6 Phase-2a futility):
 
     ``CONTINUE`` iff EVERY registered gate passes — full rank AND finite
-    conditioning AND measurable AND OOF theta ``> 0``.
+    conditioning AT OR BELOW the registered ceiling AND measurable AND OOF theta
+    ``> 0``.
 
     Otherwise ``FUTILITY_STOPPED``: rank deficiency OR non-finite conditioning OR
-    measurability failure OR OOF theta ``<= 0``.
+    conditioning above ``identification.condition_ceiling`` OR measurability
+    failure OR OOF theta ``<= 0``.
+
+The ceiling is a conditioning gate, not an input check. Its statistic is
+invariant to round-off — NOT exactly — under a uniform rescale of ``z``, so it
+does not police overall factor magnitude; what moves it is imbalance BETWEEN the
+expression and ESM blocks, whose relative scale nothing upstream bounds. A violation therefore
+stops the run rather than rejecting the invocation: rescaling the blocks until
+the gate passes would be a post-hoc change chosen after seeing a development
+diagnostic (``CLAUDE.md#invariants`` 14), and a stop preserves the rank report,
+spectrum and selected hyperparameters that a rejection would discard.
 
 Seal discipline (spec §4.5 / §6.3 / §10.6). The result is a
 :class:`FutilityResult` that records ``sealed_access_count == 0`` and carries **no
@@ -36,6 +47,7 @@ never be confused or interconverted.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 
@@ -164,6 +176,7 @@ def real_calibration_diagnostics(
     measurability_role: str,
     unregularized_oof_rank_policy: str,
     rank_tolerance_rule: str,
+    condition_ceiling: float,
 ) -> FutilityResult:
     r"""Run the Phase-2a development checkpoint on development-role inputs only.
 
@@ -196,6 +209,15 @@ def real_calibration_diagnostics(
         role raises :class:`~alive.compose.gates.LeakageError` (no sealed read).
     unregularized_oof_rank_policy, rank_tolerance_rule
         Exact config-bound OOF estimator-domain policy forwarded to selection.
+    condition_ceiling
+        Registered admissibility bound on the condition number of the SELECTED
+        dimension's design matrix (config ``identification.condition_ceiling``).
+        A finite condition number above it is a FUTILITY_STOPPED condition, not a
+        rejection: exceeding it says the registered feature construction did not
+        yield an admissibly conditioned design, and "rescale and retry" would be a
+        post-hoc change made after seeing a development diagnostic. Pass
+        ``float("inf")`` to disable the gate; ``nan`` and non-positive values are
+        REFUSED rather than silently disabling it (``cond > nan`` is False).
 
     Returns
     -------
@@ -216,6 +238,26 @@ def real_calibration_diagnostics(
     # split-half measurability with an EXPLICIT development role. The gate refuses
     # sealed roles, so a leakage attempt raises here (no sealed outcome is read).
     measurability = measurability_gate(eps_split_a, eps_split_b, _role=measurability_role)
+
+    # This guard stays a BARE ``ValueError`` on purpose, for the same reason as
+    # the headline-model guard in ``phase2a``: it is SHADOWED by ``config2``,
+    # which pins ``identification.condition_ceiling`` to a finite positive value
+    # and rejects anything else before a run ever reaches here. Reaching it means
+    # an internal invariant broke, which the registered classification calls a
+    # BUG -- traceback + exit 1, never a contracted rejection (driver design spec
+    # 1.1). It is not decoration: ``cond > nan`` is False, so a nan ceiling would
+    # disable the gate on every input while every test still passed.
+    #
+    # Both its neighbours are deliberate. It sits BELOW the measurability gate so
+    # that a call both requesting a sealed role and carrying an unusable ceiling
+    # reports the LEAKAGE attempt -- the higher-severity event, and a contracted
+    # rejection -- instead of a config-integrity bug that would hide it. It sits
+    # ABOVE selection so a bad ceiling is never discovered after the OOF fit.
+    if math.isnan(condition_ceiling) or condition_ceiling <= 0.0:
+        raise ValueError(
+            "condition_ceiling must be positive and not nan (a nan or non-positive "
+            f"ceiling silently disables the conditioning gate), got {condition_ceiling}"
+        )
 
     # 1: gene-disjoint OOF selection -> selected (k_total, lambda) + OOF theta.
     selection = select_hyperparams(
@@ -256,6 +298,18 @@ def real_calibration_diagnostics(
         failures.append(
             "non-finite conditioning: calibration design is ill-conditioned "
             f"(condition_number={rank_report.condition_number})"
+        )
+    # Exclusive with the branch above: ``rank_diagnostics`` reports ``inf`` only
+    # for a rank-deficient design, which both preceding gates already name, so a
+    # single design never produces two conditioning failure lines.
+    elif rank_report.condition_number > condition_ceiling:
+        failures.append(
+            "conditioning above the registered ceiling: "
+            f"condition_number={rank_report.condition_number} > "
+            f"condition_ceiling={condition_ceiling} "
+            "(registered identification.condition_ceiling; the design is full rank "
+            "but numerically inadmissible -- block-scale imbalance in Phi is the "
+            "known cause, and the statistic is invariant to a uniform rescale of z)"
         )
     if not measurability.passed:
         failures.append(

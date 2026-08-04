@@ -1494,6 +1494,7 @@ def _run_phase2a_core(
         measurability_role=CALIBRATION_ROLE_NAME,
         unregularized_oof_rank_policy=cfg.unregularized_oof_rank_policy,
         rank_tolerance_rule=cfg.rank_tolerance_rule,
+        condition_ceiling=cfg.condition_ceiling,
     )
     selected_k = futility.selected_k_total
     selected_lambda = futility.selected_lambda
