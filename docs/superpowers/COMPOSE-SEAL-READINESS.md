@@ -5,7 +5,7 @@
 > **이 문서는 아무것도 정의하지 않는다** — 세부(task)는 plan, claim은 spec, exact param은 config,
 > 시간순 audit는 git이 authoritative다([sources of truth](../../CLAUDE.md#sources)). 상태 행이 authoritative
 > 문서와 어긋나면 **authoritative 문서가 옳다**; 이 인덱스를 갱신한다.
-> **Updated:** 2026-08-01 @ `98fd1be` (branch `compose-exit-code-contract`)
+> **Updated:** 2026-08-03 @ `9eb1b1f` (branch `compose-seal-consumed-hardening`)
 > **갱신 트리거:** sub-project/gate **상태가 바뀔 때만**(커밋마다 아님).
 > **종결 상태:** COMPOSE seal이 정확히 한 번 열리면 이 인덱스는 **frozen/은퇴**한다. 이후 진행상황은
 > seal 결과와 post-hoc analysis가 대신한다.
@@ -532,6 +532,66 @@ branch에서 추적 가능하게 기록한다. `LOCAL` ledger ID만으로는 이
    or with a computed base is still invisible to discovery, and the static graph's over-approximation moves two
    classes from machine-checked to justification-only. Seal state remains **UNOPENED**; execution remains
    **RELEASE-BLOCKED**.
+   **2026-08-02/03 — the four recorded residuals are closed (owner-approved guard work).** All four items the
+   2026-08-01 entries listed as "recorded, NOT fixed here" are done on a separate branch, deliberately kept out
+   of the contract wave because two of them edit `CLAUDE.md#enforcement` guard files. Three shared one failure
+   DIRECTION: given absent or ambiguous filesystem evidence they concluded the seal was NOT consumed, which is
+   the single answer that puts a false statement about a one-shot seal into an operator's hands. The directions
+   are not symmetric — guessing "consumed" costs a `recover`, guessing "not consumed" invites a retry on a
+   burned seal — so all three now fail CLOSED. (1) `_seal_consumed` was
+   `audit_path.exists() and audit_path.stat().st_size > 0`; `Path.exists()` SWALLOWS `OSError`, so an audit
+   that was merely unreadable (EACCES after a remount, ESTALE on an NFS-backed approved root, EIO, EMFILE) read
+   as "nothing consumed" and a post-seal exception was re-raised as exit `10`. Only `FileNotFoundError` may now
+   be read that way, and the single `stat()` also closes the TOCTOU where the file vanishing between `exists()`
+   and `stat()` raised `FileNotFoundError` from inside the caller's own `except` block, replacing the original
+   exception. (2) `phase2b`'s step-0 roster check runs before that wrapper and the roster FORBIDS a terminal,
+   so the artifact proving consumption was the artifact tripping the check; step 0 now decides on the same kind
+   of evidence the dispatch does — terminal present ⇒ `30` and point at `recover` — and a roster violation
+   WITHOUT a terminal still raises, with the widen-to-everything mutation caught. (3) step 6's handler caught
+   only `Phase2bSubcommandError` while `_reread_durable_commit` reads the marker and every file it records, so
+   a missing `filename`/`sha256` entry (`KeyError`) or an unreadable recorded file (`OSError`) escaped as exit
+   `1` where `recover` is the operator's next action. (4) `identify.py`'s non-finite/misshapen input rejections
+   are now `EstimatorInputError` and rostered: nothing upstream checks factor-bank finiteness, so a NaN in a
+   PREPARE bank was an ordinary bad input exiting `1`. **One planned change was NOT made, on inspection.** The
+   two `OutcomeLeakageError` sites whose messages began "invariant violated" are not the same thing: the
+   CONTINUE-without-OOF-manifest check is a pure code invariant and became `Phase2aInvariantError`, classified
+   `BUG` and deliberately outside the roster; but step 9's `sealed_access_count != 0` is a GENUINE leakage
+   detection — downgrading it would have weakened the highest-severity guard — so it keeps its class and
+   instead gained the forensics its message lacked (both counts, the role, the source kind, and "preserve every
+   artifact and do not re-run"), which matters now that the driver catches it and the traceback is gone. Every
+   fix is mutation-verified, including the mutations that widen a gate too far. Guard files were touched in the
+   fail-CLOSED direction only. Seal state remains **UNOPENED**; execution remains **RELEASE-BLOCKED**.
+   **2026-08-03 independent review of the guard branch, and a CORRECTION to the entry above.** The reviewer
+   executed rather than read, and refuted two things the previous entry asserted. **(a) The recorded premise
+   for editing `_seal_consumed` was false.** That entry, the commit message, the guard-file comment and a test
+   docstring all claimed `Path.exists()` "SWALLOWS `OSError`" and named EACCES/ESTALE/EIO/EMFILE. On the pinned
+   interpreter (3.12, `requires-python >=3.11,<3.13`) `Path.exists()` ignores exactly
+   ENOENT/ENOTDIR/EBADF/ELOOP; the four errnos named all RAISE, so they never produced a false "not consumed" —
+   they escaped as the uncontracted exit `1`, replacing the caller's original post-seal exception. Re-verified
+   here independently. Both behaviours are defects and the fix is still right, but the false-`10` path was the
+   IGNORED errnos and the raising ones were an exit-`1` path; the claim as written did not survive execution
+   (`CLAUDE.md#invariants` 18). All four sites are corrected. **(b) The step-9 `sealed_access_count != 0` check
+   is unreachable by construction, so the basis for keeping `OutcomeLeakageError` there is withdrawn.**
+   `FutilityResult` has one construction site hardcoding `0`, and `DevelopmentOutcomeStore.__post_init__` — the
+   REAL detection — refuses a non-zero count on a frozen dataclass. That is the same argument used to demote
+   its sibling, so the previous entry reached opposite conclusions from identical reachability. It is now
+   `Phase2aInvariantError` too: exit `1` with its traceback, which is louder than the rostered `10` it had, and
+   the genuine detection is untouched. **Also fixed from this round:** the step-0 evidence gate consulted
+   terminals only and so still reported the audit-burned / terminal-absent crash state — precisely the state
+   `_assert_recover_roster` ACCEPTS as post-seal — as a pre-seal rejection, two rosters in one module
+   disagreeing about one directory; it now consults the run-local seal audit as well. The step-0 diagnostic had
+   dropped the exception class name, which is the key the runbook's operator table is looked up by. Runbook row
+   A still said "stop, do not re-run" for a `phase2b` `RunDirStateError` that the code now routes to `30` +
+   "use `recover`". `models.py` implemented the SAME three estimator-input checks as `identify.py` and was left
+   untyped one module away — the fixed-here-missed-the-sibling pattern, for the third time in this work.
+   **Accepted and recorded, not fixed:** `_assert_audit_destination_free` keeps the ignoring `exists()`
+   (harmless today because `os.link` fails `EEXIST`, but the two now apply different evidence rules to one
+   path); a genuine internal bug inside the step-6 re-read is swallowed as a documented `30` with its class
+   name but without its traceback; and two `solve_ridge_svd` checks are internal invariants on the
+   `identify_operator` path. Independently recomputed: **74** exception classes, symmetric difference against
+   the table empty both ways. No other `CLAUDE.md#enforcement` guard file was modified — and `run_dir_state.py`
+   is not on that list, contrary to how this branch's own review brief described it. Seal state remains
+   **UNOPENED**; execution remains **RELEASE-BLOCKED**.
    **2026-07-25 pre-pod local gate:** the probe-rerun runbook's §2.2 verification roster was run at clean exact
    commit `614017b67e35e9cc07f68d5b512213d8356cf1b2` — **254 passed**, plus `ruff check`/`ruff format --check`
    over the whole repository, `git diff --check`, and an empty `git status --short`. This records local

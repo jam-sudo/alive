@@ -48,6 +48,7 @@ from alive.compose.seed_variability import DEVELOPMENT_SEED_VARIABILITY_FILENAME
 from alive.compose.terminal import Phase2bTerminal
 
 __all__ = [
+    "TERMINAL_BASENAMES",
     "DRIVER_LOCK_FILE",
     "RunDirStateError",
     "assert_run_dir_roster",
@@ -91,6 +92,10 @@ _PHASE2A_CONTINUE_BASENAMES: frozenset[str] = frozenset(
 #: The 4 phase2a artifacts + the confirmation manifest (spec §3.3 entry roster).
 _PHASE2B_ENTRY_REQUIRED: frozenset[str] = _PHASE2A_CONTINUE_BASENAMES | {_CONFIRMATION_MANIFEST}
 
+#: Public alias of the terminal-artifact basenames. A terminal is written only
+#: after the seal is opened, so its presence is local, mode-independent evidence
+#: that a run consumed the seal -- ``phase2b_cmd``'s step 0 reads it to avoid
+#: reporting such a run dir as a pre-seal rejection.
 _TERMINAL_BASENAMES: frozenset[str] = frozenset(
     {
         Phase2bTerminal.COMPLETE_ARTIFACT,
@@ -98,6 +103,8 @@ _TERMINAL_BASENAMES: frozenset[str] = frozenset(
         Phase2bTerminal.ABORTED_ARTIFACT,
     }
 )
+
+TERMINAL_BASENAMES: frozenset[str] = _TERMINAL_BASENAMES
 
 _DURABLE_BASENAMES: frozenset[str] = frozenset(
     {REGISTERED_SUMMARY_FILENAME, FINAL_LEDGER_FILENAME, DURABLE_COMMIT_FILENAME}

@@ -279,12 +279,32 @@ def test_reject_when_audit_already_present(tmp_path: Path) -> None:
     # A pre-existing (non-empty) audit destination means the seal was (or is being)
     # consumed elsewhere; phase2b must fail closed before constructing a store. The
     # phase2b entry roster forbids audit.jsonl outright.
+    #
+    # 2026-08-03: the FAIL-CLOSED requirement is unchanged and still checked below --
+    # no store is constructed. What changed is the SIGNAL. This used to raise
+    # RunDirStateError, which the CLI maps to exit 10, "pre-seal rejection, the seal
+    # was NOT consumed" -- contradicting this test's own first sentence. A burned
+    # audit with no terminal is exactly the state ``_assert_recover_roster`` ACCEPTS
+    # as post-seal, so phase2b now reports 30 and points at ``recover``. The
+    # concurrent-consumption case ("or is being") is the driver lock's job, not the
+    # roster's, and is covered separately.
     (fx.run_dir / SEAL_AUDIT_FILENAME).write_text("{}\n", encoding="utf-8")
 
-    with pytest.raises(RunDirStateError):
-        run_phase2b_subcommand(
+    seen_stores: list[object] = []
+    real_init = outcome_store_mod.ComposeOutcomeStore.__init__
+
+    def _spy_init(self, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003
+        seen_stores.append(self)
+        real_init(self, *args, **kwargs)
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(outcome_store_mod.ComposeOutcomeStore, "__init__", _spy_init)
+        rc = run_phase2b_subcommand(
             fx, approved_artifacts_root=tmp_path, run_dir=fx.run_dir, confirm_seal_token=token
         )
+
+    assert rc == PHASE2B_NONCOMPLETE_EXIT
+    assert seen_stores == [], "phase2b constructed a sealed store despite a burned audit"
 
 
 # --------------------------------------------------------------------------- #

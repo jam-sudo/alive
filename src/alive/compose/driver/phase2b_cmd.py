@@ -91,7 +91,12 @@ from alive.compose.driver.bias_report_preseal import (
 )
 from alive.compose.driver.confirmation import verify_seal_confirmation_manifest
 from alive.compose.driver.preflight_cmd import build_confirmation_inputs
-from alive.compose.driver.run_dir_state import DRIVER_LOCK_FILE, assert_run_dir_roster
+from alive.compose.driver.run_dir_state import (
+    DRIVER_LOCK_FILE,
+    TERMINAL_BASENAMES,
+    RunDirStateError,
+    assert_run_dir_roster,
+)
 from alive.compose.driver.run_spec import (
     RUN_PRODUCED_BASENAMES,
     ResolvedRunSpec,
@@ -101,7 +106,11 @@ from alive.compose.driver.seal_boundary import (
     fixture_seal_audit_path,
     scientific_protocol_seal_audit_path,
 )
-from alive.compose.durable import COMMIT_CHECKSUM_FIELD, DURABLE_COMMIT_FILENAME
+from alive.compose.durable import (
+    COMMIT_CHECKSUM_FIELD,
+    DURABLE_COMMIT_FILENAME,
+    SEAL_AUDIT_FILENAME,
+)
 from alive.compose.freeze import FrozenPredictionBundle
 from alive.compose.outcome_store import (
     ComposeOutcomeStore,
@@ -219,7 +228,31 @@ def run_phase2b_subcommand(
     # roster forbids a stray audit / terminal / durable artifact and requires the
     # confirmation manifest, so omitting preflight fails here.
     with _driver_lock(run_dir):
-        assert_run_dir_roster(run_dir, "phase2b")
+        try:
+            assert_run_dir_roster(run_dir, "phase2b")
+        except RunDirStateError as exc:
+            # The phase2b entry roster FORBIDS a terminal artifact, so the very
+            # thing that trips it can be proof the seal was already consumed. Left
+            # to propagate, that reached the CLI and returned exit 10 -- "the seal
+            # was NOT consumed" -- with the terminal sitting on disk saying
+            # otherwise (2026-08-02 review; the same defect the recover branch had).
+            # Decide on filesystem EVIDENCE, exactly as ``_seal_consumed`` does for
+            # the dispatch, not on the exception type. The scientific audit is
+            # protocol-global rather than run-local, so the terminal is the reliable
+            # local witness in both modes.
+            if _prior_seal_evidence(run_dir):
+                # Keep the registered ``stage: ExceptionName: message`` shape: the
+                # runbook's operator table is keyed on the CLASS NAME, and the first
+                # version of this line dropped it, leaving the operator without a
+                # lookup key (2026-08-03 review).
+                print(
+                    f"phase2b: {type(exc).__name__}: {exc} "
+                    "[run_dir carries a terminal or a burned seal audit: an earlier "
+                    "run consumed the seal -- use `recover`, do not re-run phase2b]",
+                    file=sys.stderr,
+                )
+                return PHASE2B_NONCOMPLETE_EXIT
+            raise
         return _run_confirmed_phase2b(
             run_spec,
             approved_artifacts_root=approved_artifacts_root,
@@ -386,6 +419,21 @@ def _run_confirmed_phase2b(
         )
     except Phase2bSubcommandError as exc:
         print(f"{type(exc).__name__}: {exc}", file=sys.stderr)
+        return PHASE2B_NONCOMPLETE_EXIT
+    except (OSError, KeyError, ValueError, TypeError) as exc:
+        # The reasoning above is about the SEAL STATE, not the exception type, so it
+        # cannot stop at one class (2026-08-02 review). ``_reread_durable_commit``
+        # reads the marker and every file it records, so a marker that is present but
+        # malformed in a way the validator does not model first surfaces as a builtin:
+        # ``KeyError`` on a missing ``filename``/``sha256`` entry, ``OSError`` when a
+        # marker-recorded file is unreadable or gone, a decode/coercion ``ValueError``.
+        # Every one of those happens AFTER the seal was consumed, so exit 1 (the
+        # registered bug escape) is the wrong signal: the operator's next action is
+        # ``recover``, which is what 30 tells them. Narrow by construction -- this
+        # wraps a single re-read of already-written bytes, not a library call.
+        print(
+            f"durable marker re-read failed post-seal: {type(exc).__name__}: {exc}", file=sys.stderr
+        )
         return PHASE2B_NONCOMPLETE_EXIT
     if result.terminal_state == TerminalState.COMPLETE and marker_verified:
         return PHASE2B_COMPLETE_EXIT
@@ -703,13 +751,44 @@ def _assert_audit_destination_free(audit_path: Path, *, expected_parent: Path) -
         )
 
 
+def _prior_seal_evidence(run_dir: Path) -> bool:
+    """Does ``run_dir`` carry local evidence that a previous run consumed the seal?
+
+    Two witnesses, both written only after the seal is claimed:
+
+    * a phase2b terminal (``TERMINAL_BASENAMES``);
+    * the run-local seal audit (``SEAL_AUDIT_FILENAME``), which is the fixture-mode
+      consumption boundary and is exactly the state
+      :func:`~alive.compose.driver.run_dir_state.assert_run_dir_roster` ACCEPTS for
+      ``recover`` -- audit burned, terminal not yet written.
+
+    An earlier version of this check looked at terminals only (2026-08-02) and so
+    still reported that audit-only crash state as a pre-seal rejection, while the
+    recover roster in the same module accepted the same directory as post-seal. Two
+    rosters disagreeing about one directory is the defect; the audit was the witness
+    already imported next door (2026-08-03 review).
+
+    Reads NAMES only -- no contents, no store, no audit records.
+    """
+    try:
+        present = {entry.name for entry in run_dir.iterdir()}
+    except OSError:
+        # Unreadable run_dir: consumption unknown. Same asymmetry as
+        # ``_seal_consumed`` -- never claim "not consumed" on missing information.
+        return True
+    return bool(present & (TERMINAL_BASENAMES | {SEAL_AUDIT_FILENAME}))
+
+
 def _seal_consumed(audit_path: Path) -> bool:
     """Return ``True`` once the seal's durable audit carries content (§3.3 step 5).
 
     The seal — opened EXACTLY once inside ``run_phase2b[_fixture]`` — burns the
-    mode-specific audit path as its durable consumption boundary, the exact
-    inverse of the absence :func:`_assert_audit_destination_free` requires
-    BEFORE store construction. A post-dispatch exception with a non-empty audit is
+    mode-specific audit path as its durable consumption boundary, the counterpart to
+    the absence :func:`_assert_audit_destination_free` requires BEFORE store
+    construction. NOT its exact inverse any more: that function still uses
+    ``Path.exists()``/``Path.is_symlink()``, so the two apply different evidence
+    rules to the same path (harmless today -- ``os.link`` fails ``EEXIST`` -- but
+    recorded rather than left implied). A post-dispatch exception with a non-empty audit is
     therefore a POST-seal failure (the caller returns exit ``30`` + ``recover``
     salvages the terminal); an empty/absent audit means nothing was consumed (the
     caller re-raises so the CLI's pre-seal mapping stays correct).
@@ -722,9 +801,43 @@ def _seal_consumed(audit_path: Path) -> bool:
     Returns
     -------
     bool
-        ``True`` if the audit exists and is non-empty.
+        ``True`` if the audit exists and is non-empty, and ``True`` on ANY I/O
+        error other than a plain absence -- see below.
     """
-    return audit_path.exists() and audit_path.stat().st_size > 0
+    # Fails CLOSED, deliberately. The previous form was
+    # ``audit_path.exists() and audit_path.stat().st_size > 0``, which had two
+    # defects.
+    #
+    # (1) ``Path.exists()`` ignores exactly ``ENOENT``/``ENOTDIR``/``EBADF``/
+    # ``ELOOP`` and returns ``False`` for them, so a path that resolved through a
+    # non-directory, a symlink loop, or a bad descriptor read as "nothing was
+    # consumed" -- and a post-seal exception was then re-raised and reported by the
+    # CLI as exit 10, "the seal was NOT consumed", about a seal that may well have
+    # been burned. CORRECTION (2026-08-03 review): the first draft of this comment,
+    # its commit message and the readiness entry all claimed ``exists()`` swallows
+    # ``OSError`` GENERALLY and named EACCES/ESTALE/EIO/EMFILE. That is false on the
+    # pinned interpreter -- those four RAISE, and so escaped as the uncontracted
+    # exit 1 rather than as a false 10. Both are defects, but only the four errnos
+    # above produced the false "not consumed". For the raising errnos this change is
+    # exit 1 -> the contracted 30, which is also right (the seal state is unknown,
+    # and the original post-seal exception is no longer replaced).
+    #
+    # (2) Between ``exists()`` and ``stat()`` the file could vanish, raising
+    # ``FileNotFoundError`` from INSIDE the caller's ``except`` block and replacing
+    # the original exception. One ``stat()`` closes both.
+    #
+    # Only a plain absence may be read as "not consumed". Anything else leaves
+    # consumption UNKNOWN, and the two directions are not symmetric: guessing
+    # "consumed" costs a ``recover``, guessing "not consumed" puts a false claim
+    # about the seal into the operator's hands. The write itself is durable
+    # (``io.atomic_write_once``: fsync -> link -> dir fsync), so there is no
+    # zero-length window to worry about -- the audit is absent or complete.
+    try:
+        return audit_path.stat().st_size > 0
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
 
 
 def _assert_pair_roles(pair_index_manifest: Mapping[str, Any]) -> None:

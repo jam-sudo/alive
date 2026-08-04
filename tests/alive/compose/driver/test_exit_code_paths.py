@@ -170,7 +170,7 @@ def test_the_injected_roster_is_not_silently_empty():
     derivation ever yields nothing -- a renamed constant, a partial edit -- pytest
     reports a skip and the suite stays green while 168 cases quietly vanish.
     """
-    assert len(_REJECTIONS) == 43, (
-        f"expected 43 PRESEAL_REJECTION classes, found {len(_REJECTIONS)}; update this "
+    assert len(_REJECTIONS) == 44, (
+        f"expected 44 PRESEAL_REJECTION classes, found {len(_REJECTIONS)}; update this "
         "count deliberately when the classification changes, never to make it pass"
     )

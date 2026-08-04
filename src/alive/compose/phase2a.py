@@ -98,6 +98,19 @@ class HashMismatchError(ValueError):
     """
 
 
+class Phase2aInvariantError(RuntimeError):
+    """Raised when a Phase-2a internal invariant breaks. NOT an input rejection.
+
+    Deliberately outside the driver's rejection roster, so it surfaces as the
+    registered exit ``1`` bug escape with its traceback intact rather than as a
+    contracted pre-seal rejection. It exists because one such check was previously
+    raised as ``OutcomeLeakageError`` and therefore reported to a pod operator as a
+    documented rejection (2026-08-01 review): a CONTINUE verdict without the
+    persisted OOF fold manifest is a code invariant, not a leakage event, and the
+    genuine leakage assertion in step 9 keeps its own class.
+    """
+
+
 class InputContractError(ValueError):
     """Raised when an externally supplied Phase-2a input violates its contract.
 
@@ -1508,8 +1521,9 @@ def _run_phase2a_core(
     # IDENTITIES / FEATURES only.
     oof_manifest = futility.oof_manifest
     if oof_manifest is None:
-        raise OutcomeLeakageError(
-            "invariant violated: CONTINUE without a persisted OOF fold manifest"
+        raise Phase2aInvariantError(
+            "CONTINUE without a persisted OOF fold manifest: the futility checkpoint's "
+            "single selection call must always bind one"
         )
     oof_fold_manifest_checksum = oof_manifest.manifest_checksum
     selected_Z = np.asarray(inputs.factors_by_k[selected_k], dtype=float)
@@ -1644,7 +1658,20 @@ def _run_phase2a_core(
 
     # Step 9: confirm the sealed access count is ZERO (it never opened a seal).
     if futility.sealed_access_count != 0 or outcome_store.access_audit.sealed_access_count != 0:
-        raise OutcomeLeakageError("invariant violated: Phase2a reported a non-zero sealed access")
+        raise Phase2aInvariantError(
+            "Phase2a step 9: sealed access count is NOT zero — a sealed outcome was "
+            f"touched during development (futility={futility.sealed_access_count}, "
+            f"store audit={outcome_store.access_audit.sealed_access_count}, "
+            f"role={outcome_store.access_audit.role!r}, "
+            f"source_kind={outcome_store.access_audit.source_kind!r}). "
+            "The REAL detection is DevelopmentOutcomeStore.__post_init__, which "
+            "refuses a non-zero count on a frozen dataclass, and FutilityResult's "
+            "one construction site hardcodes 0 -- so reaching this line means an "
+            "internal invariant broke, which is why it is Phase2aInvariantError and "
+            "exits 1 with its traceback. A 2026-08-02 draft kept OutcomeLeakageError "
+            "here on the belief that it was a live leakage detection; review refuted "
+            "that by construction (2026-08-03). Preserve every artifact and report."
+        )
 
     return Phase2aResult(
         futility_status=futility.status,
