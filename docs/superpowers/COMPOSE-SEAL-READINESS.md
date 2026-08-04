@@ -5,7 +5,7 @@
 > **이 문서는 아무것도 정의하지 않는다** — 세부(task)는 plan, claim은 spec, exact param은 config,
 > 시간순 audit는 git이 authoritative다([sources of truth](../../CLAUDE.md#sources)). 상태 행이 authoritative
 > 문서와 어긋나면 **authoritative 문서가 옳다**; 이 인덱스를 갱신한다.
-> **Updated:** 2026-08-04 @ `33e5237` (branch `compose-condition-ceiling`)
+> **Updated:** 2026-08-04 @ `aa46403` (branch `compose-condition-ceiling`)
 > **갱신 트리거:** sub-project/gate **상태가 바뀔 때만**(커밋마다 아님).
 > **종결 상태:** COMPOSE seal이 정확히 한 번 열리면 이 인덱스는 **frozen/은퇴**한다. 이후 진행상황은
 > seal 결과와 post-hoc analysis가 대신한다.
@@ -655,15 +655,30 @@ branch에서 추적 가능하게 기록한다. `LOCAL` ledger ID만으로는 이
    boundary where the two events coincide), a stop preserves the rank report/spectrum/selected hyperparameters
    that a rejection discards, and "fix and retry" would here mean rescaling blocks until the gate passes — a
    post-hoc change made after seeing a development diagnostic. A `NaN` or non-positive ceiling silently
-   disables the gate (`cond > NaN` is False), so both the loader and the checkpoint refuse one. Ten mutations
-   were run and all ten were caught: deleting the gate, widening `elif` to `if` (which would append a second
-   conditioning line to every rank-deficient run), dropping or narrowing the checkpoint refusal, dropping
-   either loader check, coercing instead of refusing a non-numeric value, removing the key from the closed
-   schema, and moving the checkpoint refusal to either side of its two ordering constraints. Those orderings
-   are themselves choices and are now pinned: the refusal runs **after** the measurability gate, so a call
-   that is both requesting a sealed role and carrying an unusable ceiling reports the LEAKAGE attempt rather
-   than the config bug that would hide it, and **before** selection, so it is never discovered after the
-   expensive OOF fit. The first draft had it at the top of the function, with a test pinning that order.
+   disables the gate (`cond > NaN` is False), so both the loader and the checkpoint refuse one. Fourteen
+   mutations were run against the committed code and all fourteen are caught: deleting the gate, widening
+   `elif` to `if` (which would append a second conditioning line to every rank-deficient run), dropping or
+   narrowing the checkpoint refusal, dropping either loader check, coercing instead of refusing a non-numeric
+   value, removing the key from the closed schema, moving the checkpoint refusal to either side of its two
+   ordering constraints, flipping `>` to `>=` at the bound, and three hardcoded literals in the `phase2a`
+   call site. Those orderings are themselves choices and are now pinned: the refusal runs **after** the
+   measurability gate, so a call that is both requesting a sealed role and carrying an unusable ceiling
+   reports the LEAKAGE attempt rather than the config bug that would hide it, and **before** selection, so it
+   is never discovered after the expensive OOF fit. The first draft had it at the top of the function, with a
+   test pinning that order.
+   **Three of the fourteen were found by re-running the set after the code had moved, and are recorded because
+   the first pass claimed more than it had shown.** An earlier version of this entry said "ten mutations, all
+   caught"; those ten had been run BEFORE the refusal was repositioned and the loader tests split, so they
+   were not evidence about the committed code. Re-running found that (a) `>` → `>=` survived — the inclusive
+   bound the wording registers ("at or below") had no test near it, now pinned one ulp either side by moving
+   the ceiling onto a measured condition number, since a design at exactly `1.0e8` cannot be constructed; and
+   (b) **nothing asserted `phase2a` forwards the CONFIG value at all.** Deleting the argument is a `TypeError`
+   the required parameter already catches, but a hardcoded `float("inf")` would have left the gate dead in
+   production with every test green — the exact failure mode this ceiling exists to prevent. The forwarding
+   test uses a sentinel config value, so a literal is caught even when it equals the registered one (checked:
+   a hardcoded `1.0e8` fails it). Its two sibling config-bound policies deliberately keep the weaker check —
+   `select.py` pins both to registered constants and raises `SelectionError` on anything else, so a literal
+   there cannot silently diverge; the ceiling has no such second guard, which is why it needed this one.
    **Two recorded measurements are corrected here.** (a) The entry below says the condition number is
    "exactly scale-invariant under a UNIFORM rescale". Re-measured: `10.421787979549746` at `1x` versus
    `10.421787979549734` at `1e6x` — invariant to round-off, not exactly, and the test asserts `rel=1e-9`

@@ -184,6 +184,80 @@ def test_block_imbalance_adds_exactly_the_ceiling_failure_and_stops():
     assert bounded.sealed_access_count == 0
 
 
+def test_the_bound_is_inclusive_and_the_comparison_is_one_ulp_sharp():
+    """The registered wording is "at or below", so the comparison is ``>``.
+
+    Found by mutation: flipping ``>`` to ``>=`` changed nothing, because no test
+    went near the boundary. A design whose condition number is exactly ``1.0e8``
+    cannot be constructed, so the ceiling is moved onto the measured value
+    instead — the same comparison, from the other side.
+    """
+    rng = np.random.default_rng(0)
+    inst = _full_rank_instance(rng)
+    measured = _run(inst, condition_ceiling=float("inf")).rank_report.condition_number
+
+    at_the_bound = _run(inst, condition_ceiling=measured)
+    assert not _ceiling_failures(at_the_bound), "the bound is inclusive"
+    assert at_the_bound.status == "CONTINUE"
+
+    one_ulp_below = _run(inst, condition_ceiling=float(np.nextafter(measured, 0.0)))
+    assert _ceiling_failures(one_ulp_below), "one ulp lower must fire"
+    assert one_ulp_below.status == "FUTILITY_STOPPED"
+
+
+def test_phase2a_forwards_the_registered_ceiling_rather_than_a_literal():
+    """The gate is only as good as the value production actually hands it.
+
+    Deleting the argument in ``phase2a`` is a ``TypeError`` the parameter's
+    requiredness already catches. Passing a WRONG one — a hardcoded ``inf``, say —
+    is caught by nothing: the gate would be dead in production with every test
+    green. The two sibling config-bound policies have identical exposure and had
+    no such test either, so they are pinned here too.
+
+    The ceiling is checked with a SENTINEL config value, so a literal is caught
+    even if it currently equals the registered one. Comparing against the
+    canonical config alone would not: mutation-checked, and a hardcoded
+    ``1.0e8`` passed.
+
+    Its two sibling policies get the weaker check on purpose. ``select.py`` pins
+    both to registered constants and raises ``SelectionError`` on anything else,
+    so a literal there cannot diverge from the registered value without failing
+    loudly downstream — a sentinel is refused before it can prove anything. The
+    ceiling has no such second guard, which is exactly why it needs this one.
+    """
+    import dataclasses
+
+    from alive.compose import phase2a
+    from tests.alive.compose.test_phase2a import _HASHES, _build_instance, _inputs, _store
+
+    canonical = load_compose_phase2_config(CANON)
+    assert canonical.condition_ceiling == _REGISTERED_CEILING
+    # distinct from the registered value, and permissive enough not to change the
+    # verdict -- this test is about plumbing, not about the gate firing
+    altered = dataclasses.replace(canonical, condition_ceiling=1.0e30)
+
+    seen: dict = {}
+    real = phase2a.real_calibration_diagnostics
+
+    def _spy(**kwargs):
+        seen.update(kwargs)
+        return real(**kwargs)
+
+    phase2a.real_calibration_diagnostics = _spy
+    try:
+        rng = np.random.default_rng(0)
+        inst = _build_instance(rng)
+        phase2a.run_phase2a_fixture(
+            _inputs(inst), _store(inst), expected_hashes=_HASHES, config=altered
+        )
+    finally:
+        phase2a.real_calibration_diagnostics = real
+
+    assert seen["condition_ceiling"] == 1.0e30, "phase2a is not forwarding the config value"
+    assert seen["rank_tolerance_rule"] == canonical.rank_tolerance_rule
+    assert seen["unregularized_oof_rank_policy"] == canonical.unregularized_oof_rank_policy
+
+
 def test_a_rank_deficient_design_reports_one_conditioning_failure_not_two():
     """``rank_diagnostics`` returns ``inf`` for a rank-deficient design.
 
