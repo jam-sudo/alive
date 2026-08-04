@@ -5,7 +5,7 @@
 > **이 문서는 아무것도 정의하지 않는다** — 세부(task)는 plan, claim은 spec, exact param은 config,
 > 시간순 audit는 git이 authoritative다([sources of truth](../../CLAUDE.md#sources)). 상태 행이 authoritative
 > 문서와 어긋나면 **authoritative 문서가 옳다**; 이 인덱스를 갱신한다.
-> **Updated:** 2026-08-03 @ `9eb1b1f` (branch `compose-seal-consumed-hardening`)
+> **Updated:** 2026-08-04 @ `33e5237` (branch `compose-condition-ceiling`)
 > **갱신 트리거:** sub-project/gate **상태가 바뀔 때만**(커밋마다 아님).
 > **종결 상태:** COMPOSE seal이 정확히 한 번 열리면 이 인덱스는 **frozen/은퇴**한다. 이후 진행상황은
 > seal 결과와 post-hoc analysis가 대신한다.
@@ -645,6 +645,40 @@ branch에서 추적 가능하게 기록한다. `LOCAL` ledger ID만으로는 이
    config-bound evidence stale. The resulting canonical config digest is
    `2a8b1bc37b4b952b29dd57cf128d2aa27a2a698693e1376e569544ff119e85eb`; it must be the config axis of
    any replacement evidence and run identity.
+   **2026-08-04 CLOSED — the condition ceiling is registered.** The open item below is resolved by owner
+   decision: statistic `rank_diagnostics(Φ).condition_number` on the full-calibration `Φ` at the SELECTED
+   `k_total`, bound `identification.condition_ceiling: 1.0e+8`, anchored data-free at
+   `1/sqrt(float64 eps) ≈ 6.7e7` rounded up. **Disposition is `FUTILITY_STOPPED`, not a pre-seal rejection**,
+   which reverses the drafted plan's exit-10 proposal: the spec already calls this a *futility* gate, the
+   registered futility vocabulary already contains `rank_condition_fail` while no rejection slot exists, the
+   sibling non-finite branch is already futility (so exit 10 would make the verdict discontinuous at the exact
+   boundary where the two events coincide), a stop preserves the rank report/spectrum/selected hyperparameters
+   that a rejection discards, and "fix and retry" would here mean rescaling blocks until the gate passes — a
+   post-hoc change made after seeing a development diagnostic. A `NaN` or non-positive ceiling silently
+   disables the gate (`cond > NaN` is False), so both the loader and the checkpoint refuse one. Ten mutations
+   were run and all ten were caught: deleting the gate, widening `elif` to `if` (which would append a second
+   conditioning line to every rank-deficient run), dropping or narrowing the checkpoint refusal, dropping
+   either loader check, coercing instead of refusing a non-numeric value, removing the key from the closed
+   schema, and moving the checkpoint refusal to either side of its two ordering constraints. Those orderings
+   are themselves choices and are now pinned: the refusal runs **after** the measurability gate, so a call
+   that is both requesting a sealed role and carrying an unusable ceiling reports the LEAKAGE attempt rather
+   than the config bug that would hide it, and **before** selection, so it is never discovered after the
+   expensive OOF fit. The first draft had it at the top of the function, with a test pinning that order.
+   **Two recorded measurements are corrected here.** (a) The entry below says the condition number is
+   "exactly scale-invariant under a UNIFORM rescale". Re-measured: `10.421787979549746` at `1x` versus
+   `10.421787979549734` at `1e6x` — invariant to round-off, not exactly, and the test asserts `rel=1e-9`
+   rather than equality. (b) The committed config must write `1.0e+8`: YAML 1.1 parses an unsigned exponent
+   (`1.0e8`) as a **string**, which the loader refused as non-numeric — caught on the first load, and now
+   pinned by a test. **This moves the config digest**, as planned and as the 2026-07-30 entry anticipated:
+   `2a8b1bc37b4b952b29dd57cf128d2aa27a2a698693e1376e569544ff119e85eb` →
+   `b158417a76e888bff2bf6836bea622e0cbf596f0743f3fe89aea2ffe0864a9fd`. That digest, not the prior one, must be
+   the config axis of any replacement evidence and run identity; the two activation-evidence reports pinned to
+   `d8c65ac4…` remain stale and their regeneration remains open (task #14). Independently checked against the
+   committed `real_norman_phi_rank_report.json`: the recorded real designs sit at condition numbers `15.82`,
+   `32.86` and `484.20` for `k_total` 4/6/8 — more than five orders of magnitude below the ceiling — so the
+   registered bound does not trivially reject the study it governs, and the test reads those from the evidence
+   file rather than transcribing them. Seal state remains **UNOPENED**; execution remains **RELEASE-BLOCKED**;
+   nothing here authorizes a run.
    **Carried forward, NOT superseded — the registered condition ceiling.** The 2026-07-29 entry below opened
    this as a new item, and removing the representability guard makes it more load-bearing, not less: that guard
    incidentally rejected an extreme block-scale imbalance, and nothing now does. Measured 2026-07-31 on the

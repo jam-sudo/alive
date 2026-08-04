@@ -451,6 +451,31 @@ $s/(s^2+\lambda)$를 수치적으로 안전한 분기식으로 계산하는
 문자열은 config `identification.unregularized_solver`, `identification.regularized_solver`,
 `identification.unregularized_oof_rank_policy`, `identification.rank_tolerance_rule`에 동결한다.
 
+**Registered conditioning ceiling.** 위 rank/condition futility gate의 condition 축은 등록된 상한을
+가진다. 통계량은 선택된 `k_total`의 full-calibration $\Phi$에 대한
+`rank_diagnostics(Φ).condition_number`이고, 상한은 config `identification.condition_ceiling`에 동결한다.
+값의 근거는 data-free numeric anchor $1/\sqrt{\varepsilon_{f64}}\approx 6.7\times10^{7}$ — float64가
+유효자릿수의 절반을 잃는 지점 — 을 한 자릿수 올림한 값이며, 어떤 outcome도 보지 않고 정한다.
+
+이 gate가 **덮는 것**은 $z$의 expression block과 ESM block 사이의 **scale imbalance**다. 두 block의
+상대 scale은 upstream 어디에서도 bound되지 않으며, 2026-07-29에 삭제된 representability guard가 이를
+우연히 탐지하던 유일한 장치였다. 측정된 exhibit: 동일 bank에서 ESM block만 $\times10^6$하면 조건수가
+$10.42\to3.71\times10^{12}$로 움직인다.
+
+이 gate가 **덮지 않는 것**은 uniform scale이다. 조건수는 $z$ 전체의 uniform rescale에 대해 반올림
+오차 범위에서 불변이므로(정확히 불변은 아니다), uniform-scale에서의 penalty immateriality는 이 상한으로
+**닫히지 않는다**. 그 band는 readiness index에 별도 항목으로 기록되어 있으며, 이 상한을 그것의 해결로
+읽어서는 안 된다.
+
+**처분은 `FUTILITY_STOPPED`이며 rejection이 아니다.** 이미 등록된 futility condition
+`rank_condition_fail`에 속한다. 근거는 세 가지다. (1) 형제 분기인 non-finite conditioning이 이미
+futility인데, `rank_diagnostics`는 rank 결손일 때만 $\infty$를 반환하므로 두 사건이 같아지는 경계에서
+verdict가 불연속이 된다. (2) futility stop은 rank report·spectrum·선택된 hyperparameter를 기록으로
+남기지만 rejection은 stderr 한 줄만 남기고 버린다. (3) retryable exit code가 지시하는 "고쳐서 재시도"가
+여기서는 "gate를 통과할 때까지 block을 rescale"을 뜻하며, 이는 development diagnostic을 본 뒤의 사후
+변경이다(`CLAUDE.md#invariants` 14). 상한 자체가 `NaN`이거나 non-positive이면 gate가 조용히 무력화되므로
+(`cond > NaN`은 항상 False) config loader와 checkpoint 양쪽에서 거부한다.
+
 ### 10.5 Baselines, metric and inference
 
 family = {additive(null floor), GEARS(published SOTA, GO-graph 사용 — 우리 차별점), CPA(latent-
