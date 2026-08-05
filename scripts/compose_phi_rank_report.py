@@ -155,20 +155,34 @@ def main(argv: list[str] | None = None) -> int:
         and block["n_calibration_pairs_skipped"] == 0
         for block in report["per_k_total"]
     )
-    conditioning_ready = all(
-        float(block["condition_number"]) <= ceiling for block in report["per_k_total"]
-    )
-    if rank_ready and conditioning_ready:
+    # ANY, not ALL -- the run screens an over-ceiling dimension out of selection and
+    # proceeds on the rest, so only a grid with no admissible dimension is
+    # uncertifiable. The over-ceiling dimensions are named in the verdict either
+    # way, so an owner sees which ones the run will drop before approving a SHA.
+    over_ceiling = [
+        int(block["k_total"])
+        for block in report["per_k_total"]
+        if float(block["condition_number"]) > ceiling
+    ]
+    conditioning_ready = len(over_ceiling) < len(report["per_k_total"])
+    if not rank_ready:
+        activation = "BLOCKED — at least one registered factor grid failed the rank gate; no seal"
+    elif not conditioning_ready:
+        activation = (
+            "BLOCKED — every registered factor grid is full rank but ALL are conditioned "
+            f"above the registered ceiling {ceiling}, so the run's admissibility screen "
+            "would leave no viable candidate; no seal"
+        )
+    elif over_ceiling:
+        activation = (
+            f"READY — k_total {over_ceiling} exceed the registered conditioning ceiling "
+            f"{ceiling} and the run will screen them out; the remaining registered grid is "
+            "full rank and admissible; sealed outcomes remain unread"
+        )
+    else:
         activation = (
             "READY — every registered factor grid is full rank and conditioned at or "
             f"below the registered ceiling {ceiling}; sealed outcomes remain unread"
-        )
-    elif not rank_ready:
-        activation = "BLOCKED — at least one registered factor grid failed the rank gate; no seal"
-    else:
-        activation = (
-            "BLOCKED — every registered factor grid is full rank but at least one is "
-            f"conditioned above the registered ceiling {ceiling}; no seal"
         )
     envelope = {
         "schema": PHI_RANK_ACTIVATION_SCHEMA,
