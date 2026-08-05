@@ -114,11 +114,22 @@ def test_the_block_imbalance_exhibit_clears_the_ceiling_by_orders_of_magnitude()
     assert rank_diagnostics(Z_block, pairs).is_full_rank
     assert uniform == pytest.approx(baseline, rel=1e-9)
 
-    # the exact values the spec and the readiness index register
+    # The values the spec and the readiness index register, each pinned at the
+    # precision it actually HAS. The two well-conditioned numbers are reproducible
+    # to the last bit; the imbalanced one is not, and asserting that it was is the
+    # defect this comment exists to stop recurring.
+    #
+    # A first version pinned all three at rel=1e-12. That is green on macOS
+    # (Accelerate) and RED on Linux x86_64 (OpenBLAS): 3713365971178.1865 against
+    # 3713121910859.7812, a relative difference of 6.6e-05. The arithmetic says it
+    # must be: cond ~= 3.7e12 destroys 12.6 of float64's 15.65 significant
+    # decimal digits, so ~3 remain, and a 12-digit pin asserts nine digits the
+    # number does not carry. `rel=1e-3` asserts exactly the 3 figures it does,
+    # with 15x headroom over the observed cross-BLAS spread.
     assert len(pairs) == 37
     assert baseline == pytest.approx(10.421787979549746, rel=1e-12)
     assert uniform == pytest.approx(10.421787979549734, rel=1e-12)
-    assert imbalanced == pytest.approx(3.7131219108597812e12, rel=1e-12)
+    assert imbalanced == pytest.approx(3.713e12, rel=1e-3)
 
     assert baseline < _REGISTERED_CEILING
     assert imbalanced > _REGISTERED_CEILING

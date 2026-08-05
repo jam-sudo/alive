@@ -5,7 +5,7 @@
 > **이 문서는 아무것도 정의하지 않는다** — 세부(task)는 plan, claim은 spec, exact param은 config,
 > 시간순 audit는 git이 authoritative다([sources of truth](../../CLAUDE.md#sources)). 상태 행이 authoritative
 > 문서와 어긋나면 **authoritative 문서가 옳다**; 이 인덱스를 갱신한다.
-> **Updated:** 2026-08-05 @ `da82a4a` (branch `compose-condition-ceiling`)
+> **Updated:** 2026-08-05 @ `24b0fd7` (branch `main`)
 > `scripts/bump-readiness-stamp.sh` / the pre-commit hook from `HEAD` at commit time, so it names the
 > **parent** of the commit that carries it and can never name itself. Reading it as "one commit stale" is a
 > misreading; git is authoritative for when this file actually changed.
@@ -682,6 +682,18 @@ branch에서 추적 가능하게 기록한다. `LOCAL` ledger ID만으로는 이
    load-bearing it is pinned by a committed test rather than quoted.** The exhibit values are pinned that way
    now; the θ=0.43 figure was withdrawn rather than re-derived, and the regression it stood for is pinned by a
    test instead.
+   **The rule needed a second clause within the hour, and Linux CI supplied it.** Pinning the exhibit values at
+   `rel=1e-12` was green on macOS (Accelerate) and RED on Linux x86_64 (OpenBLAS) at `24b0fd7`: the
+   block-imbalanced condition number came back `3713365971178.1865` against the recorded
+   `3713121910859.7812`, a relative difference of `6.6e-05`. The arithmetic says it must: `cond ≈ 3.7e12`
+   destroys 12.6 of float64's 15.65 significant decimal digits, so about three survive, and a twelve-digit pin
+   asserted nine digits the number does not carry. The two well-conditioned values in the same test reproduce
+   bit-for-bit on both platforms and keep their exact pins. So: **executing a number is not enough — it must be
+   pinned at the precision it actually has, and a number whose own conditioning destroys most of its digits is
+   reproducible only to what survives.** The imbalanced value is now pinned at `rel=1e-3` (three figures,
+   fifteen times the observed cross-BLAS spread); the spec and this index quote it to three figures already, so
+   no recorded claim changes. This is also the first defect on this branch that macOS could not have caught,
+   which is the argument for the Linux job existing.
    **Also corrected from this round:** `_EXPECTED_CONDITION_CEILING`'s own comment and the validator's comment
    still described the reversed futility design — the two most authoritative places a reader looks for what the
    number means; `select_hyperparams`'s public docstring omitted its new required parameter and still described
