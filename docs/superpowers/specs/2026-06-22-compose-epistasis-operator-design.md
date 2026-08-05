@@ -451,6 +451,47 @@ $s/(s^2+\lambda)$를 수치적으로 안전한 분기식으로 계산하는
 문자열은 config `identification.unregularized_solver`, `identification.regularized_solver`,
 `identification.unregularized_oof_rank_policy`, `identification.rank_tolerance_rule`에 동결한다.
 
+**Registered conditioning ceiling.** 등록된 admissibility 기준으로 $\Phi$의 조건수 상한을 둔다.
+통계량은 각 후보 `k_total`의 full-calibration $\Phi$에 대한 `rank_diagnostics(Φ).condition_number`이고,
+상한은 config `identification.condition_ceiling`에 동결한다. 값의 근거는 data-free numeric anchor
+$1/\sqrt{\varepsilon_{f64}}\approx 6.7\times10^{7}$ — float64가 유효자릿수의 절반을 잃는 지점 — 을
+한 자릿수 올림한 값이며, 어떤 outcome도 보지 않고 정한다.
+
+이 기준이 **덮는 것**은 $z$의 expression block과 ESM block 사이의 **scale imbalance**다. 두 block의
+상대 scale은 upstream 어디에서도 bound되지 않으며, 2026-07-29에 도입돼 2026-07-31에 삭제된
+representability guard가 이를 우연히 탐지하던 유일한 장치였다. 측정된 exhibit: 동일 bank에서 ESM
+block만 $\times10^6$하면 조건수가 $10.42\to3.71\times10^{12}$로 움직인다.
+
+이 기준이 **덮지 않는 것**은 uniform scale이다. 조건수는 $z$ 전체의 uniform rescale에 대해 반올림
+오차 범위에서 불변이므로(정확히 불변은 아니다), uniform-scale에서의 penalty immateriality는 이 상한으로
+**닫히지 않는다**. 그 band는 readiness index에 별도 항목으로 기록되어 있으며, 이 상한을 그것의 해결로
+읽어서는 안 된다.
+
+**적용 지점은 selection의 후보별 심사이며 futility condition이 아니다.** 형제 기준인
+`unregularized_oof_rank_policy`와 같은 형태로, 상한을 넘는 `k_total`은 그 사유와 함께
+`nonviable_candidates`에 기록되고 점수 map에서 제외되며 selection은 나머지 후보로 진행한다. **모든**
+후보가 부적격일 때에만 selection 자체가 무효가 되어 `SelectionError`로 종료한다 — 이미 등록된 pre-seal
+rejection(exit 10)이자 runbook 카테고리 D("반복 재실행이 아니라 원인 조사")이므로 새 exception class도
+새 futility condition도 필요하지 않다. 등록된 `futility.conditions`는 그대로 유지된다.
+
+심사는 **유한한 조건수에만** 적용한다. `rank_diagnostics`는 rank 결손일 때 정확히 $\infty$를 반환하며,
+rank 결손은 등록된 rank futility gate의 소관이다. 이를 심사가 함께 걸러내면 selection이 조용히 full-rank
+차원으로 옮겨가 그 gate가 도달 불가능해진다.
+
+상한 자체가 `NaN`이나 $\infty$이면 심사가 모든 후보에서 침묵하고(`cond > NaN`은 항상 False), non-positive면
+반대로 모든 후보를 거부한다. 두 방향 모두 사용 불가이므로 config loader와 selection 양쪽에서 거부한다.
+같은 통계량을 같은 설계에 대해 계산하는 activation-evidence validator(`phi_rank`)와 그 producer의 READY
+판정도 이 상한에 결합한다. 결합은 run과 **같은 ANY 규칙**이어야 한다 — 초과 dimension 하나는 run이
+screen하고 나머지로 진행하므로, 그것만으로 report 전체를 거부하면 성공했을 run을 막고 유일한 해법이
+등록된 `total_k_grid` 수정(=diagnostic을 본 뒤의 사후 변경)이 된다. 거부는 **admissible dimension이
+하나도 없을 때에만** 하며, 그 조건은 selection 자체가 무효가 되는 조건과 같다.
+
+> **2026-08-04 개정.** 최초 구현은 이 기준을 *선택된* `k_total`에 대한 `FUTILITY_STOPPED` 조건으로
+> 두었다. 독립 리뷰 3건이 두 축 모두에서 그것이 틀렸음을 보였다 — 등록된 grid에 적합한 후보가 있어도
+> run이 영구 종료됐고, futility 처분의 근거로 제시된 항목 중 둘이 사실과 달랐다(runbook은 exit 10을
+> "고쳐서 재시도"로 규정하지 않으며 카테고리 D가 그 반대를 지시한다; durable futility 보고서는 보존한다고
+> 서술된 spectrum을 기록하지 않는다). 위 문단이 현재 계약이다.
+
 ### 10.5 Baselines, metric and inference
 
 family = {additive(null floor), GEARS(published SOTA, GO-graph 사용 — 우리 차별점), CPA(latent-

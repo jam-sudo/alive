@@ -131,8 +131,30 @@ def validate_phi_rank_activation_report(
     expected_total_k_grid: Sequence[int],
     expected_esm_model: str,
     expected_esm_dim: int,
+    expected_condition_ceiling: float,
 ) -> dict[str, int]:
-    """Validate a READY rank report and return its independently bound role counts."""
+    """Validate a READY rank report and return its independently bound role counts.
+
+    ``expected_condition_ceiling`` is the registered
+    ``identification.condition_ceiling``. This report computes the SAME statistic
+    on the SAME design as the admissibility screen in
+    :func:`alive.compose.select.select_hyperparams`, so the two must agree — and
+    agreeing means matching the screen's **ANY** rule, not an ALL rule. A single
+    over-ceiling ``k_total`` is a dimension the run drops and proceeds without;
+    only a grid with no admissible dimension at all is uncertifiable. Checking it
+    here costs nothing and runs before an owner approves a SHA or a pod trip is
+    spent.
+    """
+    # A nan/inf ceiling would silence this check on every block and a non-positive
+    # one would reject every block; both are refused for the same reason the
+    # selection screen refuses them. Production passes a loader-validated value,
+    # so this is defence in depth on the argument, not on the config.
+    ceiling = float(expected_condition_ceiling)
+    if not math.isfinite(ceiling) or ceiling <= 0.0:
+        raise ValueError(
+            "phi-rank expected_condition_ceiling must be finite and positive, "
+            f"got {expected_condition_ceiling!r}"
+        )
     top = _exact_object(envelope, _ENVELOPE_KEYS, "phi-rank envelope")
     if top["schema"] != PHI_RANK_ACTIVATION_SCHEMA:
         raise ValueError("phi-rank schema mismatch")
@@ -218,6 +240,7 @@ def validate_phi_rank_activation_report(
     per_k = report["per_k_total"]
     if not isinstance(per_k, list) or len(per_k) != len(expected_grid):
         raise ValueError("phi-rank factor-grid roster is incomplete")
+    over_ceiling: list[tuple[int, float]] = []
     for raw_block, expected_k in zip(per_k, expected_grid, strict=True):
         block = _exact_object(raw_block, _FACTOR_BLOCK_KEYS, "phi-rank factor block")
         sym_dim = expected_k * (expected_k + 1) // 2
@@ -239,7 +262,24 @@ def validate_phi_rank_activation_report(
             raise ValueError(
                 f"phi-rank invalid or non-full-rank factor block for k_total={expected_k}"
             )
+        # Collected, NOT raised per block. The run's rule is ANY, not ALL: an
+        # over-ceiling k_total is screened out of selection and the study proceeds
+        # on the rest. Rejecting the whole report over one such dimension would
+        # block a run that would have succeeded -- the exact over-strictness this
+        # ceiling's own design was corrected for, one gate earlier. Only a grid
+        # with NO admissible dimension makes the report uncertifiable, which is
+        # the same condition that makes selection itself invalid.
+        if float(condition) > ceiling:
+            over_ceiling.append((expected_k, float(condition)))
         _full_hex(block["factor_bank_checksum"], "phi-rank factor-bank checksum", lengths=(64,))
+    if over_ceiling and len(over_ceiling) == len(expected_grid):
+        detail = ", ".join(f"k_total={k}: {c}" for k, c in over_ceiling)
+        raise ValueError(
+            "phi-rank reports no admissible factor dimension: every registered grid point "
+            f"is full rank but conditioned above the registered ceiling {ceiling} ({detail}); "
+            "the run's admissibility screen would reject all of them and selection itself "
+            "would be invalid"
+        )
     return pair_counts
 
 

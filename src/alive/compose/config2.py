@@ -35,6 +35,7 @@ approximation-bias blockers are resolved.
 from __future__ import annotations
 
 import json
+import math
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -75,6 +76,15 @@ _EXPECTED_UNREGULARIZED_OOF_RANK_POLICY = "require_full_rank_each_train_fold"
 _EXPECTED_RANK_TOLERANCE_RULE = "max_shape_times_float64_eps_times_sigma_max"
 _EXPECTED_OOF_FOLDS = 3
 _EXPECTED_UNCOVERED_TOLERANCE = 0.75
+# Registered admissibility bound on the condition number of the full-calibration
+# design matrix Phi, screened PER CANDIDATE k_total inside `select_hyperparams`.
+# The anchor is data-free: 1/sqrt(eps_f64) ~= 6.7e7 is where float64 has lost half
+# its significant digits, rounded up to the next order of magnitude. An
+# over-ceiling dimension is recorded non-viable and selection proceeds on the
+# rest; only a grid with NO admissible dimension makes selection itself invalid
+# (SelectionError, a contracted pre-seal rejection). See the spec's *Registered
+# conditioning ceiling* paragraph -- it is deliberately NOT a futility condition.
+_EXPECTED_CONDITION_CEILING = 1.0e8
 _EXPECTED_SPLIT_SEED = 11
 _EXPECTED_REGISTERED_SEEDS: tuple[int, ...] = (11, 23, 37)
 _EXPECTED_COMPARATOR_FAMILY: tuple[str, ...] = (
@@ -259,6 +269,7 @@ _KNOWN_IDENTIFICATION = frozenset(
         "rank_tolerance_rule",
         "oof_folds",
         "uncovered_tolerance",
+        "condition_ceiling",
     }
 )
 _KNOWN_METRIC = frozenset(
@@ -459,6 +470,7 @@ class ComposePhase2Config:
     rank_tolerance_rule: str
     oof_folds: int
     uncovered_tolerance: float
+    condition_ceiling: float
     split_seed: int
     registered_seeds: tuple[int, ...]
     comparator_family: tuple[str, ...]
@@ -706,6 +718,7 @@ def load_compose_phase2_config(path: str | Path) -> ComposePhase2Config:
         rank_tolerance_rule,
         oof_folds,
         uncovered_tolerance,
+        condition_ceiling,
     ) = _validate_identification(_require(raw, "identification", "top-level"))
     split_seed, registered_seeds = _validate_seeds(_require(raw, "seeds", "top-level"))
     sealed_minimum_n = _validate_seal(_require(raw, "seal", "top-level"))
@@ -757,6 +770,7 @@ def load_compose_phase2_config(path: str | Path) -> ComposePhase2Config:
         rank_tolerance_rule=rank_tolerance_rule,
         oof_folds=oof_folds,
         uncovered_tolerance=uncovered_tolerance,
+        condition_ceiling=condition_ceiling,
         split_seed=split_seed,
         registered_seeds=registered_seeds,
         comparator_family=comparator_family,
@@ -924,7 +938,7 @@ def _validate_factor_z(
 
 def _validate_identification(
     block: dict[str, Any],
-) -> tuple[tuple[float, ...], str, str, str, str, int, float]:
+) -> tuple[tuple[float, ...], str, str, str, str, int, float, float]:
     """Validate the exact preregistered estimator, rank policy and OOF controls."""
     _close_schema(block, _KNOWN_IDENTIFICATION, "identification")
     estimator = _require(block, "estimator", "identification")
@@ -990,6 +1004,25 @@ def _validate_identification(
             f"oof_folds={_EXPECTED_OOF_FOLDS}, "
             f"uncovered_tolerance={_EXPECTED_UNCOVERED_TOLERANCE}"
         )
+
+    # The registered conditioning ceiling. Both unusable directions are refused,
+    # and they fail in OPPOSITE ways: a nan or infinite value silences the
+    # downstream selection screen on every candidate (``cond > nan`` is always
+    # False), while a non-positive one fires on every candidate including a
+    # perfect design.
+    ceiling_raw = _require(block, "condition_ceiling", "identification")
+    if isinstance(ceiling_raw, bool) or not isinstance(ceiling_raw, (int, float)):
+        raise Phase2ConfigError("identification.condition_ceiling must be numeric")
+    ceiling = float(ceiling_raw)
+    if not math.isfinite(ceiling) or ceiling <= 0.0:
+        raise Phase2ConfigError(
+            f"identification.condition_ceiling must be finite and positive, got {ceiling}"
+        )
+    if ceiling != _EXPECTED_CONDITION_CEILING:
+        raise Phase2ConfigError(
+            "identification.condition_ceiling must match the preregistration exactly: "
+            f"expected {_EXPECTED_CONDITION_CEILING}, got {ceiling}"
+        )
     return (
         grid,
         unregularized_solver,
@@ -998,6 +1031,7 @@ def _validate_identification(
         rank_rule,
         oof_folds,
         tolerance,
+        ceiling,
     )
 
 
@@ -1545,6 +1579,7 @@ def assert_scientific_mode_allowed(
                 expected_total_k_grid=config.total_k_grid,
                 expected_esm_model=config.esm_model.removesuffix("_mean_pool"),
                 expected_esm_dim=config.esm_projection_dim,
+                expected_condition_ceiling=config.condition_ceiling,
             )
         except ValueError as exc:
             raise ScientificModeError(

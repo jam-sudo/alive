@@ -27,6 +27,17 @@ Decision (spec §10.6 Phase-2a futility):
     Otherwise ``FUTILITY_STOPPED``: rank deficiency OR non-finite conditioning OR
     measurability failure OR OOF theta ``<= 0``.
 
+The registered conditioning ceiling is **not** one of these. It is a
+per-candidate admissibility screen inside
+:func:`alive.compose.select.select_hyperparams`, which records an over-ceiling
+``k_total`` in ``nonviable_candidates`` and selects among the rest; only when
+EVERY candidate is inadmissible does selection itself become invalid
+(``SelectionError`` — a contracted pre-seal rejection, exit 10, runbook category
+D "investigate, do not re-run"). This module only forwards ``condition_ceiling``.
+Enforcing it here instead would have terminated the study permanently whenever
+the best-scoring dimension was over the ceiling, even when the same registered
+grid contained an admissible alternative.
+
 Seal discipline (spec §4.5 / §6.3 / §10.6). The result is a
 :class:`FutilityResult` that records ``sealed_access_count == 0`` and carries **no
 sealed-verdict field**. A ``FUTILITY_STOPPED`` development stop is therefore
@@ -44,7 +55,12 @@ import numpy as np
 from alive.compose.gates import GateResult, measurability_gate
 from alive.compose.identify import RankReport, rank_diagnostics
 from alive.compose.operator import design_matrix
-from alive.compose.select import ModelFactory, OOFFoldManifest, select_hyperparams
+from alive.compose.select import (
+    CEILING_REASON_PREFIX,
+    ModelFactory,
+    OOFFoldManifest,
+    select_hyperparams,
+)
 
 #: Status values this checkpoint may emit. Deliberately disjoint from the sealed
 #: verdict axis ({GI_LEARNABLE_WIN, PARTIAL, NO_DISTINCT_WIN, INVALID}) so a
@@ -164,6 +180,7 @@ def real_calibration_diagnostics(
     measurability_role: str,
     unregularized_oof_rank_policy: str,
     rank_tolerance_rule: str,
+    condition_ceiling: float,
 ) -> FutilityResult:
     r"""Run the Phase-2a development checkpoint on development-role inputs only.
 
@@ -196,6 +213,13 @@ def real_calibration_diagnostics(
         role raises :class:`~alive.compose.gates.LeakageError` (no sealed read).
     unregularized_oof_rank_policy, rank_tolerance_rule
         Exact config-bound OOF estimator-domain policy forwarded to selection.
+    condition_ceiling
+        Registered admissibility bound on ``cond(Phi)`` (config
+        ``identification.condition_ceiling``), forwarded unchanged to
+        :func:`~alive.compose.select.select_hyperparams`, which applies it per
+        candidate. Must be finite and positive; ``nan``/``inf`` would silence the
+        screen and a non-positive value would reject every candidate, so selection
+        refuses both.
 
     Returns
     -------
@@ -231,6 +255,7 @@ def real_calibration_diagnostics(
         seed=seed,
         model_factory=model_factory,
         uncovered_tolerance=uncovered_tolerance,
+        condition_ceiling=condition_ceiling,
         unregularized_oof_rank_policy=unregularized_oof_rank_policy,
         rank_tolerance_rule=rank_tolerance_rule,
     )
@@ -266,6 +291,30 @@ def real_calibration_diagnostics(
         failures.append(
             "OOF primary theta does not clear the preregistered threshold: "
             f"theta={oof_theta}, threshold={float(dev_oof_threshold)}"
+        )
+
+    # A stop must name its own cause. When the conditioning screen removed one or
+    # more dimensions, the surviving one can fail a gate that reads as a claim
+    # about the BIOLOGY -- most sharply `oof_theta <= threshold`, i.e. "the GI
+    # signal is not learnable at the registered dimensions". If the dimension that
+    # could express it was screened out for conditioning, that verdict is a
+    # mislabelled negative (CLAUDE.md#invariants 12/14/18): the cause was numerical.
+    # The reasons already exist in `nonviable_candidates`, but nothing linked them
+    # to the failure, so a reader of `futility_status` + `failures` alone recorded
+    # a scientific negative for an engineering defect. This line is the link.
+    screened = sorted(
+        {
+            int(candidate[0])
+            for candidate, reason in selection.nonviable_candidates.items()
+            if reason.startswith(CEILING_REASON_PREFIX)
+        }
+    )
+    if failures and screened:
+        failures.append(
+            f"context, not an independent failure: k_total {screened} were removed before "
+            "scoring by the registered conditioning screen, so the gates above were "
+            "evaluated only on the dimensions that survived it -- do not read this stop as "
+            "evidence about the screened dimensions"
         )
 
     status = _CONTINUE if not failures else _FUTILITY_STOPPED

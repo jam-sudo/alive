@@ -39,6 +39,7 @@ import anndata as ad
 import numpy as np
 import yaml
 
+from alive.compose.config2 import load_compose_phase2_config
 from alive.compose.phi_rank import PHI_RANK_ACTIVATION_SCHEMA, compute_phi_rank_report
 from alive.compose.response import fit_response_space
 from alive.data.features import Esm2Encoder
@@ -139,17 +140,50 @@ def main(argv: list[str] | None = None) -> int:
         sequence_mapping_hash=seq_mapping_hash,
     )
 
+    # READY must mean "the run can use every registered dimension", not merely
+    # "every dimension is full rank". The conditioning ceiling is the run's
+    # registered admissibility criterion (`select_hyperparams` screens candidates
+    # against exactly this statistic on exactly this design), so a report that
+    # certified an over-ceiling dimension would green-light a design the run then
+    # rejects. Read through the VALIDATED loader, not the raw mapping: the raw
+    # value can be a string (YAML 1.1 parses `1.0e8` that way), and a coerced
+    # comparison would certify silently. Never hardcoded here.
+    ceiling = float(load_compose_phase2_config(args.config).condition_ceiling)
     rank_ready = all(
         block["is_full_rank"]
         and block["rank"] == block["sym_dim"]
         and block["n_calibration_pairs_skipped"] == 0
         for block in report["per_k_total"]
     )
-    activation = (
-        "READY — every registered factor grid is full rank; sealed outcomes remain unread"
-        if rank_ready
-        else "BLOCKED — at least one registered factor grid failed the rank gate; no seal"
-    )
+    # ANY, not ALL -- the run screens an over-ceiling dimension out of selection and
+    # proceeds on the rest, so only a grid with no admissible dimension is
+    # uncertifiable. The over-ceiling dimensions are named in the verdict either
+    # way, so an owner sees which ones the run will drop before approving a SHA.
+    over_ceiling = [
+        int(block["k_total"])
+        for block in report["per_k_total"]
+        if float(block["condition_number"]) > ceiling
+    ]
+    conditioning_ready = len(over_ceiling) < len(report["per_k_total"])
+    if not rank_ready:
+        activation = "BLOCKED — at least one registered factor grid failed the rank gate; no seal"
+    elif not conditioning_ready:
+        activation = (
+            "BLOCKED — every registered factor grid is full rank but ALL are conditioned "
+            f"above the registered ceiling {ceiling}, so the run's admissibility screen "
+            "would leave no viable candidate; no seal"
+        )
+    elif over_ceiling:
+        activation = (
+            f"READY — k_total {over_ceiling} exceed the registered conditioning ceiling "
+            f"{ceiling} and the run will screen them out; the remaining registered grid is "
+            "full rank and admissible; sealed outcomes remain unread"
+        )
+    else:
+        activation = (
+            "READY — every registered factor grid is full rank and conditioned at or "
+            f"below the registered ceiling {ceiling}; sealed outcomes remain unread"
+        )
     envelope = {
         "schema": PHI_RANK_ACTIVATION_SCHEMA,
         "deliverable": "real_norman_phi_rank_and_condition_report",
