@@ -77,12 +77,13 @@ _EXPECTED_RANK_TOLERANCE_RULE = "max_shape_times_float64_eps_times_sigma_max"
 _EXPECTED_OOF_FOLDS = 3
 _EXPECTED_UNCOVERED_TOLERANCE = 0.75
 # Registered admissibility bound on the condition number of the full-calibration
-# design matrix Phi at the SELECTED total factor dimension. The anchor is
-# data-free: 1/sqrt(eps_f64) ~= 6.7e7 is where float64 has lost half its
-# significant digits, rounded up to the next order of magnitude. Exceeding it is
-# a FUTILITY_STOPPED condition (spec, identification section), never a retryable
-# input rejection -- "rescale until the gate passes" is exactly the post-hoc
-# threshold change CLAUDE.md#invariants 14 forbids.
+# design matrix Phi, screened PER CANDIDATE k_total inside `select_hyperparams`.
+# The anchor is data-free: 1/sqrt(eps_f64) ~= 6.7e7 is where float64 has lost half
+# its significant digits, rounded up to the next order of magnitude. An
+# over-ceiling dimension is recorded non-viable and selection proceeds on the
+# rest; only a grid with NO admissible dimension makes selection itself invalid
+# (SelectionError, a contracted pre-seal rejection). See the spec's *Registered
+# conditioning ceiling* paragraph -- it is deliberately NOT a futility condition.
 _EXPECTED_CONDITION_CEILING = 1.0e8
 _EXPECTED_SPLIT_SEED = 11
 _EXPECTED_REGISTERED_SEEDS: tuple[int, ...] = (11, 23, 37)
@@ -1004,9 +1005,11 @@ def _validate_identification(
             f"uncovered_tolerance={_EXPECTED_UNCOVERED_TOLERANCE}"
         )
 
-    # The registered conditioning ceiling. A non-finite or non-positive value
-    # would silently DISABLE the futility gate downstream (``cond > nan`` is
-    # always False), so those are rejected here rather than compared.
+    # The registered conditioning ceiling. Both unusable directions are refused,
+    # and they fail in OPPOSITE ways: a nan or infinite value silences the
+    # downstream selection screen on every candidate (``cond > nan`` is always
+    # False), while a non-positive one fires on every candidate including a
+    # perfect design.
     ceiling_raw = _require(block, "condition_ceiling", "identification")
     if isinstance(ceiling_raw, bool) or not isinstance(ceiling_raw, (int, float)):
         raise Phase2ConfigError("identification.condition_ceiling must be numeric")

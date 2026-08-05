@@ -53,14 +53,14 @@ from alive.compose.config2 import (
 )
 from alive.compose.gates import LeakageError
 from alive.compose.identify import rank_diagnostics
-from alive.compose.operator import sym_basis_dim
+from alive.compose.operator import bilinear_predict, sym_basis_dim
 from alive.compose.phi_rank import (
     PHI_RANK_ACTIVATION_SCHEMA,
     validate_phi_rank_activation_report,
 )
 from alive.compose.select import SelectionError
 from tests.alive.compose.test_config2 import CANON, _raw, _write
-from tests.alive.compose.test_diagnostics2 import _full_rank_instance, _run
+from tests.alive.compose.test_diagnostics2 import _full_rank_instance, _run, _sym_to_vec
 
 # The registered value, restated here so a silent config edit breaks THIS file's
 # margin claims rather than passing unnoticed. Bound to config2 by the first test.
@@ -209,6 +209,78 @@ def test_an_over_ceiling_dimension_is_dropped_and_an_admissible_one_is_selected(
     assert not res.failures
 
 
+def _signal_only_at_the_over_ceiling_dimension(seed: int):
+    """A grid where the OVER-CEILING dimension is the one that wins.
+
+    The case the reversal was made for, and the case no test covered: `k=6` is
+    block-imbalanced AND carries the signal, `k=4` is well conditioned and cannot
+    express it. Two reviews independently observed that the existing test's `k=4`
+    wins with or without the screen, so it demonstrates nothing about the outcome.
+    """
+    rng = np.random.default_rng(seed)
+    inst = _full_rank_instance(rng, k=4)
+    Z4 = inst["factors_by_k"][4]
+    Z6 = np.hstack([Z4, rng.normal(size=(Z4.shape[0], 2)) * 1e6])
+    p = inst["eps_obs"].shape[1]
+    B = rng.normal(size=(p, 6, 6))
+    B = 0.5 * (B + np.transpose(B, (0, 2, 1)))
+    coef = np.vstack([_sym_to_vec(B[m]) for m in range(p)])
+    eps = np.vstack([bilinear_predict(coef, Z6[g], Z6[h]) for g, h in inst["idx_pairs"]])
+    inst["eps_obs"] = eps
+    inst["eps_split_a"] = eps
+    inst["eps_split_b"] = eps
+    inst["factors_by_k"] = {4: Z4, 6: Z6}
+    inst["k_total_grid"] = [4, 6]
+    return inst
+
+
+def test_screening_the_winning_dimension_stops_the_run_and_says_so():
+    """A stop caused by the screen must not read as a claim about the biology.
+
+    With `k=6` screened, the surviving `k=4` fails the OOF theta gate — whose
+    registered condition is `dev_oof_delta_below_threshold`, i.e. "the GI signal is
+    not learnable at the registered dimensions". That is a statement about the
+    BIOLOGY, and here the cause was numerical: the dimension that could express the
+    signal was inadmissible. The ceiling reason lived only in
+    `nonviable_candidates`, unlinked to the failure, so a reader of
+    `futility_status` + `failures` recorded a scientific negative for an
+    engineering defect (`CLAUDE.md#invariants` 12/14/18).
+    """
+    inst = _signal_only_at_the_over_ceiling_dimension(0)
+    unscreened = _run(inst, condition_ceiling=1e300)
+    screened = _run(inst, condition_ceiling=_REGISTERED_CEILING)
+
+    # the premise: without the screen this run CONTINUEs on the over-ceiling k
+    assert unscreened.status == "CONTINUE"
+    assert unscreened.selected_k_total == 6
+    assert rank_diagnostics(inst["factors_by_k"][6], inst["idx_pairs"]).condition_number > (
+        _REGISTERED_CEILING
+    )
+
+    # with the screen the run stops -- honest, because the only admissible
+    # dimension cannot express the signal -- but it must SAY the screen ran
+    assert screened.status == "FUTILITY_STOPPED"
+    assert screened.selected_k_total == 4
+    assert any("OOF primary theta" in f for f in screened.failures)
+    context = [f for f in screened.failures if f.startswith("context, not an independent failure")]
+    assert len(context) == 1, "a screened stop must name the screen in `failures`"
+    assert "[6]" in context[0]
+    assert _nonviable_reasons(screened), "and the per-candidate reasons are still recorded"
+
+
+def test_no_screening_context_line_is_added_when_the_screen_did_not_run():
+    """The context line is evidence, not decoration: absent when nothing was screened."""
+    rng = np.random.default_rng(2)
+    inst = _full_rank_instance(rng)
+    k = inst["selected_k_total"]
+    Z = inst["factors_by_k"][k]
+    v = rng.normal(size=Z.shape[1])
+    inst["factors_by_k"] = {k: np.outer(rng.normal(size=Z.shape[0]), v)}
+    res = _run(inst, condition_ceiling=_REGISTERED_CEILING)
+    assert res.status == "FUTILITY_STOPPED"
+    assert not any(f.startswith("context, not an independent failure") for f in res.failures)
+
+
 def test_when_every_dimension_is_inadmissible_selection_itself_is_invalid():
     """All candidates screened out is a REJECTION, not a futility verdict.
 
@@ -352,6 +424,56 @@ def test_an_unusable_ceiling_is_refused_by_selection(ceiling):
         _run(inst, condition_ceiling=ceiling)
 
 
+@pytest.mark.parametrize(
+    "ceiling", [float("nan"), float("inf"), 0.0, -1.0], ids=["nan", "inf", "zero", "negative"]
+)
+def test_the_activation_gate_refuses_an_unusable_ceiling_argument(ceiling):
+    """Both halves of the binding must refuse what silences or over-fires them.
+
+    Production passes a loader-validated value, so this is defence in depth on the
+    argument. It is here because the branch's own rationale names this failure
+    mode, and the first version of the binding left it unguarded on this side —
+    a validator called with ``inf`` accepted every design in silence.
+    """
+    env = _envelope_under_test()
+    with pytest.raises(ValueError, match="must be finite and positive"):
+        validate_phi_rank_activation_report(
+            env, expected_condition_ceiling=ceiling, **_validator_kwargs(env)
+        )
+
+
+def test_the_refusal_runs_before_any_selection_work():
+    """The other ordering, restored.
+
+    The reversal deleted the test that pinned it. The property still held, but
+    silently: the ceiling check sits in ``_validate_inputs`` ahead of the
+    ``eps_obs``/``additive`` shape validation, so a malformed instance cannot mask
+    it — and an unusable ceiling is never discovered after the OOF fit.
+    """
+    rng = np.random.default_rng(0)
+    inst = _full_rank_instance(rng)
+    poisoned = dict(inst)
+    poisoned["eps_obs"] = np.zeros((0, 0))
+    with pytest.raises(SelectionError, match="must be finite and positive"):
+        _run(poisoned, condition_ceiling=float("nan"))
+
+
+def test_a_screened_run_still_reports_zero_sealed_access_and_names_the_bound():
+    """Two assertions the reversal dropped without recording it.
+
+    The deleted futility test asserted ``sealed_access_count == 0`` on a
+    ceiling-affected result and that the operator-facing reason carries the actual
+    bound. Both still matter and neither had a home after the redesign.
+    """
+    inst = _signal_only_at_the_over_ceiling_dimension(0)
+    res = _run(inst, condition_ceiling=_REGISTERED_CEILING)
+    assert res.sealed_access_count == 0
+    reasons = _nonviable_reasons(res)
+    assert reasons, "the screen fired"
+    assert str(float(_REGISTERED_CEILING)) in reasons[0], "the bound must reach the operator"
+    assert "condition_number=" in reasons[0], "and so must the measured value"
+
+
 def test_the_refusal_still_sits_behind_the_leakage_gate():
     """A call that is both requesting a sealed role and carrying an unusable
     ceiling must report the LEAKAGE attempt, not the config-integrity failure that
@@ -415,26 +537,46 @@ def test_the_committed_activation_evidence_still_passes_the_bound_validator():
 @pytest.mark.parametrize(
     "condition", [1.0e8 + 1.0, 1.0e12, 1.7e308], ids=["just_over", "1e12", "max"]
 )
-def test_the_activation_gate_refuses_what_the_run_would_screen_out(condition):
-    """The gap two reviews found independently: two gates, one statistic, no
-    agreement.
+def test_the_activation_gate_refuses_a_grid_with_no_admissible_dimension(condition):
+    """The gap two reviews found independently: two gates, one statistic.
 
     ``compute_phi_rank_report`` calls the SAME ``rank_diagnostics`` on the SAME
     full-calibration design as the run's admissibility screen, but the validator
-    only ever checked full rank and finiteness. A report certifying "READY" for a
-    dimension the run then refuses costs an owner approval and a pod trip to
-    discover. It is now bound, and the message is separate from the rank one so an
-    operator is not sent looking for the wrong defect.
+    only ever checked full rank and finiteness, so a report could certify as READY
+    a grid the run cannot use at all. Here EVERY block is over the ceiling, which
+    is exactly the state that makes selection itself invalid.
     """
-    with pytest.raises(ValueError, match="conditioned above the registered ceiling"):
+    with pytest.raises(ValueError, match="no admissible factor dimension"):
         _validate(_envelope_under_test(condition_number=condition))
 
 
-def test_the_ceiling_the_activation_gate_uses_comes_from_the_config():
-    """Not a literal in `phi_rank.py`: a stricter ceiling must reject more."""
+@pytest.mark.parametrize("over_k", [4, 6, 8], ids=["k4", "k6", "k8"])
+def test_the_activation_gate_accepts_a_grid_the_run_would_merely_screen(over_k):
+    """ANY, not ALL — the correction two reviews demanded, independently.
+
+    The first version of this binding raised on the FIRST over-ceiling block, so a
+    single inadmissible ``k_total`` blocked scientific mode entirely. That is the
+    same over-strictness the ceiling's own design was corrected for, relocated one
+    gate earlier: the run screens that dimension out and proceeds on the rest, and
+    the only remedy for a BLOCKED report would have been editing the registered
+    ``total_k_grid`` after seeing a development diagnostic.
+
+    ``k_total=8`` is the realistic case — `sym_dim=36` against 41 calibration
+    pairs, already 30x worse conditioned than the others in the committed evidence.
+    """
     env = _envelope_under_test()
-    worst = max(float(b["condition_number"]) for b in env["report"]["per_k_total"])
-    kwargs = dict(
+    for block in env["report"]["per_k_total"]:
+        if block["k_total"] == over_k:
+            block["condition_number"] = 1.0e12
+    assert (
+        sum(1 for b in env["report"]["per_k_total"] if b["condition_number"] > _REGISTERED_CEILING)
+        == 1
+    ), "the premise: exactly one dimension is inadmissible"
+    _validate(env)
+
+
+def _validator_kwargs(env):
+    return dict(
         expected_protocol=env["protocol"],
         expected_config_sha256=env["config_sha256"],
         expected_git_sha=env["git_sha"],
@@ -446,10 +588,22 @@ def test_the_ceiling_the_activation_gate_uses_comes_from_the_config():
         expected_esm_model=env["esm_model"],
         expected_esm_dim=env["report"]["esm_dim"],
     )
-    validate_phi_rank_activation_report(env, expected_condition_ceiling=worst, **kwargs)
-    with pytest.raises(ValueError, match="conditioned above the registered ceiling"):
+
+
+def test_the_ceiling_the_activation_gate_uses_comes_from_the_config():
+    """Not a literal in `phi_rank.py`: a stricter ceiling must reject more.
+
+    Under the ANY rule the discriminating boundary is the BEST-conditioned block,
+    not the worst: at ``min(conds)`` that dimension is still admissible, and one
+    ulp lower every dimension is over and the grid has nothing left.
+    """
+    env = _envelope_under_test()
+    best = min(float(b["condition_number"]) for b in env["report"]["per_k_total"])
+    kwargs = _validator_kwargs(env)
+    validate_phi_rank_activation_report(env, expected_condition_ceiling=best, **kwargs)
+    with pytest.raises(ValueError, match="no admissible factor dimension"):
         validate_phi_rank_activation_report(
-            env, expected_condition_ceiling=float(np.nextafter(worst, 0.0)), **kwargs
+            env, expected_condition_ceiling=float(np.nextafter(best, 0.0)), **kwargs
         )
 
 
@@ -457,9 +611,16 @@ def test_the_ceiling_the_activation_gate_uses_comes_from_the_config():
 # config: the ceiling is registered, exact, and cannot arrive unusable
 # --------------------------------------------------------------------------- #
 def test_the_config_key_is_required(tmp_path):
+    """Matched on the closed-schema message, not on the key name.
+
+    Four other messages in ``_validate_identification`` also contain
+    ``condition_ceiling``, so a key-name match would pass even if the key became
+    optional with a default — the same substring collision already fixed twice on
+    this branch.
+    """
     raw = _raw()
     del raw["identification"]["condition_ceiling"]
-    with pytest.raises(Phase2ConfigError, match="condition_ceiling"):
+    with pytest.raises(Phase2ConfigError, match="missing required identification keys"):
         load_compose_phase2_config(_write(tmp_path, raw))
 
 

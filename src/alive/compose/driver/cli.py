@@ -199,9 +199,13 @@ _KNOWN_PRESEAL_REJECTIONS: tuple[type[Exception], ...] = (
     ScientificRuntimeError,
     # SelectionError (also a bare ``ValueError`` subclass) invalidates OOF
     # hyperparameter selection before any seal access: an empty/degenerate fold
-    # layout, an uncovered-pair fraction above the registered tolerance, or a
-    # grid in which the registered estimator-domain rank policy leaves no viable
-    # candidate at all. That last row is reachable only since the policy exists,
+    # layout, an uncovered-pair fraction above the registered tolerance, a grid in
+    # which the registered estimator-domain rank policy leaves no viable candidate
+    # at all, a non-finite or non-positive registered conditioning ceiling, or a
+    # grid in which the registered conditioning screen leaves nothing admissible
+    # (2026-08-05: the ceiling is a per-candidate admissibility screen, so its
+    # all-inadmissible case lands here rather than in the futility vocabulary).
+    # The rank-policy row is reachable only since the policy exists,
     # and it is a selection INVALIDATION, not a futility verdict — phase2a
     # produces no futility report for it, so without this entry the run ended in
     # a traceback and exit 1, outside the §1.1 contract, with the per-candidate
