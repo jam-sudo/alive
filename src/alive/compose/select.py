@@ -58,6 +58,11 @@ OOF_FOLD_MANIFEST_SCHEMA = "compose_oof_fold_manifest_v1"
 UNREGULARIZED_OOF_RANK_POLICY = "require_full_rank_each_train_fold"
 OOF_RANK_TOLERANCE_RULE = "max_shape_times_float64_eps_times_sigma_max"
 
+#: Prefix of the ``nonviable_candidates`` reason written by the registered
+#: conditioning screen. ``diagnostics2`` matches on it to attribute a futility stop
+#: to the screen; keeping one constant means the two cannot drift apart silently.
+CEILING_REASON_PREFIX = "conditioning above the registered ceiling"
+
 #: A typed model factory: a zero-arg callable returning a fresh symmetric model
 #: exposing ``fit(Z, pairs, eps_obs, *, lam)`` and ``predict_eps(Z, g, h)``.
 ModelFactory = Callable[[], object]
@@ -129,10 +134,14 @@ class SelectionResult:
         relative error reduction of ``delta_hat`` vs the additive comparator,
         aggregated over OOF test pairs).
     nonviable_candidates : dict
-        Map each excluded ``(k_total, lambda)`` to the deterministic reason the
-        estimator could not be defined. Such candidates are absent from
-        ``theta_by_candidate``; no NaN or infinity sentinel enters selection or
-        persisted diagnostics.
+        Map each excluded ``(k_total, lambda)`` to the deterministic reason it was
+        excluded before scoring. Two reasons occur: the estimator could not be
+        defined on that candidate (the registered unregularized rank policy), or
+        the candidate's design is inadmissible under the registered conditioning
+        ceiling (``CEILING_REASON_PREFIX``). The latter is a property of
+        ``k_total`` alone, so it appears once per ``lambda`` at that dimension.
+        Such candidates are absent from ``theta_by_candidate``; no NaN or infinity
+        sentinel enters selection or persisted diagnostics.
     union_test_pair_ids : tuple of tuple of str
         Sorted union of canonical pair IDs that appear as some fold's OOF test
         pair (the covered calibration pairs).
@@ -949,6 +958,15 @@ def select_hyperparams(
     uncovered_tolerance : float
         Maximum allowed fraction of calibration pairs that are never an OOF test
         pair. An uncovered fraction strictly above this invalidates selection.
+    condition_ceiling : float
+        Registered admissibility bound on ``cond(Phi)`` (config
+        ``identification.condition_ceiling``), applied as a per-candidate screen:
+        a ``k_total`` whose full-calibration design has a FINITE condition number
+        above this is excluded before scoring and recorded in
+        ``nonviable_candidates``. Restricted to finite condition numbers on
+        purpose — ``rank_diagnostics`` returns ``inf`` exactly for a rank-deficient
+        design, which the registered rank futility gate owns. Must itself be finite
+        and positive.
     unregularized_oof_rank_policy, rank_tolerance_rule : str
         Exact config-bound estimator-domain policy. The only registered values
         require every unregularized OOF train design to be full rank under the
@@ -959,13 +977,19 @@ def select_hyperparams(
     SelectionResult
         Selected hyperparameters, per-candidate OOF theta, and the coverage /
         exclusion report (union test pairs, uncovered pairs, fold exclusions).
+        Candidates excluded by either admissibility rule are scored by neither the
+        complete fit path nor the metric, and appear only in
+        ``nonviable_candidates``.
 
     Raises
     ------
     SelectionError
-        On invalid inputs (see :func:`_validate_inputs`), an empty fold (a
-        retained fold must have non-empty train AND test), or an uncovered-pair
-        fraction strictly above ``uncovered_tolerance``.
+        On invalid inputs (see :func:`_validate_inputs`, which also refuses a
+        non-finite or non-positive ``condition_ceiling``), an empty fold (a
+        retained fold must have non-empty train AND test), an uncovered-pair
+        fraction strictly above ``uncovered_tolerance``, or a grid in which every
+        candidate is non-viable — including the case where the registered
+        conditioning screen leaves nothing admissible.
     """
     if unregularized_oof_rank_policy != UNREGULARIZED_OOF_RANK_POLICY:
         raise SelectionError(
@@ -1039,7 +1063,7 @@ def select_hyperparams(
         inadmissible: str | None = None
         if np.isfinite(candidate_condition) and candidate_condition > float(condition_ceiling):
             inadmissible = (
-                "conditioning above the registered ceiling: "
+                f"{CEILING_REASON_PREFIX}: "
                 f"condition_number={candidate_condition} > "
                 f"condition_ceiling={float(condition_ceiling)} "
                 "(registered identification.condition_ceiling; the design is full rank "

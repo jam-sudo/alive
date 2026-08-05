@@ -55,7 +55,12 @@ import numpy as np
 from alive.compose.gates import GateResult, measurability_gate
 from alive.compose.identify import RankReport, rank_diagnostics
 from alive.compose.operator import design_matrix
-from alive.compose.select import ModelFactory, OOFFoldManifest, select_hyperparams
+from alive.compose.select import (
+    CEILING_REASON_PREFIX,
+    ModelFactory,
+    OOFFoldManifest,
+    select_hyperparams,
+)
 
 #: Status values this checkpoint may emit. Deliberately disjoint from the sealed
 #: verdict axis ({GI_LEARNABLE_WIN, PARTIAL, NO_DISTINCT_WIN, INVALID}) so a
@@ -286,6 +291,30 @@ def real_calibration_diagnostics(
         failures.append(
             "OOF primary theta does not clear the preregistered threshold: "
             f"theta={oof_theta}, threshold={float(dev_oof_threshold)}"
+        )
+
+    # A stop must name its own cause. When the conditioning screen removed one or
+    # more dimensions, the surviving one can fail a gate that reads as a claim
+    # about the BIOLOGY -- most sharply `oof_theta <= threshold`, i.e. "the GI
+    # signal is not learnable at the registered dimensions". If the dimension that
+    # could express it was screened out for conditioning, that verdict is a
+    # mislabelled negative (CLAUDE.md#invariants 12/14/18): the cause was numerical.
+    # The reasons already exist in `nonviable_candidates`, but nothing linked them
+    # to the failure, so a reader of `futility_status` + `failures` alone recorded
+    # a scientific negative for an engineering defect. This line is the link.
+    screened = sorted(
+        {
+            int(candidate[0])
+            for candidate, reason in selection.nonviable_candidates.items()
+            if reason.startswith(CEILING_REASON_PREFIX)
+        }
+    )
+    if failures and screened:
+        failures.append(
+            f"context, not an independent failure: k_total {screened} were removed before "
+            "scoring by the registered conditioning screen, so the gates above were "
+            "evaluated only on the dimensions that survived it -- do not read this stop as "
+            "evidence about the screened dimensions"
         )
 
     status = _CONTINUE if not failures else _FUTILITY_STOPPED
