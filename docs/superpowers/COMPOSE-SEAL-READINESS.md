@@ -5,7 +5,7 @@
 > **이 문서는 아무것도 정의하지 않는다** — 세부(task)는 plan, claim은 spec, exact param은 config,
 > 시간순 audit는 git이 authoritative다([sources of truth](../../CLAUDE.md#sources)). 상태 행이 authoritative
 > 문서와 어긋나면 **authoritative 문서가 옳다**; 이 인덱스를 갱신한다.
-> **Updated:** 2026-08-04 @ `f97989a` (branch `compose-condition-ceiling`)
+> **Updated:** 2026-08-05 @ `da82a4a` (branch `compose-condition-ceiling`)
 > `scripts/bump-readiness-stamp.sh` / the pre-commit hook from `HEAD` at commit time, so it names the
 > **parent** of the commit that carries it and can never name itself. Reading it as "one commit stale" is a
 > misreading; git is authoritative for when this file actually changed.
@@ -648,6 +648,58 @@ branch에서 추적 가능하게 기록한다. `LOCAL` ledger ID만으로는 이
    config-bound evidence stale. The resulting canonical config digest is
    `2a8b1bc37b4b952b29dd57cf128d2aa27a2a698693e1376e569544ff119e85eb`; it must be the config axis of
    any replacement evidence and run identity.
+   **2026-08-05 second independent review of the redesign, and the corrections it forced.** Three reviewers
+   re-ran against the redesigned branch; two were the round-1 reviewers, asked to judge their own findings
+   CLOSED/PARTIAL/OPEN rather than to re-derive. **The highest-risk item held.** That the screen must not fire
+   on a non-finite condition number — otherwise selection moves quietly to a full-rank dimension and the
+   registered rank futility gate becomes unreachable — was found, fixed and tested by the implementer with no
+   independent check. It now has one: verified by proof (`isfinite(cond) ⟹ full rank` unconditionally, the
+   converse failing only at `k_total=0`, which the config pins out), by 460 random designs across five
+   degeneracy modes with 0 divergences, and by a differential sweep over 60 mixed `[4,6]` grids finding 0
+   rank-stop→CONTINUE regressions. A structural argument was also supplied that the implementer had not
+   articulated: the screen only ever REMOVES candidates, and removing elements cannot demote the existing
+   argmin, so a rank-deficient dimension that won before still wins.
+   **Two corrections were forced, and both were the implementer's own new defects.** (1) **The activation-gate
+   binding overshot.** The run's rule is ANY — an over-ceiling `k_total` is screened out and the study proceeds
+   on the rest — but the validator and the producer verdict were written as ALL, rejecting the whole report over
+   a single inadmissible dimension. Two reviewers found this independently; it relocates one gate earlier the
+   exact over-strictness the redesign had just corrected, and `k_total=8` is its realistic trigger (`sym_dim=36`
+   against 41 calibration pairs, already 30× worse conditioned than the others in the committed evidence). The
+   only remedy for such a BLOCKED report would have been editing the registered `total_k_grid` after seeing a
+   development diagnostic. Both sides now reject only when NO dimension is admissible, name the over-ceiling
+   dimensions in the verdict either way, and refuse an unusable ceiling ARGUMENT (`nan`/`inf`/non-positive),
+   which the first binding left unguarded. (2) **A screened stop misattributed its own cause.** With the
+   signal-bearing dimension screened, the surviving one fails `oof_theta <= threshold`, whose registered
+   condition is `dev_oof_delta_below_threshold` — a claim about the BIOLOGY — while the actual cause was
+   numerical; the ceiling reason existed only in `nonviable_candidates`, unlinked. Reproduced on 3/3 seeds. A
+   stop that follows a screening now carries an explicit context line in `failures` naming the screened
+   dimensions and saying it is not independent evidence about them (`CLAUDE.md#invariants` 12/14/18). Four
+   mutations against these two fixes, all caught.
+   **A recording rule, adopted because this branch broke it five times.** `Path.exists()`'s errno set, the
+   exhibit condition numbers, a quoted `grep` output, and a reviewer's θ figure were all written into this file
+   or the spec without being executed by the writer. From here: **no number, command output or measurement is
+   recorded in a governance document unless the writer produced it in that session, and where a number is
+   load-bearing it is pinned by a committed test rather than quoted.** The exhibit values are pinned that way
+   now; the θ=0.43 figure was withdrawn rather than re-derived, and the regression it stood for is pinned by a
+   test instead.
+   **Also corrected from this round:** `_EXPECTED_CONDITION_CEILING`'s own comment and the validator's comment
+   still described the reversed futility design — the two most authoritative places a reader looks for what the
+   number means; `select_hyperparams`'s public docstring omitted its new required parameter and still described
+   `nonviable_candidates` as estimator-domain only; the `SelectionError` roster comment's registered enumeration
+   did not list the new all-inadmissible cause, which is the same criticism round 1 levelled at
+   `rank_condition_fail`; `condition_ceiling` is now in the preflight confirmation manifest, because the screen
+   can remove dimensions from `total_k_grid` and recording the grid without the bound that filtered it
+   misdescribes what was searched; and three assertions the reversal dropped without recording it
+   (`sealed_access_count`, the bound reaching the operator, the refusal-before-selection ordering) are restored.
+   **Still open, recorded not closed:** fold-level conditioning is ungated — and the earlier description
+   understated it: `select.py` computes a fold's condition number ONLY when `lam == 0.0`, so for the three
+   positive registered lambdas no fold diagnostic exists at all; the exclusive coverage band is `(1e8, ~1e14)`;
+   `LinAlgError` at extreme factor scale still exits `1`, and a NaN factor bank reaches it before the estimator's
+   input contract, so the runbook's "this is the first gate" note is false for NaN; `scripts/compose_phi_rank_report.py`
+   has no tests (pod-only code) and loads the config only AFTER the GPU encode, so a config failure burns the
+   run; the scientific-mode call site's ceiling forwarding has no sentinel test; and the plan's DRAFT/"D1–D4
+   미결" gate lines still stand under a banner that says L2 shipped. Seal state remains **UNOPENED**; execution
+   remains **RELEASE-BLOCKED**.
    **2026-08-04 CLOSED — the condition ceiling is registered, and the first design of it was WRONG.**
    The open item below is resolved: statistic `rank_diagnostics(Φ).condition_number` on the
    full-calibration `Φ`, bound `identification.condition_ceiling: 1.0e+8`, anchored data-free at
@@ -666,11 +718,15 @@ branch에서 추적 가능하게 기록한다. `LOCAL` ledger ID만으로는 이
    **The first implementation made it a `FUTILITY_STOPPED` condition on the SELECTED `k_total`, and three
    independent adversarial reviews rejected that on both axes.** (a) It terminated the study permanently
    whenever the best-scoring dimension was over the ceiling, even when the same registered grid held an
-   admissible alternative — reproduced: grid `[4, 6]` stops, grid `[4]` alone CONTINUEs at θ=0.43. (b) Two of
+   admissible alternative. **The θ=0.43 figure previously recorded here is WITHDRAWN**: it was quoted from a
+   reviewer's round-1 script and never reproduced by the implementer, and it does not reproduce from the
+   construction the committed tests use — the fifth unreproduced measurement on this branch, and the reason
+   the rule below now exists. The regression itself is real and is now pinned by a committed test
+   (`test_screening_the_winning_dimension_stops_the_run_and_says_so`) rather than by a quoted number. (b) Two of
    the five reasons recorded for choosing futility were **factually false about this repository**, and are
    withdrawn: the runbook does NOT say exit 10 means "fix and retry" (it says the exit code carries only
    seal-consumption, and category D says "investigate, do not re-run"), and the durable futility report does
-   NOT persist the `singular_values` spectrum it was said to preserve — `grep -rn singular_values src/alive`
+   NOT persist the `singular_values` spectrum it was said to preserve — the array is built in `diagnostics2` and
    reaches only `diagnostics2`. Two more were weakened: "no rejection slot exists" was a tautology about the
    *futility* vocabulary while the sibling threshold in the same config block (`uncovered_tolerance`) is a
    `SelectionError`, and `EstimatorInputError` was rostered as exit 10 two days earlier on the identical

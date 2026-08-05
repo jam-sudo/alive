@@ -5,7 +5,11 @@
 > 유효하지 않다. 현재 계약은 spec의 *Registered conditioning ceiling* 문단이며, ceiling은 selection의
 > **후보별 admissibility 심사**다(모든 후보 부적격일 때만 `SelectionError` → exit 10). 아래 §4의
 > "조건수는 uniform rescale에 **정확히 불변**" 서술도 정정됐다 — 반올림 오차 범위에서 불변이다.
-> §7 task #14의 "live `2a8b1bc3…`"도 stale이며 현재 digest는 `b158417a…`다.
+> §7 task #14의 "live `2a8b1bc3…`"도 stale이며 현재 digest는 `b158417a…`다. §1의 D2 행이 적은
+> `identification.condition_ceiling: 1.0e8` 철자는 YAML 1.1이 **문자열**로 파싱하므로 committed
+> config는 `1.0e+8`을 쓴다. 아래 DRAFT 상태 행과 "D1·D2가 정해지기 전 L2 전체는 착수하지
+> 않는다"는 gate 문장, 그리고 L1/L2 checkbox는 **집행 당시 상태로 보존**한다(이 문서는 실행
+> 기록이 아니라 계획이며, 실제 진행은 readiness index가 authoritative다).
 > 진행 상태와 종결 근거는 `docs/superpowers/COMPOSE-SEAL-READINESS.md`가 authoritative다.
 
 > **상태:** DRAFT — owner decision gate D1–D4 미결. 아래 work package는 **전부 로컬(MacBook + GitHub

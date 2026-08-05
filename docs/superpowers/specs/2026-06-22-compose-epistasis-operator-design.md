@@ -481,7 +481,10 @@ rank 결손은 등록된 rank futility gate의 소관이다. 이를 심사가 �
 상한 자체가 `NaN`이나 $\infty$이면 심사가 모든 후보에서 침묵하고(`cond > NaN`은 항상 False), non-positive면
 반대로 모든 후보를 거부한다. 두 방향 모두 사용 불가이므로 config loader와 selection 양쪽에서 거부한다.
 같은 통계량을 같은 설계에 대해 계산하는 activation-evidence validator(`phi_rank`)와 그 producer의 READY
-판정도 이 상한에 결합한다 — 그렇지 않으면 run이 거부할 설계를 "실행 READY"로 인증하게 된다.
+판정도 이 상한에 결합한다. 결합은 run과 **같은 ANY 규칙**이어야 한다 — 초과 dimension 하나는 run이
+screen하고 나머지로 진행하므로, 그것만으로 report 전체를 거부하면 성공했을 run을 막고 유일한 해법이
+등록된 `total_k_grid` 수정(=diagnostic을 본 뒤의 사후 변경)이 된다. 거부는 **admissible dimension이
+하나도 없을 때에만** 하며, 그 조건은 selection 자체가 무효가 되는 조건과 같다.
 
 > **2026-08-04 개정.** 최초 구현은 이 기준을 *선택된* `k_total`에 대한 `FUTILITY_STOPPED` 조건으로
 > 두었다. 독립 리뷰 3건이 두 축 모두에서 그것이 틀렸음을 보였다 — 등록된 grid에 적합한 후보가 있어도
