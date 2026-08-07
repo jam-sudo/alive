@@ -76,8 +76,11 @@ identification:
   rank_tolerance_rule: max_shape_times_float64_eps_times_sigma_max
   oof_folds: 3
   uncovered_tolerance: 0.75
-  # Admissibility bound on cond(Phi), screened PER CANDIDATE k_total inside
-  # selection. Anchor is data-free: 1/sqrt(float64 eps) ~= 6.7e7, rounded up.
+  # Admissibility bound on cond(Phi). Screened in TWO places inside selection:
+  # per candidate k_total on the FULL calibration design, and per unregularized
+  # (lam == 0.0) OOF TRAIN fold. The two remove different amounts -- a whole
+  # k_total at every lambda, versus that k_total's lam=0.0 candidate alone.
+  # Anchor is data-free: 1/sqrt(float64 eps) ~= 6.7e7, rounded up.
   # Invariant to a uniform rescale of z (to round-off); moves ~11 orders under
   # ESM-vs-expression block imbalance. An over-ceiling k_total is recorded
   # non-viable; only if EVERY candidate is, selection itself fails (exit 10).

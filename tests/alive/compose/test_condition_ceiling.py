@@ -20,18 +20,31 @@ The screen has TWO arms, and they remove different amounts:
   ``k_total`` at every lambda;
 * the **fold** arm (2026-08-07) bounds each unregularized OOF TRAIN design, so it
   removes that ``k_total``'s ``lam=0.0`` candidate alone. It exists because a
-  degeneracy confined to one gene-disjoint group is invisible to the first arm: a
-  full design at cond ~1e1 can hold a full-rank train fold at ~1e12. It is
-  restricted to ``lam == 0.0`` because that is the only place ``cond(Phi)`` IS the
-  conditioning of the solve; for ``lam > 0`` the ridge filter factors bound it
-  (measured: theta 0.7867 at cond 2.9e12 against 0.7928 at 2.9e4), so rejecting on
-  the unregularized number there would discard a healthy candidate.
+  degeneracy confined to one gene-disjoint group is invisible to the first arm:
+  ``_fold_local_degeneracy_instance`` measures a full design at ``cond 6.47`` with a
+  FULL-RANK train fold at ``3.03e12``. It is restricted to ``lam == 0.0`` because
+  that is the only place ``cond(Phi)`` IS the conditioning of the solve; at
+  ``lam > 0`` the ridge filter factors bound it.
 
-Neither arm can change the WINNER — conditioning damage inflates held-out error,
-which lowers theta, and selection takes the max (measured 2026-08-07: 0 of 37
-over-ceiling designs outscored a clean sibling). What they change is the recorded
-REASON, which is the whole point: without them a numerical failure is filed as
-``dev_oof_delta_below_threshold``, a claim about the biology.
+On typical (noisy) data neither arm changes the WINNER: conditioning bounds noise
+AMPLIFICATION, so a degenerate fold inflates held-out error, lowers theta, and
+selection takes the max. What the arms change is the recorded REASON — without them
+a numerical failure is filed as ``dev_oof_delta_below_threshold``, a claim about the
+biology.
+
+That is a CONDITIONAL claim and an earlier version of this file stated it
+unconditionally, while its own fixture falsified it. With zero noise there is
+nothing to amplify, an ill-conditioned but consistent ``lstsq`` is exact, and the
+over-ceiling ``lam=0`` candidate wins at ``theta = 0.9999999993`` — so the screen
+DOES move the winner there. Two independent reviews found it. The condition and its
+boundary are now pinned in
+:func:`test_the_winner_claim_is_conditional_on_noise_and_the_boundary_is_pinned`.
+
+One further scope limit, also from review: ``cond`` is invariant to a uniform
+rescale of ``z`` while the registered ``lambda_grid`` is ABSOLUTE, so how much
+protection ``lam > 0`` actually provides depends on a factor-bank scale that no
+config field bounds. Recorded as a limitation in the readiness index, not closed
+here.
 
 The first implementation enforced it on the WINNER as a futility condition. Three
 independent reviews (2026-08-04) showed that was wrong on both axes:
@@ -45,11 +58,12 @@ independent reviews (2026-08-04) showed that was wrong on both axes:
   in the same config block (``uncovered_tolerance``) is a ``SelectionError``.
 
 Two things the screen deliberately does NOT do. It never fires on a non-finite
-condition number: that is exactly the rank-deficient case, which the registered
-rank futility gate owns, and screening it here would make that gate unreachable.
-And it does not police uniform factor magnitude — the statistic is invariant to a
-uniform rescale of ``z`` (to round-off), so uniform-scale penalty immateriality is
-recorded separately and is not closed by this.
+condition number: that is the rank-deficient case (and, at ``k_total == 0``, a
+zero-width bank that reports full rank), which the registered rank policy owns, and
+screening it here would make that gate unreachable. And it does not police uniform
+factor magnitude — the statistic is invariant to a uniform rescale of ``z`` (to
+round-off), so uniform-scale penalty immateriality is recorded separately and is
+not closed by this.
 
 SYNTHETIC-ONLY: pure ``numpy`` except the forwarding test, which drives the
 ``phase2a`` fixture path (and so builds a DEVELOPMENT outcome store). No sealed
@@ -59,6 +73,8 @@ access, no seal, in any test here.
 from __future__ import annotations
 
 import json
+import re
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -72,6 +88,7 @@ from alive.compose.config2 import (
 )
 from alive.compose.gates import LeakageError
 from alive.compose.identify import rank_diagnostics
+from alive.compose.models import L1Model
 from alive.compose.operator import bilinear_predict, sym_basis_dim
 from alive.compose.phi_rank import (
     PHI_RANK_ACTIVATION_SCHEMA,
@@ -82,6 +99,7 @@ from alive.compose.select import (
     FOLD_CEILING_MARKER,
     FoldConditioningError,
     SelectionError,
+    _screen_unregularized_folds,
     build_gene_disjoint_folds,
 )
 from tests.alive.compose.test_config2 import CANON, _raw, _write
@@ -409,7 +427,7 @@ def test_the_bound_is_inclusive_and_the_comparison_is_one_ulp_sharp():
 # --------------------------------------------------------------------------- #
 # the second arm: the unregularized OOF TRAIN fold
 # --------------------------------------------------------------------------- #
-def _fold_local_degeneracy_instance(seed: int = 0, *, tiny: float = 1e-6):
+def _fold_local_degeneracy_instance(seed: int = 0, *, tiny: float = 1e-6, noise: float = 1e-2):
     """Full design comfortably under the ceiling; one TRAIN fold far above it.
 
     A gene-disjoint fold drops every pair touching its held-out genes, so a
@@ -417,6 +435,16 @@ def _fold_local_degeneracy_instance(seed: int = 0, *, tiny: float = 1e-6):
     the whole calibration roster. Confining the last factor's magnitude to fold
     0's held-out genes builds exactly that: pairs touching a carrier still probe
     the factor (the full design stays conditioned), fold 0's train pairs barely do.
+
+    ``noise`` is RELATIVE to ``std(eps)`` and is not decoration. A first version of
+    this helper regenerated ``eps_obs`` exactly and noiselessly from the degenerate
+    ``Z``, which made the exhibit demonstrate the OPPOSITE of the claim it was cited
+    for: ``cond(Phi)`` bounds noise AMPLIFICATION, so with nothing to amplify an
+    ill-conditioned but consistent ``lstsq`` is exact, the over-ceiling ``lam=0``
+    candidate scored ``theta = 0.9999999993`` and WON, and the screen changed the
+    winner. Two independent reviews caught it. The noiseless case is not hidden —
+    it is pinned as the boundary in
+    :func:`test_the_winner_claim_is_conditional_on_noise_and_the_boundary_is_pinned`.
     """
     rng = np.random.default_rng(seed)
     inst = _full_rank_instance(rng)
@@ -443,9 +471,10 @@ def _fold_local_degeneracy_instance(seed: int = 0, *, tiny: float = 1e-6):
     B = 0.5 * (B + np.transpose(B, (0, 2, 1)))
     coef = np.vstack([_sym_to_vec(B[m]) for m in range(p)])
     eps = np.vstack([bilinear_predict(coef, Z[g], Z[h]) for g, h in inst["idx_pairs"]])
-    inst["eps_obs"] = eps
-    inst["eps_split_a"] = eps + 0.02 * rng.normal(size=eps.shape)
-    inst["eps_split_b"] = eps + 0.02 * rng.normal(size=eps.shape)
+    scale = float(np.std(eps))
+    inst["eps_obs"] = eps + noise * scale * rng.normal(size=eps.shape)
+    inst["eps_split_a"] = inst["eps_obs"] + 0.02 * rng.normal(size=eps.shape)
+    inst["eps_split_b"] = inst["eps_obs"] + 0.02 * rng.normal(size=eps.shape)
     return inst, folds, carriers
 
 
@@ -510,7 +539,10 @@ def test_the_fold_arm_removes_the_unregularized_candidate_and_nothing_else():
     assert 0.0 in inst["lambda_grid"] and any(x > 0.0 for x in inst["lambda_grid"])
 
     unscreened = _run(inst, condition_ceiling=1e300)
-    assert not _nonviable_reasons(unscreened), "the premise: nothing else removes it"
+    # Stronger than `_nonviable_reasons`, which filters on the CEILING prefix and so
+    # cannot see a rank-policy removal -- exactly the "something else" this premise
+    # claims to rule out.
+    assert not unscreened.nonviable_candidates, "the premise: nothing else removes it"
 
     res = _run(inst, condition_ceiling=_REGISTERED_CEILING)
     assert not _candidate_arm(res), "the full design was admissible"
@@ -519,6 +551,42 @@ def test_the_fold_arm_removes_the_unregularized_candidate_and_nothing_else():
     assert {lam for _, lam in screened} == {0.0}
     assert res.status == "CONTINUE", "an admissible candidate remained in the grid"
     assert res.selected_lambda > 0.0
+    # The claim the module docstring makes, pinned on the exhibit that is cited for
+    # it. This assertion is the one whose absence let the claim stand while the
+    # fixture falsified it: the screened candidate must ALREADY have lost.
+    assert unscreened.selected_lambda > 0.0, "the over-ceiling candidate must not win"
+    assert unscreened.selected_lambda == res.selected_lambda
+    assert res.oof_theta == pytest.approx(unscreened.oof_theta, rel=1e-12)
+
+
+def test_the_winner_claim_is_conditional_on_noise_and_the_boundary_is_pinned():
+    """The scope of "conditioning damage cannot change the winner".
+
+    ``cond(Phi)`` bounds noise AMPLIFICATION. With NO noise there is nothing to
+    amplify: an ill-conditioned but consistent unregularized solve is exact, the
+    over-ceiling candidate scores ~1.0, wins, and the screen DOES move the winner.
+    The claim is therefore conditional, and this test states the condition rather
+    than leaving a reader to trust an unscoped sentence.
+
+    Both reviews found this by running the fixture; it is pinned here so the scope
+    cannot be quietly widened again.
+    """
+    noiseless, _, _ = _fold_local_degeneracy_instance(noise=0.0)
+    u = _run(noiseless, condition_ceiling=1e300)
+    s = _run(noiseless, condition_ceiling=_REGISTERED_CEILING)
+    assert u.selected_lambda == 0.0, "noiseless: the over-ceiling candidate wins"
+    assert u.oof_theta == pytest.approx(1.0, abs=1e-6), "and it recovers the operator"
+    assert s.selected_lambda > 0.0, "so the screen DOES change the winner here"
+    assert s.oof_theta < u.oof_theta
+
+    # ...and the amount of noise needed to restore the claim is small. Pinned as an
+    # order of magnitude, not a threshold: this is a property of the exhibit, not a
+    # registered bound.
+    for relative_noise in (1e-6, 1e-2):
+        inst, _, _ = _fold_local_degeneracy_instance(noise=relative_noise)
+        assert _run(inst, condition_ceiling=1e300).selected_lambda > 0.0, (
+            f"at relative noise {relative_noise} the over-ceiling candidate must lose"
+        )
 
 
 def test_the_fold_arm_reports_the_fold_and_the_two_numbers_it_compared():
@@ -532,6 +600,137 @@ def test_the_fold_arm_reports_the_fold_and_the_two_numbers_it_compared():
     assert f"condition_ceiling={_REGISTERED_CEILING}" in reason
     measured = float(reason.split("condition_number=")[1].split(" ")[0])
     assert measured > _REGISTERED_CEILING
+    # The FOLD, which this test is named for and did not assert. A constant index
+    # passed the suite until an independent review pointed at the gap -- while the
+    # sibling RANK arm's index has been pinned all along (test_diagnostics2).
+    assert f"{_FOLD_MARKER} 0" in reason, "fold 0 is the degenerate one"
+
+
+def test_every_over_ceiling_fold_is_named_not_only_the_first():
+    """An operator needs to know the degeneracy's extent, not one arbitrary index."""
+    inst, folds, _ = _fold_local_degeneracy_instance()
+    conditions = sorted(r.condition_number for r in _fold_conditions(inst, folds))
+    full = rank_diagnostics(
+        inst["factors_by_k"][inst["selected_k_total"]], inst["idx_pairs"]
+    ).condition_number
+    # Below the SECOND-largest fold (so at least two folds are over) but above the
+    # FULL design (so the candidate arm stays silent and this measures the fold arm).
+    assert full < conditions[-2], "no ceiling can separate the two arms on this exhibit"
+    ceiling = float(np.sqrt(full * conditions[-2]))
+    reason = _fold_arm(_run(inst, condition_ceiling=ceiling))[0]
+
+    assert "also over the ceiling: fold " in reason
+    named = {int(index) for index in re.findall(r"fold (\d+)", reason)}
+    assert len(named) >= 2, f"only one fold named in: {reason}"
+
+
+def test_a_rank_failure_in_any_fold_outranks_a_conditioning_failure_in_another():
+    """The ordering contract is per CANDIDATE, not per fold.
+
+    Checking rank then ceiling inside the fit loop looks equivalent and is not: the
+    loop raises on the first offending fold, so a conditioning raise in fold 0
+    short-circuits a rank failure in fold 1 and the candidate is recorded
+    "numerically inadmissible" when it is actually NON-IDENTIFIABLE. That silently
+    downgrades the diagnosis and makes the recorded reason depend on fold order --
+    the misattribution class this whole screen exists to prevent. Found by
+    independent review; the fix is the whole-candidate pre-pass.
+    """
+    inst, folds, _ = _fold_local_degeneracy_instance()
+    k = inst["selected_k_total"]
+    Z = inst["factors_by_k"][k].copy()
+    # collapse a factor for every gene OUTSIDE fold 1's held-out group, so fold 1's
+    # train design loses a dimension outright while fold 0 stays full rank
+    for g in range(inst["n_genes"]):
+        if g not in set(folds[1].held_out_genes):
+            Z[g, 1] = 0.0
+    inst["factors_by_k"] = {k: Z}
+
+    reports = _fold_conditions(inst, folds)
+    assert reports[0].is_full_rank and reports[0].condition_number > _REGISTERED_CEILING
+    assert not reports[1].is_full_rank, "fold 1 must be the rank-deficient one"
+
+    res = _run(inst, condition_ceiling=_REGISTERED_CEILING)
+    assert not _fold_arm(res), "rank outranks conditioning across the whole candidate"
+    assert any("non-identifiable" in r for _, _, r in res.nonviable_candidates)
+
+
+class _NotTheRegisteredModel(L1Model):
+    """Behaves identically to the registered estimator; only its TYPE differs."""
+
+
+def test_the_fold_arm_records_the_same_reason_for_any_estimator():
+    """The deliberate asymmetry with the SingularDesignError branch, pinned.
+
+    That branch escalates to ``SelectionError`` for a non-registered estimator,
+    because a singular design means "this HYPERPARAMETER is non-viable" only for
+    the registered one. Conditioning is different: ``cond(Phi)`` is a function of
+    ``Z`` and the fold's train pair roster alone -- no model, no outcome -- so it
+    means the same thing whatever the factory returns, and the fold arm carries no
+    estimator guard. Adding one survived the suite until this test existed.
+    """
+    inst, _, _ = _fold_local_degeneracy_instance()
+    inst["model_factory"] = _NotTheRegisteredModel
+    res = _run(inst, condition_ceiling=_REGISTERED_CEILING)
+
+    assert _fold_arm(res), "recorded, not escalated"
+    assert res.status == "CONTINUE"
+
+
+def test_a_reason_that_merely_mentions_the_ceiling_is_not_a_screened_candidate(monkeypatch):
+    """``startswith``, not ``in`` -- the prefix is a contract, not a keyword.
+
+    ``select.py`` documents that a screened reason BEGINS with the prefix and that
+    ``diagnostics2`` keys on it. A substring match would also catch any estimator
+    error that merely quotes the ceiling in passing, and would then attribute a
+    numerical stop to a screen that never ran -- a misattribution manufactured by
+    the very line meant to prevent one. Weakening it to ``in`` survived the suite
+    until this test existed.
+    """
+    import alive.compose.diagnostics2 as diagnostics2
+
+    rng = np.random.default_rng(2)
+    inst = _full_rank_instance(rng)
+    real = diagnostics2.select_hyperparams
+
+    def _mention_only(**kwargs):
+        result = real(**kwargs)
+        candidate = (inst["selected_k_total"], 0.0)
+        reason = f"estimator failed while checking {_CEILING_MARKER} -- not a screen"
+        assert not reason.startswith(_CEILING_MARKER) and _CEILING_MARKER in reason
+        return replace(result, nonviable_candidates={candidate: reason})
+
+    monkeypatch.setattr(diagnostics2, "select_hyperparams", _mention_only)
+    res = _run(inst, condition_ceiling=_REGISTERED_CEILING, dev_oof_threshold=1.0)
+
+    assert res.status == "FUTILITY_STOPPED", "the premise: a stop to attach context to"
+    assert not any(f.startswith("context, not an independent failure") for f in res.failures), (
+        "a mention is not a screen"
+    )
+
+
+def test_the_finiteness_guard_is_reachable_and_owns_the_zero_width_bank():
+    """Why the ``isfinite`` guard is not redundant with the rank pass.
+
+    ``rank_diagnostics`` returns ``inf`` when ``rank < sym_dim`` OR ``pos.size == 0``.
+    At ``k_total == 0`` the second fires while ``is_full_rank`` is True (``0 >= 0``),
+    so a zero-width bank arrives full-rank AND infinitely conditioned. An earlier
+    comment claimed the guard was simply dead below the rank raise; it is not, and
+    the guard is exercised directly here rather than left as untestable
+    defence-in-depth.
+    """
+    inst, folds, _ = _fold_local_degeneracy_instance()
+    empty = np.zeros((inst["n_genes"], 0), dtype=np.float64)
+    report = rank_diagnostics(empty, inst["idx_pairs"])
+    assert report.is_full_rank and not np.isfinite(report.condition_number)
+
+    # must NOT raise FoldConditioningError: an inf here is a degenerate bank, and
+    # filing it under the conditioning arm would be the wrong diagnosis
+    _screen_unregularized_folds(
+        folds=folds,
+        idx_pairs=inst["idx_pairs"],
+        Z=empty,
+        condition_ceiling=_REGISTERED_CEILING,
+    )
 
 
 def test_the_fold_arm_never_swallows_a_rank_deficient_fold():
@@ -549,6 +748,7 @@ def test_the_fold_arm_never_swallows_a_rank_deficient_fold():
 
     res = _run(inst, condition_ceiling=_REGISTERED_CEILING)
     assert not _fold_arm(res), "rank deficiency is the rank policy's, not the screen's"
+    assert not _candidate_arm(res), "and not the candidate arm's either"
     rank_reasons = [r for _, _, r in res.nonviable_candidates if "non-identifiable" in r]
     assert rank_reasons, "and the rank policy must still have recorded it"
 
