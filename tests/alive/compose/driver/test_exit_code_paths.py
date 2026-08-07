@@ -168,9 +168,15 @@ def test_the_injected_roster_is_not_silently_empty():
 
     ``_REJECTIONS`` is derived at import from the sibling module's table. If that
     derivation ever yields nothing -- a renamed constant, a partial edit -- pytest
-    reports a skip and the suite stays green while 168 cases quietly vanish.
+    reports a skip and the suite stays green while the injected cases quietly
+    vanish.
+
+    2026-08-07: 44 -> 45 for ``select::FoldConditioningError``. Updated because the
+    classification genuinely gained a PRESEAL_REJECTION class, which is what this
+    count is for; the new class is now driven end to end through every injection
+    stage like the other 44.
     """
-    assert len(_REJECTIONS) == 44, (
-        f"expected 44 PRESEAL_REJECTION classes, found {len(_REJECTIONS)}; update this "
+    assert len(_REJECTIONS) == 45, (
+        f"expected 45 PRESEAL_REJECTION classes, found {len(_REJECTIONS)}; update this "
         "count deliberately when the classification changes, never to make it pass"
     )

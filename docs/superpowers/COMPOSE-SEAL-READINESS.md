@@ -5,7 +5,7 @@
 > **이 문서는 아무것도 정의하지 않는다** — 세부(task)는 plan, claim은 spec, exact param은 config,
 > 시간순 audit는 git이 authoritative다([sources of truth](../../CLAUDE.md#sources)). 상태 행이 authoritative
 > 문서와 어긋나면 **authoritative 문서가 옳다**; 이 인덱스를 갱신한다.
-> **Updated:** 2026-08-05 @ `24b0fd7` (branch `main`)
+> **Updated:** 2026-08-07 @ `78a2acd` (branch `compose-fold-conditioning`)
 > `scripts/bump-readiness-stamp.sh` / the pre-commit hook from `HEAD` at commit time, so it names the
 > **parent** of the commit that carries it and can never name itself. Reading it as "one commit stale" is a
 > misreading; git is authoritative for when this file actually changed.
@@ -648,6 +648,49 @@ branch에서 추적 가능하게 기록한다. `LOCAL` ledger ID만으로는 이
    config-bound evidence stale. The resulting canonical config digest is
    `2a8b1bc37b4b952b29dd57cf128d2aa27a2a698693e1376e569544ff119e85eb`; it must be the config axis of
    any replacement evidence and run identity.
+   **2026-08-07 CLOSED — fold-level conditioning is gated, at `lam == 0.0` only (owner decision).** The item the
+   2026-08-04 and 2026-08-05 entries below carried as *recorded, not closed* now has a registered disposition.
+   Measured first, decided second, and the measurement **narrowed the premise the decision was going to be made
+   on**. Three things were established on synthetic designs this session (`n_genes=12/18`, `k=3/4`, 3 folds;
+   probes are scratch, the exhibits are pinned in `tests/alive/compose/test_condition_ceiling.py`):
+   (1) *the gap is real* — confining one factor's magnitude to a single fold's held-out genes leaves the full
+   design at `cond ≈ 1.5e1` (admitted by the candidate screen) with a **full-rank** train fold at `≈ 2.9e12`,
+   invisible to the `is_full_rank`-only fold policy and, for the three positive registered lambdas, to any fold
+   diagnostic at all; (2) *the damage at `lam = 0.0` is catastrophic but **self-eliminating*** — `theta` collapses
+   to the `-5e21` scale, and because conditioning damage inflates held-out error while selection takes the **max**,
+   an over-ceiling candidate cannot win: **0 counterexamples in 37 designs** that had a finite over-ceiling fold,
+   across the whole registered lambda grid; (3) *at `lam > 0` there is no damage to gate* — same design, same
+   outcomes, `theta = 0.7867` at `cond 2.9e12` against `0.7928` at `2.9e4`, because the ridge filter factors bound
+   the effective conditioning. So the residual risk was never a corrupted winner: it was **misattribution** — the
+   dead candidate is filed as a legitimate low score, and a stop that follows is named
+   `dev_oof_delta_below_threshold`, a claim about the biology, for a numerical cause. That is the same defect class
+   the 2026-08-05 entry fixed one level up. **Registered:** the ceiling is now also applied to each unregularized
+   OOF **train fold** design, at `lam == 0.0` only — the one place `identify_operator` takes the `lstsq` branch and
+   `cond(Φ)` *is* the conditioning of the solve, and the same boundary the sibling `unregularized_oof_rank_policy`
+   already uses. Applying it at every lambda was **rejected**: it would discard candidates whose actual solve is
+   well conditioned, relocating the ALL-vs-ANY over-strictness the 2026-08-05 review caught. The screened candidate
+   is recorded with the same reason prefix, so the `diagnostics2` context line covers it; that line now names
+   `(k_total, lambda)` **candidates** rather than `k_total` dimensions, because the two arms remove different
+   amounts and reporting a `lam=0.0`-only removal as a whole screened dimension would itself be a misattribution.
+   Verification: 7 mutations (screen deleted · applied at every lambda · `>` → `>=` · ordered before the rank raise ·
+   reason prefix dropped · exception swallowed unrecorded · context line reverted to `k_total`) — **all 7 killed**.
+   The fold arm raises `FoldConditioningError`, a `SelectionError` **subclass**, so `except` still routes an escape
+   (impossible on today's single call path) to exit 10 rather than exit 1; the roster stays 42 entries for the same
+   reason, while the classification table moves **74 → 75**. That table is what noticed the new class: the targeted
+   selection suites were green without it, and only the full `tests/alive/compose` run — 2 failed, 2000 passed —
+   flagged the unclassified exception. **This is the fail-closed registry from 2026-08-01 (L1-T4) doing exactly its
+   job**, and the second time on this work that a green targeted suite was not evidence of anything. A second full
+   run then caught a third: `_REJECTIONS` in `test_exit_code_paths.py`, derived from the same table, moved **44 →
+   45**, so the new class is now injected end to end through every driver stage like the other 44. All three counts
+   bound to the classification were then enumerated rather than discovered one run at a time. Final state:
+   full `tests/alive/compose` **2007 passed, 2 skipped**; `tests/alive/compose/driver` 537 passed; ruff check and
+   format clean. **macOS only — no Linux CI and no independent review of this arm.**
+   **What this does NOT close.** The phi-rank activation evidence reports the FULL design's condition number only,
+   so the fold arm is enforced at run time and is **not** pre-certified by evidence — recorded as a limitation, not
+   a blocker. The config digest is **unchanged** (`b158417a…`): no config field moved, the registered bound is
+   reused. Task #14 (regenerate the two config-bound activation reports at the current digest) and the missing
+   **owner-decision artifact** for the 2026-08-04 ceiling disposition both remain open. Seal state remains
+   **UNOPENED**; execution remains **RELEASE-BLOCKED**.
    **2026-08-05 second independent review of the redesign, and the corrections it forced.** Three reviewers
    re-ran against the redesigned branch; two were the round-1 reviewers, asked to judge their own findings
    CLOSED/PARTIAL/OPEN rather than to re-derive. **The highest-risk item held.** That the screen must not fire

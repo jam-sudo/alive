@@ -467,16 +467,50 @@ block만 $\times10^6$하면 조건수가 $10.42\to3.71\times10^{12}$로 움직�
 **닫히지 않는다**. 그 band는 readiness index에 별도 항목으로 기록되어 있으며, 이 상한을 그것의 해결로
 읽어서는 안 된다.
 
-**적용 지점은 selection의 후보별 심사이며 futility condition이 아니다.** 형제 기준인
+**첫 번째 적용 지점은 selection의 후보별 심사이며 futility condition이 아니다.** 형제 기준인
 `unregularized_oof_rank_policy`와 같은 형태로, 상한을 넘는 `k_total`은 그 사유와 함께
 `nonviable_candidates`에 기록되고 점수 map에서 제외되며 selection은 나머지 후보로 진행한다. **모든**
 후보가 부적격일 때에만 selection 자체가 무효가 되어 `SelectionError`로 종료한다 — 이미 등록된 pre-seal
 rejection(exit 10)이자 runbook 카테고리 D("반복 재실행이 아니라 원인 조사")이므로 새 exception class도
 새 futility condition도 필요하지 않다. 등록된 `futility.conditions`는 그대로 유지된다.
 
-심사는 **유한한 조건수에만** 적용한다. `rank_diagnostics`는 rank 결손일 때 정확히 $\infty$를 반환하며,
-rank 결손은 등록된 rank futility gate의 소관이다. 이를 심사가 함께 걸러내면 selection이 조용히 full-rank
-차원으로 옮겨가 그 gate가 도달 불가능해진다.
+**두 번째 적용 지점은 비정칙 OOF train fold다.** 위 통계량은 full-calibration roster 전체에 대한
+것이므로 하나의 gene-disjoint group에 국한된 degeneracy를 보지 못한다. fold는 held-out gene을 건드리는
+pair를 모두 버리므로 fold의 train 설계는 full 설계보다 작고 일반적으로 더 나쁘게 조건화된다. 측정된
+exhibit(2026-08-07, synthetic, `tests/alive/compose/test_condition_ceiling.py`): 마지막 factor의 크기를
+fold 0의 held-out gene에만 남기면 full 설계는 $\mathrm{cond}\approx1.5\times10^{1}$로 상한을 통과하고
+rank도 가득 차 있으나 그 fold의 train 설계는 $\approx2.9\times10^{12}$에 있다. 같은 상한을 fold의 train
+설계에도 적용하며, 초과 후보는 후보별 심사와 **같은 사유 접두사**로 `nonviable_candidates`에 기록한다.
+이 arm은 selection 내부 신호로 `FoldConditioningError`를 쓴다. `SelectionError`의 **subclass**이며
+`select_hyperparams`가 항상 포착하므로 밖으로 나가지 않는다 — subclass인 이유는 만에 하나 escape해도
+등록된 pre-seal rejection roster(exit 10)에 걸리고 uncontracted bug(exit 1)가 되지 않게 하기 위해서다.
+따라서 위 문단의 "새 exception class가 필요 없다"는 진술은 **모든 후보 부적격 시의 종료 경로**에 대한
+것으로 그대로 유효하다: 그 종료는 여전히 `SelectionError`이고 등록된 `futility.conditions`도 불변이다.
+
+이 arm은 **`lam == 0.0`에서만** 적용한다. 그 지점이 `identify_operator`가 비정칙 `lstsq` 분기를 타는
+곳, 즉 $\mathrm{cond}(\Phi)$가 곧 solve의 조건수인 유일한 지점이다. `lam > 0`에서는 ridge filter
+factor가 실효 조건수를 묶으므로 비정칙 조건수로 거부하면 실제 solve가 멀쩡한 후보를 버리게 된다. 같은
+설계·같은 outcome에서 측정(2026-08-07): `lam=0.1`에서 $\mathrm{cond}\approx2.9\times10^{12}$ 설계의
+OOF $\theta$는 0.7867, $\approx2.9\times10^{4}$ 대조군은 0.7928로, 수치 손상이라 부를 차이가 아니다.
+등록된 `unregularized_oof_rank_policy`가 `lam == 0.0`에만 적용되는 것과 같은 경계다.
+
+이 arm이 바로잡는 것은 **승자 오염이 아니라 사유 오귀속**이다. 조건 악화는 held-out 오차를 키워
+$\theta$를 낮추므로 argmax를 이길 수 없다 — 2026-08-07 측정에서 유한한 초과 fold를 가진 37개 설계 중
+등록 grid의 깨끗한 형제 차원을 이긴 경우는 0건이었고, `lam=0.0`의 $\theta$는 $-5\times10^{21}$ 규모로
+붕괴했다. 문제는 그 후보가 *정당한 낮은 점수*로 기록되어 이어지는 정지가
+`dev_oof_delta_below_threshold`(생물학에 관한 주장)라는 이름을 다는 것이다. 심사 기록과 `diagnostics2`의
+context 줄이 그 오귀속을 막는다. context 줄은 `k_total`이 아니라 `(k_total, lambda)` 후보를 지목한다 —
+후보별 arm은 한 `k_total`을 모든 lambda에서 제거하지만 fold arm은 그 `lam=0.0` 후보만 제거하므로, 차원
+단위로 보고하면 그 줄 자체가 또 하나의 오귀속이 된다.
+
+activation-evidence(`phi_rank`)는 full 설계의 조건수만 보고하므로 이 두 번째 arm을 **사전 증거로 닫지
+않는다**. fold 단위 조건수는 run 시점에 selection이 강제하며, 그 한계는 readiness index에 기록한다.
+
+두 arm 모두 심사는 **유한한 조건수에만** 적용한다. `rank_diagnostics`는 rank 결손일 때 정확히
+$\infty$를 반환하며, rank 결손은 등록된 rank 정책의 소관이다. 후보별 arm에서 이를 함께 걸러내면
+selection이 조용히 full-rank 차원으로 옮겨가 rank futility gate가 도달 불가능해진다. fold arm에서는
+경계가 **순서**로 보장된다 — fold의 rank 검사가 조건수 심사보다 **먼저** 실행되므로 rank 결손 fold는
+조건수 심사에 도달하지 않는다. 순서를 뒤집으면 모든 rank 실패가 조건 실패로 개명된다.
 
 상한 자체가 `NaN`이나 $\infty$이면 심사가 모든 후보에서 침묵하고(`cond > NaN`은 항상 False), non-positive면
 반대로 모든 후보를 거부한다. 두 방향 모두 사용 불가이므로 config loader와 selection 양쪽에서 거부한다.
@@ -491,6 +525,12 @@ screen하고 나머지로 진행하므로, 그것만으로 report 전체를 거�
 > run이 영구 종료됐고, futility 처분의 근거로 제시된 항목 중 둘이 사실과 달랐다(runbook은 exit 10을
 > "고쳐서 재시도"로 규정하지 않으며 카테고리 D가 그 반대를 지시한다; durable futility 보고서는 보존한다고
 > 서술된 spectrum을 기록하지 않는다). 위 문단이 현재 계약이다.
+
+> **2026-08-07 개정.** 두 번째 적용 지점(비정칙 OOF train fold)을 추가했다. 2026-08-06까지의 계약은
+> full-calibration 설계만 심사했고 fold에 국한된 degeneracy는 어떤 guard에도 걸리지 않았다 —
+> `lam == 0.0`에서는 `is_full_rank`만 읽혔고(조건수는 계산된 뒤 버려졌다) `lam > 0`에서는 fold 진단
+> 자체가 없었다. 소유자 결정으로 `lam == 0.0`에만 적용하는 안을 등록했다. 측정 근거와 기각된 대안(모든
+> lambda에 적용)은 위 문단에 있다.
 
 ### 10.5 Baselines, metric and inference
 

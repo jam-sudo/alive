@@ -203,8 +203,11 @@ _KNOWN_PRESEAL_REJECTIONS: tuple[type[Exception], ...] = (
     # which the registered estimator-domain rank policy leaves no viable candidate
     # at all, a non-finite or non-positive registered conditioning ceiling, or a
     # grid in which the registered conditioning screen leaves nothing admissible
-    # (2026-08-05: the ceiling is a per-candidate admissibility screen, so its
-    # all-inadmissible case lands here rather than in the futility vocabulary).
+    # (2026-08-05: the ceiling is an admissibility screen, so its all-inadmissible
+    # case lands here rather than in the futility vocabulary; 2026-08-07: its
+    # fold-level arm raises ``FoldConditioningError``, a ``SelectionError``
+    # subclass that ``select_hyperparams`` always catches — it is a subclass so
+    # that an escape would still be rostered here rather than exit 1).
     # The rank-policy row is reachable only since the policy exists,
     # and it is a selection INVALIDATION, not a futility verdict — phase2a
     # produces no futility report for it, so without this entry the run ended in
