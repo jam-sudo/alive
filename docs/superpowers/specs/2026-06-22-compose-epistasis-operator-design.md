@@ -499,9 +499,26 @@ factor가 실효 조건수를 묶으므로 비정칙 조건수로 거부하면 �
 > $\mathrm{cond}(\Phi)$는 uniform rescale에 불변이고(이 문서가 위에서 detector 성질로 등록한 바로 그
 > 성질) 등록된 `lambda_grid`는 **절대값**이다. 따라서 "`lam > 0`은 안전하다"는 진술은 등록된 grid가
 > 실제 $\lVert z\rVert$에서 healthy window에 들어갈 때에만 성립하며, 조건수만으로는 판정할 수 없다.
-> 측정 예(2026-08-07, 동일 설계·동일 $\mathrm{cond}$, bank를 $\times100$): `lam=0.001`의 OOF $\theta$가
-> 0.8103에서 0.9577로 이동한다 — 즉 등록된 양의 $\lambda$가 점점 $\lambda\approx0$처럼 작동한다.
-> 이 한계는 **닫히지 않았고** readiness index에 기록한다.
+> 측정(2026-08-07 재측정, `_fold_local_degeneracy_instance` 기본 exhibit = 상대 noise 0.01, `eps`도
+> $c^{2}$로 함께 rescale, `lam=0.001`):
+>
+> | | $c=1$ | $c=100$ |
+> |---|---|---|
+> | noise $=0$ | 0.8100934924563623 | 0.9577101250921993 |
+> | noise $=0.01$ (기본) | 0.8103235465139835 | **−3340344.0205271696** |
+>
+> $\mathrm{cond}(\Phi)$는 네 칸 모두에서 6.4732…로 동일하다. $\lambda/c^{4}$ 항등식도 확인했다
+> ($c=100,\lambda=10^{-3}$ ≡ $c=1,\lambda=10^{-11}$, 유효숫자 10자리). 즉 기본 exhibit에서 bank를
+> $\times100$하면 $\theta$가 **−3.34×10⁶으로 붕괴**하며, 이는 어떤 `dev_oof_threshold`보다도 한참
+> 아래다. 이 한계는 **닫히지 않았고** readiness index에 기록한다.
+>
+> > **2026-08-07 철회.** 최초 기록은 이 이동을 "0.8103 → 0.9577"로 적고 그 위에 "동일 설계"라고
+> > 썼다. 두 값은 **서로 다른 exhibit**의 것이다(0.8103은 noisy 기본값, 0.9577은 noiseless). 어떤
+> > (noise, c) 조합도 그 쌍을 만들지 않으며, noiseless 기준선은 0.8101이다. 또한 리뷰어가 제시한
+> > −3.3e6을 "eps를 함께 rescale하지 않은 혼동"이라며 재현 실패로 기각했는데, 그 근거는 **틀렸다** —
+> > $\theta$는 outcome의 uniform rescale에 불변이며(측정 차이 상대 5×10⁻⁹), 실제 차이는 noise였다.
+> > 재현 실패의 원인은 내가 fix wave 이전의 noiseless exhibit으로 측정한 것이다. 기각을 철회하고
+> > 리뷰어의 측정을 채택한다. 이는 이 commit이 고쳤다고 주장한 misattribution과 **같은 유형**이다.
 
 이 arm이 바로잡는 것은 **일반적으로 승자 오염이 아니라 사유 오귀속**이다. 조건수는 **noise 증폭**을
 묶는 양이므로, noise가 있는 데이터에서 조건 악화는 held-out 오차를 키워 $\theta$를 낮추고 따라서 argmax를

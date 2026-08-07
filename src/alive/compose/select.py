@@ -840,9 +840,20 @@ def _screen_unregularized_folds(
     """Registered fold-level guards for the unregularized (``lam == 0.0``) solve.
 
     A PRE-PASS over every fold, before any fit. Rank is checked across ALL folds
-    before conditioning is checked on ANY, which is the ordering that carries the
-    contract: a rank failure anywhere in the candidate outranks a conditioning
-    failure anywhere else.
+    before conditioning is checked on ANY, so within this function a rank failure
+    in any fold outranks a conditioning failure in any other.
+
+    That precedence is LOCAL to this function and does not hold for selection as a
+    whole. ``select_hyperparams`` screens the FULL calibration design against the
+    same ceiling before it ever calls into here, so a full-design conditioning
+    failure still masks a fold-level rank failure. Measured: full design
+    ``cond 9.21e12`` over the ceiling with train fold 1 at ``rank 6/10`` records
+    only the conditioning reason. That is deliberate and is NOT the defect fixed
+    here: the two arms examine different objects, the candidate arm's reason is
+    true, and it justifies removing the candidate at EVERY lambda whereas the fold
+    rank policy justifies removing only ``lam=0.0``. Recording the narrower reason
+    as primary would under-justify the removal that actually happens. The loss is
+    diagnostic, not decisional, and it is not fold-order dependent.
 
     Checking the two fold by fold inside the fit loop looked equivalent and was
     not. The loop raises on the first offending fold, so a conditioning raise in
@@ -872,13 +883,24 @@ def _screen_unregularized_folds(
     """
     reports = [rank_diagnostics(Z, [idx_pairs[i] for i in fold.train_idx]) for fold in folds]
 
-    for fold_index, report in enumerate(reports):
-        if not report.is_full_rank:
-            raise SingularDesignError(
-                f"OOF train fold {fold_index}: unregularized calibration design "
-                "is non-identifiable under the registered rank rule: "
-                f"rank={report.rank}, sym_dim={report.sym_dim}, lam={0.0!r}"
+    deficient = [(index, report) for index, report in enumerate(reports) if not report.is_full_rank]
+    if deficient:
+        first_index, first_report = deficient[0]
+        # Same argument as the conditioning arm below: an operator needs the extent
+        # of the degeneracy, not one arbitrary index. Leaving this arm reporting
+        # only its first offender while the sibling reports all of them was an
+        # asymmetry in the arm this screen calls the STRONGER diagnosis.
+        also = ""
+        if len(deficient) > 1:
+            also = "; also rank-deficient: " + ", ".join(
+                f"fold {index} at rank {report.rank}/{report.sym_dim}"
+                for index, report in deficient[1:]
             )
+        raise SingularDesignError(
+            f"OOF train fold {first_index}: unregularized calibration design "
+            "is non-identifiable under the registered rank rule: "
+            f"rank={first_report.rank}, sym_dim={first_report.sym_dim}, lam={0.0!r}{also}"
+        )
 
     ceiling = float(condition_ceiling)
     # ``isfinite`` is NOT redundant with the rank pass above, and the reason is

@@ -5,7 +5,7 @@
 > **이 문서는 아무것도 정의하지 않는다** — 세부(task)는 plan, claim은 spec, exact param은 config,
 > 시간순 audit는 git이 authoritative다([sources of truth](../../CLAUDE.md#sources)). 상태 행이 authoritative
 > 문서와 어긋나면 **authoritative 문서가 옳다**; 이 인덱스를 갱신한다.
-> **Updated:** 2026-08-07 @ `9865f6e` (branch `compose-fold-conditioning`)
+> **Updated:** 2026-08-07 @ `28cd0a0` (branch `compose-fold-conditioning`)
 > `scripts/bump-readiness-stamp.sh` / the pre-commit hook from `HEAD` at commit time, so it names the
 > **parent** of the commit that carries it and can never name itself. Reading it as "one commit stale" is a
 > misreading; git is authoritative for when this file actually changed.
@@ -724,24 +724,81 @@ branch에서 추적 가능하게 기록한다. `LOCAL` ledger ID만으로는 이
    moving both guards into a whole-candidate pre-pass, `_screen_unregularized_folds`, that checks rank across ALL
    folds before conditioning on any.
    **(d) a scope limit that is NOT closed.** `cond(Φ)` is invariant to a uniform rescale of `z` while the registered
-   `lambda_grid` is ABSOLUTE: `Φ` is bilinear in `z`, so `z → cz` makes the effective penalty `λ/c⁴`. Measured on the
-   same design at identical `cond`: rescaling the bank by 100 moves `theta(lam=0.001)` from `0.8103` to `0.9577`,
-   i.e. the registered positive lambdas increasingly behave like `lam ≈ 0`. **How much protection `lam > 0` actually
-   provides is therefore a property of `‖z‖`, which no config field, code path or activation evidence bounds.**
-   Recorded as a registered limitation; the `lam == 0.0` restriction is retained as the conservative choice.
-   One reviewer illustrated (d) with a `theta ≈ -3.3e6` collapse; I could not reproduce that magnitude — scaling `Z`
-   without scaling `eps` conflates a representation mismatch with conditioning — so the mechanism is recorded and
-   the magnitude is not. Also fixed: the reported fold index was asserted nowhere (a constant passed the suite) while
-   the sibling rank arm pinned its own; only the first over-ceiling fold was named; the `isfinite` guard's stated
-   justification was wrong (`rank_diagnostics` returns `inf` when `rank < sym_dim` **or** `pos.size == 0`, and the
+   `lambda_grid` is ABSOLUTE: `Φ` is bilinear in `z`, so `z → cz` makes the effective penalty `λ/c⁴`. **How much
+   protection `lam > 0` actually provides is therefore a property of `‖z‖`, which no config field, code path or
+   activation evidence bounds.** Recorded as a registered limitation; the `lam == 0.0` restriction is retained as
+   the conservative choice. Measured (2026-08-07 re-measurement, `lam=0.001`, `eps` rescaled by `c²` with the
+   design, `cond(Φ) = 6.4732…` in all four cells):
+
+   | | `c = 1` | `c = 100` |
+   |---|---|---|
+   | noise = 0 | `0.8100934924563623` | `0.9577101250921993` |
+   | noise = 0.01 (the fixture default) | `0.8103235465139835` | **`-3340344.0205271696`** |
+
+   The `λ/c⁴` identity is confirmed to ten significant figures (`c=100, λ=1e-3` ≡ `c=1, λ=1e-11`). Also fixed: the reported fold index was asserted nowhere (a constant passed the suite) while
+   the sibling rank arm pinned its own; only the first over-ceiling fold was named; the reason string silently
+   dropped the "the unregularized solver applies no filter that could bound it" clause — deliberately, because it is
+   false (`lstsq` applies an `rcond` truncation), but the removal went unrecorded while the string lands verbatim in
+   a checksummed futility report; the `isfinite` guard's stated justification was wrong (`rank_diagnostics` returns `inf` when `rank < sym_dim` **or** `pos.size == 0`, and the
    second fires at `k_total == 0` with `is_full_rank` TRUE — so the guard is reachable, and is now tested directly
    rather than kept as untestable defence-in-depth); and the config comment still described a `k_total`-only screen.
    The config fix is comment-only and **digest-neutral by owner decision** — recomputed after the edit as
    `b158417a76e888bff2bf6836bea622e0cbf596f0743f3fe89aea2ffe0864a9fd`, unchanged, so no new run identity is created.
-   Post-fix state: **12 mutations all killed**, full `tests/alive/compose` **2013 passed, 2 skipped**, ruff check and
-   format clean. **This wave has NOT been re-reviewed and has no Linux CI yet** — the 2026-08-05 round established
-   that a fix wave needs its own review, because that is where the second batch of defects came from. Seal state
-   remains **UNOPENED**; execution remains **RELEASE-BLOCKED**.
+   Post-fix state at `28cd0a0`: 12 mutations killed, full `tests/alive/compose` 2013 passed 2 skipped, ruff clean,
+   Linux CI green (run `31152897312`). **That state was then reviewed again and did not survive — see the entry
+   below.** Seal state remains **UNOPENED**; execution remains **RELEASE-BLOCKED**.
+
+   **2026-08-07 SECOND review round on the fix wave (closure · new code · new tests), and the third correction
+   wave.** Verdict again **do not merge**: `28cd0a0` had green Linux CI and a green 2013-test suite, and both were
+   green on a commit whose own record was still wrong. Ten of the twelve round-1 findings were judged genuinely
+   closed — a reviewer independently rebuilt the true reorder mutation and confirmed it is now killable, and
+   reproduced every repinned number bit-for-bit. Three were not.
+   **F12 was WRONGLY CLOSED, and it is the same misattribution the fix wave claimed to eliminate.** The recorded
+   scale exhibit `0.8103 → 0.9577` pairs numbers from TWO different fixtures — `0.8103` is the noisy default,
+   `0.9577` is the noiseless one — under the words "동일 설계" (same design); no `(noise, c)` setting produces both,
+   and the noiseless baseline is `0.8101`. Worse, a reviewer's `theta ≈ -3.3e6` had been dismissed as unreproducible
+   "because scaling `Z` without scaling `eps` conflates a representation mismatch with conditioning". **That reason
+   is false**: `theta` is a relative-error-reduction ratio and is invariant to a uniform rescale of the outcomes
+   (measured difference: relative `5e-9`). The real cause of the non-reproduction was measuring against the
+   pre-fix, noiseless exhibit. The dismissal is **withdrawn**, the reviewer's measurement is adopted, and the table
+   above is repinned from a single stated configuration. The correction matters: the recorded severity understated
+   the collapse by roughly seven orders of magnitude on a quantity that feeds a registered futility condition.
+   **A thirteenth mutation existed, in the arm the fix wave itself created.** `select.py`'s RANK pre-pass reported
+   `f"OOF train fold {fold_index}"`, and replacing that index with a constant `0` survived the FULL compose suite at
+   2013 passed — identical to clean. The only fixture in the repo where the deficient fold is not fold 0 is the new
+   `test_a_rank_failure_in_any_fold_outranks_a_conditioning_failure_in_another`, and it never asserted which fold
+   the reason named. Eight further survivors were found in the same family (rank value taken from fold 0; rank pass
+   skipping the last fold; the also-clause naming a nonexistent fold, or healthy folds, or only the second; the rank
+   raise switched to the conditioning exception type, which routes it past the estimator escalation).
+   **Five of the six new tests were weaker than their names.** The boundary test's boundary was measured at noise
+   `≈ 6e-12` while its nearest probe sat at `1e-6`; `approx(1.0, abs=1e-6)` asserted seven digits of a quantity out
+   of a `cond 3.03e12` solve, the same over-precise shape as the `rel=1e-12` pin that went red on Linux; the
+   "owns the zero-width bank" test showed no such ownership (the actual refusal is `EstimatorInputError`, three
+   layers down); the monkeypatched prefix test passed verbatim with its monkeypatch deleted; and the rewritten
+   fixture fed the SAME noise realization into both split halves, so `measurability_gate` — a split-half correlation
+   — would have scored injected noise as reproducible GI signal.
+   **The recurring failure mode, named.** Across both rounds the code fixes held; what failed each time was
+   asserting a weaker property than the name claims, then recording the name. The standing rule added here is
+   mechanical rather than aspirational: **for every new test, run the mutation its own name describes and confirm it
+   dies.** Every finding above would have been caught by that check before commit, without a reviewer.
+   Also corrected: `_screen_unregularized_folds`'s docstring asserted its rank-before-conditioning precedence
+   without qualification, but the CANDIDATE-level screen still masks fold-level rank failures one level up
+   (measured: full design `cond 9.21e12` over the ceiling with train fold 1 at `rank 6/10` records only the
+   conditioning reason). That is deliberate, not the same defect — the two arms examine different objects, the
+   candidate arm's reason is true, and it justifies removal at every lambda where the fold rank policy justifies
+   removing only `lam=0.0` — so the docstring is scoped rather than the code restructured. The RANK arm now names
+   every deficient fold, matching the conditioning arm. `diagnostics2`'s two `sorted(...)` calls remain mutable to
+   `list(...)` with the suite green; that is **equivalent-by-config** (the registered grids are ascending, so
+   insertion order equals sorted order) and is recorded here as knowingly-surviving rather than left silent for a
+   third round. **F10 remains OPEN and is recorded as such:** the decision NOT to register a policy name for the new
+   scope was minuted only as its benefit ("no config field moved, so no new run identity"); its counterpart is that
+   the 2026-08-06 and 2026-08-07 selection contracts are now indistinguishable from config, digest and
+   `selected_hyperparameters`, and separable only by Git SHA. Post-wave state: **22 mutations all killed** (the
+   twelve from round 1 plus the nine round-2 survivors and one per new test name), full `tests/alive/compose`
+   **2016 passed, 2 skipped**, ruff check and format clean. **Not yet re-reviewed at this SHA, and no Linux CI on
+   this wave** — and on this branch two fix waves in a row have themselves needed correction, so neither a green
+   suite nor green CI is evidence about the record. Seal state remains **UNOPENED**; execution remains
+   **RELEASE-BLOCKED**.
    **2026-08-05 second independent review of the redesign, and the corrections it forced.** Three reviewers
    re-ran against the redesigned branch; two were the round-1 reviewers, asked to judge their own findings
    CLOSED/PARTIAL/OPEN rather than to re-derive. **The highest-risk item held.** That the screen must not fire
