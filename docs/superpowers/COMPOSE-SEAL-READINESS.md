@@ -5,7 +5,7 @@
 > **이 문서는 아무것도 정의하지 않는다** — 세부(task)는 plan, claim은 spec, exact param은 config,
 > 시간순 audit는 git이 authoritative다([sources of truth](../../CLAUDE.md#sources)). 상태 행이 authoritative
 > 문서와 어긋나면 **authoritative 문서가 옳다**; 이 인덱스를 갱신한다.
-> **Updated:** 2026-08-09 @ `2256f6d` (branch `compose-fold-conditioning`)
+> **Updated:** 2026-08-09 @ `50e7bc7` (branch `compose-fold-conditioning`)
 > `scripts/bump-readiness-stamp.sh` / the pre-commit hook from `HEAD` at commit time, so it names the
 > **parent** of the commit that carries it and can never name itself. Reading it as "one commit stale" is a
 > misreading; git is authoritative for when this file actually changed.
@@ -858,8 +858,14 @@ branch에서 추적 가능하게 기록한다. `LOCAL` ledger ID만으로는 이
    would guess. **Process hazard recorded:** the in-place harness was run while independent reviewers were reading
    the same checkout, which briefly showed a mutated `select.py` in `git status`. It restored correctly and a
    concurrent on-disk mutation can only produce a spurious FAILURE, never a spurious pass — but the harness and
-   read-only review must not share a worktree. Seal state remains **UNOPENED**; execution remains
-   **RELEASE-BLOCKED**.
+   read-only review must not share a worktree.
+   Branch state at `50e7bc7`: 30 mutations all killed (M8 retired), full `tests/alive/compose` 2016 passed
+   2 skipped, ruff clean, Linux CI **green on the tip** (run `31263820204`). Note `2256f6d`'s own run
+   (`31263666233`) was **cancelled** when the next commit was pushed on top of it — superseded, so neither a pass
+   nor a failure, and that commit has no CI verdict of its own; the tip contains its changes. **`2256f6d` and
+   `50e7bc7` have had no independent review.** Rounds 1/2/3 found 12 / 9+ / 6 defects: converging, not converged,
+   and the last two findings came from reviewers examining the VERIFICATION rather than the code. Seal state
+   remains **UNOPENED**; execution remains **RELEASE-BLOCKED**.
    **2026-08-05 second independent review of the redesign, and the corrections it forced.** Three reviewers
    re-ran against the redesigned branch; two were the round-1 reviewers, asked to judge their own findings
    CLOSED/PARTIAL/OPEN rather than to re-derive. **The highest-risk item held.** That the screen must not fire
