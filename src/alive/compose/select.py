@@ -846,9 +846,12 @@ def _screen_unregularized_folds(
     That precedence is LOCAL to this function and does not hold for selection as a
     whole. ``select_hyperparams`` screens the FULL calibration design against the
     same ceiling before it ever calls into here, so a full-design conditioning
-    failure still masks a fold-level rank failure. Measured: full design
-    ``cond 9.21e12`` over the ceiling with train fold 1 at ``rank 6/10`` records
-    only the conditioning reason. That is deliberate and is NOT the defect fixed
+    failure still masks a fold-level rank failure: a full design over the ceiling
+    with a rank-deficient train fold records only the conditioning reason. (An
+    earlier version of this comment quoted a specific condition number from a
+    construction that exists in no committed artifact — the same unreproducible-
+    number defect this branch was corrected for twice.) That is deliberate and is
+    NOT the defect fixed
     here: the two arms examine different objects, the candidate arm's reason is
     true, and it justifies removing the candidate at EVERY lambda whereas the fold
     rank policy justifies removing only ``lam=0.0``. Recording the narrower reason
@@ -1089,11 +1092,14 @@ def select_hyperparams(
         pair. An uncovered fraction strictly above this invalidates selection.
     condition_ceiling : float
         Registered admissibility bound on ``cond(Phi)`` (config
-        ``identification.condition_ceiling``), applied as a per-candidate screen:
+        ``identification.condition_ceiling``), applied in TWO places: per candidate
+        on the FULL calibration design, and per unregularized (``lam == 0.0``) OOF
+        TRAIN fold. The two remove different amounts — a whole ``k_total`` at every
+        lambda, versus that ``k_total``'s ``lam=0.0`` candidate alone. The screen:
         a ``k_total`` whose full-calibration design has a FINITE condition number
         above this is excluded before scoring and recorded in
         ``nonviable_candidates``. Restricted to finite condition numbers on
-        purpose — ``rank_diagnostics`` returns ``inf`` exactly for a rank-deficient
+        purpose — ``rank_diagnostics`` returns ``inf`` for a rank-deficient
         design, which the registered rank futility gate owns. Must itself be finite
         and positive.
     unregularized_oof_rank_policy, rank_tolerance_rule : str
@@ -1183,7 +1189,8 @@ def select_hyperparams(
         # grid. It is the same shape as the unregularized rank policy below.
         #
         # Deliberately restricted to FINITE condition numbers. ``rank_diagnostics``
-        # returns ``inf`` exactly when the design is rank-deficient, and rank
+        # returns ``inf`` when the design is rank-deficient (and, at ``k_total == 0``,
+        # for a zero-width bank that reports FULL rank — "exactly" was wrong), and rank
         # deficiency is owned by the registered rank futility gate in
         # ``diagnostics2``. Screening it out here would make that gate unreachable:
         # selection would quietly move to a full-rank dimension and the run would

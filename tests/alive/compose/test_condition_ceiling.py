@@ -332,6 +332,11 @@ def test_screening_the_winning_dimension_stops_the_run_and_says_so():
     # Candidates, not dimensions: the two arms remove different amounts, and the
     # line must not inflate a lam=0.0-only removal into a whole screened k_total.
     assert "(6, 0.0)" in context[0]
+    # EVERY lambda, because the candidate arm removes the whole k_total. Asserting
+    # only `(6, 0.0)` let a mutant report a candidate-arm removal as a lam=0.0-only
+    # one -- the mirror image of the misattribution this line exists to prevent.
+    for lam in inst["lambda_grid"]:
+        assert f"(6, {float(lam)})" in context[0], context[0]
     assert "(4," not in context[0], "the surviving dimension is not a screened one"
     assert _nonviable_reasons(screened), "and the per-candidate reasons are still recorded"
 
@@ -369,12 +374,17 @@ def test_when_every_dimension_is_inadmissible_selection_itself_is_invalid():
         _run(inst, condition_ceiling=_REGISTERED_CEILING)
     assert "no viable hyperparameter candidate" in str(excinfo.value)
     assert _CEILING_MARKER in str(excinfo.value), "the reason must reach the operator"
+    # the MEASURED value, not merely the field name: replacing it with 0.0 passed.
+    measured = rank_diagnostics(Z, inst["idx_pairs"]).condition_number
+    assert f"condition_number={float(measured)} " in str(excinfo.value)
+    assert f"condition_ceiling={float(_REGISTERED_CEILING)}" in str(excinfo.value)
 
 
 def test_the_screen_never_swallows_rank_deficiency():
     """The trap in moving the ceiling into selection.
 
-    ``rank_diagnostics`` returns ``inf`` exactly for a rank-deficient design, and
+    ``rank_diagnostics`` returns ``inf`` for a rank-deficient design (and, at
+    ``k_total == 0``, for a zero-width bank that reports FULL rank), and
     ``inf > ceiling`` is True. A screen that fired on it would drop every
     rank-deficient dimension as merely "non-viable" — selection would quietly move
     to a full-rank one and the run would CONTINUE, making the registered rank
@@ -427,7 +437,9 @@ def test_the_bound_is_inclusive_and_the_comparison_is_one_ulp_sharp():
 # --------------------------------------------------------------------------- #
 # the second arm: the unregularized OOF TRAIN fold
 # --------------------------------------------------------------------------- #
-def _fold_local_degeneracy_instance(seed: int = 0, *, tiny: float = 1e-6, noise: float = 1e-2):
+def _fold_local_degeneracy_instance(
+    seed: int = 0, *, tiny: float = 1e-6, noise: float = 1e-2, degenerate_fold: int = 0
+):
     """Full design comfortably under the ceiling; one TRAIN fold far above it.
 
     A gene-disjoint fold drops every pair touching its held-out genes, so a
@@ -456,7 +468,10 @@ def _fold_local_degeneracy_instance(seed: int = 0, *, tiny: float = 1e-6, noise:
         n_folds=inst["n_folds"],
         seed=inst["seed"],
     )
-    carriers = tuple(sorted(folds[0].held_out_genes))
+    # ``degenerate_fold`` exists because a fixture that always degenerates fold 0
+    # cannot tell a reported index from the literal ``0`` -- which is exactly how a
+    # constant index survived the whole suite.
+    carriers = tuple(sorted(folds[degenerate_fold].held_out_genes))
     for g in range(inst["n_genes"]):
         if g not in carriers:
             Z[g, -1] *= tiny
@@ -487,6 +502,40 @@ def _fold_local_degeneracy_instance(seed: int = 0, *, tiny: float = 1e-6, noise:
 def _fold_conditions(inst, folds) -> list:
     Z = inst["factors_by_k"][inst["selected_k_total"]]
     return [rank_diagnostics(Z, [inst["idx_pairs"][i] for i in f.train_idx]) for f in folds]
+
+
+def _assert_ceiling_fields(reason, *, index, condition, ceiling, also):
+    """Pin EVERY generated field of a conditioning reason against substitution.
+
+    Field-level rather than one assertion per discovered mutation: three review
+    rounds each found the same defect one seat over (a constant fold index, a value
+    taken from fold 0, an extent that could not be falsified), because each fix
+    addressed the instance rather than the class. The class is "a generated field is
+    unpinned"; this closes it for the whole message at once.
+    """
+    assert reason.startswith(CEILING_REASON_PREFIX), reason
+    assert f"{FOLD_CEILING_MARKER} {index} " in reason, reason
+    assert f"condition_number={condition} " in reason, reason
+    assert f"condition_ceiling={ceiling} " in reason, reason
+    if also:
+        assert "; also over the ceiling: " in reason, reason
+    for other_index, other_condition in also:
+        assert f"fold {other_index} at {other_condition}" in reason, reason
+    named = {int(found) for found in re.findall(r"fold (\d+)", reason)}
+    assert named == {index} | {i for i, _ in also}, reason
+
+
+def _assert_rank_fields(reason, *, index, report, also):
+    """The same, for the rank arm -- the arm this screen calls the stronger diagnosis."""
+    assert reason.startswith(f"{FOLD_CEILING_MARKER} {index}: "), reason
+    assert f"rank={report.rank}, sym_dim={report.sym_dim}" in reason, reason
+    assert report.rank < report.sym_dim, "the reported rank must be deficient"
+    if also:
+        assert "; also rank-deficient: " in reason, reason
+    for other_index, other in also:
+        assert f"fold {other_index} at rank {other.rank}/{other.sym_dim}" in reason, reason
+    named = {int(found) for found in re.findall(r"fold (\d+)", reason)}
+    assert named == {index} | {i for i, _ in also}, reason
 
 
 def test_the_reason_markers_under_test_are_the_ones_selection_writes():
@@ -605,19 +654,43 @@ def test_the_winner_claim_is_conditional_on_noise_and_the_boundary_is_pinned():
 
 def test_the_fold_arm_reports_the_fold_and_the_two_numbers_it_compared():
     """A screened candidate must be diagnosable without re-running selection."""
-    inst, _, _ = _fold_local_degeneracy_instance()
+    inst, folds, _ = _fold_local_degeneracy_instance()
     res = _run(inst, condition_ceiling=_REGISTERED_CEILING)
     reason = _fold_arm(res)[0]
 
-    assert reason.startswith(_CEILING_MARKER), "diagnostics2 keys on this prefix"
     assert "lam=0.0" in reason
-    assert f"condition_ceiling={_REGISTERED_CEILING}" in reason
-    measured = float(reason.split("condition_number=")[1].split(" ")[0])
-    assert measured > _REGISTERED_CEILING
-    # The FOLD, which this test is named for and did not assert. A constant index
-    # passed the suite until an independent review pointed at the gap -- while the
-    # sibling RANK arm's index has been pinned all along (test_diagnostics2).
-    assert f"{_FOLD_MARKER} 0" in reason, "fold 0 is the degenerate one"
+    over = [
+        (i, float(r.condition_number))
+        for i, r in enumerate(_fold_conditions(inst, folds))
+        if r.condition_number > _REGISTERED_CEILING
+    ]
+    _assert_ceiling_fields(
+        reason,
+        index=over[0][0],
+        condition=over[0][1],
+        ceiling=float(_REGISTERED_CEILING),
+        also=over[1:],
+    )
+
+    # ...and with the degeneracy moved OFF fold 0, so a constant index cannot pass.
+    # Two review rounds closed this in the rank arm and left it open here, because
+    # every fixture in the repo degenerated fold 0.
+    moved, moved_folds, _ = _fold_local_degeneracy_instance(degenerate_fold=1)
+    moved_reason = _fold_arm(_run(moved, condition_ceiling=_REGISTERED_CEILING))[0]
+    moved_over = [
+        (i, float(r.condition_number))
+        for i, r in enumerate(_fold_conditions(moved, moved_folds))
+        if r.condition_number > _REGISTERED_CEILING
+    ]
+    assert moved_over[0][0] == 1, "the fixture must move the degeneracy off fold 0"
+    _assert_ceiling_fields(
+        moved_reason,
+        index=1,
+        condition=moved_over[0][1],
+        ceiling=float(_REGISTERED_CEILING),
+        also=moved_over[1:],
+    )
+    assert f"{_FOLD_MARKER} 0 " not in moved_reason
 
 
 def test_every_over_ceiling_fold_is_named_not_only_the_first():
@@ -646,6 +719,12 @@ def test_every_over_ceiling_fold_is_named_not_only_the_first():
     assert named == expected, f"named {named}, over-ceiling {expected}: {reason}"
     assert len(named) >= 3, "'every' is only falsifiable with three or more offenders"
     assert max(named) < len(folds), "a named fold must exist"
+    # ...and each named fold's own condition number, not the primary's repeated.
+    over = [(i, float(c)) for i, c in enumerate(by_fold) if c > ceiling]
+    _assert_ceiling_fields(
+        reason, index=over[0][0], condition=over[0][1], ceiling=ceiling, also=over[1:]
+    )
+    assert len({c for _, c in over}) == len(over), "distinct values, or M28 is invisible"
 
     # Seed 4 puts ALL folds over, which makes "name every offender" and "name every
     # fold" indistinguishable. Seed 0 leaves one fold UNDER the ceiling, so it is the
@@ -660,6 +739,10 @@ def test_every_over_ceiling_fold_is_named_not_only_the_first():
     expected0 = {i for i, c in enumerate(by_fold0) if c > ceiling0}
     under = {i for i, c in enumerate(by_fold0) if c <= ceiling0}
     assert under, "seed 0 must leave a healthy fold for this half to mean anything"
+    # ...and at least two offenders, or `named0 == expected0` degrades to a
+    # single-element identity that no longer discriminates a clause naming
+    # healthy folds. Fold 2 sits only ~5% above this ceiling.
+    assert len(expected0) >= 2, f"seed 0 must keep two offenders, got {expected0}"
     reason0 = _fold_arm(_run(inst0, condition_ceiling=ceiling0))[0]
     named0 = {int(index) for index in re.findall(r"fold (\d+)", reason0)}
     assert named0 == expected0, f"named {named0}, over-ceiling {expected0}: {reason0}"
@@ -716,21 +799,33 @@ def test_every_rank_deficient_fold_is_named_not_only_the_first():
     Z = inst["factors_by_k"][k].copy()
     # A fold's TRAIN design uses pairs with neither gene held out, so to make fold
     # i deficient the factor must vanish on every gene OUTSIDE fold i's group.
-    for g in range(inst["n_genes"]):
-        if g not in set(folds[1].held_out_genes):
-            Z[g, 1] = 0.0
-        if g not in set(folds[2].held_out_genes):
-            Z[g, 2] = 0.0
+    # Distinct RANKS per fold, not merely three deficient folds: with all three at
+    # rank 6/10, substituting the first fold's values into the also-clause produces
+    # a byte-identical message and the mutation is invisible.
+    for column, fold in ((0, 1), (1, 1), (2, 2), (3, 0)):
+        for g in range(inst["n_genes"]):
+            if g not in set(folds[fold].held_out_genes):
+                Z[g, column] = 0.0
     inst["factors_by_k"] = {k: Z}
 
     reports = _fold_conditions(inst, folds)
     deficient = [i for i, r in enumerate(reports) if not r.is_full_rank]
-    assert len(deficient) >= 2, f"fixture must make several folds deficient, got {deficient}"
+    # THREE, not two. With two, `deficient[1:]` and `deficient[1:2]` are the same
+    # list and the word "every" in this test's name cannot be falsified -- the exact
+    # criterion the conditioning sibling states, and which this test was written
+    # without. That mutation survived the full 2016-test suite.
+    assert len(deficient) >= 3, f"'every' needs three offenders, got {deficient}"
+    ranks = {reports[i].rank for i in deficient}
+    assert len(ranks) >= 2, f"the offenders must differ in rank, got {ranks}"
 
     res = _run(inst, condition_ceiling=_REGISTERED_CEILING)
     reason = [r for _, _, r in res.nonviable_candidates if "non-identifiable" in r][0]
-    named = {int(index) for index in re.findall(r"fold (\d+)", reason)}
-    assert named == set(deficient), f"named {named}, deficient {deficient}: {reason}"
+    _assert_rank_fields(
+        reason,
+        index=deficient[0],
+        report=reports[deficient[0]],
+        also=[(i, reports[i]) for i in deficient[1:]],
+    )
 
 
 class _NotTheRegisteredModel(L1Model):
@@ -803,12 +898,18 @@ def test_the_fold_arm_records_the_same_reason_for_any_estimator():
     means the same thing whatever the factory returns, and the fold arm carries no
     estimator guard. Adding one survived the suite until this test existed.
     """
+    baseline, _, _ = _fold_local_degeneracy_instance()
+    registered = _fold_arm(_run(baseline, condition_ceiling=_REGISTERED_CEILING))
+
     inst, _, _ = _fold_local_degeneracy_instance()
     inst["model_factory"] = _NotTheRegisteredModel
     res = _run(inst, condition_ceiling=_REGISTERED_CEILING)
 
     assert _fold_arm(res), "recorded, not escalated"
     assert res.status == "CONTINUE"
+    # "the SAME reason" -- the test asserted only that SOME reason existed, so a
+    # branch that rewrote the text for an unregistered estimator passed.
+    assert _fold_arm(res) == registered
 
 
 def test_a_reason_that_merely_mentions_the_ceiling_is_not_a_screened_candidate(monkeypatch):
@@ -849,7 +950,7 @@ def test_a_reason_that_merely_mentions_the_ceiling_is_not_a_screened_candidate(m
     )
 
 
-def test_the_finiteness_guard_refuses_the_zero_width_bank_it_alone_can_see():
+def test_the_finiteness_guard_keeps_the_zero_width_bank_out_of_the_conditioning_arm():
     """Why the ``isfinite`` guard is not redundant with the rank pass.
 
     ``rank_diagnostics`` returns ``inf`` when ``rank < sym_dim`` OR ``pos.size == 0``.

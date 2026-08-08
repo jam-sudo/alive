@@ -218,8 +218,10 @@ def real_calibration_diagnostics(
     condition_ceiling
         Registered admissibility bound on ``cond(Phi)`` (config
         ``identification.condition_ceiling``), forwarded unchanged to
-        :func:`~alive.compose.select.select_hyperparams`, which applies it per
-        candidate. Must be finite and positive; ``nan``/``inf`` would silence the
+        :func:`~alive.compose.select.select_hyperparams`, which applies it in two
+        places: per candidate on the full calibration design, and per unregularized
+        (``lam == 0.0``) OOF train fold. Must be finite and positive; ``nan``/``inf``
+        would silence the
         screen and a non-positive value would reject every candidate, so selection
         refuses both.
 

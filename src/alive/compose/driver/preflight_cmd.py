@@ -405,9 +405,13 @@ def _selected_hyperparameters(
         "split_seed": int(config.split_seed),
         "registered_seeds": [int(s) for s in config.registered_seeds],
         "uncovered_tolerance": float(config.uncovered_tolerance),
-        # Load-bearing beside `total_k_grid`: the conditioning screen can remove
-        # dimensions from that grid before scoring, so recording the grid without
-        # the bound that filtered it would misdescribe what was actually searched.
+        # Load-bearing beside `total_k_grid`: the conditioning screen removes
+        # CANDIDATES before scoring -- a whole `k_total` at every lambda when the
+        # full design is over the bound, or that `k_total`'s `lam=0.0` candidate
+        # alone when only a train fold is. Recording the grid without the bound that
+        # filtered it would misdescribe what was actually searched. "dimensions" was
+        # the k_total/candidate conflation this protocol registers as a
+        # misattribution.
         "condition_ceiling": float(config.condition_ceiling),
         "dev_oof_metric": str(config.dev_oof_metric),
         "dev_oof_threshold": float(config.dev_oof_threshold),

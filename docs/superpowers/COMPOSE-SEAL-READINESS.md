@@ -5,7 +5,7 @@
 > **이 문서는 아무것도 정의하지 않는다** — 세부(task)는 plan, claim은 spec, exact param은 config,
 > 시간순 audit는 git이 authoritative다([sources of truth](../../CLAUDE.md#sources)). 상태 행이 authoritative
 > 문서와 어긋나면 **authoritative 문서가 옳다**; 이 인덱스를 갱신한다.
-> **Updated:** 2026-08-07 @ `28cd0a0` (branch `compose-fold-conditioning`)
+> **Updated:** 2026-08-09 @ `c22db82` (branch `compose-fold-conditioning`)
 > `scripts/bump-readiness-stamp.sh` / the pre-commit hook from `HEAD` at commit time, so it names the
 > **parent** of the commit that carries it and can never name itself. Reading it as "one commit stale" is a
 > misreading; git is authoritative for when this file actually changed.
@@ -795,10 +795,56 @@ branch에서 추적 가능하게 기록한다. `LOCAL` ledger ID만으로는 이
    the 2026-08-06 and 2026-08-07 selection contracts are now indistinguishable from config, digest and
    `selected_hyperparameters`, and separable only by Git SHA. Post-wave state: **22 mutations all killed** (the
    twelve from round 1 plus the nine round-2 survivors and one per new test name), full `tests/alive/compose`
-   **2016 passed, 2 skipped**, ruff check and format clean. **Not yet re-reviewed at this SHA, and no Linux CI on
-   this wave** — and on this branch two fix waves in a row have themselves needed correction, so neither a green
-   suite nor green CI is evidence about the record. Seal state remains **UNOPENED**; execution remains
+   2016 passed 2 skipped, ruff clean, Linux CI green on `c22db82` (run `31188255447`). **That state was reviewed a
+   third time and again did not survive — see below.** Seal state remains **UNOPENED**; execution remains
    **RELEASE-BLOCKED**.
+
+   **2026-08-08 THIRD review round (closure · whole-branch merge readiness · new tests), and the fourth correction
+   wave.** All three CI runs green, 2016 tests green, 22/22 mutations killed — and **six more mutations survived the
+   full suite at counts byte-identical to clean**. The whole-branch lens returned MERGE-WITH-FIXES; the other two
+   returned defects. Every finding was re-run before acceptance.
+   **The recurring failure was diagnosed one level too shallow.** Round 2 was recorded as "asserting a weaker
+   property than the test name claims". The truer statement is that **each wave fixed the INSTANCE and not the
+   CLASS**: wave 3 closed the constant-fold-index mutation in the rank arm, wrote a comment stating that "every" is
+   only falsifiable with three or more offenders — and then created the same two defects in the *conditioning* arm's
+   primary index and in the rank arm's own also-clause, in the same commit. Six survivors, all of one family: a
+   generated message field that no assertion pins. The fix is now class-level: `_assert_ceiling_fields` and
+   `_assert_rank_fields` pin EVERY generated field of both reasons — index, measured value, clause header, and the
+   exact membership of the also-clause — against substitution by a constant or by another field's value. Fixtures
+   were changed to make that falsifiable at all: the degenerate fold is parameterised (it was always fold 0, so no
+   fixture in the repo could distinguish a reported index from the literal `0`), the rank fixture now produces
+   THREE deficient folds with DISTINCT ranks (three were needed for "every"; distinct ranks were needed or
+   substituting fold 0's values yields a byte-identical message), and the conditioning also-clause is asserted with
+   its per-fold values.
+   Also closed: the fold-arm "same reason for any estimator" test never compared reasons; the candidate arm's
+   measured value could be replaced by `0.0`; the `diagnostics2` context line could report a candidate-arm removal
+   (every lambda) as a `lam=0.0`-only one — the mirror of the misattribution that line exists to prevent; a
+   test whose name said the finiteness guard "refuses" a zero-width bank when its body asserts nothing is raised
+   (renamed); and a seed-0 margin that could silently degrade to a single-element identity. **Harness now 31
+   mutations, all killed.**
+   Corrections to this document and to source: the falsified claim that `rank_diagnostics` returns `inf` **exactly**
+   for a rank-deficient design still stood in three places including the PUBLIC `select_hyperparams` docstring;
+   `select_hyperparams` and `diagnostics2` still documented a one-arm screen; `preflight_cmd`'s comment still said
+   the screen removes "dimensions", the exact `k_total`/candidate conflation this protocol registers as a
+   misattribution. Two unreproducible numbers introduced by the previous correction are withdrawn: the withdrawal
+   paragraph's own "relative `5e-9`" invariance figure measures ~`5e-15`, and a `cond 9.21e12` quoted in a source
+   docstring came from a construction committed nowhere — both are unreproducible numbers *inside the corrections
+   for unreproducible numbers*, and the second is removed rather than repinned.
+   **Recorded, NOT closed.** `diagnostics2`'s `sorted(...)` sites were recorded as equivalent-by-config; that
+   justification covers `sorted` → `list` but **not** reversal, which also survives, and a third such site exists at
+   `select.py`'s `"; ".join(sorted(...))`. `measurability_gate` still cannot fail on this fixture — the fix removed
+   a false-pass mechanism (the shared noise realization) rather than making the gate load-bearing here. And the
+   **lineage asymmetry F10 half-states**: the 2026-07-27 entry registered a structurally identical guard as a config
+   field precisely because "a scientific selection-contract change moves the config digest/run identity", and the
+   same review dismissed `selected_hyperparameters` blindness **because** `config_checksum` and `run_id` "both move
+   with any config change". This branch removes that premise, and F10 records the consequence without saying the
+   earlier mitigation no longer applies. It does now.
+   The mutation harness is now **committed** (`scripts/compose_conditioning_mutation_harness.py`) because its
+   absence was itself a named root cause: the evidence for "all mutations killed" existed only as prose in a commit
+   message, so it could not be re-run or extended and each round rediscovered the same family one seat over. It
+   refuses to start on a dirty worktree, since it edits `src/` in place and restores in `finally`. Post-wave state:
+   **31 mutations all killed**, full `tests/alive/compose` **2016 passed, 2 skipped**, ruff check and format clean.
+   Seal state remains **UNOPENED**; execution remains **RELEASE-BLOCKED**.
    **2026-08-05 second independent review of the redesign, and the corrections it forced.** Three reviewers
    re-ran against the redesigned branch; two were the round-1 reviewers, asked to judge their own findings
    CLOSED/PARTIAL/OPEN rather than to re-derive. **The highest-risk item held.** That the screen must not fire
