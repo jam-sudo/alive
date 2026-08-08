@@ -11,6 +11,17 @@ Each entry applies ONE textual mutation to a source file, runs the targeted suit
 and restores the file. A mutation that leaves the suite GREEN survived and is a
 defect in the tests, not in the source.
 
+TWO RULES, both learned the hard way:
+
+1. For every test, run the mutation its own NAME describes and confirm it dies.
+2. An index- or value-to-constant mutation must use the constant the CORRECT
+   ANSWER actually takes -- never a conspicuous sentinel like ``99``. A sentinel
+   dies against any assertion that mentions the real value, so it certifies the
+   class while the real defect lives. See the retired M8 below: it did exactly
+   that for two review rounds. Better still, build the fixture so the correct
+   answer is not a constant any mutation would guess -- which is why the degenerate
+   fold is parameterised rather than always fold 0.
+
 Run: ``uv run python scripts/compose_conditioning_mutation_harness.py``
 
 The ``# noqa: E501`` markers below are deliberate: those strings are VERBATIM
@@ -97,12 +108,14 @@ MUTATIONS = [
         "        (int(candidate[0]), float(candidate[1]))",
         "        int(candidate[0])",
     ),
-    (
-        "M8  [reviewer] the reported fold index is a constant",
-        SELECT,
-        "{FOLD_CEILING_MARKER} {first_index} ",
-        "{FOLD_CEILING_MARKER} 99 ",
-    ),
+    # M8 RETIRED, and the reason is the most instructive entry in this file.
+    # It mutated this same site to the sentinel `99` and was recorded as KILLED in
+    # round 1 -- but `99` died only because a test asserted the literal substring
+    # "OOF train fold 0". The constant that mattered, `0`, SURVIVED two further
+    # rounds under a name ("the reported fold index is a constant") that claimed the
+    # whole class. The harness had acquired the exact defect it exists to find:
+    # asserting a weaker property than the name claims, then recording the name.
+    # M23 below supersedes it with the correct-answer constant.
     (
         "M9  [reviewer] the isfinite guard is deleted",
         SELECT,

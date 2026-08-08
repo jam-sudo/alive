@@ -5,7 +5,7 @@
 > **이 문서는 아무것도 정의하지 않는다** — 세부(task)는 plan, claim은 spec, exact param은 config,
 > 시간순 audit는 git이 authoritative다([sources of truth](../../CLAUDE.md#sources)). 상태 행이 authoritative
 > 문서와 어긋나면 **authoritative 문서가 옳다**; 이 인덱스를 갱신한다.
-> **Updated:** 2026-08-09 @ `c22db82` (branch `compose-fold-conditioning`)
+> **Updated:** 2026-08-09 @ `2256f6d` (branch `compose-fold-conditioning`)
 > `scripts/bump-readiness-stamp.sh` / the pre-commit hook from `HEAD` at commit time, so it names the
 > **parent** of the commit that carries it and can never name itself. Reading it as "one commit stale" is a
 > misreading; git is authoritative for when this file actually changed.
@@ -844,7 +844,22 @@ branch에서 추적 가능하게 기록한다. `LOCAL` ledger ID만으로는 이
    message, so it could not be re-run or extended and each round rediscovered the same family one seat over. It
    refuses to start on a dirty worktree, since it edits `src/` in place and restores in `finally`. Post-wave state:
    **31 mutations all killed**, full `tests/alive/compose` **2016 passed, 2 skipped**, ruff check and format clean.
-   Seal state remains **UNOPENED**; execution remains **RELEASE-BLOCKED**.
+
+   **The most instructive finding of the third round arrived after it: the failure mode had migrated INTO the
+   mutation harness.** Round 1's `M8` mutated the reported fold index to the sentinel `99` and was recorded KILLED —
+   but `99` died only because a test asserted the literal substring `"OOF train fold 0"`. The constant that
+   mattered, `0`, survived two further rounds, under a mutation NAME ("the reported fold index is a constant") that
+   claimed the whole class. So the harness itself was asserting a weaker property than its name and then recording
+   the name — the exact defect it exists to find — and its false kill is *why* the class stayed open across rounds
+   2 and 3. Verified at this SHA: both `99` and `0` now die, because wave 4 parameterised the degenerate fold.
+   `M8` is retired in favour of the correct-answer mutation, and the harness now carries the rule explicitly:
+   **an index- or value-to-constant mutation must use the constant the correct answer actually takes, never a
+   conspicuous sentinel** — better still, build the fixture so the correct answer is not a constant any mutation
+   would guess. **Process hazard recorded:** the in-place harness was run while independent reviewers were reading
+   the same checkout, which briefly showed a mutated `select.py` in `git status`. It restored correctly and a
+   concurrent on-disk mutation can only produce a spurious FAILURE, never a spurious pass — but the harness and
+   read-only review must not share a worktree. Seal state remains **UNOPENED**; execution remains
+   **RELEASE-BLOCKED**.
    **2026-08-05 second independent review of the redesign, and the corrections it forced.** Three reviewers
    re-ran against the redesigned branch; two were the round-1 reviewers, asked to judge their own findings
    CLOSED/PARTIAL/OPEN rather than to re-derive. **The highest-risk item held.** That the screen must not fire
