@@ -7,11 +7,15 @@ extended, or regression-tested, and each round rediscovered the same family one
 seat over. The evidence for "all mutations killed" has to be re-runnable or it is
 just a sentence in a commit message.
 
-Each entry applies ONE textual mutation to a source file, runs the targeted suite,
-and restores the file. A mutation that leaves the suite GREEN survived and is a
-defect in the tests, not in the source.
+Each entry applies a textual mutation to ONE file under `src/` or `tests/`, runs
+the targeted suite, and restores the file. (M6 additionally injects a helper class
+it needs; that second substitution is anchor-checked like the first.)
 
-TWO RULES, both learned the hard way:
+A mutation that leaves the suite GREEN survived and is a defect in the tests, not
+in the source. A mutation that produces no failing test at all is reported INVALID
+-- neither a kill nor a survivor -- because it is evidence about the process.
+
+FIVE RULES, every one of them learned by this harness getting it wrong:
 
 1. For every test, run the mutation its own NAME describes and confirm it dies.
 2. An index- or value-to-constant mutation must use the constant the CORRECT
@@ -20,7 +24,22 @@ TWO RULES, both learned the hard way:
    class while the real defect lives. See the retired M8 below: it did exactly
    that for two review rounds. Better still, build the fixture so the correct
    answer is not a constant any mutation would guess -- which is why the degenerate
-   fold is parameterised rather than always fold 0.
+   fold is parameterised rather than always fold 0. This is the strongest of the
+   rules, not a footnote to rule 2: it is what actually closed the constant class.
+4. A kill must be attested by a NAMED FAILING TEST, never by a nonzero exit code.
+   A mutant that breaks collection exits nonzero with zero failing tests, and
+   scoring on the exit code records that as a kill -- a statement about the
+   process, not about the tests. Demonstrated by review with a one-character
+   syntax break: three collection errors, no assertion, recorded "killed". This
+   harness now reports such a run as INVALID, which is neither a kill nor a
+   survivor.
+5. The mutable file set must cover every site that ENFORCES the contract, not
+   only the two where it is implemented. Rules 1-4 govern how an entry is written;
+   none of them governs which sites have an entry at all. Sites currently
+   enforcing the ceiling and NOT mutated here: `phi_rank.py`, `phase2a.py`,
+   `config2.py`, `driver/preflight_cmd.py`. The suite does cover them
+   (`test_phase2a_forwards_the_registered_ceiling_rather_than_a_literal` catches a
+   hardcoded literal), but that coverage is asserted, not measured here.
 
 Run: ``uv run python scripts/compose_conditioning_mutation_harness.py``
 
@@ -30,10 +49,17 @@ An anchor that stops matching is reported as ``SKIP``/``ANCHOR`` rather than as 
 kill — silently counting a non-applied mutation as killed is the failure this
 harness exists to prevent.
 
-SAFETY. This script edits files under ``src/`` in place and restores them from a
-backup in ``finally``. It refuses to start on a dirty worktree, so an interrupted
-run can always be recovered with ``git checkout --``. It never touches ``configs/``
-and never runs a scientific command: every mutation here is synthetic-suite only.
+SAFETY. This script edits files under ``src/`` AND ``tests/`` in place and restores
+them from a backup in ``finally``. It refuses to start on a dirty worktree, so an
+interrupted run can always be recovered with ``git checkout --``. It never touches
+``configs/`` and never runs a scientific command: every mutation here is
+synthetic-suite only.
+
+**It must not share a worktree with anything else.** A concurrent reader — an
+independent review, another agent, an editor — will observe a mutated tree
+mid-run. That happened during a review of this branch. A concurrent on-disk
+mutation can only produce a spurious FAILURE and never a spurious pass, so it does
+not corrupt evidence, but it will confuse anyone reading `git status`.
 """
 
 from __future__ import annotations
@@ -79,16 +105,38 @@ MUTATIONS = [
         "    if require_full_rank_unregularized:\n        _screen_unregularized_folds(",
     ),
     (
-        "M3  the bound becomes exclusive (> -> >=)",
+        "M3  FOLD arm bound becomes exclusive (> -> >=)",
         SELECT,
         "and float(report.condition_number) > ceiling",
         "and float(report.condition_number) >= ceiling",
     ),
     (
-        "M4  [reviewer] conditioning checked BEFORE rank, across folds",
+        # Renamed to what it DOES. It was called "conditioning checked BEFORE rank"
+        # while deleting the rank pre-pass outright -- a strict superset, so its kill
+        # was evidence for the larger defect and said nothing about ordering. A live
+        # Rule-1 violation, in the harness committed after the rules were written.
+        # M4b below performs the reorder the old name claimed.
+        "M4  the rank pre-pass is deleted outright",
         SELECT,
         RANK_BLOCK,
         "    deficient = []  # rank pass disabled: conditioning now decides first",
+    ),
+    (
+        "M4b TRUE reorder: the conditioning arm is evaluated BEFORE the rank arm",
+        SELECT,
+        RANK_BLOCK,
+        "    _ceiling_first = float(condition_ceiling)\n"
+        "    _over_first = [\n"
+        "        (i, float(r.condition_number))\n"
+        "        for i, r in enumerate(reports)\n"
+        "        if np.isfinite(r.condition_number) and float(r.condition_number) > _ceiling_first\n"  # noqa: E501
+        "    ]\n"
+        "    if _over_first:\n"
+        "        raise FoldConditioningError(\n"
+        '            f"{CEILING_REASON_PREFIX}: {FOLD_CEILING_MARKER} {_over_first[0][0]} "\n'
+        '            f"condition_number={_over_first[0][1]} > "\n'
+        '            f"condition_ceiling={_ceiling_first} at lam=0.0 (mutant reorder)"\n'
+        "        )\n" + RANK_BLOCK,
     ),
     (
         "M5  the reason drops the prefix diagnostics2 keys on",
@@ -117,7 +165,7 @@ MUTATIONS = [
     # asserting a weaker property than the name claims, then recording the name.
     # M23 below supersedes it with the correct-answer constant.
     (
-        "M9  [reviewer] the isfinite guard is deleted",
+        "M9  FOLD arm isfinite guard is deleted",
         SELECT,
         "if np.isfinite(report.condition_number) and float(report.condition_number) > ceiling",
         "if float(report.condition_number) > ceiling",
@@ -203,6 +251,18 @@ MUTATIONS = [
         "noise: float = 0.0, degenerate_fold: int = 0",
     ),
     (
+        "M9b CANDIDATE arm isfinite guard is deleted",
+        SELECT,
+        "if np.isfinite(candidate_condition) and candidate_condition > float(condition_ceiling):",
+        "if candidate_condition > float(condition_ceiling):",
+    ),
+    (
+        "M3b CANDIDATE arm bound becomes exclusive (> -> >=)",
+        SELECT,
+        "and candidate_condition > float(condition_ceiling):",
+        "and candidate_condition >= float(condition_ceiling):",
+    ),
+    (
         "M23 [r3] CONDITIONING arm primary fold index is a constant",
         SELECT,
         'f"{CEILING_REASON_PREFIX}: {FOLD_CEILING_MARKER} {first_index} "',
@@ -261,12 +321,37 @@ MUTATIONS = [
 ]
 
 
-def run_suite() -> tuple[bool, str]:
+def _key(path: Path) -> str:
+    """Backup name keyed by RELATIVE PATH, not basename.
+
+    Two mutable files sharing a basename would otherwise restore each other's
+    contents into the wrong file.
+    """
+    return str(path.relative_to(REPO)).replace("/", "__")
+
+
+def run_suite() -> tuple[frozenset[str], str]:
+    """Run the suite and return the set of FAILED test node IDs, plus the summary.
+
+    Returning the FAILURES rather than the exit code is the whole point. A mutant
+    that makes a module unimportable produces collection ERRORS and a nonzero exit
+    with ZERO failing tests; scoring on ``returncode`` records that as a kill,
+    which is a statement about the process and not about the tests. Independent
+    review demonstrated it with a one-character syntax break: three collection
+    errors, no assertion, recorded "killed". Every kill in the old logs meant only
+    "the process exited nonzero".
+    """
     proc = subprocess.run(
-        ["uv", "run", "pytest", "-q", *TESTS], cwd=REPO, capture_output=True, text=True
+        ["uv", "run", "pytest", "-q", "-rf", *TESTS], cwd=REPO, capture_output=True, text=True
     )
-    line = proc.stdout.strip().splitlines()[-1] if proc.stdout else ""
-    return proc.returncode == 0, line
+    out = proc.stdout or ""
+    failed = frozenset(
+        line.split()[1]
+        for line in out.splitlines()
+        if line.startswith("FAILED ") and len(line.split()) > 1
+    )
+    lines = [line for line in out.strip().splitlines() if line.strip()]
+    return failed, lines[-1] if lines else "(no output)"
 
 
 def main() -> int:
@@ -279,18 +364,19 @@ def main() -> int:
         return 2
     SCRATCH.mkdir(parents=True, exist_ok=True)
     for path in (SELECT, DIAG, TESTS_FILE):
-        shutil.copy2(path, SCRATCH / path.name)
+        shutil.copy2(path, SCRATCH / _key(path))
 
-    ok, line = run_suite()
-    if not ok:
+    failed, line = run_suite()
+    if failed:
         print(f"BASELINE RED -- aborting: {line}")
         return 2
     print(f"baseline green: {line}\n")
 
-    survived = []
+    survived: list[str] = []
+    invalid: list[str] = []
     try:
         for name, path, old, new in MUTATIONS:
-            original = (SCRATCH / path.name).read_text(encoding="utf-8")
+            original = (SCRATCH / _key(path)).read_text(encoding="utf-8")
             n = original.count(old)
             if n != 1:
                 print(f"SKIP      {name}: anchor matched {n} times")
@@ -298,28 +384,46 @@ def main() -> int:
                 continue
             mutant = original.replace(old, new)
             if "_Never" in new:
-                mutant = mutant.replace(
-                    "class FoldConditioningError(SelectionError):",
-                    "class _Never(Exception):\n    pass\n\n\nclass FoldConditioningError(SelectionError):",  # noqa: E501
-                )
+                helper = "class _Never(Exception):\n    pass\n\n\n"
+                target = "class FoldConditioningError(SelectionError):"
+                if mutant.count(target) != 1:
+                    print(f"SKIP      {name}: _Never helper anchor matched {mutant.count(target)}")
+                    survived.append(f"{name} (ANCHOR)")
+                    continue
+                mutant = mutant.replace(target, helper + target)
             path.write_text(mutant, encoding="utf-8")
-            green, line = run_suite()
-            print(f"{'SURVIVED' if green else 'killed  '}  {name}\n          {line}")
-            if green:
-                survived.append(name)
+            killers, line = run_suite()
             path.write_text(original, encoding="utf-8")
+
+            if killers:
+                shown = ", ".join(sorted(k.split("::")[-1] for k in killers)[:3])
+                extra = f" (+{len(killers) - 3} more)" if len(killers) > 3 else ""
+                print(f"killed    {name}\n          by: {shown}{extra}")
+            elif line.startswith("(no output)") or "error" in line.lower():
+                # nonzero exit with NO failing test: the mutant broke collection or
+                # the environment. That is not evidence about the tests.
+                print(f"INVALID   {name}: no test failed -- {line}")
+                invalid.append(name)
+            else:
+                print(f"SURVIVED  {name}\n          {line}")
+                survived.append(name)
     finally:
         for path in (SELECT, DIAG, TESTS_FILE):
-            shutil.copy2(SCRATCH / path.name, path)
+            shutil.copy2(SCRATCH / _key(path), path)
 
-    ok, line = run_suite()
-    print(f"\nrestored, suite green: {ok} ({line})")
-    if survived:
-        print("\nSURVIVING:")
-        for name in survived:
-            print(f"  - {name}")
+    failed, line = run_suite()
+    print(f"\nrestored, suite clean: {not failed} ({line})")
+    if survived or invalid:
+        if survived:
+            print("\nSURVIVING:")
+            for name in survived:
+                print(f"  - {name}")
+        if invalid:
+            print("\nINVALID (no assertion fired -- not evidence of a kill):")
+            for name in invalid:
+                print(f"  - {name}")
         return 1
-    print("\nall mutations killed")
+    print(f"\nall {len(MUTATIONS)} mutations killed, each by a named failing test")
     return 0
 
 
