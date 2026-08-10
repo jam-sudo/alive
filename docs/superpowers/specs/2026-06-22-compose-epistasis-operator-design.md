@@ -516,7 +516,11 @@ factor가 실효 조건수를 묶으므로 비정칙 조건수로 거부하면 �
 > > 썼다. 두 값은 **서로 다른 exhibit**의 것이다(0.8103은 noisy 기본값, 0.9577은 noiseless). 어떤
 > > (noise, c) 조합도 그 쌍을 만들지 않으며, noiseless 기준선은 0.8101이다. 또한 리뷰어가 제시한
 > > −3.3e6을 "eps를 함께 rescale하지 않은 혼동"이라며 재현 실패로 기각했는데, 그 근거는 **틀렸다** —
-> > $\theta$는 outcome의 uniform rescale에 불변이며(측정 차이 상대 5×10⁻⁹), 실제 차이는 noise였다.
+> > $\theta$는 relative-error-reduction 비율이므로 outcome의 uniform rescale에 불변이다. **구성을 함께
+> > 적는다** — 값만 적은 이전 판본들이 네 번 연속 틀린 원인이 그것이다: 평범한 exhibit에서 outcome만
+> > rescale하면 차이는 **정확히 0**이고, 문제가 된 그 설정(bank $c=100$, `eps`를 $c^{2}$로 함께
+> > rescale한 경우와 아닌 경우)에서는 상대 **5.019×10⁻¹⁵** — 즉 round-off이지 mechanism이 아니다.
+> > 실제 차이는 noise였다.
 > > 재현 실패의 원인은 내가 fix wave 이전의 noiseless exhibit으로 측정한 것이다. 기각을 철회하고
 > > 리뷰어의 측정을 채택한다. 이는 이 commit이 고쳤다고 주장한 misattribution과 **같은 유형**이다.
 

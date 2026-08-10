@@ -318,6 +318,30 @@ MUTATIONS = [
         '                    "" if type(model_factory()) is _OOF_SELECTION_MODEL else " [rewritten]"\n'  # noqa: E501
         "                )\n                continue\n            except SingularDesignError as exc:",  # noqa: E501
     ),
+    (
+        "RA1 [r4] RANK also-clause names ALL folds, not only the deficient ones",
+        SELECT,
+        "for index, report in deficient[1:]",
+        "for index, report in list(enumerate(reports))[1:]",
+    ),
+    (
+        "C1  [r4] RANK arm primary sym_dim is the literal it usually takes",
+        SELECT,
+        'f"rank={first_report.rank}, sym_dim={first_report.sym_dim}, lam={0.0!r}{also}"',
+        'f"rank={first_report.rank}, sym_dim=10, lam={0.0!r}{also}"',
+    ),
+    (
+        "C2  [r4] RANK arm primary rank is the literal it usually takes",
+        SELECT,
+        'f"rank={first_report.rank}, sym_dim={first_report.sym_dim}, lam={0.0!r}{also}"',
+        'f"rank=6, sym_dim={first_report.sym_dim}, lam={0.0!r}{also}"',
+    ),
+    (
+        "C3  [r4] RANK also-clause sym_dim is the literal it usually takes",
+        SELECT,
+        'f"fold {index} at rank {report.rank}/{report.sym_dim}"',
+        'f"fold {index} at rank {report.rank}/10"',
+    ),
 ]
 
 

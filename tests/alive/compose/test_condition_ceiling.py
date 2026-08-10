@@ -816,7 +816,7 @@ def test_every_rank_deficient_fold_is_named_not_only_the_first():
     # without. That mutation survived the full 2016-test suite.
     assert len(deficient) >= 3, f"'every' needs three offenders, got {deficient}"
     ranks = {reports[i].rank for i in deficient}
-    assert len(ranks) >= 2, f"the offenders must differ in rank, got {ranks}"
+    assert len(ranks) >= 2, f"the offenders must not ALL share one rank, got {ranks}"
 
     res = _run(inst, condition_ceiling=_REGISTERED_CEILING)
     reason = [r for _, _, r in res.nonviable_candidates if "non-identifiable" in r][0]
@@ -886,6 +886,56 @@ def test_the_prepass_rank_raise_keeps_the_type_that_carries_the_escalation():
     with pytest.raises(SelectionError) as excinfo:
         _run(inst, condition_ceiling=_REGISTERED_CEILING)
     assert "OOF non-viability is registered for" in str(excinfo.value)
+
+
+def test_the_rank_arm_names_only_the_DEFICIENT_folds_and_reports_their_own_ranks():
+    """The rank arm's half of the two-fixture rule the conditioning arm already has.
+
+    ``_assert_rank_fields`` was called from exactly one test whose fixture makes ALL
+    three folds deficient — so "name every offender" and "name every fold" were
+    indistinguishable, and a mutant reporting a FULL-RANK fold as rank-deficient
+    passed. The conditioning sibling documents this trap and defends against it with
+    a second fixture; the rank arm was given only the first half. Independent review
+    found four survivors here after the fix was recorded as class-level.
+
+    This fixture leaves one fold HEALTHY, and uses ``k=3`` so ``sym_dim`` is 6 rather
+    than the 10 it takes in every other fixture in this file — otherwise a literal
+    ``sym_dim=10`` is indistinguishable from the real value, which is the retired
+    M8's defect one field over.
+    """
+    rng = np.random.default_rng(0)
+    inst = _full_rank_instance(rng, k=3)
+    k = inst["selected_k_total"]
+    Z = inst["factors_by_k"][k].copy()
+    folds = build_gene_disjoint_folds(
+        inst["idx_pairs"], n_genes=inst["n_genes"], n_folds=inst["n_folds"], seed=inst["seed"]
+    )
+    # fold 0 loses TWO dimensions, fold 1 one, fold 2 none -> distinct ranks AND a
+    # healthy fold, so neither "all folds" nor a constant rank can pass.
+    for column, fold in ((0, 0), (1, 0), (2, 1)):
+        for g in range(inst["n_genes"]):
+            if g not in set(folds[fold].held_out_genes):
+                Z[g, column] = 0.0
+    inst["factors_by_k"] = {k: Z}
+
+    reports = _fold_conditions(inst, folds)
+    deficient = [i for i, r in enumerate(reports) if not r.is_full_rank]
+    healthy = [i for i, r in enumerate(reports) if r.is_full_rank]
+    assert healthy, "a healthy fold is what makes 'only the deficient ones' falsifiable"
+    assert len(deficient) >= 2, f"need two offenders for the also-clause, got {deficient}"
+    assert reports[deficient[0]].sym_dim == 6, "k=3 so sym_dim must not be the usual 10"
+    assert reports[deficient[0]].rank != 6, "the primary rank must not be the usual 6"
+
+    res = _run(inst, condition_ceiling=_REGISTERED_CEILING)
+    reason = [r for _, _, r in res.nonviable_candidates if "non-identifiable" in r][0]
+    _assert_rank_fields(
+        reason,
+        index=deficient[0],
+        report=reports[deficient[0]],
+        also=[(i, reports[i]) for i in deficient[1:]],
+    )
+    for index in healthy:
+        assert f"fold {index} at rank" not in reason, f"healthy fold {index} named: {reason}"
 
 
 def test_the_fold_arm_records_the_same_reason_for_any_estimator():

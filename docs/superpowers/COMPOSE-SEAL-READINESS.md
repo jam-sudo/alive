@@ -5,7 +5,7 @@
 > **이 문서는 아무것도 정의하지 않는다** — 세부(task)는 plan, claim은 spec, exact param은 config,
 > 시간순 audit는 git이 authoritative다([sources of truth](../../CLAUDE.md#sources)). 상태 행이 authoritative
 > 문서와 어긋나면 **authoritative 문서가 옳다**; 이 인덱스를 갱신한다.
-> **Updated:** 2026-08-09 @ `50e7bc7` (branch `compose-fold-conditioning`)
+> **Updated:** 2026-08-11 @ `e7b6b8d` (branch `compose-fold-conditioning`)
 > `scripts/bump-readiness-stamp.sh` / the pre-commit hook from `HEAD` at commit time, so it names the
 > **parent** of the commit that carries it and can never name itself. Reading it as "one commit stale" is a
 > misreading; git is authoritative for when this file actually changed.
@@ -727,7 +727,10 @@ branch에서 추적 가능하게 기록한다. `LOCAL` ledger ID만으로는 이
    `lambda_grid` is ABSOLUTE: `Φ` is bilinear in `z`, so `z → cz` makes the effective penalty `λ/c⁴`. **How much
    protection `lam > 0` actually provides is therefore a property of `‖z‖`, which no config field, code path or
    activation evidence bounds.** Recorded as a registered limitation; the `lam == 0.0` restriction is retained as
-   the conservative choice. Measured (2026-08-07 re-measurement, `lam=0.001`, `eps` rescaled by `c²` with the
+   the conservative choice. **It is filed here, inside a correction narrative, and NOT in the pre-seal blocker
+   enumeration — round 4 flagged that placement as wrong for something that can flip a REGISTERED futility
+   condition (`dev_oof_delta_below_threshold`) by a numerical cause. Surfacing it where a pod operator reads
+   blockers is task #43 and is NOT closed by this entry.** Measured (2026-08-07 re-measurement, `lam=0.001`, `eps` rescaled by `c²` with the
    design, `cond(Φ) = 6.4732…` in all four cells):
 
    | | `c = 1` | `c = 100` |
@@ -759,7 +762,10 @@ branch에서 추적 가능하게 기록한다. `LOCAL` ledger ID만으로는 이
    and the noiseless baseline is `0.8101`. Worse, a reviewer's `theta ≈ -3.3e6` had been dismissed as unreproducible
    "because scaling `Z` without scaling `eps` conflates a representation mismatch with conditioning". **That reason
    is false**: `theta` is a relative-error-reduction ratio and is invariant to a uniform rescale of the outcomes
-   (measured difference: relative `5e-9`). The real cause of the non-reproduction was measuring against the
+   (stated WITH its construction, because every
+   value-only version of this figure has been wrong: on the plain exhibit, rescaling the outcomes alone changes
+   `theta` by **exactly 0**; in the setting actually at issue — bank at `c=100`, `eps` scaled by `c²` versus not —
+   by relative **5.019e-15**, i.e. round-off, not a mechanism). The real cause of the non-reproduction was measuring against the
    pre-fix, noiseless exhibit. The dismissal is **withdrawn**, the reviewer's measurement is adopted, and the table
    above is repinned from a single stated configuration. The correction matters: the recorded severity understated
    the collapse by roughly seven orders of magnitude on a quantity that feeds a registered futility condition.
@@ -799,6 +805,50 @@ branch에서 추적 가능하게 기록한다. `LOCAL` ledger ID만으로는 이
    third time and again did not survive — see below.** Seal state remains **UNOPENED**; execution remains
    **RELEASE-BLOCKED**.
 
+   **2026-08-11 FOURTH review round (verification apparatus · round-3 closure · whole-branch merge readiness), and
+   the fifth correction wave.** The merge lens returned MERGE-WITH-FIXES with four record items and zero code
+   changes. The other two found that **the failure had moved into the instrument, and that the previous wave's
+   "class-level" fix covered one arm again.**
+   **(a) A mutation "kill" meant only that the process exited nonzero.** `run_suite` scored on `returncode`.
+   Reproduced with a one-character syntax break in `select.py`: three collection ERRORS, **zero failing tests**,
+   nonzero exit — recorded `killed`. Every kill this branch has logged was therefore a statement about the process,
+   not the tests, and a transient environment failure mid-run would have converted every remaining entry to
+   "killed" and printed `all mutations killed`, exit 0. `run_suite` now returns the SET OF FAILED NODE IDS; a kill
+   requires it non-empty and PRINTS the tests that produced it; a nonzero exit with no failing test is reported
+   **INVALID** — neither kill nor survivor. Two rules become **five**: (4) a kill must be attested by a named
+   failing test, never an exit code; (5) the mutable file set must cover every site that ENFORCES the contract —
+   rules 1–3 govern how an entry is written, none governs which sites have an entry at all. The four enforcing
+   sites still unmutated (`phi_rank`, `phase2a`, `config2`, `preflight_cmd`) are now named as such.
+   **(b) The harness violated its own Rule 1.** `M4` was named "conditioning checked BEFORE rank" while DELETING
+   the rank pre-pass — a strict superset, so its kill was evidence for the larger defect and said nothing about
+   ordering. Renamed to what it does; `M4b` performs the reorder the old name claimed. `M3`/`M9` named no arm and
+   mutated only the FOLD arm; the CANDIDATE arm's own `>` and `isfinite` had no entry (`M3b`/`M9b` added). The
+   `_Never` helper injection had no anchor count check — one drift from a `NameError` recorded as a kill, the
+   retired M8's class one level down. Backups were keyed by BASENAME. The summary printed no count, so deleting an
+   entry left the output byte-identical.
+   **(c) The "class-level" field fix covered the conditioning arm only — the fifth time on this branch that the
+   instance was fixed and the class was not.** Four survivors in the RANK arm: its also-clause could name ALL folds
+   rather than only the deficient ones (reporting a FULL-RANK fold as rank-deficient, inside a checksummed report),
+   and its `rank`/`sym_dim` could be replaced by the literals they take in every fixture in the file — a direct
+   violation of the harness's own Rule 2. Root cause: `_assert_rank_fields` had ONE call site whose fixture makes
+   all three folds deficient, so "name every offender" and "name every fold" were indistinguishable — exactly the
+   trap the conditioning sibling documents and defends against with a second fixture, whose comment reads "Both are
+   needed; either alone leaves a mutant alive". The rank arm had only the first half. Closed with a second rank
+   fixture at `k=3` (so `sym_dim` is 6, not the usual 10) that leaves one fold HEALTHY and gives the primary
+   offender a rank other than the usual 6.
+   **(d) The `5e-9` figure was corrected into a different wrong number.** It was never fixed where it lives — the
+   SPEC, which outranks this index for scientific claims, still carried it, because the withdrawal touched only the
+   readiness. And the replacement stated a value without its construction: `theta`'s invariance to a uniform outcome
+   rescale is **exactly 0** on the plain exhibit, while the sentence is about a different setting (bank at `c=100`,
+   `eps` scaled by `c²` versus not) where it is `5.019e-15`. Both documents now state the construction alongside the
+   value — the omission that made this figure wrong four times running.
+   Also: "(owner decision)" was asserted unqualified in three places while this same document records its artifact
+   as missing — now qualified with a pointer to the pending artifact and its convention. The harness matched none of
+   the ten path globs in `.claude/rules/compose.md` despite existing solely to rewrite COMPOSE production source —
+   added. Its safety notice said it edits `src/` when it also edits `tests/`, and omitted the concurrency hazard
+   that fired twice during these reviews — both corrected in the file a future user actually reads.
+   Post-wave: **37 mutations all killed, each by a named failing test**; full `tests/alive/compose` **2017 passed,
+   2 skipped**; ruff check and format clean. Seal state remains **UNOPENED**; execution remains **RELEASE-BLOCKED**.
    **2026-08-08 THIRD review round (closure · whole-branch merge readiness · new tests), and the fourth correction
    wave.** All three CI runs green, 2016 tests green, 22/22 mutations killed — and **six more mutations survived the
    full suite at counts byte-identical to clean**. The whole-branch lens returned MERGE-WITH-FIXES; the other two
@@ -813,7 +863,7 @@ branch에서 추적 가능하게 기록한다. `LOCAL` ledger ID만으로는 이
    exact membership of the also-clause — against substitution by a constant or by another field's value. Fixtures
    were changed to make that falsifiable at all: the degenerate fold is parameterised (it was always fold 0, so no
    fixture in the repo could distinguish a reported index from the literal `0`), the rank fixture now produces
-   THREE deficient folds with DISTINCT ranks (three were needed for "every"; distinct ranks were needed or
+   THREE deficient folds not all sharing one rank (three were needed for "every"; distinct ranks were needed or
    substituting fold 0's values yields a byte-identical message), and the conditioning also-clause is asserted with
    its per-fold values.
    Also closed: the fold-arm "same reason for any estimator" test never compared reasons; the candidate arm's
@@ -827,7 +877,7 @@ branch에서 추적 가능하게 기록한다. `LOCAL` ledger ID만으로는 이
    `select_hyperparams` and `diagnostics2` still documented a one-arm screen; `preflight_cmd`'s comment still said
    the screen removes "dimensions", the exact `k_total`/candidate conflation this protocol registers as a
    misattribution. Two unreproducible numbers introduced by the previous correction are withdrawn: the withdrawal
-   paragraph's own "relative `5e-9`" invariance figure measures ~`5e-15`, and a `cond 9.21e12` quoted in a source
+   paragraph's own "relative `5e-9`" invariance figure is off by six orders, and a `cond 9.21e12` quoted in a source
    docstring came from a construction committed nowhere — both are unreproducible numbers *inside the corrections
    for unreproducible numbers*, and the second is removed rather than repinned.
    **Recorded, NOT closed.** `diagnostics2`'s `sorted(...)` sites were recorded as equivalent-by-config; that
