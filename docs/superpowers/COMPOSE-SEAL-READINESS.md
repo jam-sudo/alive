@@ -5,7 +5,7 @@
 > **이 문서는 아무것도 정의하지 않는다** — 세부(task)는 plan, claim은 spec, exact param은 config,
 > 시간순 audit는 git이 authoritative다([sources of truth](../../CLAUDE.md#sources)). 상태 행이 authoritative
 > 문서와 어긋나면 **authoritative 문서가 옳다**; 이 인덱스를 갱신한다.
-> **Updated:** 2026-08-11 @ `69b8d4c` (branch `compose-fold-conditioning`)
+> **Updated:** 2026-08-12 @ `dbc360a` (branch `main`)
 > `scripts/bump-readiness-stamp.sh` / the pre-commit hook from `HEAD` at commit time, so it names the
 > **parent** of the commit that carries it and can never name itself. Reading it as "one commit stale" is a
 > misreading; git is authoritative for when this file actually changed.
@@ -700,6 +700,11 @@ branch에서 추적 가능하게 기록한다. `LOCAL` ledger ID만으로는 이
    gap was first described as having none: `2026-07-13-compose-dev-pod-gate-decisions.md` (PROPOSED → owner
    CONFIRMED in its §6). Seal state remains **UNOPENED**; execution remains **RELEASE-BLOCKED**.
 
+   > **[2026-08-12 update to the paragraph above.]** The owner-decision artifact now exists:
+   > `docs/superpowers/2026-08-12-compose-conditioning-ceiling-decisions.md`, covering the ceiling value, both
+   > application points, and — as `OPEN` with no proposal — the `‖z‖` gap of item 4b. It is **PROPOSED**; §6 is
+   > unsigned, so the gap is recorded, not closed. Task #14 is unaffected and remains open.
+
    **2026-08-07 three independent adversarial reviews of the fold arm (numerics · governance · test adequacy), and
    the corrections they forced.** Linux CI on `9865f6e` passed (run `31149597512`) and was, as on 2026-08-05,
    the weakest of the signals: it cannot see a false claim. All three reviewers converged on **do not merge — the
@@ -1311,10 +1316,25 @@ branch에서 추적 가능하게 기록한다. `LOCAL` ledger ID만으로는 이
    protocol gap (absolute grid + unbounded `‖z‖` predate the fold-conditioning branch, which discovered it), and it
    is **enumerated here rather than left in a correction narrative** because three review rounds judged narrative
    placement wrong for something a pod operator must see. Options, none taken: record a scale statistic in the
-   phi-rank activation evidence (cheapest — `sigma_max` is already computed by the registered rank-tolerance rule,
-   and task #14 regenerates those reports anyway); add a `factor_z` scale field or normalization (**moves the
-   config digest = new run identity**); or record explicit owner acceptance as a non-blocker. Detail and the
-   `λ/c⁴` derivation: the 2026-08-07 conditioning-ceiling entry below.
+   phi-rank activation evidence (cheapest, and digest-neutral); add a `factor_z` scale field or normalization
+   (**moves the config digest = new run identity**); or record explicit owner acceptance as a non-blocker. Detail
+   and the `λ/c⁴` derivation: the 2026-08-07 conditioning-ceiling entry below.
+
+   > **[2026-08-12 correction to the option costs above, and a precision note.]** The three options are now costed
+   > in `docs/superpowers/2026-08-12-compose-conditioning-ceiling-decisions.md` §4, which the owner signs. Two
+   > corrections, both found by reading the source rather than the record. **(1)** This entry called the first
+   > option cheapest "because `sigma_max` is already computed by the registered rank-tolerance rule, and task #14
+   > regenerates those reports anyway". `sigma_max` *is* computed (`src/alive/compose/identify.py:70`, as
+   > `svals[0]` inside the tolerance) but is **not exposed on `RankReport` and not emitted**, and
+   > `_FACTOR_BLOCK_KEYS` is an **exact** roster enforced by `_exact_object` — so requiring the key invalidates the
+   > committed `real_norman_phi_rank_report.json` and needs either a schema bump with the validator accepting both
+   > versions, or regeneration on the pod against real Norman data. The option is genuinely digest-neutral; it is
+   > **not** nearly free, and it is **not** checkable from currently committed evidence. **(2)** The collapse figure
+   > is quoted above to 17 significant digits. Re-measured 2026-08-12, θ at this scale carries about **14** digits
+   > (relative spread `1.03e-14` across mathematically inert outcome rescales), and the value this construction
+   > reproduces differs from the one recorded here by exactly 1 ulp. The magnitude — `θ ≈ -3.34e6` — is the
+   > finding; the trailing digits are not evidence, per the precision rule this project adopted after a `rel=1e-12`
+   > pin went green on macOS and red on Linux.
 
 5. **§2.5 release gate** — worker locked-env integration green + 독립 검토 후 exact commit `C`를 마지막
    repository commit으로 동결한다. Clean detached `C`에서 bias report → single-leaf finalized config →
