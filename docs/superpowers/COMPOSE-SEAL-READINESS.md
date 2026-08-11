@@ -5,7 +5,7 @@
 > **이 문서는 아무것도 정의하지 않는다** — 세부(task)는 plan, claim은 spec, exact param은 config,
 > 시간순 audit는 git이 authoritative다([sources of truth](../../CLAUDE.md#sources)). 상태 행이 authoritative
 > 문서와 어긋나면 **authoritative 문서가 옳다**; 이 인덱스를 갱신한다.
-> **Updated:** 2026-08-11 @ `e7b6b8d` (branch `compose-fold-conditioning`)
+> **Updated:** 2026-08-11 @ `69b8d4c` (branch `compose-fold-conditioning`)
 > `scripts/bump-readiness-stamp.sh` / the pre-commit hook from `HEAD` at commit time, so it names the
 > **parent** of the commit that carries it and can never name itself. Reading it as "one commit stale" is a
 > misreading; git is authoritative for when this file actually changed.
@@ -910,7 +910,8 @@ branch에서 추적 가능하게 기록한다. `LOCAL` ledger ID만으로는 이
    concurrent on-disk mutation can only produce a spurious FAILURE, never a spurious pass — but the harness and
    read-only review must not share a worktree.
    Branch state at `50e7bc7`: 30 mutations all killed (M8 retired), full `tests/alive/compose` 2016 passed
-   2 skipped, ruff clean, Linux CI **green on the tip** (run `31263820204`). Note `2256f6d`'s own run
+   2 skipped, ruff clean, Linux CI green at `50e7bc7` (run `31263820204`) and at `bb185b6` (run `31265250187`) — naming both, since
+   "the tip" stopped being unambiguous the moment another commit landed. Note `2256f6d`'s own run
    (`31263666233`) was **cancelled** when the next commit was pushed on top of it — superseded, so neither a pass
    nor a failure, and that commit has no CI verdict of its own; the tip contains its changes. **`2256f6d` and
    `50e7bc7` have had no independent review.** Rounds 1/2/3 found 12 / 9+ / 6 defects: converging, not converged,
@@ -1298,6 +1299,23 @@ branch에서 추적 가능하게 기록한다. `LOCAL` ledger ID만으로는 이
    candidate remains unsigned/historical and there is still no owner image lock, candidate-bound owner signature,
    or accepted external verifier pin. Status remains **RELEASE-BLOCKED**; a registered key or unsigned digest alone
    is never seal authorization.
+4b. **⛔ OPEN — the registered `lambda_grid` is an ABSOLUTE penalty and nothing bounds `‖z‖`** (task #43,
+   owner decision). `cond(Phi)` is invariant to a uniform rescale of `z` while `identification.lambda_grid` is a
+   fixed absolute penalty, and `Phi` is bilinear in `z`, so `z → cz` makes the effective penalty `λ/c⁴`. Measured
+   2026-08-07 on the committed exhibit at IDENTICAL `cond(Phi) = 6.4732…`: rescaling the factor bank by 100 moves
+   `theta(lam=0.001)` from `0.8103235465139835` to **`-3340344.0205271696`**. Nothing bounds `‖z‖` — `zfactor`
+   returns raw centered PCA scores concatenated with the ESM block, `factor_z` has no scale field, and no
+   activation evidence records a scale statistic. **Consequence:** the registered conditioning ceiling cannot tell
+   whether the registered `lambda_grid` lands in a healthy window on the real Norman bank, and a numerical cause
+   can therefore flip the REGISTERED futility condition `oof_theta <= dev_oof_threshold`. This is a PRE-EXISTING
+   protocol gap (absolute grid + unbounded `‖z‖` predate the fold-conditioning branch, which discovered it), and it
+   is **enumerated here rather than left in a correction narrative** because three review rounds judged narrative
+   placement wrong for something a pod operator must see. Options, none taken: record a scale statistic in the
+   phi-rank activation evidence (cheapest — `sigma_max` is already computed by the registered rank-tolerance rule,
+   and task #14 regenerates those reports anyway); add a `factor_z` scale field or normalization (**moves the
+   config digest = new run identity**); or record explicit owner acceptance as a non-blocker. Detail and the
+   `λ/c⁴` derivation: the 2026-08-07 conditioning-ceiling entry below.
+
 5. **§2.5 release gate** — worker locked-env integration green + 독립 검토 후 exact commit `C`를 마지막
    repository commit으로 동결한다. Clean detached `C`에서 bias report → single-leaf finalized config →
    analytical reports를 external durable stage에 게시하고, owner가 `C`·모든 byte hash·immutable object
