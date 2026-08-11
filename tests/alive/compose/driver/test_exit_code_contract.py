@@ -196,6 +196,12 @@ _CLASSIFICATION: dict[str, tuple[str, str]] = {
         PRESEAL_REJECTION,
         "OOF selection invalidated before any seal access; carries per-candidate reasons.",
     ),
+    "alive.compose.select::FoldConditioningError": (
+        PRESEAL_REJECTION,
+        "One candidate's unregularized OOF train fold exceeds the registered "
+        "conditioning ceiling; select_hyperparams always catches it, and it is a "
+        "SelectionError subclass so an escape would still be rostered, not exit 1.",
+    ),
     "alive.compose.select::OOFFoldManifestError": (
         PRESEAL_REJECTION,
         "Invalid, inconsistent or tampered OOF fold manifest.",
@@ -691,8 +697,12 @@ def test_the_enumeration_counts_are_pinned():
     The readiness index commits to all three; assert them so a partial edit is loud
     rather than a quietly smaller table. Update deliberately, never to pass.
     """
-    assert len(_CLASSES) == 74, f"exception classes under src/alive: {len(_CLASSES)}"
-    assert len(_CLASSIFICATION) == 74, f"classification entries: {len(_CLASSIFICATION)}"
+    # 2026-08-07: 74 -> 75 for select::FoldConditioningError. The roster stays 42:
+    # it is a SelectionError subclass, and `except` matches by isinstance, so the
+    # existing entry already routes it to exit 10. This registry is what noticed
+    # the new class at all -- the targeted selection suites were green without it.
+    assert len(_CLASSES) == 75, f"exception classes under src/alive: {len(_CLASSES)}"
+    assert len(_CLASSIFICATION) == 75, f"classification entries: {len(_CLASSIFICATION)}"
     assert len(cli._KNOWN_PRESEAL_REJECTIONS) == 42, (
         f"roster size: {len(cli._KNOWN_PRESEAL_REJECTIONS)}"
     )

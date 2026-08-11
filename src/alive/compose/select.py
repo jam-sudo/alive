@@ -63,6 +63,13 @@ OOF_RANK_TOLERANCE_RULE = "max_shape_times_float64_eps_times_sigma_max"
 #: to the screen; keeping one constant means the two cannot drift apart silently.
 CEILING_REASON_PREFIX = "conditioning above the registered ceiling"
 
+#: Distinguishes the screen's two arms inside a reason that already carries
+#: :data:`CEILING_REASON_PREFIX`. ``diagnostics2`` treats them identically -- both
+#: mean "removed before scoring, for a numerical reason" -- but they remove
+#: different amounts (a whole ``k_total`` versus its ``lam=0.0`` candidate alone),
+#: so a reader that must tell them apart matches this constant instead of prose.
+FOLD_CEILING_MARKER = "OOF train fold"
+
 #: A typed model factory: a zero-arg callable returning a fresh symmetric model
 #: exposing ``fit(Z, pairs, eps_obs, *, lam)`` and ``predict_eps(Z, g, h)``.
 ModelFactory = Callable[[], object]
@@ -81,6 +88,20 @@ class SelectionError(ValueError):
     Covers empty/ill-typed grids, missing factor banks, dimension mismatches
     (including a factor-shaped additive added to a response-shaped prediction),
     empty folds and an uncovered-pair fraction above the registered tolerance.
+    """
+
+
+class FoldConditioningError(SelectionError):
+    """Raised when an unregularized OOF TRAIN fold exceeds the registered ceiling.
+
+    Signals ONE candidate's non-viability, not an invalid selection: the caller
+    catches it, records the reason and moves on. It subclasses
+    :class:`SelectionError` only so that an escape — impossible on today's single
+    call path — would still land in the driver's registered pre-seal rejection
+    roster rather than as an uncontracted bug.
+
+    Its message begins with :data:`CEILING_REASON_PREFIX`, which is how
+    ``diagnostics2`` recognises a screened candidate; do not reword the opening.
     """
 
 
@@ -809,6 +830,111 @@ def _validate_inputs(
 # --------------------------------------------------------------------------- #
 
 
+def _screen_unregularized_folds(
+    *,
+    folds: Sequence[GeneDisjointFold],
+    idx_pairs: Sequence[tuple[int, int]],
+    Z: np.ndarray,
+    condition_ceiling: float,
+) -> None:
+    """Registered fold-level guards for the unregularized (``lam == 0.0``) solve.
+
+    A PRE-PASS over every fold, before any fit. Rank is checked across ALL folds
+    before conditioning is checked on ANY, so within this function a rank failure
+    in any fold outranks a conditioning failure in any other.
+
+    That precedence is LOCAL to this function and does not hold for selection as a
+    whole. ``select_hyperparams`` screens the FULL calibration design against the
+    same ceiling before it ever calls into here, so a full-design conditioning
+    failure still masks a fold-level rank failure: a full design over the ceiling
+    with a rank-deficient train fold records only the conditioning reason. (An
+    earlier version of this comment quoted a specific condition number from a
+    construction that exists in no committed artifact — the same unreproducible-
+    number defect this branch was corrected for twice.) That is deliberate and is
+    NOT the defect fixed
+    here: the two arms examine different objects, the candidate arm's reason is
+    true, and it justifies removing the candidate at EVERY lambda whereas the fold
+    rank policy justifies removing only ``lam=0.0``. Recording the narrower reason
+    as primary would under-justify the removal that actually happens. The loss is
+    diagnostic, not decisional, and it is not fold-order dependent.
+
+    Checking the two fold by fold inside the fit loop looked equivalent and was
+    not. The loop raises on the first offending fold, so a conditioning raise in
+    fold 0 short-circuited a rank failure in fold 1 and the candidate was recorded
+    "numerically inadmissible" when it was in fact NON-IDENTIFIABLE — the stronger
+    diagnosis, silently lost, and the recorded reason made to depend on fold order.
+    Losing it that way is exactly the reason-misattribution this screen exists to
+    prevent. Found by independent review; the fold-order case is pinned in
+    ``test_condition_ceiling.py``.
+
+    Applies only at ``lam == 0.0`` because that is where ``identify_operator``
+    takes the unregularized ``lstsq`` branch and ``cond(Phi)`` IS the conditioning
+    of the solve. At ``lam > 0`` the ridge filter factors bound it, so the
+    unregularized number is the wrong statistic to reject on. NOTE that this
+    bound is in the units of ``Phi``: ``cond`` is invariant to a uniform rescale of
+    ``z`` while the registered ``lambda_grid`` is absolute, so the size of the
+    protection at ``lam > 0`` depends on a factor-bank scale nothing registers.
+    That limitation is recorded in the readiness index, not closed here.
+
+    Raises
+    ------
+    SingularDesignError
+        If any train fold is rank-deficient under the registered rank rule.
+    FoldConditioningError
+        Otherwise, if any train fold's condition number exceeds the registered
+        ceiling. Every offending fold is named, not just the first.
+    """
+    reports = [rank_diagnostics(Z, [idx_pairs[i] for i in fold.train_idx]) for fold in folds]
+
+    deficient = [(index, report) for index, report in enumerate(reports) if not report.is_full_rank]
+    if deficient:
+        first_index, first_report = deficient[0]
+        # Same argument as the conditioning arm below: an operator needs the extent
+        # of the degeneracy, not one arbitrary index. Leaving this arm reporting
+        # only its first offender while the sibling reports all of them was an
+        # asymmetry in the arm this screen calls the STRONGER diagnosis.
+        also = ""
+        if len(deficient) > 1:
+            also = "; also rank-deficient: " + ", ".join(
+                f"fold {index} at rank {report.rank}/{report.sym_dim}"
+                for index, report in deficient[1:]
+            )
+        raise SingularDesignError(
+            f"OOF train fold {first_index}: unregularized calibration design "
+            "is non-identifiable under the registered rank rule: "
+            f"rank={first_report.rank}, sym_dim={first_report.sym_dim}, lam={0.0!r}{also}"
+        )
+
+    ceiling = float(condition_ceiling)
+    # ``isfinite`` is NOT redundant with the rank pass above, and the reason is
+    # narrower than an earlier version of this comment claimed. ``rank_diagnostics``
+    # returns ``inf`` when ``rank < sym_dim`` OR ``pos.size == 0``; at ``k_total == 0``
+    # the second fires while ``is_full_rank`` is ``True`` (``0 >= 0``), so a zero-width
+    # factor bank reaches here full-rank AND infinitely conditioned. Screening it as
+    # a conditioning failure would file a degenerate bank under the wrong arm. The
+    # registered ``total_k_grid`` excludes 0, so this is unreachable through config —
+    # it is reachable, and tested, through this function directly.
+    over = [
+        (index, float(report.condition_number))
+        for index, report in enumerate(reports)
+        if np.isfinite(report.condition_number) and float(report.condition_number) > ceiling
+    ]
+    if over:
+        first_index, first_condition = over[0]
+        also = ""
+        if len(over) > 1:
+            also = "; also over the ceiling: " + ", ".join(
+                f"fold {index} at {condition}" for index, condition in over[1:]
+            )
+        raise FoldConditioningError(
+            f"{CEILING_REASON_PREFIX}: {FOLD_CEILING_MARKER} {first_index} "
+            f"condition_number={first_condition} > "
+            f"condition_ceiling={ceiling} at lam=0.0 "
+            "(registered identification.condition_ceiling; the fold design is full "
+            f"rank but numerically inadmissible){also}"
+        )
+
+
 def _oof_theta_for_candidate(
     *,
     folds: Sequence[GeneDisjointFold],
@@ -821,6 +947,7 @@ def _oof_theta_for_candidate(
     p: int,
     model_factory: ModelFactory,
     require_full_rank_unregularized: bool,
+    condition_ceiling: float,
 ) -> tuple[float, set[tuple[str, str]]]:
     """OOF ``theta`` (vs additive) for one ``(Z, lambda)`` over all folds.
 
@@ -830,6 +957,14 @@ def _oof_theta_for_candidate(
     ``delta = additive + eps_obs``), then accumulate the OOF predictions, the
     additive-comparator predictions and the truth — all by pair ID. ``theta`` is
     computed once over the aggregated OOF rows (alignment by pair ID).
+
+    Two registered guards run before any fold is fitted, and BOTH only at
+    ``lam == 0.0`` — the one branch that solves unregularized, so the fold design's
+    own spectrum is what the solve sees: the rank policy (``SingularDesignError``)
+    and the conditioning ceiling (``FoldConditioningError``). They run as a
+    whole-candidate pre-pass, not per fold, so that a rank failure in ANY fold
+    outranks a conditioning failure in any other; see
+    :func:`_screen_unregularized_folds` for why that is not the same thing.
 
     Returns
     -------
@@ -842,18 +977,15 @@ def _oof_theta_for_candidate(
     row_ids: list[tuple[str, str]] = []
     covered: set[tuple[str, str]] = set()
 
+    if require_full_rank_unregularized and float(lam) == 0.0:
+        _screen_unregularized_folds(
+            folds=folds, idx_pairs=idx_pairs, Z=Z, condition_ceiling=condition_ceiling
+        )
+
     for fold_index, fold in enumerate(folds):
         model = model_factory()
         train_pairs = [idx_pairs[i] for i in fold.train_idx]
         train_eps = eps_obs[list(fold.train_idx)]
-        if require_full_rank_unregularized and float(lam) == 0.0:
-            report = rank_diagnostics(Z, train_pairs)
-            if not report.is_full_rank:
-                raise SingularDesignError(
-                    f"OOF train fold {fold_index}: unregularized calibration design "
-                    "is non-identifiable under the registered rank rule: "
-                    f"rank={report.rank}, sym_dim={report.sym_dim}, lam={float(lam)!r}"
-                )
         try:
             model.fit(Z, train_pairs, train_eps, lam=float(lam))
         except SingularDesignError as exc:
@@ -960,11 +1092,14 @@ def select_hyperparams(
         pair. An uncovered fraction strictly above this invalidates selection.
     condition_ceiling : float
         Registered admissibility bound on ``cond(Phi)`` (config
-        ``identification.condition_ceiling``), applied as a per-candidate screen:
+        ``identification.condition_ceiling``), applied in TWO places: per candidate
+        on the FULL calibration design, and per unregularized (``lam == 0.0``) OOF
+        TRAIN fold. The two remove different amounts — a whole ``k_total`` at every
+        lambda, versus that ``k_total``'s ``lam=0.0`` candidate alone. The screen:
         a ``k_total`` whose full-calibration design has a FINITE condition number
         above this is excluded before scoring and recorded in
         ``nonviable_candidates``. Restricted to finite condition numbers on
-        purpose — ``rank_diagnostics`` returns ``inf`` exactly for a rank-deficient
+        purpose — ``rank_diagnostics`` returns ``inf`` for a rank-deficient
         design, which the registered rank futility gate owns. Must itself be finite
         and positive.
     unregularized_oof_rank_policy, rank_tolerance_rule : str
@@ -1054,7 +1189,8 @@ def select_hyperparams(
         # grid. It is the same shape as the unregularized rank policy below.
         #
         # Deliberately restricted to FINITE condition numbers. ``rank_diagnostics``
-        # returns ``inf`` exactly when the design is rank-deficient, and rank
+        # returns ``inf`` when the design is rank-deficient (and, at ``k_total == 0``,
+        # for a zero-width bank that reports FULL rank — "exactly" was wrong), and rank
         # deficiency is owned by the registered rank futility gate in
         # ``diagnostics2``. Screening it out here would make that gate unreachable:
         # selection would quietly move to a full-rank dimension and the run would
@@ -1089,7 +1225,15 @@ def select_hyperparams(
                     p=p,
                     model_factory=model_factory,
                     require_full_rank_unregularized=True,
+                    condition_ceiling=float(condition_ceiling),
                 )
+            except FoldConditioningError as exc:
+                # No estimator guard here, unlike the singular-design branch below.
+                # ``cond(Phi)`` is a function of ``Z`` and the fold's train pair
+                # roster alone -- no model, no outcome -- so it means the same thing
+                # whatever ``model_factory`` returns.
+                nonviable_candidates[candidate] = str(exc)
+                continue
             except SingularDesignError as exc:
                 # Reading a singular design as "this HYPERPARAMETER is non-viable"
                 # is only correct for the REGISTERED headline estimator, whose

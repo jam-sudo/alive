@@ -27,10 +27,12 @@ Decision (spec §10.6 Phase-2a futility):
     Otherwise ``FUTILITY_STOPPED``: rank deficiency OR non-finite conditioning OR
     measurability failure OR OOF theta ``<= 0``.
 
-The registered conditioning ceiling is **not** one of these. It is a
-per-candidate admissibility screen inside
-:func:`alive.compose.select.select_hyperparams`, which records an over-ceiling
-``k_total`` in ``nonviable_candidates`` and selects among the rest; only when
+The registered conditioning ceiling is **not** one of these. It is an
+admissibility screen inside :func:`alive.compose.select.select_hyperparams`,
+which records an over-ceiling candidate in ``nonviable_candidates`` and selects
+among the rest. It has two arms: one bounds the full calibration design (removing
+a ``k_total`` at every lambda), the other bounds each unregularized OOF train
+design (removing that ``k_total``'s ``lam=0.0`` candidate alone). Only when
 EVERY candidate is inadmissible does selection itself become invalid
 (``SelectionError`` — a contracted pre-seal rejection, exit 10, runbook category
 D "investigate, do not re-run"). This module only forwards ``condition_ceiling``.
@@ -216,8 +218,10 @@ def real_calibration_diagnostics(
     condition_ceiling
         Registered admissibility bound on ``cond(Phi)`` (config
         ``identification.condition_ceiling``), forwarded unchanged to
-        :func:`~alive.compose.select.select_hyperparams`, which applies it per
-        candidate. Must be finite and positive; ``nan``/``inf`` would silence the
+        :func:`~alive.compose.select.select_hyperparams`, which applies it in two
+        places: per candidate on the full calibration design, and per unregularized
+        (``lam == 0.0``) OOF train fold. Must be finite and positive; ``nan``/``inf``
+        would silence the
         screen and a non-positive value would reject every candidate, so selection
         refuses both.
 
@@ -302,19 +306,24 @@ def real_calibration_diagnostics(
     # The reasons already exist in `nonviable_candidates`, but nothing linked them
     # to the failure, so a reader of `futility_status` + `failures` alone recorded
     # a scientific negative for an engineering defect. This line is the link.
+    #
+    # Reported as (k_total, lambda) CANDIDATES, not as k_total dimensions. The
+    # screen has two arms and they remove different amounts: the candidate-level
+    # arm removes a k_total at every lambda, while the fold-level arm removes only
+    # its lam=0.0 candidate. Naming the k_total would overstate the second into
+    # the first -- itself a misattribution, in a line whose whole job is to prevent
+    # one.
     screened = sorted(
-        {
-            int(candidate[0])
-            for candidate, reason in selection.nonviable_candidates.items()
-            if reason.startswith(CEILING_REASON_PREFIX)
-        }
+        (int(candidate[0]), float(candidate[1]))
+        for candidate, reason in selection.nonviable_candidates.items()
+        if reason.startswith(CEILING_REASON_PREFIX)
     )
     if failures and screened:
         failures.append(
-            f"context, not an independent failure: k_total {screened} were removed before "
-            "scoring by the registered conditioning screen, so the gates above were "
-            "evaluated only on the dimensions that survived it -- do not read this stop as "
-            "evidence about the screened dimensions"
+            f"context, not an independent failure: (k_total, lambda) candidates {screened} "
+            "were removed before scoring by the registered conditioning screen, so the "
+            "gates above were evaluated only on the candidates that survived it -- do not "
+            "read this stop as evidence about the screened ones"
         )
 
     status = _CONTINUE if not failures else _FUTILITY_STOPPED

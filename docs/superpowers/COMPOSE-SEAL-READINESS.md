@@ -5,7 +5,7 @@
 > **이 문서는 아무것도 정의하지 않는다** — 세부(task)는 plan, claim은 spec, exact param은 config,
 > 시간순 audit는 git이 authoritative다([sources of truth](../../CLAUDE.md#sources)). 상태 행이 authoritative
 > 문서와 어긋나면 **authoritative 문서가 옳다**; 이 인덱스를 갱신한다.
-> **Updated:** 2026-08-05 @ `24b0fd7` (branch `main`)
+> **Updated:** 2026-08-11 @ `69b8d4c` (branch `compose-fold-conditioning`)
 > `scripts/bump-readiness-stamp.sh` / the pre-commit hook from `HEAD` at commit time, so it names the
 > **parent** of the commit that carries it and can never name itself. Reading it as "one commit stale" is a
 > misreading; git is authoritative for when this file actually changed.
@@ -648,6 +648,275 @@ branch에서 추적 가능하게 기록한다. `LOCAL` ledger ID만으로는 이
    config-bound evidence stale. The resulting canonical config digest is
    `2a8b1bc37b4b952b29dd57cf128d2aa27a2a698693e1376e569544ff119e85eb`; it must be the config axis of
    any replacement evidence and run identity.
+   **2026-08-07 CLOSED — fold-level conditioning is gated, at `lam == 0.0` only (owner decision).** The item the
+   2026-08-04 and 2026-08-05 entries below carried as *recorded, not closed* now has a registered disposition.
+   Measured first, decided second, and the measurement **narrowed the premise the decision was going to be made
+   on**. Three things were established on synthetic designs this session (`n_genes=12/18`, `k=3/4`, 3 folds;
+   probes are scratch, the exhibits are pinned in `tests/alive/compose/test_condition_ceiling.py`):
+   (1) *the gap is real* — confining one factor's magnitude to a single fold's held-out genes leaves the full
+   design at `cond = 6.47` (admitted by the candidate screen) with **full-rank** train folds at
+   `(3.03e12, 5.17, 7.13)`, invisible to the `is_full_rank`-only fold policy and, for the three positive registered
+   lambdas, to any fold diagnostic at all; (2) *on NOISY data the over-ceiling candidate loses* — conditioning
+   bounds noise AMPLIFICATION, so a degenerate fold inflates held-out error while selection takes the **max**:
+   **0 counterexamples in 37 designs** at relative noise 0.01. **This is conditional and was first recorded as
+   though it were not — see the review entry below, which falsified the unconditional form against this branch's
+   own exhibit.** (3) *at `lam > 0` the unregularized number is the wrong statistic* — the ridge filter factors
+   bound the effective conditioning, so rejecting on `cond(Φ)` there would discard a healthy candidate. The
+   residual risk this arm addresses is therefore **misattribution** — the dead candidate is filed as a legitimate
+   low score, and a stop that follows is named
+   `dev_oof_delta_below_threshold`, a claim about the biology, for a numerical cause. That is the same defect class
+   the 2026-08-05 entry fixed one level up. **Registered:** the ceiling is now also applied to each unregularized
+   OOF **train fold** design, at `lam == 0.0` only — the one place `identify_operator` takes the `lstsq` branch and
+   `cond(Φ)` *is* the conditioning of the solve, and the same boundary the sibling `unregularized_oof_rank_policy`
+   already uses. Applying it at every lambda was **rejected**: it would discard candidates whose actual solve is
+   well conditioned, relocating the ALL-vs-ANY over-strictness the 2026-08-05 review caught. The screened candidate
+   is recorded with the same reason prefix, so the `diagnostics2` context line covers it; that line now names
+   `(k_total, lambda)` **candidates** rather than `k_total` dimensions, because the two arms remove different
+   amounts and reporting a `lam=0.0`-only removal as a whole screened dimension would itself be a misattribution.
+   Verification: **12 mutations, all killed** after the review fix wave — screen deleted · applied at every lambda ·
+   `>` → `>=` · conditioning checked before rank · reason prefix dropped · exception swallowed unrecorded · context
+   line reverted to `k_total` · fold index replaced by a constant · `isfinite` guard deleted · only the first
+   over-ceiling fold named · prefix contract weakened to a substring · estimator guard added to the fold branch.
+   The last five are the reviewers' own proposed mutations. **A first pass claimed "7 mutations, all killed" and
+   that was wrong**: the ordering mutation as written also deleted the `isfinite` guard, and with the guard kept
+   the reordering is an EQUIVALENT mutant. Two reviewers found it independently.
+   The fold arm raises `FoldConditioningError`, a `SelectionError` **subclass**, so `except` still routes an escape
+   (impossible on today's single call path) to exit 10 rather than exit 1; the roster stays 42 entries for the same
+   reason, while the classification table moves **74 → 75**. That table is what noticed the new class: the targeted
+   selection suites were green without it, and only the full `tests/alive/compose` run — 2 failed, 2000 passed —
+   flagged the unclassified exception. **This is the fail-closed registry from 2026-08-01 (L1-T4) doing exactly its
+   job**, and the second time on this work that a green targeted suite was not evidence of anything. A second full
+   run then caught a third: `_REJECTIONS` in `test_exit_code_paths.py`, derived from the same table, moved **44 →
+   45**, so the new class is now injected end to end through every driver stage like the other 44. All three counts
+   bound to the classification were then enumerated rather than discovered one run at a time. Final state:
+   `tests/alive/compose/driver` 537 passed; ruff check and format clean. Linux CI on `9865f6e` (the pre-review
+   commit) passed as run `31149597512`; the post-review full-suite figure is recorded in the review entry below.
+   **What this does NOT close.** The phi-rank activation evidence reports the FULL design's condition number only,
+   so the fold arm is enforced at run time and is **not** pre-certified by evidence — recorded as a limitation, not
+   a blocker. The config digest is **unchanged** (`b158417a…`): no config field moved, the registered bound is
+   reused. Task #14 (regenerate the two config-bound activation reports at the current digest) and the missing
+   **owner-decision artifact** for the 2026-08-04 ceiling disposition **and for the 2026-08-07 fold-arm
+   disposition recorded here** both remain open. A convention for exactly this exists and was overlooked when the
+   gap was first described as having none: `2026-07-13-compose-dev-pod-gate-decisions.md` (PROPOSED → owner
+   CONFIRMED in its §6). Seal state remains **UNOPENED**; execution remains **RELEASE-BLOCKED**.
+
+   **2026-08-07 three independent adversarial reviews of the fold arm (numerics · governance · test adequacy), and
+   the corrections they forced.** Linux CI on `9865f6e` passed (run `31149597512`) and was, as on 2026-08-05,
+   the weakest of the signals: it cannot see a false claim. All three reviewers converged on **do not merge — the
+   code is sound, the record is not**. Confirmed by re-running each finding rather than accepting it:
+   **(a) the headline claim was false as written and this branch's own exhibit was the counterexample.**
+   `_fold_local_degeneracy_instance` regenerated `eps_obs` exactly and noiselessly from the degenerate `Z`. With no
+   noise there is nothing to amplify, an ill-conditioned but consistent `lstsq` is exact, and the over-ceiling
+   `lam=0` candidate WON at `theta = 0.9999999993` — so the screen moved the winner (`0.99999999933 → 0.81009349246`),
+   in direct contradiction of the "neither arm can change the WINNER" sentence written into the spec, the readiness
+   index, a test docstring and the commit message. The exhibit now carries relative noise; the noiseless case is
+   pinned as the explicit boundary rather than hidden. **This also matters beyond bookkeeping**: `oof_theta` is a
+   registered futility input, so an arm that can move it can move `CONTINUE` → `FUTILITY_STOPPED`.
+   **(b) four numbers were attributed to an artifact that does not produce them.** `1.5e1`, `2.9e12`, the `-5e21`
+   theta scale and the `0.7867 / 0.7928` pair came from scratch probes at `n_genes=12, k=3`, while the cited test
+   file runs `n_genes=18, k=4` and produces `6.47`, `3.03e12` and `+0.99999999933`. The standing rule was written
+   as "never record a number you did not produce this session"; this is its second failure mode — a number the
+   writer DID produce, attributed to an artifact that reproduces something else. Both halves now apply.
+   **(c) one real code defect.** The ordering guarantee held per fold but not per CANDIDATE: `_oof_theta_for_candidate`
+   raised on the first offending fold, so a conditioning raise in fold 0 short-circuited a rank failure in fold 1 and
+   a NON-IDENTIFIABLE candidate was recorded "numerically inadmissible", with the reason depending on fold order.
+   Reproduced (`fold 0: cond 2.92e12 full-rank · fold 1: rank-deficient` → recorded as conditioning). Fixed by
+   moving both guards into a whole-candidate pre-pass, `_screen_unregularized_folds`, that checks rank across ALL
+   folds before conditioning on any.
+   **(d) a scope limit that is NOT closed.** `cond(Φ)` is invariant to a uniform rescale of `z` while the registered
+   `lambda_grid` is ABSOLUTE: `Φ` is bilinear in `z`, so `z → cz` makes the effective penalty `λ/c⁴`. **How much
+   protection `lam > 0` actually provides is therefore a property of `‖z‖`, which no config field, code path or
+   activation evidence bounds.** Recorded as a registered limitation; the `lam == 0.0` restriction is retained as
+   the conservative choice. **It is filed here, inside a correction narrative, and NOT in the pre-seal blocker
+   enumeration — round 4 flagged that placement as wrong for something that can flip a REGISTERED futility
+   condition (`dev_oof_delta_below_threshold`) by a numerical cause. Surfacing it where a pod operator reads
+   blockers is task #43 and is NOT closed by this entry.** Measured (2026-08-07 re-measurement, `lam=0.001`, `eps` rescaled by `c²` with the
+   design, `cond(Φ) = 6.4732…` in all four cells):
+
+   | | `c = 1` | `c = 100` |
+   |---|---|---|
+   | noise = 0 | `0.8100934924563623` | `0.9577101250921993` |
+   | noise = 0.01 (the fixture default) | `0.8103235465139835` | **`-3340344.0205271696`** |
+
+   The `λ/c⁴` identity is confirmed to ten significant figures (`c=100, λ=1e-3` ≡ `c=1, λ=1e-11`). Also fixed: the reported fold index was asserted nowhere (a constant passed the suite) while
+   the sibling rank arm pinned its own; only the first over-ceiling fold was named; the reason string silently
+   dropped the "the unregularized solver applies no filter that could bound it" clause — deliberately, because it is
+   false (`lstsq` applies an `rcond` truncation), but the removal went unrecorded while the string lands verbatim in
+   a checksummed futility report; the `isfinite` guard's stated justification was wrong (`rank_diagnostics` returns `inf` when `rank < sym_dim` **or** `pos.size == 0`, and the
+   second fires at `k_total == 0` with `is_full_rank` TRUE — so the guard is reachable, and is now tested directly
+   rather than kept as untestable defence-in-depth); and the config comment still described a `k_total`-only screen.
+   The config fix is comment-only and **digest-neutral by owner decision** — recomputed after the edit as
+   `b158417a76e888bff2bf6836bea622e0cbf596f0743f3fe89aea2ffe0864a9fd`, unchanged, so no new run identity is created.
+   Post-fix state at `28cd0a0`: 12 mutations killed, full `tests/alive/compose` 2013 passed 2 skipped, ruff clean,
+   Linux CI green (run `31152897312`). **That state was then reviewed again and did not survive — see the entry
+   below.** Seal state remains **UNOPENED**; execution remains **RELEASE-BLOCKED**.
+
+   **2026-08-07 SECOND review round on the fix wave (closure · new code · new tests), and the third correction
+   wave.** Verdict again **do not merge**: `28cd0a0` had green Linux CI and a green 2013-test suite, and both were
+   green on a commit whose own record was still wrong. Ten of the twelve round-1 findings were judged genuinely
+   closed — a reviewer independently rebuilt the true reorder mutation and confirmed it is now killable, and
+   reproduced every repinned number bit-for-bit. Three were not.
+   **F12 was WRONGLY CLOSED, and it is the same misattribution the fix wave claimed to eliminate.** The recorded
+   scale exhibit `0.8103 → 0.9577` pairs numbers from TWO different fixtures — `0.8103` is the noisy default,
+   `0.9577` is the noiseless one — under the words "동일 설계" (same design); no `(noise, c)` setting produces both,
+   and the noiseless baseline is `0.8101`. Worse, a reviewer's `theta ≈ -3.3e6` had been dismissed as unreproducible
+   "because scaling `Z` without scaling `eps` conflates a representation mismatch with conditioning". **That reason
+   is false**: `theta` is a relative-error-reduction ratio and is invariant to a uniform rescale of the outcomes
+   (stated WITH its construction, because every
+   value-only version of this figure has been wrong: on the plain exhibit, rescaling the outcomes alone changes
+   `theta` by **exactly 0**; in the setting actually at issue — bank at `c=100`, `eps` scaled by `c²` versus not —
+   by relative **5.019e-15**, i.e. round-off, not a mechanism). The real cause of the non-reproduction was measuring against the
+   pre-fix, noiseless exhibit. The dismissal is **withdrawn**, the reviewer's measurement is adopted, and the table
+   above is repinned from a single stated configuration. The correction matters: the recorded severity understated
+   the collapse by roughly seven orders of magnitude on a quantity that feeds a registered futility condition.
+   **A thirteenth mutation existed, in the arm the fix wave itself created.** `select.py`'s RANK pre-pass reported
+   `f"OOF train fold {fold_index}"`, and replacing that index with a constant `0` survived the FULL compose suite at
+   2013 passed — identical to clean. The only fixture in the repo where the deficient fold is not fold 0 is the new
+   `test_a_rank_failure_in_any_fold_outranks_a_conditioning_failure_in_another`, and it never asserted which fold
+   the reason named. Eight further survivors were found in the same family (rank value taken from fold 0; rank pass
+   skipping the last fold; the also-clause naming a nonexistent fold, or healthy folds, or only the second; the rank
+   raise switched to the conditioning exception type, which routes it past the estimator escalation).
+   **Five of the six new tests were weaker than their names.** The boundary test's boundary was measured at noise
+   `≈ 6e-12` while its nearest probe sat at `1e-6`; `approx(1.0, abs=1e-6)` asserted seven digits of a quantity out
+   of a `cond 3.03e12` solve, the same over-precise shape as the `rel=1e-12` pin that went red on Linux; the
+   "owns the zero-width bank" test showed no such ownership (the actual refusal is `EstimatorInputError`, three
+   layers down); the monkeypatched prefix test passed verbatim with its monkeypatch deleted; and the rewritten
+   fixture fed the SAME noise realization into both split halves, so `measurability_gate` — a split-half correlation
+   — would have scored injected noise as reproducible GI signal.
+   **The recurring failure mode, named.** Across both rounds the code fixes held; what failed each time was
+   asserting a weaker property than the name claims, then recording the name. The standing rule added here is
+   mechanical rather than aspirational: **for every new test, run the mutation its own name describes and confirm it
+   dies.** Every finding above would have been caught by that check before commit, without a reviewer.
+   Also corrected: `_screen_unregularized_folds`'s docstring asserted its rank-before-conditioning precedence
+   without qualification, but the CANDIDATE-level screen still masks fold-level rank failures one level up
+   (measured: full design `cond 9.21e12` over the ceiling with train fold 1 at `rank 6/10` records only the
+   conditioning reason). That is deliberate, not the same defect — the two arms examine different objects, the
+   candidate arm's reason is true, and it justifies removal at every lambda where the fold rank policy justifies
+   removing only `lam=0.0` — so the docstring is scoped rather than the code restructured. The RANK arm now names
+   every deficient fold, matching the conditioning arm. `diagnostics2`'s two `sorted(...)` calls remain mutable to
+   `list(...)` with the suite green; that is **equivalent-by-config** (the registered grids are ascending, so
+   insertion order equals sorted order) and is recorded here as knowingly-surviving rather than left silent for a
+   third round. **F10 remains OPEN and is recorded as such:** the decision NOT to register a policy name for the new
+   scope was minuted only as its benefit ("no config field moved, so no new run identity"); its counterpart is that
+   the 2026-08-06 and 2026-08-07 selection contracts are now indistinguishable from config, digest and
+   `selected_hyperparameters`, and separable only by Git SHA. Post-wave state: **22 mutations all killed** (the
+   twelve from round 1 plus the nine round-2 survivors and one per new test name), full `tests/alive/compose`
+   2016 passed 2 skipped, ruff clean, Linux CI green on `c22db82` (run `31188255447`). **That state was reviewed a
+   third time and again did not survive — see below.** Seal state remains **UNOPENED**; execution remains
+   **RELEASE-BLOCKED**.
+
+   **2026-08-11 FOURTH review round (verification apparatus · round-3 closure · whole-branch merge readiness), and
+   the fifth correction wave.** The merge lens returned MERGE-WITH-FIXES with four record items and zero code
+   changes. The other two found that **the failure had moved into the instrument, and that the previous wave's
+   "class-level" fix covered one arm again.**
+   **(a) A mutation "kill" meant only that the process exited nonzero.** `run_suite` scored on `returncode`.
+   Reproduced with a one-character syntax break in `select.py`: three collection ERRORS, **zero failing tests**,
+   nonzero exit — recorded `killed`. Every kill this branch has logged was therefore a statement about the process,
+   not the tests, and a transient environment failure mid-run would have converted every remaining entry to
+   "killed" and printed `all mutations killed`, exit 0. `run_suite` now returns the SET OF FAILED NODE IDS; a kill
+   requires it non-empty and PRINTS the tests that produced it; a nonzero exit with no failing test is reported
+   **INVALID** — neither kill nor survivor. Two rules become **five**: (4) a kill must be attested by a named
+   failing test, never an exit code; (5) the mutable file set must cover every site that ENFORCES the contract —
+   rules 1–3 govern how an entry is written, none governs which sites have an entry at all. The four enforcing
+   sites still unmutated (`phi_rank`, `phase2a`, `config2`, `preflight_cmd`) are now named as such.
+   **(b) The harness violated its own Rule 1.** `M4` was named "conditioning checked BEFORE rank" while DELETING
+   the rank pre-pass — a strict superset, so its kill was evidence for the larger defect and said nothing about
+   ordering. Renamed to what it does; `M4b` performs the reorder the old name claimed. `M3`/`M9` named no arm and
+   mutated only the FOLD arm; the CANDIDATE arm's own `>` and `isfinite` had no entry (`M3b`/`M9b` added). The
+   `_Never` helper injection had no anchor count check — one drift from a `NameError` recorded as a kill, the
+   retired M8's class one level down. Backups were keyed by BASENAME. The summary printed no count, so deleting an
+   entry left the output byte-identical.
+   **(c) The "class-level" field fix covered the conditioning arm only — the fifth time on this branch that the
+   instance was fixed and the class was not.** Four survivors in the RANK arm: its also-clause could name ALL folds
+   rather than only the deficient ones (reporting a FULL-RANK fold as rank-deficient, inside a checksummed report),
+   and its `rank`/`sym_dim` could be replaced by the literals they take in every fixture in the file — a direct
+   violation of the harness's own Rule 2. Root cause: `_assert_rank_fields` had ONE call site whose fixture makes
+   all three folds deficient, so "name every offender" and "name every fold" were indistinguishable — exactly the
+   trap the conditioning sibling documents and defends against with a second fixture, whose comment reads "Both are
+   needed; either alone leaves a mutant alive". The rank arm had only the first half. Closed with a second rank
+   fixture at `k=3` (so `sym_dim` is 6, not the usual 10) that leaves one fold HEALTHY and gives the primary
+   offender a rank other than the usual 6.
+   **(d) The `5e-9` figure was corrected into a different wrong number.** It was never fixed where it lives — the
+   SPEC, which outranks this index for scientific claims, still carried it, because the withdrawal touched only the
+   readiness. And the replacement stated a value without its construction: `theta`'s invariance to a uniform outcome
+   rescale is **exactly 0** on the plain exhibit, while the sentence is about a different setting (bank at `c=100`,
+   `eps` scaled by `c²` versus not) where it is `5.019e-15`. Both documents now state the construction alongside the
+   value — the omission that made this figure wrong four times running.
+   Also: "(owner decision)" was asserted unqualified in three places while this same document records its artifact
+   as missing — now qualified with a pointer to the pending artifact and its convention. The harness matched none of
+   the ten path globs in `.claude/rules/compose.md` despite existing solely to rewrite COMPOSE production source —
+   added. Its safety notice said it edits `src/` when it also edits `tests/`, and omitted the concurrency hazard
+   that fired twice during these reviews — both corrected in the file a future user actually reads.
+   Post-wave: **37 mutations all killed, each by a named failing test**; full `tests/alive/compose` **2017 passed,
+   2 skipped**; ruff check and format clean. Seal state remains **UNOPENED**; execution remains **RELEASE-BLOCKED**.
+   **2026-08-08 THIRD review round (closure · whole-branch merge readiness · new tests), and the fourth correction
+   wave.** All three CI runs green, 2016 tests green, 22/22 mutations killed — and **six more mutations survived the
+   full suite at counts byte-identical to clean**. The whole-branch lens returned MERGE-WITH-FIXES; the other two
+   returned defects. Every finding was re-run before acceptance.
+   **The recurring failure was diagnosed one level too shallow.** Round 2 was recorded as "asserting a weaker
+   property than the test name claims". The truer statement is that **each wave fixed the INSTANCE and not the
+   CLASS**: wave 3 closed the constant-fold-index mutation in the rank arm, wrote a comment stating that "every" is
+   only falsifiable with three or more offenders — and then created the same two defects in the *conditioning* arm's
+   primary index and in the rank arm's own also-clause, in the same commit. Six survivors, all of one family: a
+   generated message field that no assertion pins. The fix is now class-level: `_assert_ceiling_fields` and
+   `_assert_rank_fields` pin EVERY generated field of both reasons — index, measured value, clause header, and the
+   exact membership of the also-clause — against substitution by a constant or by another field's value. Fixtures
+   were changed to make that falsifiable at all: the degenerate fold is parameterised (it was always fold 0, so no
+   fixture in the repo could distinguish a reported index from the literal `0`), the rank fixture now produces
+   THREE deficient folds not all sharing one rank (three were needed for "every"; distinct ranks were needed or
+   substituting fold 0's values yields a byte-identical message), and the conditioning also-clause is asserted with
+   its per-fold values.
+   Also closed: the fold-arm "same reason for any estimator" test never compared reasons; the candidate arm's
+   measured value could be replaced by `0.0`; the `diagnostics2` context line could report a candidate-arm removal
+   (every lambda) as a `lam=0.0`-only one — the mirror of the misattribution that line exists to prevent; a
+   test whose name said the finiteness guard "refuses" a zero-width bank when its body asserts nothing is raised
+   (renamed); and a seed-0 margin that could silently degrade to a single-element identity. **Harness now 31
+   mutations, all killed.**
+   Corrections to this document and to source: the falsified claim that `rank_diagnostics` returns `inf` **exactly**
+   for a rank-deficient design still stood in three places including the PUBLIC `select_hyperparams` docstring;
+   `select_hyperparams` and `diagnostics2` still documented a one-arm screen; `preflight_cmd`'s comment still said
+   the screen removes "dimensions", the exact `k_total`/candidate conflation this protocol registers as a
+   misattribution. Two unreproducible numbers introduced by the previous correction are withdrawn: the withdrawal
+   paragraph's own "relative `5e-9`" invariance figure is off by six orders, and a `cond 9.21e12` quoted in a source
+   docstring came from a construction committed nowhere — both are unreproducible numbers *inside the corrections
+   for unreproducible numbers*, and the second is removed rather than repinned.
+   **Recorded, NOT closed.** `diagnostics2`'s `sorted(...)` sites were recorded as equivalent-by-config; that
+   justification covers `sorted` → `list` but **not** reversal, which also survives, and a third such site exists at
+   `select.py`'s `"; ".join(sorted(...))`. `measurability_gate` still cannot fail on this fixture — the fix removed
+   a false-pass mechanism (the shared noise realization) rather than making the gate load-bearing here. And the
+   **lineage asymmetry F10 half-states**: the 2026-07-27 entry registered a structurally identical guard as a config
+   field precisely because "a scientific selection-contract change moves the config digest/run identity", and the
+   same review dismissed `selected_hyperparameters` blindness **because** `config_checksum` and `run_id` "both move
+   with any config change". This branch removes that premise, and F10 records the consequence without saying the
+   earlier mitigation no longer applies. It does now.
+   The mutation harness is now **committed** (`scripts/compose_conditioning_mutation_harness.py`) because its
+   absence was itself a named root cause: the evidence for "all mutations killed" existed only as prose in a commit
+   message, so it could not be re-run or extended and each round rediscovered the same family one seat over. It
+   refuses to start on a dirty worktree, since it edits `src/` in place and restores in `finally`. Post-wave state:
+   **31 mutations all killed**, full `tests/alive/compose` **2016 passed, 2 skipped**, ruff check and format clean.
+
+   **The most instructive finding of the third round arrived after it: the failure mode had migrated INTO the
+   mutation harness.** Round 1's `M8` mutated the reported fold index to the sentinel `99` and was recorded KILLED —
+   but `99` died only because a test asserted the literal substring `"OOF train fold 0"`. The constant that
+   mattered, `0`, survived two further rounds, under a mutation NAME ("the reported fold index is a constant") that
+   claimed the whole class. So the harness itself was asserting a weaker property than its name and then recording
+   the name — the exact defect it exists to find — and its false kill is *why* the class stayed open across rounds
+   2 and 3. Verified at this SHA: both `99` and `0` now die, because wave 4 parameterised the degenerate fold.
+   `M8` is retired in favour of the correct-answer mutation, and the harness now carries the rule explicitly:
+   **an index- or value-to-constant mutation must use the constant the correct answer actually takes, never a
+   conspicuous sentinel** — better still, build the fixture so the correct answer is not a constant any mutation
+   would guess. **Process hazard recorded:** the in-place harness was run while independent reviewers were reading
+   the same checkout, which briefly showed a mutated `select.py` in `git status`. It restored correctly and a
+   concurrent on-disk mutation can only produce a spurious FAILURE, never a spurious pass — but the harness and
+   read-only review must not share a worktree.
+   Branch state at `50e7bc7`: 30 mutations all killed (M8 retired), full `tests/alive/compose` 2016 passed
+   2 skipped, ruff clean, Linux CI green at `50e7bc7` (run `31263820204`) and at `bb185b6` (run `31265250187`) — naming both, since
+   "the tip" stopped being unambiguous the moment another commit landed. Note `2256f6d`'s own run
+   (`31263666233`) was **cancelled** when the next commit was pushed on top of it — superseded, so neither a pass
+   nor a failure, and that commit has no CI verdict of its own; the tip contains its changes. **`2256f6d` and
+   `50e7bc7` have had no independent review.** Rounds 1/2/3 found 12 / 9+ / 6 defects: converging, not converged,
+   and the last two findings came from reviewers examining the VERIFICATION rather than the code. Seal state
+   remains **UNOPENED**; execution remains **RELEASE-BLOCKED**.
    **2026-08-05 second independent review of the redesign, and the corrections it forced.** Three reviewers
    re-ran against the redesigned branch; two were the round-1 reviewers, asked to judge their own findings
    CLOSED/PARTIAL/OPEN rather than to re-derive. **The highest-risk item held.** That the screen must not fire
@@ -1030,6 +1299,23 @@ branch에서 추적 가능하게 기록한다. `LOCAL` ledger ID만으로는 이
    candidate remains unsigned/historical and there is still no owner image lock, candidate-bound owner signature,
    or accepted external verifier pin. Status remains **RELEASE-BLOCKED**; a registered key or unsigned digest alone
    is never seal authorization.
+4b. **⛔ OPEN — the registered `lambda_grid` is an ABSOLUTE penalty and nothing bounds `‖z‖`** (task #43,
+   owner decision). `cond(Phi)` is invariant to a uniform rescale of `z` while `identification.lambda_grid` is a
+   fixed absolute penalty, and `Phi` is bilinear in `z`, so `z → cz` makes the effective penalty `λ/c⁴`. Measured
+   2026-08-07 on the committed exhibit at IDENTICAL `cond(Phi) = 6.4732…`: rescaling the factor bank by 100 moves
+   `theta(lam=0.001)` from `0.8103235465139835` to **`-3340344.0205271696`**. Nothing bounds `‖z‖` — `zfactor`
+   returns raw centered PCA scores concatenated with the ESM block, `factor_z` has no scale field, and no
+   activation evidence records a scale statistic. **Consequence:** the registered conditioning ceiling cannot tell
+   whether the registered `lambda_grid` lands in a healthy window on the real Norman bank, and a numerical cause
+   can therefore flip the REGISTERED futility condition `oof_theta <= dev_oof_threshold`. This is a PRE-EXISTING
+   protocol gap (absolute grid + unbounded `‖z‖` predate the fold-conditioning branch, which discovered it), and it
+   is **enumerated here rather than left in a correction narrative** because three review rounds judged narrative
+   placement wrong for something a pod operator must see. Options, none taken: record a scale statistic in the
+   phi-rank activation evidence (cheapest — `sigma_max` is already computed by the registered rank-tolerance rule,
+   and task #14 regenerates those reports anyway); add a `factor_z` scale field or normalization (**moves the
+   config digest = new run identity**); or record explicit owner acceptance as a non-blocker. Detail and the
+   `λ/c⁴` derivation: the 2026-08-07 conditioning-ceiling entry below.
+
 5. **§2.5 release gate** — worker locked-env integration green + 독립 검토 후 exact commit `C`를 마지막
    repository commit으로 동결한다. Clean detached `C`에서 bias report → single-leaf finalized config →
    analytical reports를 external durable stage에 게시하고, owner가 `C`·모든 byte hash·immutable object
