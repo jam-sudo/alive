@@ -5,7 +5,7 @@
 > **이 문서는 아무것도 정의하지 않는다** — 세부(task)는 plan, claim은 spec, exact param은 config,
 > 시간순 audit는 git이 authoritative다([sources of truth](../../CLAUDE.md#sources)). 상태 행이 authoritative
 > 문서와 어긋나면 **authoritative 문서가 옳다**; 이 인덱스를 갱신한다.
-> **Updated:** 2026-08-12 @ `dbc360a` (branch `main`)
+> **Updated:** 2026-08-12 @ `1d19729` (branch `compose-receipt-interpreter`)
 > `scripts/bump-readiness-stamp.sh` / the pre-commit hook from `HEAD` at commit time, so it names the
 > **parent** of the commit that carries it and can never name itself. Reading it as "one commit stale" is a
 > misreading; git is authoritative for when this file actually changed.
@@ -373,7 +373,8 @@ branch에서 추적 가능하게 기록한다. `LOCAL` ledger ID만으로는 이
    **Operational cost, stated so it is not discovered at the wrong moment:** any `uv sync` that rewrites
    `uv.lock` — including a routine dependency refresh — turns the closure test red until a fresh Linux
    kernel-isolation CI run is archived and the pin moved to it. The test says so and says not to delete the
-   check; budget the re-archive rather than the deletion. **Open item:** record the actual interpreter in the
+   check; budget the re-archive rather than the deletion. **Open item [CLOSED 2026-08-12 — see the L4 entry at
+   the end of this file]:** record the actual interpreter in the
    receipt schema; `.python-version` is a minor series and identifies no patch release. (4) **The three history-reading tests would have failed on CI and
    taken the kernel gate down with them.** The workflow checked out at `fetch-depth: 1`, where the commits the
    archives name do not exist; they pass on any full clone, which is why local green did not catch it. Worse, the
@@ -426,6 +427,12 @@ branch에서 추적 가능하게 기록한다. `LOCAL` ledger ID만으로는 이
    (D2, not yet implemented — that is the next wave); the uniform-scale "immaterial λ" band is recorded as a
    registered limitation rather than invented as a criterion (D3); the receipt's interpreter identity is done
    now (D4). Plan: `plans/2026-08-01-compose-pre-pod-local-closure.md`.
+   > **[2026-08-12 wording correction.]** "the receipt's interpreter identity is done now (D4)" records the
+   > **decision** — *do it now* — and was written before any code existed. Read as a completion claim it was
+   > false for eleven days: the receipt schema stayed `..._v1` with a runner block of `os`/`architecture`/
+   > `kernel_release` and no interpreter anywhere. It became true on 2026-08-12; see the L4 entry at the end of
+   > this file. A decision and its implementation are separate states and this document should not spell them
+   > the same way.
    **The contract is no longer stated as total.** Driver design spec 1.1 now registers exit `1` as the
    uncontracted-driver-bug escape — full traceback on stderr, stdout empty, blind retry forbidden — because the
    carve-out previously existed only in `cli.py`'s docstring while the spec and runbook described `main`'s
@@ -1344,6 +1351,48 @@ branch에서 추적 가능하게 기록한다. `LOCAL` ledger ID만으로는 이
 6. **A100 sealed-run pod: runbook 실행** — 유효한 owner-approved external ResolvedRunSpec,
    `ActivationRecord`(requirement별 non-empty staged evidence), staged finalized config와 clean detached `C`
    하에 `phase2a → preflight → phase2b --confirm-seal`. **COMPOSE seal 1회 개봉** — `TG-K562`와 독립.
+
+---
+
+**2026-08-12 — L4 (owner decision D4) CLOSED: the kernel-isolation receipt now records its interpreter.**
+Receipt schema `compose_kernel_isolation_ci_receipt_v1` → `_v2`, adding an `interpreter` block of
+`platform.python_version()`, a whitespace-normalised `sys.version` build string, and
+`sys.implementation.name`. This closes the open item recorded above: the receipt named the runner's OS,
+architecture and kernel release but never the interpreter, and `.python-version` carries only a minor series,
+so no committed proof could say which CPython patch release produced it. Read **in-process**, not passed on
+the command line, so there is no argument surface through which it could be misdeclared; the honest scope is
+the receipt-**building** process, which shares the locked environment with the suite but is not literally the
+same process, and the docstring says so.
+
+**`v1` stays readable, deliberately.** Both committed archives embed `v1` receipts, their source artifacts
+expire, and the `v1` archive is the one carrying the independent Codex grade — a validator that stopped
+reading `v1` would retire durable evidence nobody can regenerate. Both were validated **directly** against the
+new validator, not merely via the suite. The roster is selected **by** the declared schema and then enforced
+exactly, so a `v1` receipt smuggling an `interpreter` and a `v2` receipt omitting one are both refused, and an
+unrecognised schema resolves to no roster at all rather than falling through to one that happens to fit.
+**No re-archive is forced:** `kernel_isolation_ci.py` is not in `_ISOLATION_CLOSURE`, so the archived kernel
+property is untouched.
+
+**The version/build cross-binding is `startswith`, not equality, and that is load-bearing.** On a release both
+fields read `3.12.13` and equality would hold; on a pre-release `sys.version` carries `3.13.0rc1` while
+`platform.python_version()` reports `3.13.0`. Because a red suite skips the receipt-build step and the upload
+then fails closed, an over-strict check here would not warn — it would take the only kernel-property gate this
+project has offline, the same cascade the `fetch-depth: 1` defect produced. The weaker predicate still pins the
+full patch level, and a different release is still refused.
+
+**🔑 Two mutations survived the first version of the tests, and they are the reason this entry exists.**
+Replacing `platform.python_version()` with the literal `3.12.13`, and `sys.implementation.name` with
+`cpython`, passed the whole suite — because on this machine **the constant IS the correct answer**, so every
+assertion comparing the receipt to today's interpreter was satisfied, *including* a comparison against
+`interpreter_identity()`, which the mutation moves on both sides at once. The interpreter cannot be
+parameterised away, so the discriminating property is **FOLLOWS, not MATCHES**: monkeypatch the interpreter to
+values no real CPython here reports and require the receipt to move with them. Harness committed at
+`scripts/compose_receipt_interpreter_mutation_harness.py` (**14 mutations, all killed, each attested by a
+NAMED failing test**); it is a sibling of the conditioning harness rather than a refactor of it, because that
+one backs a standing 37-mutation record.
+
+Seal state remains **UNOPENED**; execution remains **RELEASE-BLOCKED**. A receipt schema is dev-boundary
+provenance and authorizes no run.
 
 ## 이 문서가 *아닌* 것 (중복 금지)
 
