@@ -12,8 +12,10 @@ import io
 import json
 import math
 import os
+import platform
 import re
 import subprocess
+import sys
 import xml.etree.ElementTree as ET
 import zipfile
 from collections.abc import Mapping, Sequence
@@ -23,7 +25,15 @@ from pathlib import Path
 from alive.io import atomic_write_once
 from alive.provenance import sha256_bytes, sha256_json
 
-CI_RECEIPT_SCHEMA = "compose_kernel_isolation_ci_receipt_v1"
+CI_RECEIPT_SCHEMA_V1 = "compose_kernel_isolation_ci_receipt_v1"
+CI_RECEIPT_SCHEMA_V2 = "compose_kernel_isolation_ci_receipt_v2"
+#: Schema the builder EMITS. ``v1`` stays *readable* on purpose: the two archives
+#: committed under ``docs/activation-evidence/compose`` embed ``v1`` receipts, and
+#: their source artifacts have expiry dates, so a validator that stopped accepting
+#: ``v1`` would retire durable evidence that cannot be regenerated. Nothing forces a
+#: re-archive either -- this module is not in the isolation closure the archived
+#: proof is about, so bumping the receipt schema invalidates no kernel property.
+CI_RECEIPT_SCHEMA = CI_RECEIPT_SCHEMA_V2
 CI_ARCHIVE_SCHEMA = "compose_kernel_isolation_ci_archive_v1"
 CI_PROOF_PROFILE_V1 = "x86_64_seccomp_primitives_v1"
 CI_PROOF_PROFILE_V2 = "x86_64_seccomp_primitives_and_launcher_wiring_v2"
@@ -39,7 +49,7 @@ _PROFILE_TESTS = {
     CI_PROOF_PROFILE_V1: (CI_PRIMITIVE_TEST,),
     CI_PROOF_PROFILE_V2: (CI_PRIMITIVE_TEST, CI_E2E_TEST),
 }
-_RECEIPT_KEYS = frozenset(
+_RECEIPT_KEYS_V1 = frozenset(
     {
         "schema",
         "proof_profile",
@@ -57,7 +67,22 @@ _RECEIPT_KEYS = frozenset(
         "self_checksum",
     }
 )
+#: ``v2`` adds the interpreter that actually ran the proof. ``.python-version`` names
+#: a minor series and identifies no patch release, so before this block the receipt
+#: could not say which CPython produced the result.
+_RECEIPT_KEYS_V2 = _RECEIPT_KEYS_V1 | frozenset({"interpreter"})
+#: Roster is selected BY the declared schema, so each version is validated exactly:
+#: a ``v1`` receipt carrying ``interpreter``, or a ``v2`` receipt missing it, both
+#: fail the roster check rather than being silently tolerated.
+_RECEIPT_KEYS_BY_SCHEMA = {
+    CI_RECEIPT_SCHEMA_V1: _RECEIPT_KEYS_V1,
+    CI_RECEIPT_SCHEMA_V2: _RECEIPT_KEYS_V2,
+}
 _RUNNER_KEYS = frozenset({"os", "architecture", "kernel_release"})
+_INTERPRETER_KEYS = frozenset({"version", "build", "implementation"})
+#: ``platform.python_version()`` always includes a patch level (it defaults to 0),
+#: which is the whole point of recording it.
+_PYTHON_VERSION_RE = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+")
 _JUNIT_KEYS = frozenset(
     {
         "sha256",
@@ -118,6 +143,41 @@ def _sha(value: object, label: str) -> str:
     if not isinstance(value, str) or _SHA256_RE.fullmatch(value) is None:
         raise KernelIsolationCIError(f"{label} must be a lowercase SHA-256")
     return value
+
+
+def _validate_interpreter(value: object) -> dict[str, object]:
+    """Check the ``v2`` interpreter block, including its cross-field binding.
+
+    ``version`` and ``build`` are not independent: :data:`sys.version` begins with
+    the same release string :func:`platform.python_version` parses out of it, so a
+    ``version`` that disagrees with ``build`` is a forged or hand-edited receipt.
+
+    The binding is ``startswith`` on ``build``'s first token rather than equality,
+    and that is deliberate. On a release both are ``3.12.13`` and equality would
+    hold; on a pre-release ``build`` carries ``3.13.0rc1`` while
+    ``platform.python_version()`` reports ``3.13.0``, so an equality check would
+    reject a legitimate receipt. Because a red suite skips the receipt-build step
+    and the upload then fails closed, an over-strict check here does not merely
+    warn -- it takes the only kernel-property gate this project has offline. The
+    weaker predicate still pins the full patch level, which is the point of the
+    block.
+    """
+    interpreter = _exact_mapping(value, _INTERPRETER_KEYS, "kernel-isolation interpreter")
+    for field in ("version", "build", "implementation"):
+        item = interpreter[field]
+        if not isinstance(item, str) or not item.strip():
+            raise KernelIsolationCIError(f"kernel-isolation interpreter {field} must be non-empty")
+    version = interpreter["version"]
+    if _PYTHON_VERSION_RE.fullmatch(version) is None:
+        raise KernelIsolationCIError(
+            "kernel-isolation interpreter version must be major.minor.patch"
+        )
+    build_tokens = interpreter["build"].split()
+    if not build_tokens or not build_tokens[0].startswith(version):
+        raise KernelIsolationCIError(
+            "kernel-isolation interpreter build string disagrees with its version"
+        )
+    return interpreter
 
 
 def _positive_int(value: object, label: str) -> int:
@@ -363,6 +423,34 @@ def _parse_junit(
     return junit, cases
 
 
+def interpreter_identity() -> dict[str, str]:
+    """Identify the CPython build running this process.
+
+    Read in-process rather than accepted as an argument. The builder runs on the
+    same runner, in the same ``uv sync --locked`` environment, as the suite whose
+    JUnit it is reading, so an in-process read is the faithful one and there is no
+    command-line surface through which it could be misdeclared.
+
+    Scope, stated because it is narrower than "the interpreter that ran the tests":
+    this is the interpreter of the *receipt-building* process. The workflow runs
+    pytest and this builder as two processes of the same locked environment, so they
+    agree in practice, but nothing in the receipt proves they were the same process.
+
+    Returns
+    -------
+    dict of str to str
+        ``version`` (``major.minor.patch``), ``build`` (whitespace-normalised
+        :data:`sys.version`), and ``implementation`` (e.g. ``cpython``).
+    """
+    return {
+        "version": platform.python_version(),
+        # `sys.version` embeds newlines; normalising keeps the canonical JSON on one
+        # line and keeps the digest independent of that formatting.
+        "build": " ".join(sys.version.split()),
+        "implementation": sys.implementation.name,
+    }
+
+
 def build_kernel_isolation_ci_receipt(
     *,
     junit_path: str | Path,
@@ -403,6 +491,7 @@ def build_kernel_isolation_ci_receipt(
             "architecture": runner_architecture,
             "kernel_release": kernel_release,
         },
+        "interpreter": interpreter_identity(),
         "junit": junit,
         "required_test_cases": cases,
         "status": "passed",
@@ -419,9 +508,16 @@ def validate_kernel_isolation_ci_receipt(
     expected_workflow_sha256: str | None = None,
 ) -> dict[str, object]:
     """Validate one canonical CI receipt without trusting its stored verdict."""
-    receipt = _exact_mapping(value, _RECEIPT_KEYS, "kernel-isolation CI receipt")
+    # The roster is chosen by the DECLARED schema, then enforced exactly. An
+    # unrecognised schema resolves to no roster and is refused here rather than
+    # falling through to a roster that happens to match.
+    declared = value.get("schema") if isinstance(value, Mapping) else None
+    keys = _RECEIPT_KEYS_BY_SCHEMA.get(declared) if isinstance(declared, str) else None
+    if keys is None:
+        raise KernelIsolationCIError("kernel-isolation CI receipt checksum or schema mismatch")
+    receipt = _exact_mapping(value, keys, "kernel-isolation CI receipt")
     body = {key: item for key, item in receipt.items() if key != "self_checksum"}
-    if receipt["schema"] != CI_RECEIPT_SCHEMA or receipt["self_checksum"] != sha256_json(body):
+    if receipt["self_checksum"] != sha256_json(body):
         raise KernelIsolationCIError("kernel-isolation CI receipt checksum or schema mismatch")
     required = _required_tests(receipt["proof_profile"])
     repository = receipt["repository"]
@@ -452,6 +548,8 @@ def validate_kernel_isolation_ci_receipt(
         or not runner["kernel_release"]
     ):
         raise KernelIsolationCIError("kernel-isolation CI runner is not Linux x86_64")
+    if declared != CI_RECEIPT_SCHEMA_V1:
+        _validate_interpreter(receipt["interpreter"])
     junit = _exact_mapping(receipt["junit"], _JUNIT_KEYS, "kernel-isolation JUnit")
     _sha(junit["sha256"], "JUnit SHA-256")
     totals = {

@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import json
 import os
+import platform
 import subprocess
+import sys
 import tomllib
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -18,6 +21,8 @@ from alive.compose.kernel_isolation_ci import (
     CI_PRIMITIVE_TEST,
     CI_PROOF_PROFILE_V2,
     CI_RECEIPT_SCHEMA,
+    CI_RECEIPT_SCHEMA_V1,
+    CI_RECEIPT_SCHEMA_V2,
     CI_TEST_CLASSNAME,
     CI_WORKFLOW_PATH,
     KernelIsolationCIError,
@@ -25,6 +30,7 @@ from alive.compose.kernel_isolation_ci import (
     _parse_junit,
     build_kernel_isolation_ci_archive,
     build_kernel_isolation_ci_receipt,
+    interpreter_identity,
     validate_kernel_isolation_ci_archive,
     validate_kernel_isolation_ci_receipt,
 )
@@ -640,3 +646,198 @@ def test_the_interpreter_range_the_kernel_proof_assumes_is_unchanged():
     )
     current = tomllib.loads((_REPO / "pyproject.toml").read_text(encoding="utf-8"))
     assert current["project"]["requires-python"] == recorded["project"]["requires-python"]
+
+
+# --------------------------------------------------------------------------- #
+# Receipt v2: the interpreter that actually ran the proof.
+#
+# `.python-version` names a minor series and identifies no patch release, so
+# before the v2 block the receipt could not say which CPython produced the
+# result. The schema bump is back-compatible on purpose: the two committed
+# archives embed v1 receipts and their source artifacts expire, so a validator
+# that stopped reading v1 would retire durable evidence nobody can regenerate.
+# --------------------------------------------------------------------------- #
+
+
+def _resign(receipt: dict) -> dict:
+    """Re-sign a mutated receipt so the roster, not the checksum, is under test."""
+    body = {key: item for key, item in receipt.items() if key != "self_checksum"}
+    return {**body, "self_checksum": sha256_json(body)}
+
+
+def test_the_receipt_records_the_interpreter_that_built_it(tmp_path):
+    receipt = _receipt(tmp_path)
+    assert receipt["schema"] == CI_RECEIPT_SCHEMA_V2
+    interpreter = receipt["interpreter"]
+    assert set(interpreter) == {"version", "build", "implementation"}
+    # Compared against a FRESH read, not against the same call that built it: a
+    # constant-returning `interpreter_identity` would satisfy self-consistency.
+    assert interpreter == interpreter_identity()
+    assert interpreter["version"] == platform.python_version()
+    assert interpreter["implementation"] == sys.implementation.name
+    # The patch level is the whole point -- `.python-version` already carries the
+    # minor series, so a two-component version records nothing new.
+    assert len(interpreter["version"].split(".")) == 3
+    assert interpreter["version"] != ".".join(interpreter["version"].split(".")[:2])
+
+
+def test_the_build_string_is_single_line_so_the_digest_is_format_independent(tmp_path):
+    """`sys.version` embeds a newline; an unnormalised copy would leak into the digest."""
+    receipt = _receipt(tmp_path)
+    build = receipt["interpreter"]["build"]
+    assert "\n" not in build and "\r" not in build
+    assert build == " ".join(build.split())
+    assert build.startswith(receipt["interpreter"]["version"])
+
+
+def test_both_committed_archives_still_validate_under_the_v2_validator():
+    """The back-compat constraint, asserted on the real files rather than a fixture.
+
+    Neither committed archive can be regenerated: their GitHub artifacts expire,
+    and the v1 archive is the one carrying the independent Codex review grade. If
+    this ever fails, the fix is the validator, never the archives.
+    """
+    for path in (_ARCHIVE, _ARCHIVE_V2):
+        archive = json.loads(path.read_text(encoding="utf-8"))
+        validated = validate_kernel_isolation_ci_archive(archive)
+        receipt = validated["receipt"]
+        assert receipt["schema"] == CI_RECEIPT_SCHEMA_V1
+        assert "interpreter" not in receipt
+
+
+def test_a_v1_receipt_may_not_smuggle_an_interpreter_block(tmp_path):
+    """Version and roster move together in BOTH directions, or neither is enforced."""
+    receipt = _receipt(tmp_path)
+    downgraded = _resign({**receipt, "schema": CI_RECEIPT_SCHEMA_V1})
+    with pytest.raises(KernelIsolationCIError, match="field roster"):
+        validate_kernel_isolation_ci_receipt(downgraded)
+
+
+def test_a_v2_receipt_may_not_omit_the_interpreter_block(tmp_path):
+    receipt = _receipt(tmp_path)
+    stripped = _resign({k: v for k, v in receipt.items() if k != "interpreter"})
+    assert stripped["schema"] == CI_RECEIPT_SCHEMA_V2
+    with pytest.raises(KernelIsolationCIError, match="field roster"):
+        validate_kernel_isolation_ci_receipt(stripped)
+
+
+def test_an_unknown_schema_resolves_to_no_roster_and_is_refused(tmp_path):
+    """Fail closed on an unrecognised version rather than guessing a roster."""
+    receipt = _receipt(tmp_path)
+    for bogus in ("compose_kernel_isolation_ci_receipt_v3", "", "v2"):
+        with pytest.raises(KernelIsolationCIError, match="checksum or schema mismatch"):
+            validate_kernel_isolation_ci_receipt(_resign({**receipt, "schema": bogus}))
+
+
+def test_the_interpreter_block_is_covered_by_the_self_checksum(tmp_path):
+    """Editing it without re-signing must be caught; that is what makes it evidence."""
+    receipt = _receipt(tmp_path)
+    forged = {**receipt, "interpreter": {**receipt["interpreter"], "version": "9.9.9"}}
+    with pytest.raises(KernelIsolationCIError, match="checksum or schema mismatch"):
+        validate_kernel_isolation_ci_receipt(forged)
+
+
+def test_the_interpreter_roster_is_exact(tmp_path):
+    receipt = _receipt(tmp_path)
+    for mutated in (
+        {**receipt["interpreter"], "extra": "x"},
+        {k: v for k, v in receipt["interpreter"].items() if k != "build"},
+        {},
+    ):
+        with pytest.raises(KernelIsolationCIError, match="interpreter has an invalid field roster"):
+            validate_kernel_isolation_ci_receipt(_resign({**receipt, "interpreter": mutated}))
+
+
+@pytest.mark.parametrize("field", ["version", "build", "implementation"])
+@pytest.mark.parametrize("blank", ["", "   "])
+def test_every_interpreter_field_must_be_a_non_empty_string(tmp_path, field, blank):
+    """Parametrised over ALL THREE fields: a single-field test certifies one seat."""
+    receipt = _receipt(tmp_path)
+    interpreter = {**receipt["interpreter"], field: blank}
+    with pytest.raises(KernelIsolationCIError, match=f"interpreter {field} must be non-empty"):
+        validate_kernel_isolation_ci_receipt(_resign({**receipt, "interpreter": interpreter}))
+
+
+@pytest.mark.parametrize("bad", ["3.12", "3", "3.12.13.1", "x.y.z", "3.12.x", "312"])
+def test_the_version_must_carry_a_patch_level(tmp_path, bad):
+    receipt = _receipt(tmp_path)
+    interpreter = {**receipt["interpreter"], "version": bad, "build": f"{bad} (main) [Clang]"}
+    with pytest.raises(KernelIsolationCIError, match="major.minor.patch"):
+        validate_kernel_isolation_ci_receipt(_resign({**receipt, "interpreter": interpreter}))
+
+
+def test_a_version_that_disagrees_with_its_build_string_is_refused(tmp_path):
+    """The cross-field binding: `sys.version` starts with the release it reports."""
+    receipt = _receipt(tmp_path)
+    interpreter = {**receipt["interpreter"], "version": "3.11.99"}
+    with pytest.raises(KernelIsolationCIError, match="build string disagrees"):
+        validate_kernel_isolation_ci_receipt(_resign({**receipt, "interpreter": interpreter}))
+
+    # An empty build is caught earlier, by the non-empty check -- pinned so the
+    # `not build_tokens` branch is not mistaken for dead code.
+    blanked = {**receipt["interpreter"], "build": " "}
+    with pytest.raises(KernelIsolationCIError, match="build must be non-empty"):
+        validate_kernel_isolation_ci_receipt(_resign({**receipt, "interpreter": blanked}))
+
+
+def test_a_pre_release_interpreter_is_accepted_not_rejected(tmp_path):
+    """Why the binding is `startswith` and not equality.
+
+    On a release both fields carry `3.12.13` and equality would hold. On a
+    pre-release `sys.version` reports `3.13.0rc1` while `platform.python_version()`
+    reports `3.13.0`, so an equality check would reject a legitimate receipt --
+    and because a red suite skips the receipt-build step and the upload then fails
+    closed, that would take the only kernel-property gate offline rather than warn.
+    """
+    receipt = _receipt(tmp_path)
+    interpreter = {
+        **receipt["interpreter"],
+        "version": "3.13.0",
+        "build": "3.13.0rc1 (main, Jan 1 2026, 00:00:00) [Clang 21.0.0]",
+    }
+    validated = validate_kernel_isolation_ci_receipt(
+        _resign({**receipt, "interpreter": interpreter})
+    )
+    assert validated["interpreter"]["build"].startswith("3.13.0rc1")
+
+    # ...but a DIFFERENT release is still refused, so the leniency is scoped to a
+    # suffix on the same version and is not a hole.
+    wrong = {**interpreter, "build": "3.13.1 (main, Jan 1 2026, 00:00:00) [Clang 21.0.0]"}
+    with pytest.raises(KernelIsolationCIError, match="build string disagrees"):
+        validate_kernel_isolation_ci_receipt(_resign({**receipt, "interpreter": wrong}))
+
+
+def test_the_recorded_interpreter_follows_the_running_one_rather_than_a_constant(
+    tmp_path, monkeypatch
+):
+    """A literal equal to today's interpreter passes every equality assertion.
+
+    This is the mutation the first version of this file could not kill. On this
+    machine ``platform.python_version()`` IS ``3.12.13``, so replacing the call
+    with that literal is invisible to any check comparing the receipt against
+    today's value -- including a comparison against ``interpreter_identity()``,
+    because the mutation changes both sides at once. Two mutations of exactly that
+    shape survived, one per field.
+
+    The discriminating property is not "matches the interpreter" but "FOLLOWS the
+    interpreter": move the interpreter and the receipt must move with it. The
+    asserted values are ones no real CPython here reports, so the monkeypatches
+    are load-bearing -- delete any of them and this test fails rather than
+    silently passing.
+    """
+    monkeypatch.setattr(platform, "python_version", lambda: "3.99.7")
+    monkeypatch.setattr(sys, "version", "3.99.7 (main, Jan 1 2099, 00:00:00) [Clang 99.0.0]")
+    monkeypatch.setattr(sys, "implementation", SimpleNamespace(name="ratpython"))
+
+    assert interpreter_identity() == {
+        "version": "3.99.7",
+        "build": "3.99.7 (main, Jan 1 2099, 00:00:00) [Clang 99.0.0]",
+        "implementation": "ratpython",
+    }
+    receipt = _receipt(tmp_path)
+    assert receipt["interpreter"] == interpreter_identity()
+    # Named explicitly too: an `interpreter_identity` that returned a constant
+    # would satisfy the line above by making both sides equally wrong.
+    assert receipt["interpreter"]["version"] == "3.99.7"
+    assert receipt["interpreter"]["implementation"] == "ratpython"
+    assert validate_kernel_isolation_ci_receipt(receipt) == receipt
