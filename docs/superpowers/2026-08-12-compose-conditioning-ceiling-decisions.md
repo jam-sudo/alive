@@ -66,9 +66,10 @@ recomputed this session:
 | **ESM block only** ×1e6 | `3713121910859.7812` |
 
 The design is **full rank in all three cases** — this is not a rank test. The imbalance moves the
-statistic **11.55 orders** and clears the registered ceiling by ~4.6. The uniform rescale moves it
-by 1.2e-15 relative, i.e. round-off: the ceiling is a *detector of imbalance*, and deliberately not
-a detector of magnitude.
+statistic **11.55 orders** and clears the registered ceiling by **4.57 orders** (a factor of
+`3.71e4`; an earlier version wrote "~4.6" with no unit, which reads as a *ratio* and is then wrong by
+four orders). The uniform rescale moves it by 1.2e-15 relative, i.e. round-off: the ceiling is a
+*detector of imbalance*, and deliberately not a detector of magnitude.
 
 Precision note: the imbalanced value is not reproducible to the last bit. `cond ≈ 3.7e12` destroys
 ~12.6 of float64's 15.65 significant decimal digits, so ~3 survive; the committed test pins it
@@ -133,8 +134,10 @@ fold 2        rank=10/10  cond=7.130033793795245
 ```
 
 A gene-disjoint fold drops every pair touching its held-out genes, so a degeneracy confined to those
-genes is invisible to a statistic computed over the whole calibration roster. Fold 0 sits **11.67
-orders** below the full design while remaining full rank — the full-design statistic cannot see it.
+genes is invisible to a statistic computed over the whole calibration roster. Fold 0's condition
+number is **11.67 orders ABOVE** the full design's — i.e. far worse conditioned — while still being
+full rank, and the full-design statistic cannot see it. (An earlier version wrote "below", meaning
+worse; in a document whose every claim is a number, that inverts the quantity being compared.)
 
 **Why `lam == 0.0` only.** That is the sole point where `cond(Φ)` *is* the conditioning of the solve.
 At `lam > 0` the ridge filter factors bound the effective conditioning, so rejecting on the
@@ -157,22 +160,42 @@ number would therefore discard candidates whose actual solve is healthy — whic
 restricted rather than applied across the grid.
 
 **What this arm actually fixes — reason attribution, not a corrupted winner.** `cond(Φ)` bounds noise
-**amplification**. On noisy data a degenerate fold inflates held-out error, lowers θ, and therefore
-loses an argmax; the risk was never that a bad candidate wins, but that a *numerical* stop is filed
-as `dev_oof_delta_below_threshold` — a claim about **biology**.
+**amplification**. At a sufficient noise level a degenerate fold inflates held-out error, lowers θ,
+and therefore loses an argmax; the risk was never that a bad candidate wins, but that a *numerical*
+stop is filed as `dev_oof_delta_below_threshold` — a claim about **biology**.
 
-**That claim is conditional, and the condition is registered.** With zero noise there is nothing to
-amplify, an ill-conditioned but consistent `lstsq` is exact, and the over-ceiling candidate wins.
-Recomputed this session:
+**That claim is conditional, the condition is a THRESHOLD, and the threshold is NOT registered.**
+An earlier version of this section said "on noisy data" and called the condition registered. Both
+were wrong, and the committed fixture falsifies them: the flip is not at zero noise but at roughly
+`6e-12` relative, so there is a wide band of *genuinely noisy* data where the over-ceiling candidate
+still wins. Swept this session on the committed exhibit at `condition_ceiling=1e300` (unscreened):
 
-| exhibit | unscreened | screened | screen moves winner? |
+| relative noise | selected `lam` | θ | winner |
 |---|---|---|---|
-| noiseless | `lam=0.0`, θ=`0.9999999993324848` | `lam=0.001`, θ=`0.8100934924563623` | **yes** |
-| default (rel noise 1e-2) | `lam=0.001`, θ=`0.8103235465139835` | `lam=0.001`, θ=`0.8103235465139835` | no |
+| `0` | `0.0` | `0.999999999332` | over-ceiling |
+| `1e-16` | `0.0` | `0.99999999936` | over-ceiling |
+| `1e-14` | `0.0` | `0.999999361774` | over-ceiling |
+| `1e-13` | `0.0` | `0.999932964426` | over-ceiling |
+| `1e-12` | `0.0` | `0.993271304823` | over-ceiling |
+| `3e-12` | `0.0` | `0.939438185108` | over-ceiling |
+| `5e-12` | `0.0` | `0.831758821944` | over-ceiling |
+| **`6e-12`** | `0.001` | `0.810093492457` | **ridge — flip** |
+| `7e-12` … `1e-2` | `0.001` | `0.810093…`–`0.810324…` | ridge |
 
-An earlier version of the record stated the "cannot change the winner" claim **unconditionally**,
-and its own committed fixture was the counterexample. Two independent reviews found it. The scope is
-recorded here rather than left to a reader's trust.
+**Six non-zero noise levels** where the screen still moves the winner. The honest statement of the
+scope is therefore three-part, and every part matters for an owner reading this:
+
+1. the condition is a **threshold near `6e-12` relative noise**, not the presence of noise;
+2. that threshold is **not registered** anywhere — not in `configs/compose_k562_v1_phase2.yaml`, not
+   in the spec; it exists only as two probe points in a test
+   (`test_condition_ceiling.py:646-649`);
+3. it is a property of **one synthetic exhibit**, and the corresponding level on the real Norman
+   bank is **unmeasured** (pod-gated).
+
+So "the screen only fixes attribution" holds for data noisier than this exhibit's flip point and is
+**unproven at the noise level of the real study**. Two earlier versions of this claim were falsified
+by the fixture that was cited to support it; this is the third statement of it, and it is stated as a
+measured band rather than a binary so that a fourth is not needed.
 
 **Status:** `PROPOSED`.
 
@@ -234,13 +257,34 @@ fold-conditioning work, which discovered rather than introduced them.
 
 ### Options, none proposed
 
-| | option | moves `config_sha256`? | cost | pod-gated? |
-|---|---|---|---|---|
-| **A** | Record a scale statistic (e.g. `sigma_max`) in the phi-rank activation evidence | **no** | see below | **yes** |
-| **B** | Add a `factor_z` scale field or normalization | **yes → new run identity** | config + loader + spec + tests | no |
-| **C** | Record explicit owner acceptance as a non-blocker | no | prose only | no |
+**Read the first column before the cost column.** Only options that establish a *decision rule*
+can close this gap. An option that merely records a number makes the gap **visible**, which is
+strictly less than closing it, and the difference is easy to lose in a table sorted by cost.
 
-**Correction to the cost of option A, which readiness item 4b currently understates.** `sigma_max`
+| | option | closes the gap? | moves `config_sha256`? | cost | pod-gated? |
+|---|---|---|---|---|---|
+| **A** | Record a scale statistic (`sigma_max`) in the phi-rank activation evidence | **NO — observational only** | no | see below | **yes** |
+| **A′** | Register an admissibility rule on a scale-invariant quantity, e.g. require `lambda_min / sigma_max²` inside a pre-registered band, checked in activation evidence and at selection | **yes** | **yes** | new registered criterion + config + validator + tests | yes (for the evidence) |
+| **B** | Normalize the factor bank, or add a `factor_z` scale field | **yes** | **yes** | config + loader + spec + tests | no |
+| **C** | Record explicit owner acceptance as a non-blocker | no — accepts it knowingly | no | prose only | no |
+
+**Why A alone cannot close it, measured this session.** Rescaling the committed exhibit's bank leaves
+`cond(Φ)` identical while the effective regularization moves eight orders and θ collapses:
+
+| `c` | `cond(Φ)` | `sigma_max` | `lambda / sigma_max²` | θ(`lam=0.001`) |
+|---|---|---|---|---|
+| 1 | `6.47321643414` | `14.3692` | `4.84e-06` | `0.81032355` |
+| 10 | `6.47321643414` | `1436.92` | `4.84e-10` | `0.40306122` |
+| 100 | `6.47321643414` | `143692` | `4.84e-14` | `-3340344` |
+
+`sigma_max` is exactly the quantity that tracks the danger — it moves as `c²` while `cond` does not —
+so recording it is **necessary** for anyone to see where the run landed. But nothing registered says
+which `lambda/sigma_max²` is admissible, so the recorded number yields **no verdict**: a pod operator
+reading `sigma_max = 143692` has no criterion telling them the run is inadmissible. **A is a
+prerequisite for A′, not an alternative to it.** An earlier version of this table listed A as simply
+the cheapest option, which invites choosing it and believing the gap closed.
+
+**Correction to the cost of option A, which readiness item 4b also understated.** `sigma_max`
 *is* computed — `src/alive/compose/identify.py:70`, as `svals[0]` inside the registered
 `max_shape_times_float64_eps_times_sigma_max` tolerance — but it is **not exposed and not emitted**:
 `RankReport` carries only `sym_dim`, `rank`, `is_full_rank`, `condition_number`. Option A therefore
@@ -251,11 +295,17 @@ the key is required. That means either a `compose_phi_rank_report_v1` → `v2` s
 validator accepting both (the pattern already used for the kernel archive), or regeneration of the
 report — **which needs real Norman data on the pod**, the same reason task #14 is pod-gated.
 
-Option A is genuinely digest-neutral. It is **not** "nearly free", and it is **not** checkable from
-currently committed evidence. An earlier statement of mine to the contrary is withdrawn here.
+**On "digest-neutral", stated precisely.** A leaves `config_sha256` unchanged, and it also leaves the
+composite `run_id` unchanged — `compute_compose_run_id` binds config digest, data-card digest,
+raw/source digest and sequence-mapping digest, and **does not include the Git SHA**. What A *does*
+move is the Git SHA and, with it, the activation-evidence lineage: `phi_rank` validates
+`git_sha == expected_git_sha`, so a code change forces the report to be regenerated at the new
+approved commit. "Digest-neutral" is therefore true of the **config axis** of run identity and must
+not be read as "no lineage consequence". The same precision applies to option B's row: moving the
+config digest changes `run_id` because `config_sha256` is one of its four inputs.
 
-**Status:** `OPEN` — owner must choose A, B, C, or something else. No option is recommended in this
-document.
+**Status:** `OPEN` — owner must choose A′, B, C, or something else; A alone leaves the gap open by
+construction. No option is recommended in this document.
 
 ---
 
@@ -283,7 +333,13 @@ are separate, later steps under runbook §2.5.
 | 1 | Ceiling value `1.0e+8`, anchored data-free at `1/√ε_f64` | PROPOSED | ______________________ |
 | 2 | First application point: per-candidate screen; all-inadmissible → `SelectionError` (exit 10) | PROPOSED | ______________________ |
 | 3 | Second application point: unregularized OOF train folds, `lam == 0.0` only | PROPOSED | ______________________ |
-| 4 | Unbounded `‖z‖` scale gap (task #43) | **OPEN — no proposal** | choose A / B / C: ____________ |
+| 4 | Unbounded `‖z‖` scale gap (task #43) | **OPEN — no proposal** | choose A′ / B / C: ____________ |
+
+> **Note on decision 3.** Signing it endorses the arm, not the scope sentence attached to it. What
+> the arm fixes is reason attribution **above a noise threshold measured near `6e-12` on one
+> synthetic exhibit**; that threshold is unregistered and its real-data counterpart is unmeasured
+> (§3). Below it the screen changes the winner. If that scope matters to the decision, it is a
+> separate registered criterion and should be raised before signing rather than after.
 
 ---
 
@@ -323,6 +379,12 @@ them.
   The 1-ulp discrepancy against the recorded `-3340344.0205271696` was confirmed to be a genuine
   float difference (exact decimal expansions compared, gap = 1.0 ulp) and not a formatting artifact,
   then bounded by the ~14-digit stability measurement rather than reported as an error.
+- **§3 noise sweep and §4 scale table** — added 2026-08-12 after an independent read-only audit
+  found that this document's own supporting fixture falsified two of its claims. Both were re-run
+  here across a range rather than at two points: the sweep found **six** non-zero noise levels at
+  which the over-ceiling candidate still wins, and the scale table shows `lambda/sigma_max²` moving
+  eight orders at constant `cond(Φ)`. The audit was right on both, on the two arithmetic items, and
+  on the imprecision of "digest-neutral"; its TOCTOU finding did **not** reproduce (§7 note below).
 - **§4 option-A cost** — read directly from source: `RankReport` field list
   (`src/alive/compose/identify.py`), the `svals[0]` tolerance expression, `_FACTOR_BLOCK_KEYS` and
   its `_exact_object` enforcement, `PHI_RANK_ACTIVATION_SCHEMA = "compose_phi_rank_report_v1"` and
@@ -334,3 +396,23 @@ them.
   `configs/compose_k562_v1_phase2.yaml`** — verified directly, and the resolved `config_sha256`
   recomputed unchanged at
   `b158417a76e888bff2bf6836bea622e0cbf596f0743f3fe89aea2ffe0864a9fd`.
+
+### 7.1 The 2026-08-12 audit's claims, adjudicated by running them
+
+An independent read-only audit at `1d19729` raised six findings against this document plus three
+against the wider tree. Each was re-run rather than accepted, because a reviewer's reasoning can be
+wrong even when their conclusion is right — and on this branch that has happened in both directions.
+
+| claim | verdict |
+|---|---|
+| §3's "noisy data" claim conflicts with the fixture's non-zero-noise counterexamples, and the noise floor is unregistered | **CONFIRMED, and understated** — six non-zero levels, flip near `6e-12`. Fixed above. |
+| Option A cannot close the `‖z‖` risk; a normalization or `λ/σ²` rule is needed | **CONFIRMED** — A is observational. A′ added; the table now leads with "closes the gap?". |
+| "clears the ceiling by ~4.6" is 4.57 **orders**, not a factor | **CONFIRMED** (the factor is `3.71e4`). Fixed. |
+| fold 0 is not 11.67 orders *below* the full design but above | **CONFIRMED**. Fixed. |
+| "digest-neutral" is imprecise once evidence/Git/run identity are included | **CONFIRMED with a correction to the reasoning** — the composite `run_id` does **not** include the Git SHA (`compute_compose_run_id` binds config, data-card, raw/source and sequence-mapping digests). What moves is the Git SHA and the evidence lineage bound to it, not `run_id`. Stated precisely above. |
+| mutation harness misclassifies subprocess and unrelated failures | **PARTIALLY CONFIRMED.** The `returncode`-as-kill defect was fixed on 2026-08-11: a kill now requires named failing tests, and a nonzero exit with none reports `INVALID`. The residual is real and narrower — a kill is not checked for **relevance**, so an unrelated failing test would still be recorded as a kill. Recorded as an open harness limitation, not fixed here. |
+| TOCTOU between the approved hash and the reopened file | **NOT REPRODUCED.** Both seal-critical read paths hold one descriptor across hash-and-read and re-verify: `phase2b_cmd.py:590` opens `O_NOFOLLOW`, captures `(dev, ino, size, mtime_ns)`, streams the digest, re-captures the identity, and yields a `/proc/self/fd` path so the pathname is never re-opened — its docstring names "the hash-then-reopen pathname race" as the thing it closes. `fit_role.py:56` additionally re-hashes the still-open descriptor **after** the read. If the audit means a third site, it needs to name it; at these two the race is closed. |
+| activation's all-`k` rank contract vs the runtime selected-`k` check | **CONFIRMED as an inconsistency, with the severity graded down.** `phi_rank.py:249-252` refuses the whole report unless **every** grid point is full rank, while the ceiling in the same loop deliberately uses an **ANY** rule (a single over-ceiling `k` is screened out and the study proceeds) — the code comment argues for ANY on the ceiling and that argument applies verbatim to rank. The mismatch can only **block** a run that runtime would have tolerated, never admit a bad one, so it is fail-closed, not a safety hole. It is reachable in principle: `rank ≤ min(n_pairs, sym_dim)`, so with fewer calibration pairs than `sym_dim(k_max) = 36` the `k=8` block can never be full rank and the report becomes uncertifiable even though `k=4`/`k=6` are fine. The real pair count is pod-gated and unmeasured here. **Registered as an owner decision, not silently changed** — making rank use ANY would relax a gate, which is exactly the kind of change this project does not make on a drafter's judgement. |
+
+The audit's release verdict is unchanged and correct: six registered config blockers and `INCOMPLETE`
+dependency evidence keep COMPOSE **RELEASE-BLOCKED**. Nothing in this document alters that.

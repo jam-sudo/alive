@@ -5,7 +5,7 @@
 > **이 문서는 아무것도 정의하지 않는다** — 세부(task)는 plan, claim은 spec, exact param은 config,
 > 시간순 audit는 git이 authoritative다([sources of truth](../../CLAUDE.md#sources)). 상태 행이 authoritative
 > 문서와 어긋나면 **authoritative 문서가 옳다**; 이 인덱스를 갱신한다.
-> **Updated:** 2026-08-12 @ `f435429` (branch `main`)
+> **Updated:** 2026-08-12 @ `057bb0e` (branch `main`)
 > `scripts/bump-readiness-stamp.sh` / the pre-commit hook from `HEAD` at commit time, so it names the
 > **parent** of the commit that carries it and can never name itself. Reading it as "one commit stale" is a
 > misreading; git is authoritative for when this file actually changed.
@@ -1322,10 +1322,15 @@ branch에서 추적 가능하게 기록한다. `LOCAL` ledger ID만으로는 이
    can therefore flip the REGISTERED futility condition `oof_theta <= dev_oof_threshold`. This is a PRE-EXISTING
    protocol gap (absolute grid + unbounded `‖z‖` predate the fold-conditioning branch, which discovered it), and it
    is **enumerated here rather than left in a correction narrative** because three review rounds judged narrative
-   placement wrong for something a pod operator must see. Options, none taken: record a scale statistic in the
-   phi-rank activation evidence (cheapest, and digest-neutral); add a `factor_z` scale field or normalization
-   (**moves the config digest = new run identity**); or record explicit owner acceptance as a non-blocker. Detail
-   and the `λ/c⁴` derivation: the 2026-08-07 conditioning-ceiling entry below.
+   placement wrong for something a pod operator must see. Options, none taken — **and the first one does not
+   close the gap**: record a scale statistic in the phi-rank activation evidence (cheapest and
+   `config_sha256`-neutral, but **observational only** — no registered rule interprets it, so it makes the gap
+   visible without deciding anything); **register an admissibility rule** on a scale-invariant quantity such as
+   `lambda_min / sigma_max²` (the option that actually closes it); add a `factor_z` scale field or normalization
+   (**moves the config digest, hence `run_id`**); or record explicit owner acceptance as a non-blocker.
+   Full costing, and the measurement showing `lambda/sigma_max²` moving eight orders at constant `cond(Φ)`:
+   `2026-08-12-compose-conditioning-ceiling-decisions.md` §4. Detail and the `λ/c⁴` derivation: the 2026-08-07
+   conditioning-ceiling entry below.
 
    > **[2026-08-12 correction to the option costs above, and a precision note.]** The three options are now costed
    > in `docs/superpowers/2026-08-12-compose-conditioning-ceiling-decisions.md` §4, which the owner signs. Two
@@ -1342,6 +1347,18 @@ branch에서 추적 가능하게 기록한다. `LOCAL` ledger ID만으로는 이
    > reproduces differs from the one recorded here by exactly 1 ulp. The magnitude — `θ ≈ -3.34e6` — is the
    > finding; the trailing digits are not evidence, per the precision rule this project adopted after a `rel=1e-12`
    > pin went green on macOS and red on Linux.
+   >
+   > **[2026-08-12, second correction — from an independent read-only audit.]** Two further defects in the
+   > paragraph above, both confirmed by re-running rather than by reading. **(3)** Recording `sigma_max` is
+   > **observational and closes nothing**: measured at constant `cond(Φ) = 6.47321643414`, rescaling the bank by
+   > `c ∈ {1, 10, 100}` moves `lambda/sigma_max²` from `4.84e-06` to `4.84e-14` while θ goes `0.810` → `0.403` →
+   > `-3.34e6`. `sigma_max` is exactly the quantity that tracks the danger, but no registered rule interprets it,
+   > so a pod operator reading it gets no verdict. Listing it as "cheapest" invites choosing it and believing the
+   > gap closed. A fourth option — a **registered admissibility band on `lambda/sigma_max²`** — is what closes it.
+   > **(4)** "digest-neutral" was glossed as "no new run identity". Precisely: the composite `run_id` binds config,
+   > data-card, raw/source and sequence-mapping digests and **does not include the Git SHA**, so `run_id` is
+   > unchanged — but the Git SHA moves and `phi_rank` validates `git_sha == expected_git_sha`, so the
+   > activation-evidence lineage does move. "Digest-neutral" is true of the **config axis** only.
 
 5. **§2.5 release gate** — worker locked-env integration green + 독립 검토 후 exact commit `C`를 마지막
    repository commit으로 동결한다. Clean detached `C`에서 bias report → single-leaf finalized config →
@@ -1403,6 +1420,28 @@ actual independent party is the owner's step and no document substitutes for it.
 measurement rather than a worry — the `614017b6…` archive's source artifact expired `2026-08-08`, so its
 `runner.*` / `head_sha` / `run_id` / `source_artifact` are **already** unverifiable by anyone; `2dd23d6…`
 expires `2026-10-24`. Both windows predate the 400-day retention raise, which protects only later runs.
+
+**2026-08-12 — independent read-only audit at `1d19729`: two findings that outlive the decision record.**
+Six of its findings landed on `2026-08-12-compose-conditioning-ceiling-decisions.md` and are fixed there (§7.1
+adjudicates all nine, including one that did **not** reproduce). Two are about the tree and are recorded here:
+
+- **⚠️ OPEN (owner decision) — activation requires full rank at EVERY `k`, runtime does not.**
+  `phi_rank.py:249-252` refuses the entire report unless every registered grid point is full rank, while the
+  conditioning ceiling **in the same loop** deliberately uses an **ANY** rule — a single over-ceiling `k` is
+  screened out of selection and the study proceeds. The code comment argues for ANY on the ceiling, and that
+  argument applies verbatim to rank. The mismatch is **fail-closed**: it can only block a run that runtime would
+  have tolerated, never admit a bad one — so it is an over-strictness, not a safety hole, and it is graded below
+  the audit's IMPORTANT. It is reachable in principle: `rank ≤ min(n_pairs, sym_dim)`, so with fewer calibration
+  pairs than `sym_dim(k=8) = 36` that block can never be full rank and the report becomes uncertifiable even
+  though `k=4`/`k=6` are admissible. The real pair count is **pod-gated and unmeasured locally**. **Not changed
+  here:** making rank use ANY would relax a registered gate, which is an owner decision, not a drafter's.
+- **Mutation-harness limitation, recorded not fixed.** The `returncode`-as-kill defect was fixed on 2026-08-11
+  (a kill now requires named failing tests; a nonzero exit with none reports `INVALID`). The residual: a kill is
+  not checked for **relevance**, so a mutation that breaks an unrelated test is still recorded as killed. Both
+  committed harnesses print their killing tests, so the check is available to a reader but is not mechanical.
+
+The audit's release verdict stands and is independent of all of the above: six registered config blockers and
+`INCOMPLETE` dependency evidence keep execution **RELEASE-BLOCKED**; seal remains **UNOPENED**.
 
 ## 이 문서가 *아닌* 것 (중복 금지)
 
