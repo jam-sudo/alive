@@ -307,6 +307,13 @@ config digest changes `run_id` because `config_sha256` is one of its four inputs
 **Status:** `OPEN` — owner must choose A′, B, C, or something else; A alone leaves the gap open by
 construction. No option is recommended in this document.
 
+> **[2026-08-13] A concrete proposal now exists for this decision** — `2026-08-13-compose-factor-scale-normalization-proposal.md`, which recommends option B
+> (normalize the bank) in the specific form `sigma_max(Phi) = 1` with the scalar pinned in activation evidence,
+> and shows by measurement that it leaves `cond` and `rank` untouched, removes the scale-dependent theta
+> collapse to one ulp, and turns the registered grid into an actual ladder. It is PROPOSED and unsigned; this
+> decision stays **OPEN** until the owner signs there. Option D of that document's §4 is disqualified by
+> measurement, which is the kind of thing this record exists to carry.
+
 ---
 
 ## 5. What this record does NOT settle

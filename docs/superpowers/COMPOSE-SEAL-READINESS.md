@@ -5,7 +5,7 @@
 > **이 문서는 아무것도 정의하지 않는다** — 세부(task)는 plan, claim은 spec, exact param은 config,
 > 시간순 audit는 git이 authoritative다([sources of truth](../../CLAUDE.md#sources)). 상태 행이 authoritative
 > 문서와 어긋나면 **authoritative 문서가 옳다**; 이 인덱스를 갱신한다.
-> **Updated:** 2026-08-12 @ `057bb0e` (branch `main`)
+> **Updated:** 2026-08-13 @ `a275eae` (branch `main`)
 > `scripts/bump-readiness-stamp.sh` / the pre-commit hook from `HEAD` at commit time, so it names the
 > **parent** of the commit that carries it and can never name itself. Reading it as "one commit stale" is a
 > misreading; git is authoritative for when this file actually changed.
@@ -1328,6 +1328,9 @@ branch에서 추적 가능하게 기록한다. `LOCAL` ledger ID만으로는 이
    visible without deciding anything); **register an admissibility rule** on a scale-invariant quantity such as
    `lambda_min / sigma_max²` (the option that actually closes it); add a `factor_z` scale field or normalization
    (**moves the config digest, hence `run_id`**); or record explicit owner acceptance as a non-blocker.
+   **A concrete proposal for closing this now exists and is unsigned:**
+   `2026-08-13-compose-factor-scale-normalization-proposal.md` (normalize so `sigma_max(Phi) = 1`, pin the
+   scalar in evidence; measured to leave `cond`/`rank` untouched and to remove the scale-dependent collapse).
    Full costing, and the measurement showing `lambda/sigma_max²` moving eight orders at constant `cond(Φ)`:
    `2026-08-12-compose-conditioning-ceiling-decisions.md` §4. Detail and the `λ/c⁴` derivation: the 2026-08-07
    conditioning-ceiling entry below.
