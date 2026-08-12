@@ -162,14 +162,23 @@ raise site는 **typed class를 갖게 만들고**, roster에는 typed class만 �
       readiness `:591-595`의 band(λ가 `max||z||~116`부터 실질 무효)는 uniform-scale 의존이라 **L2의
       조건수 ceiling으로 닫히지 않는다.** 이걸 "닫혔다"고 쓰지 않는 것이 이 task의 요점이다.
       산출물: spec 비주장 문단 1개 + readiness 항목 1개. 코드 변경 없음.
-- [ ] **L4 (D4).** kernel-isolation receipt schema에 실제 interpreter 기록 추가(readiness `:373` open item).
-      `.python-version`은 minor series일 뿐 patch release를 식별하지 못한다.
-      `scripts/compose/build_kernel_isolation_ci_receipt.py`에 `platform.python_version()`·`sys.version`
-      build 문자열·`sys.implementation`을 추가하고 schema version을 올린다.
-      **제약: validator는 기존 v1/v2 archive 2건을 계속 통과시켜야 한다(back-compat).** 빌더는
-      `_ISOLATION_CLOSURE`에 없으므로 re-archive는 강제되지 않는다. CI 1회로 새 receipt를 생성해 확인.
-- [ ] **L5 (task #16).** seal을 뒷받침할 kernel archive의 **독립 archiver** 요구. runbook §2.5에 항목은 이미
-      들어가 있으므로 로컬 잔여는 archiver 지시서 정리뿐이고, **실제 독립 당사자 섭외는 owner 몫**이다.
+- [x] **L4 (D4) — DONE 2026-08-12** (merge `18e323f`). Receipt schema `..._v1` → `..._v2` with an
+      `interpreter` block. Implemented in `src/alive/compose/kernel_isolation_ci.py` rather than only the
+      builder script, so the value is read **in-process** and has no command-line surface to misdeclare.
+      Back-compat held and verified **directly on both committed archives**, not merely via the suite.
+      14 mutations, all killed, each by a NAMED failing test
+      (`scripts/compose_receipt_interpreter_mutation_harness.py`). CI run `31572675945` produced and
+      validated a real `_v2` receipt. **Measured gap this closes:** runner CPython `3.12.3`/GCC 13.3.0 vs
+      development machine `3.12.13`/Clang 21.0.0, where `.python-version` says only `3.12`.
+      *Two mutations survived the first test set* — hardcoding the version and the implementation — because
+      on the development machine the constant IS the correct answer; the discriminating property had to
+      become FOLLOWS rather than MATCHES.
+- [x] **L5 (task #16) — LOCAL HALF DONE 2026-08-12.** Archiver instruction sheet at
+      `runbooks/2026-08-12-compose-kernel-archive-independent-archiver.md`, cross-linked from runbook §2.5.
+      **The task itself stays OPEN: engaging an actual independent party is the owner's step and no
+      document substitutes for it.** Recorded there with a measured motivation — the `614017b6…` archive's
+      source artifact expired `2026-08-08`, so its `runner.*`/`head_sha`/`run_id`/`source_artifact` are
+      already unverifiable by anyone.
 - [ ] **L6.** `head_sha == C` archive는 **unresolved owner decision**으로 기록된 상태다. "archive의
       `head_sha`가 `C`에 선행하되 isolation closure가 byte-identical" 경로를 택하면 **이미 테스트로 강제되고
       있으므로 로컬 작업은 0**이다. 결정 전까지 코드를 만들지 않는다.

@@ -198,8 +198,13 @@ stderr 한 줄이 나르는 **exception class 이름**이 정한다(형식: `sta
   final-ledger recovery를 확인.
 - Kernel-isolation CI archive가 **독립 archiver**의 것이어야 한다. `archived_by`가 authoring session이
   파견한 agent가 아니라 독립 제3자임을 기록한다. **주의: 이 필드는 non-empty string 외에 아무 validator도
-  강제하지 않는다** — 자동 검사가 아니라 owner가 확인할 항목이다. 그 run의 primary JUnit bytes도 함께
-  보존한다.
+  강제하지 않는다**(`kernel_isolation_ci.py:594`가 non-empty만 검사) — 자동 검사가 아니라 owner가 확인할
+  항목이다. 그 run의 primary JUnit bytes도 함께 보존한다.
+  **archiver에게 줄 지시서(2026-08-12, L5):**
+  `runbooks/2026-08-12-compose-kernel-archive-independent-archiver.md` — 다운로드·`archive_kernel_isolation_ci_receipt.py`
+  실행·관측값(artifact id/expiry) 기록·hand-assembly 금지·`archived_by` 작성 기준·"workflow differs from the
+  blob recorded at the commit under test"를 tampering으로 오독하지 않기까지를 포함한다. **실제 독립 당사자
+  섭외는 owner 몫이며 이 문서가 대신하지 않는다.**
 - **`head_sha == C`인 archive는 미해결 owner 결정이다.** 이 항목의 이전 두 판이 모두 틀렸다. (i) "`C`에서의
   archive는 불가능하다"는 논증은 **unsound**다 — workflow가 `on: push: branches: ['**']`이므로 `head_sha == C`
   실행은 얻을 수 있고, commit하지 않고 approved-artifacts root에 게시하면 HEAD는 `C`에 남는다. (ii) 그러나
@@ -228,8 +233,12 @@ stderr 한 줄이 나르는 **exception class 이름**이 정한다(형식: `sta
   **운영 비용:** `uv.lock`을 다시 쓰는 모든 `uv sync`는 통상적인 dependency refresh를 포함해 closure test를
   red로 만들며, 새 Linux kernel-isolation CI run을 archive하고 pin을 옮기기 전까지 유지된다. check 삭제가
   아니라 re-archive를 예산에 넣는다. Receipt schema에 실제 interpreter를 기록하는 것은
-  여전히 **미해결 항목**이다(`.python-version`은 minor series라 patch release를 식별하지 못한다).
-  `tests/alive/compose/test_kernel_isolation_ci.py`가 이를 fail-closed로 강제한다.
+  ~~여전히 **미해결 항목**이다~~ → **2026-08-12 해결(L4/D4).** Receipt schema가
+  `compose_kernel_isolation_ci_receipt_v2`로 올라가 `interpreter` block(`platform.python_version()` ·
+  정규화된 `sys.version` · `sys.implementation.name`)을 기록한다. `v1`은 계속 읽는다(committed archive 2건이
+  `v1`이고 그 artifact는 만료된다). **실측으로 확인된 격차:** runner는 CPython `3.12.3`/GCC 13.3.0, 개발
+  머신은 `3.12.13`/Clang 21.0.0인데 `.python-version`은 양쪽 모두 `3.12`로만 기록한다 — patch release 10개와
+  compiler가 다르다. `tests/alive/compose/test_kernel_isolation_ci.py`가 이를 fail-closed로 강제한다.
 - 이 evidence는 GEARS Probe-A driver 경로를 덮으며 COMPOSE scientific execution 전반이 아니고, 어떤
   production pod가 올바르게 구성되었음을 established하지도 않는다(그 pod 자신의 `capture-runtime` evidence가
   필요). 커밋된 JUnit bytes는 `junit` block·testcase roster·`workflow_sha256`만 영구 재현하며,

@@ -5,7 +5,7 @@
 > **이 문서는 아무것도 정의하지 않는다** — 세부(task)는 plan, claim은 spec, exact param은 config,
 > 시간순 audit는 git이 authoritative다([sources of truth](../../CLAUDE.md#sources)). 상태 행이 authoritative
 > 문서와 어긋나면 **authoritative 문서가 옳다**; 이 인덱스를 갱신한다.
-> **Updated:** 2026-08-12 @ `1d19729` (branch `compose-receipt-interpreter`)
+> **Updated:** 2026-08-12 @ `f435429` (branch `main`)
 > `scripts/bump-readiness-stamp.sh` / the pre-commit hook from `HEAD` at commit time, so it names the
 > **parent** of the commit that carries it and can never name itself. Reading it as "one commit stale" is a
 > misreading; git is authoritative for when this file actually changed.
@@ -1393,6 +1393,16 @@ one backs a standing 37-mutation record.
 
 Seal state remains **UNOPENED**; execution remains **RELEASE-BLOCKED**. A receipt schema is dev-boundary
 provenance and authorizes no run.
+
+**2026-08-12 — L5 (task #16) LOCAL HALF only: instructions for the independent archiver.**
+`runbooks/2026-08-12-compose-kernel-archive-independent-archiver.md`, cross-linked from runbook §2.5. It
+gives a third party the procedure, the refusals (no hand-assembly, no metadata-only archive, no archiving
+someone else's download), what the tool machine-checks versus what rests on their care, and how to write
+`archived_by` — the one field validated only as a non-empty string. **Task #16 stays OPEN:** engaging an
+actual independent party is the owner's step and no document substitutes for it. The motivation is now a
+measurement rather than a worry — the `614017b6…` archive's source artifact expired `2026-08-08`, so its
+`runner.*` / `head_sha` / `run_id` / `source_artifact` are **already** unverifiable by anyone; `2dd23d6…`
+expires `2026-10-24`. Both windows predate the 400-day retention raise, which protects only later runs.
 
 ## 이 문서가 *아닌* 것 (중복 금지)
 
