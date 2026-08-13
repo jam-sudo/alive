@@ -73,6 +73,7 @@ _EXPECTED_UNREGULARIZED_SOLVER = "svd_lstsq_minimum_norm"
 _EXPECTED_REGULARIZED_SOLVER = "svd_ridge_filter_factors"
 _EXPECTED_IDENTIFICATION_SELECTION = "calibration_oof_gene_disjoint"
 _EXPECTED_UNREGULARIZED_OOF_RANK_POLICY = "require_full_rank_each_train_fold"
+_EXPECTED_LAMBDA_SCALING = "calibration_sigma_max_squared"
 _EXPECTED_RANK_TOLERANCE_RULE = "max_shape_times_float64_eps_times_sigma_max"
 _EXPECTED_OOF_FOLDS = 3
 _EXPECTED_UNCOVERED_TOLERANCE = 0.75
@@ -267,6 +268,7 @@ _KNOWN_IDENTIFICATION = frozenset(
         "selection",
         "unregularized_oof_rank_policy",
         "rank_tolerance_rule",
+        "lambda_scaling",
         "oof_folds",
         "uncovered_tolerance",
         "condition_ceiling",
@@ -468,6 +470,7 @@ class ComposePhase2Config:
     regularized_solver: str
     unregularized_oof_rank_policy: str
     rank_tolerance_rule: str
+    lambda_scaling: str
     oof_folds: int
     uncovered_tolerance: float
     condition_ceiling: float
@@ -716,6 +719,7 @@ def load_compose_phase2_config(path: str | Path) -> ComposePhase2Config:
         regularized_solver,
         unregularized_oof_rank_policy,
         rank_tolerance_rule,
+        lambda_scaling,
         oof_folds,
         uncovered_tolerance,
         condition_ceiling,
@@ -768,6 +772,7 @@ def load_compose_phase2_config(path: str | Path) -> ComposePhase2Config:
         regularized_solver=regularized_solver,
         unregularized_oof_rank_policy=unregularized_oof_rank_policy,
         rank_tolerance_rule=rank_tolerance_rule,
+        lambda_scaling=lambda_scaling,
         oof_folds=oof_folds,
         uncovered_tolerance=uncovered_tolerance,
         condition_ceiling=condition_ceiling,
@@ -978,6 +983,12 @@ def _validate_identification(
             "identification.rank_tolerance_rule must match the preregistration exactly: "
             f"{_EXPECTED_RANK_TOLERANCE_RULE!r}"
         )
+    lambda_scaling = _require(block, "lambda_scaling", "identification")
+    if lambda_scaling != _EXPECTED_LAMBDA_SCALING:
+        raise Phase2ConfigError(
+            "identification.lambda_scaling must match the preregistration exactly: "
+            f"{_EXPECTED_LAMBDA_SCALING!r}"
+        )
 
     raw = _require(block, "lambda_grid", "identification")
     if not isinstance(raw, list) or any(isinstance(x, bool) for x in raw):
@@ -1029,6 +1040,7 @@ def _validate_identification(
         regularized_solver,
         rank_policy,
         rank_rule,
+        lambda_scaling,
         oof_folds,
         tolerance,
         ceiling,

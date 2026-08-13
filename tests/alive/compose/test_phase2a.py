@@ -642,7 +642,9 @@ def test_oof_fold_manifest_returned_in_memory_on_futility(tmp_path):
     # and NOT bound into a bundle/lock/ledger (there is no bundle on futility).
     rng = np.random.default_rng(42)
     inst = _build_instance(rng)
-    store = _store(inst, combo_calibration_eps=inst["additive_cal"])  # forces theta<=0
+    store = _store(
+        inst, combo_calibration_eps=np.zeros_like(inst["additive_cal"])
+    )  # comparator exact -> theta == 0.0
     out = tmp_path / "futility_manifest.json"
     res = run_phase2a_fixture(_inputs(inst), store, expected_hashes=_HASHES, oof_manifest_path=out)
     assert res.futility_status == "FUTILITY_STOPPED"
@@ -902,6 +904,21 @@ def test_run_id_is_recomputed_from_provenance():
         )
 
 
+# A GI residual of exactly zero makes the additive comparator EXACTLY correct, so
+# the operator can at best tie it: theta == 0.0, and the registered futility
+# condition is ``oof_theta <= dev_oof_threshold`` with the threshold at 0.0.
+#
+# The earlier construction passed ``inst["additive_cal"]`` instead, whose own
+# comment claimed it made "the additive comparator perfect" -- it did not. It left
+# a sliver of learnable structure, and futility depended on the operator
+# OVERFITTING it into a slightly negative theta. When ``identification.lambda_scaling``
+# made the registered lambda mean what it says, the overfit went away, theta rose to
+# +0.0019 and two of these tests flipped to CONTINUE while a third (same
+# construction, different seed) did not -- they were sitting on the boundary.
+# Zero eps removes the dependence on regularization strength entirely.
+_FUTILE_EPS_NOTE = None
+
+
 # --------------------------------------------------------------------------- #
 # futility -> NO bundle, no sealed predictions, seal closed
 # --------------------------------------------------------------------------- #
@@ -910,7 +927,7 @@ def test_futility_writes_no_bundle(monkeypatch):
     inst = _build_instance(rng)
     # force the OOF theta <= 0 by making the additive comparator perfect (so L1
     # cannot beat it) — replace eps targets to equal additive exactly.
-    store = _store(inst, combo_calibration_eps=inst["additive_cal"])
+    store = _store(inst, combo_calibration_eps=np.zeros_like(inst["additive_cal"]))
     res = run_phase2a_fixture(_inputs(inst), store, expected_hashes=_HASHES)
     assert res.futility_status == "FUTILITY_STOPPED"
     assert res.bundle is None
@@ -920,7 +937,7 @@ def test_futility_writes_no_bundle(monkeypatch):
 def test_futility_does_not_write_bundle_file(tmp_path):
     rng = np.random.default_rng(8)
     inst = _build_instance(rng)
-    store = _store(inst, combo_calibration_eps=inst["additive_cal"])
+    store = _store(inst, combo_calibration_eps=np.zeros_like(inst["additive_cal"]))
     out = tmp_path / "bundle.json"
     res = run_phase2a_fixture(_inputs(inst), store, expected_hashes=_HASHES, bundle_path=out)
     assert res.bundle is None
@@ -1036,7 +1053,7 @@ def test_sealed_access_count_zero_on_continue_and_futility():
     inst = _build_instance(rng)
     ok = run_phase2a_fixture(_inputs(inst), _store(inst), expected_hashes=_HASHES)
     assert ok.sealed_access_count == 0
-    fut_store = _store(inst, combo_calibration_eps=inst["additive_cal"])
+    fut_store = _store(inst, combo_calibration_eps=np.zeros_like(inst["additive_cal"]))
     fut = run_phase2a_fixture(_inputs(inst), fut_store, expected_hashes=_HASHES)
     assert fut.sealed_access_count == 0
 

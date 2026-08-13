@@ -74,6 +74,18 @@ identification:
   selection: calibration_oof_gene_disjoint
   unregularized_oof_rank_policy: require_full_rank_each_train_fold
   rank_tolerance_rule: max_shape_times_float64_eps_times_sigma_max
+  # The registered lambda_grid is RELATIVE, not absolute. Ridge is not
+  # scale-invariant and Phi is bilinear in z, so z -> cz makes an absolute penalty
+  # act as lambda/c^4 while nothing upstream bounds ||z||; the same absolute lambda
+  # also means a different relative penalty at each k_total, because cond rises
+  # across the registered dimension grid. The applied penalty is
+  # lambda * sigma_max(Phi_calibration)^2, which cancels both. sigma_max is not a
+  # new quantity: it is the value the rank_tolerance_rule above is already built
+  # from. lambda = 0.0 stays exactly 0.0, so the unregularized rank policy and the
+  # conditioning ceiling are unaffected. Equivalent to rescaling the factor bank by
+  # sqrt(sigma_max) (verified to one ulp), applied here so the bank stays a pure
+  # function of the encoders and k_total rather than depending on the split.
+  lambda_scaling: calibration_sigma_max_squared
   oof_folds: 3
   uncovered_tolerance: 0.75
   # Admissibility bound on cond(Phi). Screened in TWO places inside selection:

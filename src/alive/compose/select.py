@@ -45,7 +45,12 @@ from pathlib import Path
 import numpy as np
 from numpy.random import PCG64, Generator
 
-from alive.compose.identify import SingularDesignError, rank_diagnostics
+from alive.compose.identify import (
+    LAMBDA_SCALING_RULE,
+    SingularDesignError,
+    calibration_lambda_scale,
+    rank_diagnostics,
+)
 from alive.compose.metric2 import paired_relative_error_reduction
 from alive.compose.models import L1Model
 from alive.io import atomic_write_once
@@ -944,6 +949,7 @@ def _oof_theta_for_candidate(
     additive: np.ndarray,
     Z: np.ndarray,
     lam: float,
+    lambda_scale: float,
     p: int,
     model_factory: ModelFactory,
     require_full_rank_unregularized: bool,
@@ -987,7 +993,11 @@ def _oof_theta_for_candidate(
         train_pairs = [idx_pairs[i] for i in fold.train_idx]
         train_eps = eps_obs[list(fold.train_idx)]
         try:
-            model.fit(Z, train_pairs, train_eps, lam=float(lam))
+            # The REGISTERED lambda is relative, not absolute: the applied penalty
+            # is ``lam * sigma_max(Phi_cal)**2`` (``identification.lambda_scaling``).
+            # ``lam == 0.0`` stays exactly 0.0, so the unregularized branch and the
+            # two guards above are untouched by the scaling.
+            model.fit(Z, train_pairs, train_eps, lam=float(lam) * float(lambda_scale))
         except SingularDesignError as exc:
             raise SingularDesignError(f"OOF train fold {fold_index}: {exc}") from exc
 
@@ -1051,6 +1061,7 @@ def select_hyperparams(
     condition_ceiling: float,
     unregularized_oof_rank_policy: str = UNREGULARIZED_OOF_RANK_POLICY,
     rank_tolerance_rule: str = OOF_RANK_TOLERANCE_RULE,
+    lambda_scaling: str = LAMBDA_SCALING_RULE,
 ) -> SelectionResult:
     """Select ``(k_total, lambda)`` by end-to-end gene-disjoint OOF (plan §2.4).
 
@@ -1131,6 +1142,11 @@ def select_hyperparams(
             "unregularized_oof_rank_policy must match the registered value "
             f"{UNREGULARIZED_OOF_RANK_POLICY!r}"
         )
+    if lambda_scaling != LAMBDA_SCALING_RULE:
+        raise SelectionError(
+            f"lambda_scaling must match the registered value {LAMBDA_SCALING_RULE!r}, "
+            f"got {lambda_scaling!r}"
+        )
     if rank_tolerance_rule != OOF_RANK_TOLERANCE_RULE:
         raise SelectionError(
             f"rank_tolerance_rule must match the registered value {OOF_RANK_TOLERANCE_RULE!r}"
@@ -1205,6 +1221,12 @@ def select_hyperparams(
                 "(registered identification.condition_ceiling; the design is full rank "
                 "but numerically inadmissible)"
             )
+        # ONE scale per ``k_total``, computed on the CALIBRATION design and reused
+        # for every fold and every lambda at this dimension, so candidates stay
+        # commensurable. Measured across the registered grid, cond rises ~6.5x from
+        # k=4 to k=8, so an absolute lambda would make the dimension choice
+        # confounded with regularization strength.
+        candidate_lambda_scale = calibration_lambda_scale(Z, list(idx_pairs))
         for lam in lambda_grid:
             candidate = (int(k_total), float(lam))
             if inadmissible is not None:
@@ -1222,6 +1244,7 @@ def select_hyperparams(
                     additive=add,
                     Z=Z,
                     lam=float(lam),
+                    lambda_scale=candidate_lambda_scale,
                     p=p,
                     model_factory=model_factory,
                     require_full_rank_unregularized=True,
