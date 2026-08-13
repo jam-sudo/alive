@@ -279,19 +279,33 @@ def test_the_final_fit_scales_the_headline_operator_and_leaves_the_baseline_alon
     """
     import dataclasses
 
+    from alive.compose.config2 import load_compose_phase2_config
     from alive.compose.identify import calibration_lambda_scale as _scale
     from alive.compose.phase2a import run_phase2a_fixture
     from tests.alive.compose.test_phase2a import _HASHES, _build_instance, _inputs, _store
 
+    # 0.0 is EXCLUDED from the grid on purpose. This fixture's design is well
+    # conditioned, so the unregularized candidate wins at every noise level tried
+    # (0.02 to 3.0) -- and with ``selected_lambda == 0.0`` the scaled and unscaled
+    # penalties are both exactly 0.0, so the assertions below cannot tell them
+    # apart. The first version of this test had precisely that hole and passed
+    # against the mutation it was written to kill.
+    grid = (0.001, 0.01, 0.1)
+    cfg = dataclasses.replace(
+        load_compose_phase2_config("configs/compose_k562_v1_phase2.yaml"), lambda_grid=grid
+    )
     rng = np.random.default_rng(3)
     inst = _build_instance(rng)
-    inp = _inputs(inst)
+    inp = dataclasses.replace(_inputs(inst), lambda_grid=grid)
     seen: dict[str, float] = {}
     factories = {
         name: _lam_spy(factory, seen, name) for name, factory in inp.model_factories.items()
     }
     res = run_phase2a_fixture(
-        dataclasses.replace(inp, model_factories=factories), _store(inst), expected_hashes=_HASHES
+        dataclasses.replace(inp, model_factories=factories),
+        _store(inst),
+        expected_hashes=_HASHES,
+        config=cfg,
     )
     assert res.futility_status == "CONTINUE", "the final fit is only reached on CONTINUE"
 
@@ -299,6 +313,7 @@ def test_the_final_fit_scales_the_headline_operator_and_leaves_the_baseline_alon
     selected_Z = np.asarray(inp.factors_by_k[res.futility.selected_k_total], dtype=float)
     scale = _scale(selected_Z, list(inp.cal_idx_pairs))
     assert scale != 1.0, "a unit scale would make this test unable to tell the arms apart"
+    assert selected_lambda > 0.0, "a zero lambda makes both arms 0.0 and the test vacuous"
 
     assert seen["l1_bilinear_identifiable"] == selected_lambda * scale
     assert seen["id_only"] == selected_lambda
