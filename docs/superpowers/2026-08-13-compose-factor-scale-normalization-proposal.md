@@ -82,7 +82,9 @@ the registered ceiling.
 `-6.7245e+17`: there is no penalty to normalize, and that value is a garbage unregularized solve on a
 `cond 3e12` fold, which is exactly what the fold arm exists to screen.)
 
-**And the registered grid becomes an actual ladder** rather than three nearly-identical points:
+**And on this exhibit the registered grid becomes an actual ladder** rather than three
+nearly-identical points — but see §5.1 R2 before generalizing that sentence, because whether the grid
+is a usable ladder after normalization depends on `cond`, which is a property of the real data:
 
 | design | `lam=0.001` | `lam=0.01` | `lam=0.1` |
 |---|---|---|---|
@@ -136,6 +138,89 @@ already-registered quantity, **B is the substitute and nothing else in this prop
 5. **It does not change the estimand, the model class, or any claim boundary** (`CLAUDE.md#mission`).
 6. The normalizer depends on the registered calibration pair roster; if that roster changed, the
    scale changes with it. That is correct behaviour, and it is why the scalar is pinned in evidence.
+
+## 5.1 Adversarial review of this proposal (2026-08-13)
+
+The recommendation was reviewed by attacking it rather than restating it. Four findings; the
+recommendation survives, with one claim narrowed, one new risk, and one result that makes the whole
+decision cheaper than §2 assumed.
+
+**R1 — after normalization the ridge's effect has an exact closed form, and it needs NO new
+recorded quantity.** With `sigma_max = 1` we have `sigma_min = 1/cond`, so the filter factor on the
+weakest direction is
+
+```
+f(lambda) = 1 / (1 + lambda * cond^2)
+```
+
+Verified against the measured SVD on four designs and three registered lambdas: `|diff| <= 4.4e-16`
+throughout, and exactly `0` on the full design. **`cond` is already computed, already emitted per
+`k_total`, and already validated in the phi-rank activation evidence.** So after normalization, grid
+adequacy is checkable from the report that already exists. This **corrects §4 of the decision record**:
+I wrote there that recording `sigma_max` is a prerequisite for an A′-style admissibility rule. With
+normalization it is not — `lambda * cond^2` is computable from committed evidence with no new field.
+(Without normalization `sigma_max` *is* still needed, because `sigma_min = sigma_max/cond`.)
+
+**R2 — NARROWS a claim: normalization does not guarantee a usable ladder.** Evaluating the closed
+form across `cond`:
+
+| `cond` | `f(0.001)` | `f(0.01)` | `f(0.1)` |
+|---|---|---|---|
+| 3 | `0.99108` | `0.91743` | `0.52632` |
+| 10 | `0.90909` | `0.50000` | `0.09091` |
+| 31.6 | `0.50036` | `0.09103` | `0.00992` |
+| 100 | `0.09091` | `0.00990` | `0.00100` |
+| 1e3 | `0.00100` | `0.00010` | `0.00001` |
+| 1e8 | `0.00000` | `0.00000` | `0.00000` |
+
+The registered grid is a graded ladder for `cond` roughly in **10–30**, usable from about 3 to 100,
+and **entirely dominant above ~100** — every positive registered lambda crushes the weakest
+direction. **The registered `condition_ceiling` admits `cond` up to `1e8`**, so there are six orders
+of admissible conditioning in which the grid, even after normalization, does nothing but
+over-regularize. Normalization removes the *arbitrary* factor (bank scale); it does **not** make the
+grid well-placed. Whether `[0.001, 0.01, 0.1]` suits the real design's `cond` is a **separate
+registered question**, and it is now answerable from existing evidence via R1.
+
+**R3 — STRENGTHENS the case: an absolute lambda already means different things across `k_total`.**
+Measured on one bank at the registered grid `[4, 6, 8]`:
+
+| `k_total` | `sym_dim` | `sigma_max` | `sigma_min` | `cond` |
+|---|---|---|---|---|
+| 4 | 10 | `14.9991` | `5.16511` | `2.90393` |
+| 6 | 21 | `19.3836` | `3.03665` | `6.38321` |
+| 8 | 36 | `24.0904` | `1.26798` | `18.999` |
+
+`cond` rises 6.5x across the registered dimension grid, so by R1 a single absolute lambda is a
+materially different relative penalty at each `k_total` — the choice of dimension is currently
+**confounded with regularization strength**. Per-`k_total` normalization removes that confound. This
+is an argument for the proposal that §2 did not make.
+
+**R4 — NEW RISK: the comparator obeys a different scaling law from the operator.** `IDOnlyModel`'s
+feature is `[z_g + z_h, |z_g - z_h|]` plus an intercept — **linear** in `z` — while the operator's
+`pair_feature` is **bilinear**. Measured under `Z -> Z/s`:
+
+| `s` | `‖id_only feature‖` | `‖bilinear feature‖` |
+|---|---|---|
+| 1 | `2.63419` | `1.01029` |
+| 2 | `1.31709` | `0.252573` |
+| 10 | `0.263419` | `0.0101029` |
+
+i.e. `1/s` against `1/s²`. **One normalizer cannot put both arms of the primary metric on the same
+footing**, and the primary metric `theta` is precisely a comparison between them. So normalizing
+changes the relative regularization *inside the headline comparison*. The honest framing: that ratio
+is **arbitrary today** — set by an unbounded bank scale nobody chose — and normalization makes it
+**pinned but still not deliberately chosen**. That is an improvement, not a resolution, and it is a
+modeling decision touching the primary metric rather than a neutral repair. It is legitimate to make
+it **now**, pre-seal and outcome-blind; it would not be legitimate after any outcome is seen
+(`CLAUDE.md#invariants` 1 and 5). *(The operator's own design has no intercept —
+`operator.py:43` stacks `pair_feature` only — which is why `cond` and `rank` are exactly invariant
+under a uniform scalar. The intercept exists only in the comparator.)*
+
+**Net verdict.** The recommendation stands: normalizing removes an arbitrary, unchosen factor from a
+penalty that feeds the registered stopping rule, and R3 shows it also removes a cross-dimension
+confound. But it is **necessary, not sufficient** — R2 shows a second registered question (are the
+grid values right for the real `cond`?) survives it, and R4 shows the operator/comparator balance
+becomes pinned rather than correct. Both are now checkable from evidence that already exists.
 
 ## 6. Reference integrity
 
