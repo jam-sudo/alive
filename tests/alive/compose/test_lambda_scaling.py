@@ -185,3 +185,137 @@ def test_the_scale_comes_from_the_calibration_design_not_a_fold():
     cal = calibration_lambda_scale(Z, list(inst["idx_pairs"]))
     fold0 = calibration_lambda_scale(Z, [inst["idx_pairs"][i] for i in folds[0].train_idx])
     assert cal != fold0
+
+
+# --------------------------------------------------------------------------- #
+# The properties below were ALL unpinned in the first version of this file, and
+# the mutation harness found them: six mutations survived, including "the final
+# fit drops the scale" -- the exact defect this rule's design notes call the one
+# that would make selection meaningless. Fourteen tests that read as thorough
+# still left the load-bearing sites untested.
+# --------------------------------------------------------------------------- #
+
+
+def _lam_spy(base, sink, name):
+    """A factory whose models record the ``lam`` they are actually fitted with.
+
+    Patches the INSTANCE rather than subclassing, deliberately: selection enforces
+    ``type(model_factory()) is L1Model`` before reading a singular design as
+    hyperparameter non-viability, so a subclass trips a registered guard that is
+    doing its job. The instance attribute shadows the class method for the call
+    while leaving ``type(obj)`` untouched.
+    """
+
+    def _make():
+        obj = base()
+        original = obj.fit
+
+        def _fit(Z, pairs, eps_obs, *, lam):
+            sink[name] = float(lam)
+            return original(Z, pairs, eps_obs, lam=lam)
+
+        obj.fit = _fit
+        return obj
+
+    return _make
+
+
+def test_an_infinite_bank_reaches_the_finiteness_refusal():
+    """The ``isfinite`` branch is reachable, and by a DIFFERENT input than NaN.
+
+    A NaN bank makes ``np.linalg.svd`` raise ``LinAlgError``; an infinite one lets
+    it converge and return ``nan`` for ``sigma_max``. Only the second reaches the
+    finiteness check, which is why the NaN test above did not kill the mutation
+    that deletes it.
+    """
+    Z = np.full((6, 4), np.inf)
+    pairs = [(0, 1), (2, 3), (4, 5)]
+    with pytest.raises(SingularDesignError, match="non-finite sigma_max"):
+        calibration_lambda_scale(Z, pairs)
+
+
+def test_selection_applies_the_scale_and_takes_it_from_the_FULL_roster():
+    """Pins the applied penalty itself, not just an invariance of the result.
+
+    An invariance assertion cannot tell a correct scale from any other constant,
+    because both sides of the comparison move together -- which is how a mutation
+    computing the scale from a one-pair subset survived.
+    """
+    from alive.compose.models import L1Model
+
+    inst, _ = _scaled(1.0)
+    k = inst["selected_k_total"]
+    seen: dict[str, float] = {}
+    select_hyperparams(
+        idx_pairs=inst["idx_pairs"],
+        pair_ids=inst["pair_ids"],
+        eps_obs=inst["eps_obs"],
+        additive=inst["additive"],
+        factors_by_k={k: inst["factors_by_k"][k]},
+        k_total_grid=[k],
+        lambda_grid=[0.01],
+        n_genes=inst["n_genes"],
+        n_folds=inst["n_folds"],
+        seed=inst["seed"],
+        model_factory=_lam_spy(L1Model, seen, "oof"),
+        uncovered_tolerance=inst["uncovered_tolerance"],
+        condition_ceiling=1e300,
+    )
+    expected = 0.01 * calibration_lambda_scale(inst["factors_by_k"][k], list(inst["idx_pairs"]))
+    assert seen["oof"] == expected
+
+
+def test_the_final_fit_scales_the_headline_operator_and_leaves_the_baseline_alone():
+    """Selection and the final fit must apply the SAME interpretation.
+
+    If only one scaled, the recorded ``selected_lambda`` would not be the penalty
+    that was scored -- selection would be optimizing a different model than the one
+    that ships. Nothing tested this until a mutation deleting the final-fit scaling
+    survived the whole suite.
+
+    The baseline arm is asserted too, in the same test: ``id_only``'s feature is
+    LINEAR in ``z`` while the operator's is bilinear, so this scale would not make
+    it invariant, and scaling it would silently change a registered baseline's fit.
+    """
+    import dataclasses
+
+    from alive.compose.identify import calibration_lambda_scale as _scale
+    from alive.compose.phase2a import run_phase2a_fixture
+    from tests.alive.compose.test_phase2a import _HASHES, _build_instance, _inputs, _store
+
+    rng = np.random.default_rng(3)
+    inst = _build_instance(rng)
+    inp = _inputs(inst)
+    seen: dict[str, float] = {}
+    factories = {
+        name: _lam_spy(factory, seen, name) for name, factory in inp.model_factories.items()
+    }
+    res = run_phase2a_fixture(
+        dataclasses.replace(inp, model_factories=factories), _store(inst), expected_hashes=_HASHES
+    )
+    assert res.futility_status == "CONTINUE", "the final fit is only reached on CONTINUE"
+
+    selected_lambda = float(res.futility.selected_lambda)
+    selected_Z = np.asarray(inp.factors_by_k[res.futility.selected_k_total], dtype=float)
+    scale = _scale(selected_Z, list(inp.cal_idx_pairs))
+    assert scale != 1.0, "a unit scale would make this test unable to tell the arms apart"
+
+    assert seen["l1_bilinear_identifiable"] == selected_lambda * scale
+    assert seen["id_only"] == selected_lambda
+
+
+def test_the_config_refuses_an_unregistered_scaling_value():
+    """A registered string is only registered if a disagreeing config is refused."""
+    import yaml
+
+    from alive.compose.config2 import Phase2ConfigError, load_compose_phase2_config
+
+    raw = yaml.safe_load(open("configs/compose_k562_v1_phase2.yaml"))
+    raw["identification"]["lambda_scaling"] = "absolute"
+    import tempfile
+
+    with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as handle:
+        yaml.safe_dump(raw, handle)
+        path = handle.name
+    with pytest.raises(Phase2ConfigError, match="lambda_scaling must match"):
+        load_compose_phase2_config(path)

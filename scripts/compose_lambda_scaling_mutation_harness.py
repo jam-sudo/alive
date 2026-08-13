@@ -72,7 +72,9 @@ MUTATIONS = [
     (
         "M5  LinAlgError escapes untyped (exit 1 instead of the contracted 10)",
         IDENTIFY,
+        "    try:\n        svals = np.linalg.svd(phi, compute_uv=False)\n"
         "    except np.linalg.LinAlgError as exc:",
+        "    try:\n        svals = np.linalg.svd(phi, compute_uv=False)\n"
         "    except _NeverRaised as exc:",
     ),
     (
