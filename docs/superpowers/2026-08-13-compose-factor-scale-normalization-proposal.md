@@ -95,20 +95,30 @@ the registered ceiling.
 All four are scale-invariant (verified `c=1` vs `c=100`). They differ in where the **registered**
 grid lands, which is the whole point:
 
-| normalizer | needs SVD? | `f(0.001)` | `f(0.01)` | `f(0.1)` | verdict |
+| normalizer | new quantity? | `f(0.001)` | `f(0.01)` | `f(0.1)` | verdict |
 |---|---|---|---|---|---|
-| **A. `sigma_max(Phi) = 1`** | yes | `0.9598` | `0.7047` | `0.1927` | **recommended** — full ladder; `lambda` is directly comparable to the squared singular values the filter factors use |
-| B. `‖Phi‖_F = 1` | no (pure reduction) | `0.8549` | `0.3708` | `0.0556` | viable; SVD-free, slightly more aggressive |
-| C. `max‖z‖ = 1` | no | `0.9886` | `0.8965` | `0.4642` | weak — `lam=0.001` nearly inert |
-| D. `RMS‖z‖ = 1` | no | `0.9982` | `0.9819` | `0.8445` | **disqualified by measurement** — the registered grid stays nearly inert, i.e. it would not fix the defect |
+| **A. `sigma_max(Phi) = 1`** | **none — already computed AND already registered** | `0.9598` | `0.7047` | `0.1927` | **recommended** |
+| B. `‖Phi‖_F = 1` | yes — a statistic nothing else in the protocol uses | `0.8549` | `0.3708` | `0.0556` | viable substitute |
+| C. `max‖z‖ = 1` | yes | `0.9886` | `0.8965` | `0.4642` | weak — `lam=0.001` nearly inert |
+| D. `RMS‖z‖ = 1` | yes | `0.9982` | `0.9819` | `0.8445` | **disqualified by measurement** — the registered grid stays nearly inert, i.e. it would not fix the defect |
+
+**Correction to an earlier framing of this table.** A first version listed A's cost as "needs SVD"
+and implied that counted against it. That is wrong on both halves. `rank_diagnostics` **already**
+computes `np.linalg.svd(phi, compute_uv=False)` on exactly this design and already reads `svals[0]`
+(`identify.py:69-70`), so A adds **zero computation**. And `sigma_max` is **already a registered
+quantity** — the registered `rank_tolerance_rule` is literally
+`max_shape_times_float64_eps_times_sigma_max`. A therefore introduces no new statistic into the
+protocol; B, C and D each would.
 
 **On numerical stability, stated accurately.** B avoids an iterative algorithm entirely. The concern
 about A is *not* established: this project measured a `6.6e-05` Accelerate-vs-OpenBLAS divergence on
 `cond`, but that quantity is dominated by `sigma_min`; `sigma_max` is the **best**-conditioned
 singular value and is typically accurate to near machine precision, so the earlier measurement does
-not imply `sigma_max` instability. Pinning the scalar in evidence (§2) removes the residual question
-for reruns regardless of which is chosen. If the owner weights BLAS-independence above
-interpretability, **B is the substitute and nothing else in this proposal changes.**
+not imply `sigma_max` instability. There is also a consistency argument: the registered rank gate
+**already** stakes a fail-closed decision on `sigma_max`, so if `sigma_max` were unstable enough to
+matter here, that gate would already be unsound. Pinning the scalar in evidence (§2) removes the
+residual question for reruns regardless. If the owner weights BLAS-independence above reusing an
+already-registered quantity, **B is the substitute and nothing else in this proposal changes.**
 
 ## 5. What this does NOT do — non-claims
 
