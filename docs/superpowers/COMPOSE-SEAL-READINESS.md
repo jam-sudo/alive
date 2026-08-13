@@ -5,7 +5,7 @@
 > **이 문서는 아무것도 정의하지 않는다** — 세부(task)는 plan, claim은 spec, exact param은 config,
 > 시간순 audit는 git이 authoritative다([sources of truth](../../CLAUDE.md#sources)). 상태 행이 authoritative
 > 문서와 어긋나면 **authoritative 문서가 옳다**; 이 인덱스를 갱신한다.
-> **Updated:** 2026-08-13 @ `a275eae` (branch `main`)
+> **Updated:** 2026-08-13 @ `4b5d438` (branch `compose-lambda-scaling`)
 > `scripts/bump-readiness-stamp.sh` / the pre-commit hook from `HEAD` at commit time, so it names the
 > **parent** of the commit that carries it and can never name itself. Reading it as "one commit stale" is a
 > misreading; git is authoritative for when this file actually changed.
@@ -1311,7 +1311,7 @@ branch에서 추적 가능하게 기록한다. `LOCAL` ledger ID만으로는 이
    candidate remains unsigned/historical and there is still no owner image lock, candidate-bound owner signature,
    or accepted external verifier pin. Status remains **RELEASE-BLOCKED**; a registered key or unsigned digest alone
    is never seal authorization.
-4b. **⛔ OPEN — the registered `lambda_grid` is an ABSOLUTE penalty and nothing bounds `‖z‖`** (task #43,
+4b. **✅ CLOSED 2026-08-13 — the registered `lambda_grid` is now RELATIVE** (`identification.lambda_scaling: calibration_sigma_max_squared`; owner-approved, implemented, 13/13 mutations killed; `config_sha256` → `3faacaff…`). Two residuals remain and are listed in `2026-08-13-compose-factor-scale-normalization-proposal.md` §8.1: `id_only` keeps an absolute lambda, and whether the registered grid VALUES suit the real design's `cond` is a separate question, now answerable from committed evidence via `f = 1/(1+λ·cond²)`. The original entry is preserved below as written. ~~⛔ OPEN — the registered `lambda_grid` is an ABSOLUTE penalty and nothing bounds `‖z‖`~~ (task #43,
    owner decision). `cond(Phi)` is invariant to a uniform rescale of `z` while `identification.lambda_grid` is a
    fixed absolute penalty, and `Phi` is bilinear in `z`, so `z → cz` makes the effective penalty `λ/c⁴`. Measured
    2026-08-07 on the committed exhibit at IDENTICAL `cond(Phi) = 6.4732…`: rescaling the factor bank by 100 moves
@@ -1445,6 +1445,47 @@ adjudicates all nine, including one that did **not** reproduce). Two are about t
 
 The audit's release verdict stands and is independent of all of the above: six registered config blockers and
 `INCOMPLETE` dependency evidence keep execution **RELEASE-BLOCKED**; seal remains **UNOPENED**.
+
+**2026-08-13 — task #43 CLOSED: the registered `lambda_grid` is RELATIVE, not absolute.**
+`identification.lambda_scaling: calibration_sigma_max_squared`; the applied penalty is
+`lambda * sigma_max(Phi_cal)²`. Owner-approved after a costed proposal
+(`2026-08-13-compose-factor-scale-normalization-proposal.md`). **⚠️ `config_sha256` moved
+`b158417a…` → `3faacafff963b221148a08cb18fb92f084d796fb80c5db2b3b3b25ea295cb3b9` — a NEW run identity,
+which this decision was approved to create. Task #14 therefore REGAINS its mechanical trigger:
+activation evidence binds on `config_sha256`, so the committed config-bound reports are stale again
+and must be regenerated on the pod at the new digest.**
+
+The defect restated: ridge is not scale-invariant and `Phi` is bilinear in `z`, so an absolute penalty
+acts as `lambda/c⁴` while nothing bounds `‖z‖`. Measured — at the committed exhibit's own scale the
+whole registered grid was nearly inert (weakest filter factors `0.9998/0.998/0.980`); at `c=100` it was
+indistinguishable from `lambda=0` and `theta(0.001)` collapsed `0.8103` → `-3.34e6`; and the SAME
+absolute lambda was inert on the full design while dominant on a degenerate fold. It also meant
+different things across the registered dimension grid (`cond` `2.90 → 6.38 → 19.00` at k=4/6/8),
+confounding the dimension choice with regularization strength.
+
+Applied at **both** solve sites — OOF selection and the final fit — since a rule applied to only one
+would make the recorded `selected_lambda` different from the penalty that was scored. `sigma_max` is
+**not** a new registered quantity: it is what `max_shape_times_float64_eps_times_sigma_max` already
+uses. `cond` and `rank` are untouched, so the registered ceiling and rank policy keep their meaning.
+
+**🔑 The verification mattered more than the feature.** The first test set — 18 tests reading as
+thorough — left **six** mutations alive, and the two most important survived a second time *after* a
+test was written specifically to kill them. Cause: this fixture's design is well conditioned, so
+`lambda = 0.0` wins at every noise level tried (0.02–3.0), and with `selected_lambda == 0.0` the
+scaled and unscaled penalties are **both exactly 0.0** — the assertion compared two numbers no
+mutation could make differ. Guarding `scale != 1.0` had covered the analogous hole one variable over.
+Fixed by parameterising the grid off `0.0`. Also: `M4` was not an equivalent mutant (a NaN bank makes
+`svd` RAISE; an INFINITE one converges and returns `nan` — two inputs, two branches), and `M5` was
+never run at all because its anchor matched three sites, visible only because a skip counts as a
+survivor. Final: **13/13 killed, each by a NAMED failing test.**
+
+Two residuals are carried forward, not closed: `id_only` keeps an absolute lambda (its feature is
+linear in `z`, so this scale would not make it invariant; changing a baseline's fit needs its own
+justification), and whether the registered grid VALUES suit the real design is a separate question —
+now answerable from the `cond` already in phi-rank evidence via `f = 1/(1 + lambda·cond²)`.
+
+Verified: full compose **2058 passed, 2 skipped**; ruff check and format clean. Seal remains
+**UNOPENED**; execution remains **RELEASE-BLOCKED**.
 
 ## 이 문서가 *아닌* 것 (중복 금지)
 

@@ -304,8 +304,18 @@ approved commit. "Digest-neutral" is therefore true of the **config axis** of ru
 not be read as "no lineage consequence". The same precision applies to option B's row: moving the
 config digest changes `run_id` because `config_sha256` is one of its four inputs.
 
-**Status:** `OPEN` — owner must choose A′, B, C, or something else; A alone leaves the gap open by
-construction. No option is recommended in this document.
+**Status:** ✅ **DECIDED 2026-08-13** — the owner approved normalizing the scale, implemented in the
+equivalent penalty-side form as `identification.lambda_scaling: calibration_sigma_max_squared`
+(measured equivalent to bank normalization within one ulp). `config_sha256` moved to
+`3faacaff…`. Two residuals are carried forward — `id_only`'s absolute lambda, and whether the
+registered grid VALUES suit the real `cond` — both recorded in
+`2026-08-13-compose-factor-scale-normalization-proposal.md` §8.1. Decision #4's sign-off row in §6
+is therefore settled; #1–#3 remain PROPOSED.
+
+The original statement of the open decision is preserved below as written.
+
+> ~~**Status:** `OPEN` — owner must choose A′, B, C, or something else; A alone leaves the gap open
+> by construction. No option is recommended in this document.~~
 
 > **[2026-08-13] A concrete proposal now exists for this decision** — `2026-08-13-compose-factor-scale-normalization-proposal.md`, which recommends option B
 > (normalize the bank) in the specific form `sigma_max(Phi) = 1` with the scalar pinned in activation evidence,
@@ -340,7 +350,7 @@ are separate, later steps under runbook §2.5.
 | 1 | Ceiling value `1.0e+8`, anchored data-free at `1/√ε_f64` | PROPOSED | ______________________ |
 | 2 | First application point: per-candidate screen; all-inadmissible → `SelectionError` (exit 10) | PROPOSED | ______________________ |
 | 3 | Second application point: unregularized OOF train folds, `lam == 0.0` only | PROPOSED | ______________________ |
-| 4 | Unbounded `‖z‖` scale gap (task #43) | **OPEN — no proposal** | choose A′ / B / C: ____________ |
+| 4 | Unbounded `‖z‖` scale gap (task #43) | ✅ **DECIDED 2026-08-13** | normalize — implemented as `lambda_scaling` |
 
 > **Note on decision 3.** Signing it endorses the arm, not the scope sentence attached to it. What
 > the arm fixes is reason attribution **above a noise threshold measured near `6e-12` on one
