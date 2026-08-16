@@ -1073,6 +1073,13 @@ def test_scientific_mode_binds_detectable_effect_to_data_card_digest(tmp_path):
 
 
 def test_scientific_mode_recomputes_rank_gate_before_release(tmp_path):
+    """The end-to-end binding, now matched on the SPECIFIC cause.
+
+    Until decision #5 (2026-08-16) eleven distinct factor-block rejections shared
+    one message, so this regex could only say "something about that block was
+    wrong". It now names the clause the corruption actually trips, which is what
+    makes it a test of *this* gate rather than of any of the other ten.
+    """
     cfg = load_compose_phase2_config(_write(tmp_path, _fully_activated_raw()))
     record = _activation_record_for_config(tmp_path, cfg)
     record = _rewrite_json_evidence(
@@ -1080,7 +1087,27 @@ def test_scientific_mode_recomputes_rank_gate_before_release(tmp_path):
         "real_norman_phi_rank_and_condition_report",
         lambda payload: payload["report"]["per_k_total"][0].__setitem__("is_full_rank", False),
     )
-    with pytest.raises(ScientificModeError, match="non-full-rank.*k_total=4"):
+    with pytest.raises(ScientificModeError, match="k_total=4: is_full_rank is False"):
+        assert_scientific_mode_allowed(cfg, activation_record=record, git_is_clean=True)
+
+
+def test_scientific_mode_names_a_rank_deficiency_as_such(tmp_path):
+    """The cause the split exists for, pinned end to end.
+
+    A rank-deficient registered ``k`` is the one factor-block failure whose remedy
+    is a CONFIG change — ``total_k_grid`` moves, which is a new run identity — and
+    not "regenerate the report". Before the split, an operator reaching this stop
+    could not distinguish it from the other ten. The assertion goes through
+    ``config2`` rather than the validator so the wrapping preserves the cause.
+    """
+    cfg = load_compose_phase2_config(_write(tmp_path, _fully_activated_raw()))
+    record = _activation_record_for_config(tmp_path, cfg)
+    record = _rewrite_json_evidence(
+        record,
+        "real_norman_phi_rank_and_condition_report",
+        lambda payload: payload["report"]["per_k_total"][0].__setitem__("rank", 9),
+    )
+    with pytest.raises(ScientificModeError, match="k_total=4: RANK-DEFICIENT"):
         assert_scientific_mode_allowed(cfg, activation_record=record, git_is_clean=True)
 
 

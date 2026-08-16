@@ -118,6 +118,96 @@ def _full_hex(value: Any, context: str, *, lengths: tuple[int, ...]) -> str:
     return value
 
 
+def _validate_factor_block(
+    block: Mapping[str, Any],
+    *,
+    expected_k: int,
+    sym_dim: int,
+    expected_scored_pairs: int,
+    n_z_universe_genes: int,
+) -> float:
+    """Validate one ``per_k_total`` block and return its condition number as a float.
+
+    Eleven distinct rejections, one message each. They were previously a single
+    eleven-clause ``or`` behind the one string "invalid or non-full-rank factor
+    block", so an operator whose pod run stopped here could not tell a RANK
+    DEFICIENCY — the one cause that says the registered grid is misspecified —
+    from a pair-count bookkeeping mismatch or a malformed condition number.
+
+    The accepted set is **unchanged**: same conditions, same short-circuit order,
+    same ``ValueError`` type. Only the messages are new. This is deliberate — the
+    gate is fail-closed and splitting the message must not move the boundary.
+
+    Parameters
+    ----------
+    block : Mapping
+        One ``report.per_k_total`` entry, already schema-checked by
+        :func:`_exact_object`.
+    expected_k : int
+        The registered ``total_k_grid`` position this block must occupy.
+    sym_dim : int
+        ``expected_k * (expected_k + 1) // 2``, the identifiable subspace
+        dimension.
+    expected_scored_pairs : int
+        The report's own ``n_combo_calibration``.
+    n_z_universe_genes : int
+        The envelope's ``n_z_universe_genes``.
+
+    Returns
+    -------
+    float
+        The block's condition number, validated numeric, finite and positive.
+
+    Raises
+    ------
+    ValueError
+        With a cause-specific message for each of the eleven rejections.
+    """
+    at = f"phi-rank factor block k_total={expected_k}"
+    if block["k_total"] != expected_k:
+        raise ValueError(
+            f"{at}: block k_total {block['k_total']!r} does not match its registered grid position"
+        )
+    if block["sym_dim"] != sym_dim:
+        raise ValueError(f"{at}: reported sym_dim {block['sym_dim']!r} is not k(k+1)/2 = {sym_dim}")
+    if block["rank"] != sym_dim:
+        raise ValueError(
+            f"{at}: RANK-DEFICIENT — rank {block['rank']!r} is below the identifiable "
+            f"subspace dimension sym_dim={sym_dim}, so this registered grid point is "
+            "not identifiable on the calibration design"
+        )
+    if block["is_full_rank"] is not True:
+        raise ValueError(
+            f"{at}: is_full_rank is {block['is_full_rank']!r}, not the boolean True "
+            "(a truthy 1 is refused: the flag and the rank must agree exactly)"
+        )
+    if block["n_calibration_pairs_scored"] != expected_scored_pairs:
+        raise ValueError(
+            f"{at}: scored {block['n_calibration_pairs_scored']!r} calibration pairs, "
+            f"but the report declares n_combo_calibration={expected_scored_pairs}"
+        )
+    if block["n_calibration_pairs_skipped"] != 0:
+        raise ValueError(
+            f"{at}: {block['n_calibration_pairs_skipped']!r} calibration pairs were "
+            "skipped; the design must be built on every calibration pair"
+        )
+    if _nonnegative_int(block["n_genes"], "phi-rank factor n_genes") != n_z_universe_genes:
+        raise ValueError(
+            f"{at}: factor bank covers {block['n_genes']!r} genes, but the envelope "
+            f"declares n_z_universe_genes={n_z_universe_genes}"
+        )
+    condition = block["condition_number"]
+    if isinstance(condition, bool):
+        raise ValueError(f"{at}: condition_number is a boolean, not a number")
+    if not isinstance(condition, (int, float)):
+        raise ValueError(f"{at}: condition_number {condition!r} is not numeric")
+    if not math.isfinite(float(condition)):
+        raise ValueError(f"{at}: condition_number {condition!r} is not finite")
+    if float(condition) <= 0.0:
+        raise ValueError(f"{at}: condition_number {condition!r} is not positive")
+    return float(condition)
+
+
 def validate_phi_rank_activation_report(
     envelope: Any,
     *,
@@ -244,24 +334,25 @@ def validate_phi_rank_activation_report(
     for raw_block, expected_k in zip(per_k, expected_grid, strict=True):
         block = _exact_object(raw_block, _FACTOR_BLOCK_KEYS, "phi-rank factor block")
         sym_dim = expected_k * (expected_k + 1) // 2
-        condition = block["condition_number"]
-        if (
-            block["k_total"] != expected_k
-            or block["sym_dim"] != sym_dim
-            or block["rank"] != sym_dim
-            or block["is_full_rank"] is not True
-            or block["n_calibration_pairs_scored"] != pair_counts[CALIBRATION_ROLE_NAME]
-            or block["n_calibration_pairs_skipped"] != 0
-            or _nonnegative_int(block["n_genes"], "phi-rank factor n_genes")
-            != top["n_z_universe_genes"]
-            or isinstance(condition, bool)
-            or not isinstance(condition, (int, float))
-            or not math.isfinite(float(condition))
-            or float(condition) <= 0.0
-        ):
-            raise ValueError(
-                f"phi-rank invalid or non-full-rank factor block for k_total={expected_k}"
-            )
+        # RANK is ALL while the ceiling below is ANY, and that asymmetry is a
+        # registered owner decision (#5, 2026-08-16), not an oversight. Measured on
+        # the committed real-Norman report: 41 calibration pairs, rank == sym_dim at
+        # every registered k (10/21/36), so the ALL rule is DORMANT -- ALL and ANY
+        # accept that report identically. The two gates also check different
+        # matrices: this one sees the full calibration design at no lambda, while
+        # the runtime policy sees each gene-disjoint TRAIN fold at lam == 0.0 only,
+        # so matching the quantifier would not align them. A rank-deficient
+        # registered k means the grid is misspecified; the honest remedy is to
+        # change total_k_grid -- a new run identity with a visible record -- not to
+        # run silently on a subset. See
+        # docs/superpowers/2026-08-16-compose-activation-rank-rule-decision.md.
+        condition = _validate_factor_block(
+            block,
+            expected_k=expected_k,
+            sym_dim=sym_dim,
+            expected_scored_pairs=pair_counts[CALIBRATION_ROLE_NAME],
+            n_z_universe_genes=top["n_z_universe_genes"],
+        )
         # Collected, NOT raised per block. The run's rule is ANY, not ALL: an
         # over-ceiling k_total is screened out of selection and the study proceeds
         # on the rest. Rejecting the whole report over one such dimension would
@@ -269,8 +360,8 @@ def validate_phi_rank_activation_report(
         # ceiling's own design was corrected for, one gate earlier. Only a grid
         # with NO admissible dimension makes the report uncertifiable, which is
         # the same condition that makes selection itself invalid.
-        if float(condition) > ceiling:
-            over_ceiling.append((expected_k, float(condition)))
+        if condition > ceiling:
+            over_ceiling.append((expected_k, condition))
         _full_hex(block["factor_bank_checksum"], "phi-rank factor-bank checksum", lengths=(64,))
     if over_ceiling and len(over_ceiling) == len(expected_grid):
         detail = ", ".join(f"k_total={k}: {c}" for k, c in over_ceiling)
