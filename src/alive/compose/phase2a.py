@@ -62,12 +62,18 @@ from alive.compose.freeze import (
     _assert_no_outcome_reference,
     _assert_no_sealed,
 )
+from alive.compose.identify import calibration_lambda_scale
 from alive.compose.models import fitted_model_checksum
 from alive.compose.response import ResponseSpace, bind_response_source, verify_response_artifact
 from alive.compose.roles import CALIBRATION_ROLE_NAME
 from alive.compose.select import OOFFoldManifest
 from alive.compose.zfactor import GeneFactorBank
 from alive.provenance import RunLedger, sha256_bytes, sha256_file, sha256_json
+
+#: The registered headline operator. Selection fits ONLY this model, so it is the
+#: only one whose penalty was chosen under the registered relative-lambda
+#: interpretation (``identification.lambda_scaling``).
+HEADLINE_MODEL_NAME = "l1_bilinear_identifiable"
 
 #: Default Phase-2 config consulted by the execution-mode guard.
 _DEFAULT_CONFIG_PATH = "configs/compose_k562_v1_phase2.yaml"
@@ -1470,8 +1476,8 @@ def _run_phase2a_core(
     # classification calls a BUG: traceback + exit 1, never a contracted
     # rejection (driver design spec 1.1). ``test_the_headline_model_guard_is_shadowed
     # _by_the_config_contract`` pins that ordering.
-    if "l1_bilinear_identifiable" not in inputs.model_factories:
-        raise ValueError("model_factories must include 'l1_bilinear_identifiable' (headline model)")
+    if HEADLINE_MODEL_NAME not in inputs.model_factories:
+        raise ValueError(f"model_factories must include {HEADLINE_MODEL_NAME!r} (headline model)")
     l1_factory = inputs.model_factories["l1_bilinear_identifiable"]
 
     eps_cal = np.asarray(outcome_store.combo_calibration_eps, dtype=float)
@@ -1494,6 +1500,7 @@ def _run_phase2a_core(
         measurability_role=CALIBRATION_ROLE_NAME,
         unregularized_oof_rank_policy=cfg.unregularized_oof_rank_policy,
         rank_tolerance_rule=cfg.rank_tolerance_rule,
+        lambda_scaling=cfg.lambda_scaling,
         condition_ceiling=cfg.condition_ceiling,
     )
     selected_k = futility.selected_k_total
@@ -1528,10 +1535,26 @@ def _run_phase2a_core(
         )
     oof_fold_manifest_checksum = oof_manifest.manifest_checksum
     selected_Z = np.asarray(inputs.factors_by_k[selected_k], dtype=float)
+    # The registered lambda is RELATIVE (``identification.lambda_scaling``). This
+    # final fit must apply exactly the interpretation selection used, or the
+    # selected hyperparameter would not be the one that was scored. Recomputed from
+    # the same ``(Z, cal_idx_pairs)`` selection saw, so the two agree by
+    # construction; ``test_lambda_scaling`` pins that they do.
+    headline_lambda_scale = calibration_lambda_scale(selected_Z, list(inputs.cal_idx_pairs))
     fitted: dict[str, object] = {}
     for name, factory in inputs.model_factories.items():
         model = factory()
-        model.fit(selected_Z, list(inputs.cal_idx_pairs), eps_cal, lam=float(selected_lambda))
+        # Scaled for the HEADLINE operator only, deliberately. Selection fits only
+        # this model, so only its penalty was ever chosen under the scaled
+        # interpretation. ``id_only`` is a registered BASELINE whose feature is
+        # linear in ``z`` (the operator's is bilinear), so the same scale would not
+        # make it scale-invariant anyway -- giving it one would silently change a
+        # baseline's fit for no established reason. Recorded as an open residual
+        # rather than half-fixed here.
+        lam_applied = float(selected_lambda)
+        if name == HEADLINE_MODEL_NAME:
+            lam_applied *= headline_lambda_scale
+        model.fit(selected_Z, list(inputs.cal_idx_pairs), eps_cal, lam=lam_applied)
         fitted[name] = model
     # Combined single-fit invocation (spec §2.5) BEFORE the adapter provenance
     # read: each subprocess worker fits ONCE and predicts the whole double∪single

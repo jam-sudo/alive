@@ -451,6 +451,34 @@ $s/(s^2+\lambda)$를 수치적으로 안전한 분기식으로 계산하는
 문자열은 config `identification.unregularized_solver`, `identification.regularized_solver`,
 `identification.unregularized_oof_rank_policy`, `identification.rank_tolerance_rule`에 동결한다.
 
+**등록된 `lambda_grid`는 절대값이 아니라 상대값이다 (2026-08-13, owner 승인).** ridge는 scale-invariant가
+아니고 $\Phi$는 $z$에 대해 bilinear이므로 $z\to cz$이면 절대 penalty는 $\lambda/c^{4}$로 작동하는데,
+upstream 어디에서도 $\lVert z\rVert$를 bound하지 않는다. 같은 절대 $\lambda$는 **같은 bank의 서로 다른
+`k_total`에서도** 다른 상대 penalty가 된다(측정: 등록 grid `[4,6,8]`에서 cond가 `2.90 → 6.38 → 19.00`으로
+상승하므로 dimension 선택이 regularization 강도와 교락된다). 따라서 실제 적용 penalty는
+$\lambda\cdot\sigma_{\max}(\Phi_{\text{cal}})^{2}$이며 정확한 문자열은 config
+`identification.lambda_scaling`에 동결한다.
+
+$\sigma_{\max}$는 새 통계량이 아니다 — 이미 등록된 rank tolerance
+`max_shape_times_float64_eps_times_sigma_max`가 쓰는 바로 그 값이며 `rank_diagnostics`가 같은 설계에서
+이미 계산한다. scale은 **calibration 설계에서 한 번** 계산해 모든 OOF fold와 selection 이후의 최종 fit에
+동일하게 쓴다. fold마다 계산하면 각 fold가 자기 spectrum 기준으로 정규화되어 fold 간 $\theta$가
+비교 불가능해진다. `lambda = 0.0`은 정확히 `0.0`으로 남으므로 등록된 unregularized rank policy와 조건수
+ceiling은 영향을 받지 않으며, $\mathrm{cond}$와 rank도 불변이므로 등록된 ceiling의 의미도 그대로다.
+
+factor bank를 $\sqrt{\sigma_{\max}}$로 rescale하는 것과 1 ulp 이내로 **동치**임을 측정했으나, penalty
+쪽에 적용한다. bank를 정규화하면 bank artifact가 split에 의존하게 되어 encoder lineage와 split lineage가
+섞이고, runtime factor row를 checksum된 bank artifact에 byte 단위로 결속하는 provenance guard를
+다시 배선해야 하기 때문이다.
+
+> **적용 범위 (비주장).** selection은 headline operator만 적합하므로 이 상대 해석 아래 penalty가 선택된
+> 모델도 그것뿐이다. 최종 fit에서 `id_only` baseline은 **절대 $\lambda$를 유지한다**: 그 feature는 $z$에
+> 대해 linear(operator는 bilinear)여서 같은 scale로는 scale-invariant해지지 않으며, 근거 없이 baseline의
+> 적합을 바꾸지 않는다. 이는 열린 잔여 항목으로 기록한다. 또한 이 규칙은 grid **값**이 실제 설계에
+> 적절한지는 정하지 않는다 — 정규화 후 최약 방향의 filter factor는 정확히 $1/(1+\lambda\,\mathrm{cond}^{2})$
+> 이므로 등록 grid는 cond가 대략 10–30일 때만 완만한 사다리를 이루고 cond ≳ 100에서는 전부 dominant가
+> 된다. 등록된 ceiling은 cond를 $10^{8}$까지 허용한다. 이 판정은 이미 기록되는 cond만으로 계산 가능하다.
+
 **Registered conditioning ceiling.** 등록된 admissibility 기준으로 $\Phi$의 조건수 상한을 둔다.
 통계량은 각 후보 `k_total`의 full-calibration $\Phi$에 대한 `rank_diagnostics(Φ).condition_number`이고,
 상한은 config `identification.condition_ceiling`에 동결한다. 값의 근거는 data-free numeric anchor

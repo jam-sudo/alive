@@ -248,10 +248,53 @@ Rides along with the **mandatory** config finalization (`⚑ config 확정(null 
 
 | | | |
 |---|---|---|
-| **Approve A** | normalize to `sigma_max(Phi) = 1`, pin the scalar in evidence | ______________________ |
-| **Approve B** | same, but `‖Phi‖_F = 1` (SVD-free) | ______________________ |
-| **Reject → A′** | leave the bank alone; register an admissibility band on `lambda/sigma_min²` instead | ______________________ |
-| **Reject → C** | accept the gap; caveat any futility verdict as possibly scale-driven | ______________________ |
+| **Approve A** | normalize to `sigma_max(Phi) = 1`, pin the scalar in evidence | **APPROVED 2026-08-13 — implemented in the equivalent penalty-side form below** |
+| **Approve B** | same, but `‖Phi‖_F = 1` (SVD-free) | not taken |
+| **Reject → A′** | leave the bank alone; register an admissibility band on `lambda/sigma_min²` instead | not taken |
+| **Reject → C** | accept the gap; caveat any futility verdict as possibly scale-driven | not taken |
+
+### 8.1 What was implemented, and why the form differs from §2
+
+Implementation showed that §2's form — normalizing the factor bank — would require
+passing the calibration pair roster into `build_gene_factors`, making the **bank artifact depend on
+the split** and conflating encoder lineage with split lineage; it would also require re-plumbing the
+byte-for-byte binding in `_verify_factor_banks`. The owner was shown the fork and chose the
+equivalent penalty-side form. Registered as:
+
+```yaml
+identification:
+  lambda_scaling: calibration_sigma_max_squared
+```
+
+The applied penalty is `lambda * sigma_max(Phi_cal)²`. **Measured equivalent to §2's bank
+normalization to within one ulp** (`|diff|` = 0, 0, 2.22e-16 at the three positive registered
+lambdas), so the scientific decision is the one that was approved; only the site changed. `sigma_max`
+is not a new registered quantity — it is the value `max_shape_times_float64_eps_times_sigma_max`
+already uses, computed on the same design by `rank_diagnostics`.
+
+Applied at **both** solve sites — OOF selection and the final fit — because if only one scaled, the
+recorded `selected_lambda` would not be the penalty that was scored.
+
+**`config_sha256` moved `b158417a…` → `3faacafff963b221148a08cb18fb92f084d796fb80c5db2b3b3b25ea295cb3b9`,
+the new run identity this decision was approved to create.**
+
+Verified: full compose suite **2058 passed, 2 skipped**; **13/13 mutations killed, each by a NAMED
+failing test** (`scripts/compose_lambda_scaling_mutation_harness.py`); ruff check and format clean.
+
+**Residuals, carried forward rather than closed:**
+
+1. **`id_only` keeps an absolute lambda.** Its feature is linear in `z` while the operator's is
+   bilinear, so this scale would not make it invariant, and changing a registered baseline's fit
+   needs its own justification. (§5.1 R4's claim that this distorts the PRIMARY metric was **wrong**
+   and is withdrawn: the OOF `theta` comparator is the parameter-free `additive` baseline, so
+   selection's comparison is untouched. `id_only` is a member of the SEALED comparator family, which
+   is where the residual lives.)
+2. **Grid adequacy is still open** (§5.1 R2). By the closed form `f = 1/(1 + lambda·cond²)` the
+   registered grid is a graded ladder only for `cond ≈ 10–30` while the ceiling admits `1e8`.
+   Now answerable from the `cond` already in phi-rank evidence.
+3. **Task #14 regains a mechanical trigger.** Activation evidence binds on `config_sha256`, which
+   just moved, so the committed config-bound reports are stale again and must be regenerated on the
+   pod at the new digest.
 
 Approval authorizes an implementation wave only. It does not flip readiness to READY, approve a Git
 SHA, or open the seal.

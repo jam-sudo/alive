@@ -7,7 +7,7 @@ paths:
   - "scripts/baselines/cpa_worker.py"
   - "scripts/baselines/stub_worker.py"
   - "scripts/run_compose_k562_phase2.py"
-  - "scripts/compose_conditioning_mutation_harness.py"
+  - "scripts/compose_*_mutation_harness.py"
   - "configs/compose*.yaml"
   - "docs/**/*compose*.md"
   - "docs/**/COMPOSE-*.md"

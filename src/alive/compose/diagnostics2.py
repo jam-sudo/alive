@@ -182,6 +182,7 @@ def real_calibration_diagnostics(
     measurability_role: str,
     unregularized_oof_rank_policy: str,
     rank_tolerance_rule: str,
+    lambda_scaling: str,
     condition_ceiling: float,
 ) -> FutilityResult:
     r"""Run the Phase-2a development checkpoint on development-role inputs only.
@@ -262,6 +263,7 @@ def real_calibration_diagnostics(
         condition_ceiling=condition_ceiling,
         unregularized_oof_rank_policy=unregularized_oof_rank_policy,
         rank_tolerance_rule=rank_tolerance_rule,
+        lambda_scaling=lambda_scaling,
     )
     selected_k_total = selection.selected_k_total
     selected_lambda = selection.selected_lambda

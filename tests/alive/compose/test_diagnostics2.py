@@ -128,6 +128,7 @@ def _run(inst, **overrides):
         "measurability_role": CALIBRATION_ROLE_NAME,
         "unregularized_oof_rank_policy": "require_full_rank_each_train_fold",
         "rank_tolerance_rule": "max_shape_times_float64_eps_times_sigma_max",
+        "lambda_scaling": "calibration_sigma_max_squared",
         # Effectively unbounded, so the tests in THIS file keep testing what they
         # were written to test. The ceiling itself is exercised in
         # ``test_condition_ceiling.py`` against the registered 1.0e8. Finite, not

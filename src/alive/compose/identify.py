@@ -60,6 +60,102 @@ class RankReport:
     condition_number: float
 
 
+#: Exact registered value of ``identification.lambda_scaling``. The registered
+#: ``lambda_grid`` is interpreted RELATIVE to this scale rather than as an
+#: absolute penalty.
+LAMBDA_SCALING_RULE = "calibration_sigma_max_squared"
+
+
+def calibration_lambda_scale(Z: np.ndarray, pairs: list[tuple[int, int]]) -> float:
+    """Scale that turns a registered ``lambda`` into the penalty actually applied.
+
+    Ridge is **not** scale-invariant, and ``Phi`` is bilinear in ``z``: ``z -> cz``
+    gives ``Phi -> c²Phi``, so a penalty applied to the raw ``Phi`` has effective
+    strength ``lambda/c⁴``. Nothing bounds ``‖z‖`` upstream, so an absolute
+    ``lambda_grid`` means something different on every factor bank — and, measured
+    across the registered dimension grid, something different at every ``k_total``
+    of the SAME bank. Multiplying by ``sigma_max(Phi_cal)²`` cancels the ``c⁴`` and
+    makes the registered grid mean one fixed thing.
+
+    ``sigma_max`` is deliberately not a new quantity: it is already computed here
+    (it is ``svals[0]``, the same value the registered
+    ``max_shape_times_float64_eps_times_sigma_max`` rank tolerance is built from).
+
+    The scale is computed on the CALIBRATION design and is then used unchanged for
+    every OOF fold and for the final fit, so folds stay comparable to each other and
+    to the fit that follows selection. Computing it per fold would regularize each
+    fold relative to its own spectrum and make their thetas incommensurable.
+
+    Equivalent to rescaling the factor bank by ``sqrt(sigma_max)`` (verified to
+    within one ulp), but applied here so the bank stays a pure function of the
+    encoders and ``k_total`` instead of acquiring a dependency on the split.
+
+    Parameters
+    ----------
+    Z : numpy.ndarray
+        Factor bank for one ``k_total``, shape ``(n_genes, k_total)``.
+    pairs : list of (int, int)
+        The registered calibration pair roster.
+
+    Returns
+    -------
+    float
+        ``sigma_max(Phi)²``, strictly positive and finite.
+
+    Raises
+    ------
+    SingularDesignError
+        If the design is empty or its largest singular value is not finite. A
+        NON-finite spectrum is a broken design and must not be turned into a
+        penalty; it is refused rather than coerced.
+
+    Notes
+    -----
+    ``sigma_max == 0`` is returned as ``1.0`` rather than refused, and that is not
+    a fail-open. ``sigma_max`` is zero **iff** ``Phi`` is identically zero, and on
+    an identically-zero design the ridge objective is ``‖y‖² + lambda‖beta‖²``,
+    minimised at ``beta = 0`` for every ``lambda`` — including ``lambda = 0``,
+    where the minimum-norm solve also returns ``0``. No choice of scale can change
+    any prediction, so refusing would abort a selection the registered policy
+    already handles: a zero bank scores ``theta`` legitimately (it predicts
+    nothing) while its ``lam = 0`` candidate is separately non-viable under the
+    rank policy. Returning ``1.0`` keeps that behaviour exactly.
+
+    A near-zero but non-zero design is deliberately NOT special-cased: it gets a
+    correspondingly tiny scale, which is the intended behaviour rather than a
+    degenerate one — a small design needs a small absolute penalty to be
+    regularized by the same relative amount.
+    """
+    Z = np.asarray(Z, dtype=np.float64)
+    # Checked BEFORE ``design_matrix``: it vstacks per-pair rows, so an empty roster
+    # raises a bare ``ValueError`` from numpy rather than anything typed.
+    if len(list(pairs)) == 0:
+        raise SingularDesignError("calibration design is empty; lambda scale is undefined")
+    phi = design_matrix(Z, pairs)
+    if phi.size == 0:
+        raise SingularDesignError("calibration design is empty; lambda scale is undefined")
+    try:
+        svals = np.linalg.svd(phi, compute_uv=False)
+    except np.linalg.LinAlgError as exc:
+        # ``LinAlgError`` is a bare ``ValueError`` subclass, NOT a
+        # ``SingularDesignError``, so letting it escape would leave the registered
+        # pre-seal rejection roster and surface as an uncontracted driver bug
+        # (exit 1). This project has already been bitten by exactly that, one
+        # function away, in ``models.py``. A non-finite bank reaches here.
+        raise SingularDesignError(
+            f"calibration design SVD failed; lambda scale is undefined: {exc}"
+        ) from exc
+    sigma_max = float(svals[0]) if svals.size else 0.0
+    if not np.isfinite(sigma_max):
+        raise SingularDesignError(
+            f"calibration design has a non-finite sigma_max ({sigma_max!r}); "
+            "lambda scale is undefined"
+        )
+    if sigma_max == 0.0:
+        return 1.0
+    return sigma_max * sigma_max
+
+
 def rank_diagnostics(Z: np.ndarray, pairs: list[tuple[int, int]]) -> RankReport:
     """Rank and condition number of the calibration design matrix Phi."""
     Z = np.asarray(Z, dtype=np.float64)
