@@ -21,6 +21,20 @@ The five rules this project earned, each because the previous set was not enough
    every message in ``phi_rank`` invisible to the operator while leaving all of
    this file's validator-level tests green.
 
+And a SIXTH, added here, which closes the harness limitation the 2026-08-12 audit
+recorded and 2026-08-11 left open ("a kill is not checked for RELEVANCE, so a
+mutation that breaks an unrelated test is still recorded as killed"):
+
+6. Every mutation names the test whose OWN NAME describes it
+   (``EXPECTED_KILLER``), and a kill by some other test alone is reported
+   ``IRRELEVANT``, not ``killed``. This is rule 1 made mechanical: rule 1 says to
+   run the mutation each test's name describes, and the only way to know that
+   happened is to check the pairing in both directions. It also forces the
+   coverage gap into the open -- writing this table is what revealed that three
+   tests in the suite (the exception TYPE, the committed-evidence anchor, and the
+   ``genes_before_condition`` ordering case) had no mutation at all, which is
+   M18-M20 below.
+
 The contract under test has two halves and both are mutated:
 
 * each of the eleven factor-block clauses refuses, with its OWN message naming the
@@ -65,6 +79,18 @@ _N_GENES_CHECK = (
     '    if _nonnegative_int(block["n_genes"], "phi-rank factor n_genes") != n_z_universe_genes:'
 )
 _N_GENES_MUTANT = '    if _nonnegative_int(block["n_genes"], "phi-rank factor n_genes") < 0:'
+_N_GENES_BLOCK = (
+    _N_GENES_CHECK + "\n"
+    "        raise ValueError(\n"
+    "            f\"{at}: factor bank covers {block['n_genes']!r} genes, but the envelope \"\n"
+    '            f"declares n_z_universe_genes={n_z_universe_genes}"\n'
+    "        )\n"
+)
+_CONDITION_BOOL_BLOCK = (
+    '    condition = block["condition_number"]\n'
+    "    if isinstance(condition, bool):\n"
+    '        raise ValueError(f"{at}: condition_number is a boolean, not a number")\n'
+)
 
 MUTATIONS = [
     (
@@ -169,7 +195,50 @@ MUTATIONS = [
         "    if over_ceiling and len(over_ceiling) == len(expected_grid):",
         "    if over_ceiling:",
     ),
+    (
+        "M18 a rejection is raised as TypeError (escapes config2's except ValueError)",
+        PHI_RANK,
+        '        raise ValueError(f"{at}: condition_number is a boolean, not a number")',
+        '        raise TypeError(f"{at}: condition_number is a boolean, not a number")',
+    ),
+    (
+        "M19 FAIL-OPEN INVERTED: the rank clause refuses a HEALTHY design",
+        PHI_RANK,
+        '    if block["rank"] != sym_dim:',
+        '    if block["rank"] == sym_dim:',
+    ),
+    (
+        "M20 the gene-count clause moves BEHIND the condition-number clauses",
+        PHI_RANK,
+        _N_GENES_BLOCK + _CONDITION_BOOL_BLOCK,
+        _CONDITION_BOOL_BLOCK + _N_GENES_BLOCK,
+    ),
 ]
+
+#: Rule 6. The test whose OWN NAME describes each mutation; a kill by anything
+#: else alone is ``IRRELEVANT``. Matched as a substring of a pytest node ID.
+EXPECTED_KILLER = {
+    "M1": "test_each_cause_raises_its_own_message[k_total]",
+    "M2": "test_each_cause_raises_its_own_message[sym_dim]",
+    "M3": "test_one_rank_deficient_dimension_still_refuses_the_whole_report",
+    "M4": "test_one_rank_deficient_dimension_still_refuses_the_whole_report",
+    "M5": "test_each_cause_raises_its_own_message[is_full_rank_truthy_1]",
+    "M6": "test_each_cause_raises_its_own_message[pairs_scored]",
+    "M7": "test_each_cause_raises_its_own_message[pairs_skipped]",
+    "M8": "test_each_cause_raises_its_own_message[n_genes]",
+    "M9": "test_each_cause_raises_its_own_message[condition_bool]",
+    "M10": "test_each_cause_raises_its_own_message[condition_str]",
+    "M11": "test_each_cause_raises_its_own_message[condition_inf]",
+    "M12": "test_each_cause_raises_its_own_message[condition_zero]",
+    "M13": "test_the_rank_message_says_what_the_operator_must_do",
+    "M14": "test_every_message_names_the_offending_dimension",
+    "M15": "test_the_short_circuit_order_is_unchanged[sym_dim_before_rank]",
+    "M16": "test_scientific_mode_names_a_rank_deficiency_as_such",
+    "M17": "test_one_over_ceiling_dimension_is_still_accepted",
+    "M18": "test_the_refusal_type_is_still_exactly_ValueError[condition_bool]",
+    "M19": "test_the_committed_evidence_still_validates",
+    "M20": "test_the_short_circuit_order_is_unchanged[genes_before_condition]",
+}
 
 
 def _key(path: Path) -> str:
@@ -222,8 +291,11 @@ def main() -> int:
 
     survived: list[str] = []
     invalid: list[str] = []
+    irrelevant: list[str] = []
     try:
         for name, path, old, new in MUTATIONS:
+            mid = name.split()[0]
+            expected = EXPECTED_KILLER[mid]
             original = (SCRATCH / _key(path)).read_text(encoding="utf-8")
             n = original.count(old)
             if n != 1:
@@ -233,8 +305,16 @@ def main() -> int:
             path.write_text(original.replace(old, new), encoding="utf-8")
             killers, line = run_suite()
             path.write_text(original, encoding="utf-8")
-            if killers:
-                print(f"killed    {name}\n            by: {', '.join(sorted(killers)[:3])}")
+            named = sorted(k for k in killers if expected in k)
+            if named:
+                others = len(killers) - len(named)
+                print(f"killed    {name}\n            by: {named[0]} (+{others} more)")
+            elif killers:
+                # Rule 6: something failed, but not the test whose name makes the
+                # claim. That is a coverage gap wearing a kill's clothing.
+                print(f"IRRELEVANT{name}\n            expected: {expected}")
+                print(f"            got:      {', '.join(sorted(killers)[:3])}")
+                irrelevant.append(name)
             elif line.startswith("(no output)") or "error" in line.lower():
                 print(f"INVALID   {name}: nonzero exit with NO failing test -- {line}")
                 invalid.append(name)
@@ -248,12 +328,14 @@ def main() -> int:
     print(f"\n{len(MUTATIONS)} mutations attempted")
     if invalid:
         print(f"INVALID ({len(invalid)}): " + "; ".join(invalid))
+    if irrelevant:
+        print(f"IRRELEVANT ({len(irrelevant)}): " + "; ".join(irrelevant))
     if survived:
         print(f"SURVIVED ({len(survived)}): " + "; ".join(survived))
+    if survived or invalid or irrelevant:
         return 1
-    if not invalid:
-        print("all mutations killed, each by a named failing test")
-    return 1 if invalid else 0
+    print("all mutations killed, each by the NAMED test that makes its claim")
+    return 0
 
 
 if __name__ == "__main__":
