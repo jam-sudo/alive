@@ -5,7 +5,7 @@
 > **이 문서는 아무것도 정의하지 않는다** — 세부(task)는 plan, claim은 spec, exact param은 config,
 > 시간순 audit는 git이 authoritative다([sources of truth](../../CLAUDE.md#sources)). 상태 행이 authoritative
 > 문서와 어긋나면 **authoritative 문서가 옳다**; 이 인덱스를 갱신한다.
-> **Updated:** 2026-08-13 @ `4b5d438` (branch `compose-lambda-scaling`)
+> **Updated:** 2026-08-16 @ `eaf69d9` (branch `main`)
 > `scripts/bump-readiness-stamp.sh` / the pre-commit hook from `HEAD` at commit time, so it names the
 > **parent** of the commit that carries it and can never name itself. Reading it as "one commit stale" is a
 > misreading; git is authoritative for when this file actually changed.
@@ -1438,6 +1438,25 @@ adjudicates all nine, including one that did **not** reproduce). Two are about t
   pairs than `sym_dim(k=8) = 36` that block can never be full rank and the report becomes uncertifiable even
   though `k=4`/`k=6` are admissible. The real pair count is **pod-gated and unmeasured locally**. **Not changed
   here:** making rank use ANY would relax a registered gate, which is an owner decision, not a drafter's.
+
+  > **[2026-08-16 correction — the pair count was neither pod-gated nor unmeasured.]** The clause
+  > "pod-gated and unmeasured locally" above is wrong, and correcting it changes how the item should be graded. `n_combo_calibration` is committed
+  > at `docs/activation-evidence/compose/real_norman_phi_rank_report.json` (real Norman, A100, `git_sha
+  > 82a9c83`): it is **41**, and the same report records `rank = sym_dim` at **every** registered `k`
+  > (`10/21/36`) with condition numbers `15.8 / 32.9 / 484.2`, five to seven orders below the registered
+  > ceiling `1.0e+8`. **So the ALL rule is dormant on the real design** — it and an ANY rule accept this
+  > report identically — and the audit's reachability scenario (fewer than 36 calibration pairs) does not
+  > arise. The count is also not a draw: `build_pair_split` is a `PCG64(split_seed=11)` permutation over the
+  > UTF-8-sorted gene set at `calibration_fraction: 0.6`, so it moves only if the eligible-pair universe or
+  > those fields move — each already a new run identity. **Second, on the measured design the mismatch runs
+  > the OPPOSITE way from the grading above.** Activation checks rank on the full 41-pair calibration design
+  > at every `k` and no `lambda`; runtime checks `require_full_rank_each_train_fold` on 3 gene-disjoint TRAIN
+  > folds and only at `lam == 0.0` — different matrices. By the 2026-07-30 counting bound re-derived here
+  > (`sum_f train_f = n_pairs + S <= 82 < 108 = 3·sym_dim(k=8)`), at least one fold has `<= 27` train pairs and
+  > is rank-deficient by construction, so `k=8`/`lam=0.0` is expected **non-viable at runtime while activation
+  > certifies it**. A costed proposal covering both points is unsigned at
+  > `2026-08-16-compose-activation-rank-rule-decision.md`; it recommends keeping ALL and is **task #48**.
+  > This correction is to a claim about what is known — no registered value, outcome or hash is refreshed.
 - **Mutation-harness limitation, recorded not fixed.** The `returncode`-as-kill defect was fixed on 2026-08-11
   (a kill now requires named failing tests; a nonzero exit with none reports `INVALID`). The residual: a kill is
   not checked for **relevance**, so a mutation that breaks an unrelated test is still recorded as killed. Both
