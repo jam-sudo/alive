@@ -1,5 +1,10 @@
 # COMPOSE-K562-v1 — decision #5: activation's all-`k` rank contract vs the runtime rank check
 
+> **STATUS: APPROVED 2026-08-16 and IMPLEMENTED — see §8.1.** The text below is preserved as
+> proposed; the sign-off table in §8 and the as-implemented record in §8.1 are the current state.
+> **Line references in §1–§7 are to the pre-implementation code**; the clauses they point at now
+> live in `phi_rank._validate_factor_block`. The banner as originally written follows.
+>
 > **STATUS: PROPOSED — owner approval required before any code change.** This document resolves
 > task #48 and the ⚠️ OPEN item recorded in `COMPOSE-SEAL-READINESS.md` under
 > **"2026-08-12 — independent read-only audit at `1d19729`"**. It **makes no code, config, test or
@@ -231,7 +236,51 @@ The **decisions** in §8 remain unsigned and nothing in the code, config or evid
 
 | # | decision | proposed | owner | date |
 |---|---|---|---|---|
-| 5 | activation's rank rule stays **ALL** (not ANY), for the reasons in §4 | ✅ D | ☐ PROPOSED | — |
-| 5a | name the eleven rejection causes at `phi_rank.py:248-264` | ✅ | ☐ PROPOSED | — |
-| 5b | record the §3.4 activation↔runtime object mismatch in the readiness index | ✅ | ☐ PROPOSED | — |
+| 5 | activation's rank rule stays **ALL** (not ANY), for the reasons in §4 | ✅ D | ✅ **APPROVED** | 2026-08-16 |
+| 5a | name the eleven rejection causes at `phi_rank.py:248-264` | ✅ | ✅ **APPROVED** | 2026-08-16 |
+| 5b | record the §3.4 activation↔runtime object mismatch in the readiness index | ✅ | ✅ **APPROVED** | 2026-08-16 |
 | 5c | correct the two "pair count unmeasured" statements (§6) | ✅ | **APPLIED — not an owner decision** | 2026-08-16 |
+
+## 8.1 As implemented (2026-08-16)
+
+**The rank rule is unchanged.** `phi_rank.py` still refuses the whole report when any
+registered `k` is rank-deficient. The decision is now carried by a code comment at the
+quantifier boundary and pinned by
+`test_one_rank_deficient_dimension_still_refuses_the_whole_report`, which sits directly
+beside `test_one_over_ceiling_dimension_is_still_accepted` — read together the pair *is*
+the asymmetry, and neither half can be flipped without a named test failing.
+
+**The eleven causes are named.** The clauses moved into `_validate_factor_block`, one
+message each. The accepted set did not move: same conditions, same short-circuit order,
+same `ValueError` type — asserted by three separate tests rather than assumed, because
+splitting a fail-closed gate's message must not shift its boundary. `config2` was
+already catching that `ValueError` to raise a contracted `ScientificModeError`, and an
+existing test there had been matching the old shared string, so it was really asserting
+"something about that block was wrong"; it now names its own clause, and a sibling covers
+the rank cause end to end.
+
+**Verification.** New suite `tests/alive/compose/test_phi_rank_block_causes.py` (66
+tests); mutation harness `scripts/compose_phi_rank_cause_mutation_harness.py`,
+**20/20 killed, each by the NAMED test that makes its claim**.
+
+**🔑 The harness gained a sixth rule, and it earned its keep immediately.** The 2026-08-12
+audit recorded a limitation left open on 2026-08-11: *a kill is not checked for
+relevance*, so a mutation that breaks an unrelated test still counts. This harness closes
+it — every mutation names the test whose own name makes its claim, and a kill by anything
+else alone reports `IRRELEVANT`. Writing that table found exactly the gap it was designed
+to find: **three tests had no mutation at all** — the exception-type assertion, the
+committed-evidence anchor, and the `genes_before_condition` ordering case — so nothing had
+ever confirmed they could fail. They became M18–M20. Two mutations (M15, M20) are killed
+by their ordering test and *nothing else*, which is the evidence that those tests are
+load-bearing rather than decorative.
+
+**One deliberate divergence from the sibling harnesses:** the clean-worktree check is
+narrowed to TRACKED files. The hazard the check exists for is losing an uncommitted `src/`
+edit if the harness crashes mid-mutation; untracked scratch output elsewhere cannot be
+lost that way, and refusing on it makes the harness unrunnable in any tree that has some.
+
+**Not changed, and still open:** the §3.4 object mismatch is now recorded in the readiness
+index but is *not* closed — whether `k=6` is fold-rank-viable on the real split remains
+pod-observable, and `k=8`'s `lam=0.0` candidate is still expected non-viable at runtime
+while activation certifies it. The `config_sha256` did not move; **task #14 is unaffected
+by this wave** and still owes the regeneration the 2026-08-13 digest move triggered.
