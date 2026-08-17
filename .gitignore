@@ -41,3 +41,11 @@ claude_science/
 
 # --- graphify knowledge-graph build output (regenerable; never commit) ---
 graphify-out/
+
+# --- 민감 로그 (F-10): 인증/계정 metadata 가 실수로 commit 되는 것을 막는다 ---
+error.log
+*.error.log
+
+# --- 로컬 생성물 (F-11): 추적 artifact 계약에 없는 산출물 ---
+/output/
+/tmp/
