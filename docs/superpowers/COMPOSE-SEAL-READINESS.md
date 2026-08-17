@@ -5,7 +5,7 @@
 > **이 문서는 아무것도 정의하지 않는다** — 세부(task)는 plan, claim은 spec, exact param은 config,
 > 시간순 audit는 git이 authoritative다([sources of truth](../../CLAUDE.md#sources)). 상태 행이 authoritative
 > 문서와 어긋나면 **authoritative 문서가 옳다**; 이 인덱스를 갱신한다.
-> **Updated:** 2026-08-16 @ `b325240` (branch `compose-activation-rank-rule`)
+> **Updated:** 2026-08-17 @ `1703b8b` (branch `compose-audit-exactness-fixes`)
 > `scripts/bump-readiness-stamp.sh` / the pre-commit hook from `HEAD` at commit time, so it names the
 > **parent** of the commit that carries it and can never name itself. Reading it as "one commit stale" is a
 > misreading; git is authoritative for when this file actually changed.
@@ -1558,6 +1558,60 @@ changed, and **task #14 is untouched by this wave** — it still owes the regene
 digest move triggered. Verified: full compose **2125 passed, 2 skipped** — exactly the 2058 of
 2026-08-13 plus the 66 new cause tests and the one new `config2` test, so nothing was displaced;
 ruff check and format clean. Seal remains **UNOPENED**; execution remains **RELEASE-BLOCKED**.
+
+**2026-08-17 — external audit at `4cd2321`: four findings adjudicated by RUNNING them, and closed.**
+An independent read-only audit (`docs/GPT audit/comprehensiveaudit.md`) raised 16 active findings.
+Four are closed here; **three of the four were defects in this project's own three most recent waves**,
+which is the part worth recording.
+
+- **F-10 — the phi-rank artifact did not enforce exact integers, and one message was FALSE.** All three
+  of the audit's claims reproduced against the validator: every count/dimension field accepted an
+  integer-VALUED float (a report with `k_total: 4.0` certified READY), `n_calibration_pairs_skipped:
+  False` passed as `0` because `bool` is an `int` subclass, and `rank > sym_dim` was refused with the
+  message *"rank 37 is BELOW the identifiable subspace dimension sym_dim=36"*. **The third is a
+  regression introduced by the 2026-08-16 cause-split itself.** The message it replaced — "invalid or
+  non-full-rank factor block" — was vague but TRUE for every cause; naming the causes made each one
+  specific and made exactly one specifically WRONG. **Precision is only an improvement when it is also
+  correct.** Fixed: every count and dimension now goes through `_nonnegative_int` (which already
+  rejected `bool` and non-`int` and was simply not being used here), and an over-rank block is its own
+  cause — `rank <= min(n_pairs, sym_dim)` holds by construction, so it is an internally inconsistent
+  report, not a design that failed to span its subspace. **This narrows the accepted set**, deliberately
+  and fail-closed: it is the one place the cause-split wave's "the boundary must not move" rule is
+  knowingly set aside, because the boundary was wrong. The committed real-Norman evidence still
+  validates unchanged.
+- **F-11 — the interpreter binding did not pin the patch level, and its docstring said it did.**
+  Measured: pinned at `3.12.14`, a bare `startswith` also accepted `3.12.149` and `3.12.140evil`. The
+  `rc1`/`+local` tolerance is intended and correct; the defect was precisely a **digit** after the
+  prefix. Closed by merging the pre-existing `fix/interpreter-patch-level-binding` (`1331e6c`), which
+  requires a non-numeric suffix. That commit changed the predicate but left the falsified sentence in
+  the docstring; **the docstring is corrected here and says why it is now true — the code changed, not
+  the wording.**
+- **F-13 / F-14 — sensitive and scratch output were untracked AND unignored.** `error.log` (427 bytes,
+  carrying auth/account metadata), `output/` (208 KiB) and `tmp/` (6.6 MiB) were not matched by any
+  `.gitignore` rule. Closed by merging `fix/gitignore-sensitive-and-scratch` (`362acbd`).
+  **⚠️ Half-closed by design: `error.log` still exists on disk.** Ignoring it removes the
+  accidental-commit path only; deleting it is the owner's action, not a drafter's.
+- **F-16 — the latest readiness changes were not reproducible on `origin/main`.** Closed by merging
+  `compose-activation-rank-rule` into `main` (`058e9dc`, tree-identical to the CI-green tip).
+
+Verification: full compose **2173 passed, 2 skipped** — exactly the 2125 of 2026-08-16 plus 41 new
+cause/exactness tests and the 7 interpreter-binding cases; mutation harness **27/27 killed, each by
+the NAMED test that makes its claim** (M21–M27 added, one per dropped type check plus the over-rank
+branch). Several older anchors moved with the refactor and the harness reported them as `ANCHOR`
+rather than passing silently — the behaviour rule 6 exists for. Ruff check and format clean.
+`config_sha256` is **unchanged** at `3faacaff…`; **task #14 is untouched and still owed.**
+
+**⚠️ OPEN from the same audit, NOT closed here — two HIGH findings that require an owner amendment:**
+**F-04** the registered `l3_hypernetwork` and its implementation are different models (spec §3.3 defines
+L3 as a hypernetwork learning `z` and the operator end-to-end; `models.py` is a two-hidden-layer `tanh`
+MLP on a **fixed** `Z`), and **F-05** the ablation ladder's `lambda` means different things per arm
+(`phase2a.py` scales only the headline, so an L1↔L2/L3 comparison confounds architecture with penalty
+strength — measured `159x / 557x / 2004x` on synthetic fixtures, fixture-dependent as the audit says).
+**F-05 also shows the 2026-08-13 residual record was too narrow:** it named `id_only` and omitted the
+ablation ladder, which is the more consequential case because the ladder is exactly what attributes
+effects to architecture. Both are carried to a costed decision document. **Not adjudicated here:**
+F-01, F-02, F-03, F-06, F-07, F-08, F-09, F-12, F-15. Seal remains **UNOPENED**; execution remains
+**RELEASE-BLOCKED**.
 
 ## 이 문서가 *아닌* 것 (중복 금지)
 
