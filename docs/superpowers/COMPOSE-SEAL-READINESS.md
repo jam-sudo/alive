@@ -5,7 +5,7 @@
 > **이 문서는 아무것도 정의하지 않는다** — 세부(task)는 plan, claim은 spec, exact param은 config,
 > 시간순 audit는 git이 authoritative다([sources of truth](../../CLAUDE.md#sources)). 상태 행이 authoritative
 > 문서와 어긋나면 **authoritative 문서가 옳다**; 이 인덱스를 갱신한다.
-> **Updated:** 2026-08-16 @ `eaf69d9` (branch `main`)
+> **Updated:** 2026-08-16 @ `b325240` (branch `compose-activation-rank-rule`)
 > `scripts/bump-readiness-stamp.sh` / the pre-commit hook from `HEAD` at commit time, so it names the
 > **parent** of the commit that carries it and can never name itself. Reading it as "one commit stale" is a
 > misreading; git is authoritative for when this file actually changed.
@@ -1428,7 +1428,10 @@ expires `2026-10-24`. Both windows predate the 400-day retention raise, which pr
 Six of its findings landed on `2026-08-12-compose-conditioning-ceiling-decisions.md` and are fixed there (§7.1
 adjudicates all nine, including one that did **not** reproduce). Two are about the tree and are recorded here:
 
-- **⚠️ OPEN (owner decision) — activation requires full rank at EVERY `k`, runtime does not.**
+- **✅ DECIDED 2026-08-16 — the rank rule STAYS `ALL`** (decision #5,
+  `2026-08-16-compose-activation-rank-rule-decision.md`; implemented, 20/20 mutations killed). The
+  original entry is preserved below as written, followed by the correction that changed its grading.
+  ~~⚠️ OPEN (owner decision)~~ — **activation requires full rank at EVERY `k`, runtime does not.**
   `phi_rank.py:249-252` refuses the entire report unless every registered grid point is full rank, while the
   conditioning ceiling **in the same loop** deliberately uses an **ANY** rule — a single over-ceiling `k` is
   screened out of selection and the study proceeds. The code comment argues for ANY on the ceiling, and that
@@ -1505,6 +1508,56 @@ now answerable from the `cond` already in phi-rank evidence via `f = 1/(1 + lamb
 
 Verified: full compose **2058 passed, 2 skipped**; ruff check and format clean. Seal remains
 **UNOPENED**; execution remains **RELEASE-BLOCKED**.
+
+**2026-08-16 — task #48 DECIDED: activation's rank rule stays ALL, and the audit's premise was
+measurable all along.** The audit graded this item on "the real pair count is pod-gated and
+unmeasured locally". It is committed, from a real Norman A100 run: `n_combo_calibration = 41`, with
+`rank == sym_dim` at every registered `k` (`10/21/36`) and condition numbers `15.8 / 32.9 / 484.2`
+against the registered ceiling `1.0e+8`. **The ALL rule is therefore DORMANT on the real design** —
+it and an ANY rule accept that report identically — so relaxing a registered fail-closed gate would
+have bought nothing measurable. The count is not a draw either: it is a `PCG64(split_seed=11)`
+permutation over the UTF-8-sorted gene set at `calibration_fraction: 0.6`, so it moves only if the
+eligible-pair universe or those fields move, each already a new run identity.
+
+**⚠️ The mismatch that IS live runs the other way, and is recorded here because a pod operator must
+see it.** Activation checks rank on the full 41-pair calibration design, at every `k`, at no
+`lambda`. Runtime checks the registered `unregularized_oof_rank_policy:
+require_full_rank_each_train_fold` on each of the **3 gene-disjoint TRAIN folds**, and only at
+`lam == 0.0`. Different matrices — so matching the quantifier would not have aligned them. By the
+2026-07-30 counting bound, re-derived rather than cited (`sum_f train_f = n_pairs + S <= 82 <
+108 = 3·sym_dim(k=8)`), at least one fold has `<= floor(82/3) = 27` train pairs and is
+rank-deficient by construction at `k=8`. At `lam == 0.0` the guards run as a whole-candidate
+pre-pass, so one deficient fold is enough: **`k=8`/`lam=0.0` is expected non-viable at runtime while
+activation certifies `k=8` as full rank.** Not closed by this entry. `k=6` needs `S >= 22` and is
+neither excluded nor established; both are layout-dependent and pod-observable. If `k=8` does prove
+non-viable, dropping it from `total_k_grid` is a **config change with a new run identity** and is not
+pre-authorized.
+
+The price paid for keeping ALL was making its refusal legible. Eleven distinct clauses shared one
+message, so an operator stopped by this gate could not tell a RANK DEFICIENCY — the one cause whose
+remedy is a config change rather than "regenerate the report" — from a pair-count mismatch or a
+malformed condition number. They are now eleven messages in `_validate_factor_block`, with the
+accepted set **unchanged**: same conditions, same short-circuit order, same `ValueError` type, each
+asserted by its own test rather than assumed. An existing `config2` test had been matching the old
+shared string and so was really asserting "something about that block was wrong"; it now names its
+clause, and a sibling covers the rank cause end to end.
+
+**🔑 The harness gained a sixth rule and it paid for itself on the first run.** The
+`returncode`-as-kill defect was fixed on 2026-08-11, but the 2026-08-12 audit recorded a residual
+that was left open: **a kill was never checked for RELEVANCE**, so a mutation breaking an unrelated
+test still counted. `scripts/compose_phi_rank_cause_mutation_harness.py` closes it — every mutation
+names the test whose OWN NAME makes its claim, and a kill by anything else alone reports
+`IRRELEVANT`. Building that table found exactly the gap it was designed to find: **three tests had
+no mutation at all** (the exception-type assertion, the committed-evidence anchor, and the
+`genes_before_condition` ordering case), so nothing had ever confirmed they could fail. They became
+M18–M20. Final: **20/20 killed, each by the named test that makes its claim**; M15 and M20 are killed
+by their ordering test and nothing else.
+
+The `config_sha256` is **unchanged** at `3faacaff…`: no config field moved, no registered value
+changed, and **task #14 is untouched by this wave** — it still owes the regeneration the 2026-08-13
+digest move triggered. Verified: full compose **2125 passed, 2 skipped** — exactly the 2058 of
+2026-08-13 plus the 66 new cause tests and the one new `config2` test, so nothing was displaced;
+ruff check and format clean. Seal remains **UNOPENED**; execution remains **RELEASE-BLOCKED**.
 
 ## 이 문서가 *아닌* 것 (중복 금지)
 
