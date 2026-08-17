@@ -63,22 +63,33 @@ TESTS = [
 ]
 
 _RANK_MESSAGE = (
-    "            f\"{at}: RANK-DEFICIENT — rank {block['rank']!r} is below the identifiable \"\n"
+    '            f"{at}: RANK-DEFICIENT — rank {rank} is below the identifiable "\n'
     '            f"subspace dimension sym_dim={sym_dim}, so this registered grid point is "\n'
     '            "not identifiable on the calibration design"\n'
 )
 _SYM_DIM_CHECK = (
-    '    if block["sym_dim"] != sym_dim:\n'
+    '    if _nonnegative_int(block["sym_dim"], f"{at}: sym_dim") != sym_dim:\n'
     "        raise ValueError("
     "f\"{at}: reported sym_dim {block['sym_dim']!r} is not k(k+1)/2 = {sym_dim}\")\n"
 )
-_RANK_CHECK = (
-    '    if block["rank"] != sym_dim:\n        raise ValueError(\n' + _RANK_MESSAGE + "        )\n"
+_RANK_BLOCK = (
+    '    rank = _nonnegative_int(block["rank"], f"{at}: rank")\n'
+    "    if rank > sym_dim:\n"
+    "        # A SEPARATE cause, not a deficiency. `rank <= min(n_pairs, sym_dim)`\n"
+    "        # always holds, so an over-rank block is not a design that failed to span\n"
+    "        # its subspace -- it is an internally inconsistent report. Folding it into\n"
+    '        # the deficiency branch made the message say "rank 37 is below sym_dim=36".\n'
+    "        raise ValueError(\n"
+    '            f"{at}: rank {rank} EXCEEDS the identifiable subspace dimension "\n'
+    '            f"sym_dim={sym_dim}; rank <= min(n_pairs, sym_dim) holds by construction, "\n'
+    '            "so this report is internally inconsistent"\n'
+    "        )\n"
+    "    if rank != sym_dim:\n        raise ValueError(\n" + _RANK_MESSAGE + "        )\n"
 )
 _N_GENES_CHECK = (
-    '    if _nonnegative_int(block["n_genes"], "phi-rank factor n_genes") != n_z_universe_genes:'
+    '    if _nonnegative_int(block["n_genes"], f"{at}: n_genes") != n_z_universe_genes:'
 )
-_N_GENES_MUTANT = '    if _nonnegative_int(block["n_genes"], "phi-rank factor n_genes") < 0:'
+_N_GENES_MUTANT = '    if _nonnegative_int(block["n_genes"], f"{at}: n_genes") < 0:'
 _N_GENES_BLOCK = (
     _N_GENES_CHECK + "\n"
     "        raise ValueError(\n"
@@ -96,26 +107,26 @@ MUTATIONS = [
     (
         "M1  the k_total position clause never fires",
         PHI_RANK,
-        '    if block["k_total"] != expected_k:',
-        "    if False:",
+        '    if _nonnegative_int(block["k_total"], f"{at}: k_total") != expected_k:',
+        '    if _nonnegative_int(block["k_total"], f"{at}: k_total") < 0:',
     ),
     (
         "M2  the sym_dim clause never fires",
         PHI_RANK,
-        '    if block["sym_dim"] != sym_dim:',
-        "    if False:",
+        '    if _nonnegative_int(block["sym_dim"], f"{at}: sym_dim") != sym_dim:',
+        '    if _nonnegative_int(block["sym_dim"], f"{at}: sym_dim") < 0:',
     ),
     (
         "M3  DECISION #5 REMOVED: the rank clause never fires",
         PHI_RANK,
-        '    if block["rank"] != sym_dim:',
+        "    if rank != sym_dim:",
         "    if False:",
     ),
     (
         "M4  the rank clause is relaxed to accept a DEFICIENT rank",
         PHI_RANK,
-        '    if block["rank"] != sym_dim:',
-        '    if block["rank"] > sym_dim:',
+        "    if rank != sym_dim:",
+        "    if rank < 0:",
     ),
     (
         "M5  is_full_rank accepts a truthy 1 instead of the boolean True",
@@ -126,13 +137,13 @@ MUTATIONS = [
     (
         "M6  the scored-pair-count clause never fires",
         PHI_RANK,
-        '    if block["n_calibration_pairs_scored"] != expected_scored_pairs:',
+        "    if scored != expected_scored_pairs:",
         "    if False:",
     ),
     (
         "M7  the skipped-pair clause never fires",
         PHI_RANK,
-        '    if block["n_calibration_pairs_skipped"] != 0:',
+        "    if skipped != 0:",
         "    if False:",
     ),
     (
@@ -180,8 +191,8 @@ MUTATIONS = [
     (
         "M15 the sym_dim and rank clauses swap order",
         PHI_RANK,
-        _SYM_DIM_CHECK + _RANK_CHECK,
-        _RANK_CHECK + _SYM_DIM_CHECK,
+        _SYM_DIM_CHECK + _RANK_BLOCK,
+        _RANK_BLOCK + _SYM_DIM_CHECK,
     ),
     (
         "M16 config2 drops the cause when wrapping (operator sees only 'invalid')",
@@ -204,14 +215,60 @@ MUTATIONS = [
     (
         "M19 FAIL-OPEN INVERTED: the rank clause refuses a HEALTHY design",
         PHI_RANK,
-        '    if block["rank"] != sym_dim:',
-        '    if block["rank"] == sym_dim:',
+        "    if rank != sym_dim:",
+        "    if rank == sym_dim:",
     ),
     (
         "M20 the gene-count clause moves BEHIND the condition-number clauses",
         PHI_RANK,
         _N_GENES_BLOCK + _CONDITION_BOOL_BLOCK,
         _CONDITION_BOOL_BLOCK + _N_GENES_BLOCK,
+    ),
+    (
+        "M21 the k_total type check is dropped (integer-valued float accepted)",
+        PHI_RANK,
+        '_nonnegative_int(block["k_total"], f"{at}: k_total")',
+        'block["k_total"]',
+    ),
+    (
+        "M22 the sym_dim type check is dropped",
+        PHI_RANK,
+        '_nonnegative_int(block["sym_dim"], f"{at}: sym_dim")',
+        'block["sym_dim"]',
+    ),
+    (
+        "M23 the rank type check is dropped",
+        PHI_RANK,
+        '    rank = _nonnegative_int(block["rank"], f"{at}: rank")',
+        '    rank = block["rank"]',
+    ),
+    (
+        "M24 the scored-pair type check is dropped",
+        PHI_RANK,
+        "    scored = _nonnegative_int(\n"
+        '        block["n_calibration_pairs_scored"], f"{at}: n_calibration_pairs_scored"\n'
+        "    )",
+        '    scored = block["n_calibration_pairs_scored"]',
+    ),
+    (
+        "M25 the skipped-pair type check is dropped (False passes as 0)",
+        PHI_RANK,
+        "    skipped = _nonnegative_int(\n"
+        '        block["n_calibration_pairs_skipped"], f"{at}: n_calibration_pairs_skipped"\n'
+        "    )",
+        '    skipped = block["n_calibration_pairs_skipped"]',
+    ),
+    (
+        "M26 the n_genes type check is dropped",
+        PHI_RANK,
+        '_nonnegative_int(block["n_genes"], f"{at}: n_genes")',
+        'block["n_genes"]',
+    ),
+    (
+        "M27 the over-rank branch is folded back into the deficiency message",
+        PHI_RANK,
+        "    if rank > sym_dim:",
+        "    if False:",
     ),
 ]
 
@@ -238,6 +295,13 @@ EXPECTED_KILLER = {
     "M18": "test_the_refusal_type_is_still_exactly_ValueError[condition_bool]",
     "M19": "test_the_committed_evidence_still_validates",
     "M20": "test_the_short_circuit_order_is_unchanged[genes_before_condition]",
+    "M21": "test_no_count_or_dimension_accepts_a_non_int[float-k_total]",
+    "M22": "test_no_count_or_dimension_accepts_a_non_int[float-sym_dim]",
+    "M23": "test_no_count_or_dimension_accepts_a_non_int[float-rank]",
+    "M24": "test_no_count_or_dimension_accepts_a_non_int[float-n_calibration_pairs_scored]",
+    "M25": "test_no_count_or_dimension_accepts_a_non_int[bool-n_calibration_pairs_skipped]",
+    "M26": "test_no_count_or_dimension_accepts_a_non_int[float-n_genes]",
+    "M27": "test_an_over_rank_block_is_not_called_a_deficiency",
 }
 
 

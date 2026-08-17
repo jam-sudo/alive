@@ -127,9 +127,43 @@ _CAUSES = [
     ("condition_nan", {"condition_number": float("nan")}, r"condition_number nan is not finite"),
     ("condition_zero", {"condition_number": 0.0}, r"condition_number 0.0 is not positive"),
     ("condition_negative", {"condition_number": -1.0}, r"condition_number -1.0 is not positive"),
+    # Exactness (2026-08-17). An external audit fed this validator `k_total: 4.0`
+    # and `n_calibration_pairs_skipped: False` and a "READY" report passed: every
+    # count and dimension was compared with a bare `!=`, which accepts an
+    # integer-valued float and a bool. One entry per field; the float/bool matrix
+    # is covered exhaustively by _INTEGER_FIELDS below.
+    ("k_total_not_int", {"k_total": 8.0}, r"k_total must be a non-negative integer"),
+    ("sym_dim_not_int", {"sym_dim": 36.0}, r"sym_dim must be a non-negative integer"),
+    ("rank_not_int", {"rank": 36.0}, r"rank must be a non-negative integer"),
+    (
+        "scored_not_int",
+        {"n_calibration_pairs_scored": 41.0},
+        r"n_calibration_pairs_scored must be a non-negative integer",
+    ),
+    (
+        "skipped_not_int",
+        {"n_calibration_pairs_skipped": False},
+        r"n_calibration_pairs_skipped must be a non-negative integer",
+    ),
+    ("n_genes_not_int", {"n_genes": 73.0}, r"n_genes must be a non-negative integer"),
+    # An over-rank block is NOT a deficiency: `rank <= min(n_pairs, sym_dim)` holds
+    # by construction, so it means the report is internally inconsistent. Folding it
+    # into the deficiency branch made the message say "rank 37 is below sym_dim=36".
+    ("rank_exceeds", {"rank": 37}, r"rank 37 EXCEEDS the identifiable subspace dimension"),
 ]
 
 _CAUSE_IDS = [case[0] for case in _CAUSES]
+
+#: Every field that must be an EXACT ``int``. A bare ``!=`` accepts both an
+#: integer-valued float and a bool (``False == 0``, ``True == 1``).
+_INTEGER_FIELDS = (
+    "k_total",
+    "sym_dim",
+    "rank",
+    "n_calibration_pairs_scored",
+    "n_calibration_pairs_skipped",
+    "n_genes",
+)
 
 
 # --------------------------------------------------------------------------- #
@@ -170,6 +204,37 @@ def test_no_cause_can_be_mistaken_for_another():
     for name, _, pattern in _CAUSES:
         matched = [other for other, text in messages.items() if re.search(pattern, text)]
         assert matched == [name], f"{name}'s pattern also matched {sorted(set(matched) - {name})}"
+
+
+@pytest.mark.parametrize("field", _INTEGER_FIELDS)
+@pytest.mark.parametrize("cast", [float, bool], ids=["float", "bool"])
+def test_no_count_or_dimension_accepts_a_non_int(field, cast):
+    """The full field x type matrix, stated as exactness rather than as messages.
+
+    ``4 == 4.0`` and ``0 == False`` in Python, so every one of these passed a bare
+    ``!=`` and a whole report certified READY on values that are not the exact
+    integers the artifact contract claims. Asserting refusal (not wording) is what
+    makes this survive a future message rewrite.
+    """
+    with pytest.raises(ValueError, match="must be a non-negative integer"):
+        _validate_corrupted(**{field: cast(_block(_envelope())[field])})
+
+
+def test_an_over_rank_block_is_not_called_a_deficiency():
+    """The regression this file's own split introduced, pinned.
+
+    The message it replaced -- "invalid or non-full-rank factor block" -- was
+    vague but TRUE for every cause. Naming the cause made it specific, and for
+    ``rank > sym_dim`` specifically WRONG: it read "rank 37 is below the
+    identifiable subspace dimension sym_dim=36". Precision is only an improvement
+    when it is also correct.
+    """
+    with pytest.raises(ValueError) as excinfo:
+        _validate_corrupted(rank=37)
+    text = str(excinfo.value)
+    assert "EXCEEDS" in text
+    assert "below" not in text, "an over-rank block must not be described as deficient"
+    assert "RANK-DEFICIENT" not in text
 
 
 def test_the_rank_message_says_what_the_operator_must_do():
