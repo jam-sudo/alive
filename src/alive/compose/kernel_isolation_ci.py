@@ -152,15 +152,23 @@ def _validate_interpreter(value: object) -> dict[str, object]:
     the same release string :func:`platform.python_version` parses out of it, so a
     ``version`` that disagrees with ``build`` is a forged or hand-edited receipt.
 
-    The binding is ``startswith`` on ``build``'s first token rather than equality,
-    and that is deliberate. On a release both are ``3.12.13`` and equality would
-    hold; on a pre-release ``build`` carries ``3.13.0rc1`` while
-    ``platform.python_version()`` reports ``3.13.0``, so an equality check would
-    reject a legitimate receipt. Because a red suite skips the receipt-build step
-    and the upload then fails closed, an over-strict check here does not merely
-    warn -- it takes the only kernel-property gate this project has offline. The
-    weaker predicate still pins the full patch level, which is the point of the
-    block.
+    The binding is not equality, and that is deliberate. On a release ``version``
+    and ``build``'s first token are both ``3.12.13``; on a pre-release ``build``
+    carries ``3.13.0rc1`` while :func:`platform.python_version` reports
+    ``3.13.0``, so equality would reject a legitimate receipt. Because a red suite
+    skips the receipt-build step and the upload then fails closed, an over-strict
+    check here does not merely warn -- it takes the only kernel-property gate this
+    project has offline.
+
+    **It is not a bare prefix match either, and the correction is worth stating.**
+    This docstring used to end "the weaker predicate still pins the full patch
+    level, which is the point of the block", and an external audit falsified that
+    on 2026-08-17: ``startswith("3.12.14")`` also accepts ``3.12.149``, a
+    DIFFERENT patch level. The tolerance the binding exists for only ever needs a
+    NON-NUMERIC suffix (``rc1``, ``+local``, ``.post1``), so
+    :func:`_binds_to_version` requires exactly that -- keeping every legitimate
+    case and dropping the forged ones. The claim above is now true because the
+    predicate changed, not because the wording did.
     """
     interpreter = _exact_mapping(value, _INTERPRETER_KEYS, "kernel-isolation interpreter")
     for field in ("version", "build", "implementation"):
