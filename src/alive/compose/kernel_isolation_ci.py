@@ -173,11 +173,26 @@ def _validate_interpreter(value: object) -> dict[str, object]:
             "kernel-isolation interpreter version must be major.minor.patch"
         )
     build_tokens = interpreter["build"].split()
-    if not build_tokens or not build_tokens[0].startswith(version):
+    if not build_tokens or not _binds_to_version(build_tokens[0], version):
         raise KernelIsolationCIError(
             "kernel-isolation interpreter build string disagrees with its version"
         )
     return interpreter
+
+
+def _binds_to_version(build_token: str, version: str) -> bool:
+    """True iff ``build_token`` is ``version`` optionally followed by a non-numeric suffix.
+
+    A bare ``startswith`` accepts a DIFFERENT patch level: ``"3.12.140"`` starts with
+    ``"3.12.14"``. That contradicts the binding's own stated invariant -- pinning the
+    full patch level -- while the prerelease tolerance it was written for only ever
+    needs a non-numeric suffix (``3.13.0rc1``, ``3.12.14+local``). Requiring the next
+    character to be non-numeric keeps every legitimate case and drops the forged ones.
+    """
+    if not build_token.startswith(version):
+        return False
+    suffix = build_token[len(version) :]
+    return not (suffix and suffix[0].isdigit())
 
 
 def _positive_int(value: object, label: str) -> int:

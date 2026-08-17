@@ -28,6 +28,7 @@ from alive.compose.kernel_isolation_ci import (
     KernelIsolationCIError,
     _git,
     _parse_junit,
+    _validate_interpreter,
     build_kernel_isolation_ci_archive,
     build_kernel_isolation_ci_receipt,
     interpreter_identity,
@@ -841,3 +842,40 @@ def test_the_recorded_interpreter_follows_the_running_one_rather_than_a_constant
     assert receipt["interpreter"]["version"] == "3.99.7"
     assert receipt["interpreter"]["implementation"] == "ratpython"
     assert validate_kernel_isolation_ci_receipt(receipt) == receipt
+
+
+# ---------------------------------------------------------------------------
+# Interpreter version<->build binding: the invariant the docstring claims
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "build_token, bound",
+    [
+        ("3.12.14", True),  # release: version == build token
+        ("3.12.14rc1", True),  # prerelease: the tolerance the binding exists for
+        ("3.12.14+local", True),  # local version label
+        ("3.12.140", False),  # DIFFERENT patch level, not a suffix of 14
+        ("3.12.149", False),
+        ("3.12.140evil", False),  # forged token that a prefix match accepts
+        ("3.12.1", False),  # shorter: not a prefix at all
+    ],
+)
+def test_interpreter_build_binding_pins_the_patch_level(build_token, bound):
+    """A bare ``startswith`` accepts ``3.12.140`` for version ``3.12.14``.
+
+    The binding's own docstring claims it "still pins the full patch level"; a
+    prefix match does not. This pins BOTH halves of the contract at once: every
+    legitimate prerelease/local suffix stays accepted, and a numeric continuation
+    -- which is a different patch level, not a suffix -- is rejected.
+    """
+    interpreter = {
+        "version": "3.12.14",
+        "build": f"{build_token} (main, Jan 1 2026, 00:00:00) [Clang 17.0.0]",
+        "implementation": "CPython",
+    }
+    if bound:
+        assert _validate_interpreter(interpreter) == interpreter
+    else:
+        with pytest.raises(KernelIsolationCIError, match="disagrees with its version"):
+            _validate_interpreter(interpreter)
