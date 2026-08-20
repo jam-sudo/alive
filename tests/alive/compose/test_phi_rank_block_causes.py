@@ -12,12 +12,15 @@ identity) from a pair-count bookkeeping mismatch or a malformed condition number
 Two properties are pinned here, and the second is the one that matters:
 
 1. every cause raises with its own message, and
-2. **the accepted set did not move.** Splitting a fail-closed gate's message must
-   not change which reports it accepts. The equivalence tests below assert the
-   committed evidence still validates, that every single-field corruption is still
-   refused, that the short-circuit ORDER is unchanged, and that the type stays
-   ``ValueError`` — which is what ``config2`` catches to produce a contracted
-   ``ScientificModeError`` rather than an uncontracted exit 1.
+2. **the accepted set moves only INWARD.** Splitting a fail-closed gate's message
+   must not change which reports it accepts, so the 2026-08-16 split held the
+   boundary exactly; the 2026-08-17 exactness fix then narrowed it deliberately,
+   after an audit passed a "READY" report carrying ``k_total: 4.0``. The tests
+   below assert both halves: the committed evidence still validates, every
+   single-field corruption is still refused, the short-circuit ORDER is unchanged,
+   the type stays ``ValueError`` — which is what ``config2`` catches to produce a
+   contracted ``ScientificModeError`` rather than an uncontracted exit 1 — and no
+   count or dimension accepts a non-``int``.
 
 The ALL rule itself is pinned by
 :func:`test_one_rank_deficient_dimension_still_refuses_the_whole_report`, so the
@@ -254,7 +257,7 @@ def test_the_rank_message_says_what_the_operator_must_do():
 
 
 # --------------------------------------------------------------------------- #
-# 2. the accepted set did not move
+# 2. the accepted set moves only inward
 # --------------------------------------------------------------------------- #
 def test_the_committed_evidence_still_validates():
     """The equivalence anchor: splitting the message accepted nothing new."""

@@ -134,9 +134,13 @@ def _validate_factor_block(
     DEFICIENCY — the one cause that says the registered grid is misspecified —
     from a pair-count bookkeeping mismatch or a malformed condition number.
 
-    The accepted set is **unchanged**: same conditions, same short-circuit order,
-    same ``ValueError`` type. Only the messages are new. This is deliberate — the
-    gate is fail-closed and splitting the message must not move the boundary.
+    **The accepted set has moved exactly once, and only inward.** Splitting the
+    message (2026-08-16) deliberately did NOT move it: same conditions, same
+    short-circuit order, same ``ValueError`` type, only new wording — because
+    splitting a fail-closed gate's message must not change which reports it
+    accepts. The exactness fix (2026-08-17) deliberately DID narrow it, for the
+    reason given at the integer checks below. Both directions are fail-closed:
+    **nothing this validator ever refused is accepted today.**
 
     Parameters
     ----------
