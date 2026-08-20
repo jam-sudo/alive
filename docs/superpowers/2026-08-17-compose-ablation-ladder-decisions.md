@@ -137,5 +137,15 @@ attribution is registered as confirmatory. **C must not be chosen — it is meas
 
 | # | decision | proposed | owner | date |
 |---|---|---|---|---|
-| 6 | `l3_hypernetwork` — rename + spec amendment (option B) | ✅ B | ☐ PROPOSED | — |
-| 7 | ladder penalty units — normalize the bank (A) or restrict the claim (D) | ✅ A, else D | ☐ PROPOSED | — |
+| 6 | `l3_hypernetwork` — rename + spec amendment (option B) | ✅ B | ✅ **APPROVED — option B** | 2026-08-20 |
+| 7 | ladder penalty units — normalize the bank (A) or restrict the claim (D) | ✅ A, else D | ✅ **APPROVED — option A** (the recommendation) | 2026-08-20 |
+
+> **[2026-08-20 — what approving #7 as option A commits, restated before implementation.]** A
+> normalizes the factor bank so `σmax(Φ_cal) = 1` and pins the scalar in evidence. Two consequences
+> were costed in §3.3 and are repeated here because they are the reason #43 declined the same option
+> for a different problem: **(1)** the bank artifact becomes **split-dependent** (`build_gene_factors`
+> takes no pair roster today), and **(2)** `_verify_factor_banks`' byte-for-byte binding needs
+> re-plumbing — that is **seal-adjacent** code. Both were known at sign-off. Option **D** (restrict the
+> L1↔L2/L3 comparison to exploratory; no code, digest unchanged) remains the recorded fallback if the
+> re-plumbing turns out to weaken the binding rather than move it. **No guard will be weakened to make
+> A fit;** if that is the only way, the implementation stops and D is raised instead.

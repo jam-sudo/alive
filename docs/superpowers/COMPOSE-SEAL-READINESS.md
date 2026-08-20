@@ -5,7 +5,7 @@
 > **이 문서는 아무것도 정의하지 않는다** — 세부(task)는 plan, claim은 spec, exact param은 config,
 > 시간순 audit는 git이 authoritative다([sources of truth](../../CLAUDE.md#sources)). 상태 행이 authoritative
 > 문서와 어긋나면 **authoritative 문서가 옳다**; 이 인덱스를 갱신한다.
-> **Updated:** 2026-08-17 @ `1703b8b` (branch `compose-audit-exactness-fixes`)
+> **Updated:** 2026-08-20 @ `70c8b02` (branch `compose-audit-exactness-fixes`)
 > `scripts/bump-readiness-stamp.sh` / the pre-commit hook from `HEAD` at commit time, so it names the
 > **parent** of the commit that carries it and can never name itself. Reading it as "one commit stale" is a
 > misreading; git is authoritative for when this file actually changed.
@@ -1611,6 +1611,31 @@ strength — measured `159x / 557x / 2004x` on synthetic fixtures, fixture-depen
 ablation ladder, which is the more consequential case because the ladder is exactly what attributes
 effects to architecture. Both are carried to a costed decision document. **Not adjudicated here:**
 F-01, F-02, F-03, F-06, F-07, F-08, F-09, F-12, F-15. Seal remains **UNOPENED**; execution remains
+**RELEASE-BLOCKED**.
+
+**2026-08-20 — the 2026-08-19 audit edition, and a self-contradiction it found one instance of.**
+The daily audit replaced its canonical file and ran against `2e60eef` (this branch), so the four
+findings closed on 2026-08-17 are gone from its active list. Renumbered, it now carries High 7 /
+Medium 5 / Low 2. **F-04 and F-05 remain active HIGH and remain unsigned** — decisions #6/#7 in
+`2026-08-17-compose-ablation-ladder-decisions.md`.
+
+Its **F-13** is closed here and is worth recording for the shape of the defect rather than its
+severity. `phi_rank.py` asserted *"the accepted set is **unchanged**"* thirty lines above a comment
+explaining that the exactness fix **deliberately narrows** it. Both sentences are mine, written a day
+apart; the first was never retracted when the second contradicted it. **The audit found one site;
+there are five.** Three are live contracts (the validator docstring, the test module docstring, a
+section header) and are unified on the invariant that actually holds across both waves: **the
+boundary has moved exactly once, and only inward — nothing this validator ever refused is accepted
+today.** Two are dated historical records and are **not** retro-edited, because each correctly
+describes the wave it belongs to; the 2026-08-16 decision document gets a dated pointer instead.
+
+The general lesson, since this is the second time in four days a correction of mine outran its own
+record: **when a later wave reverses an earlier claim, the earlier claim has to be retracted at every
+LIVE site in the same commit** — a dated record may keep it, a docstring may not.
+
+Verification: full compose **2173 passed, 2 skipped** (unchanged — this wave is prose only); mutation
+harness **27/27 killed, each by the NAMED test that makes its claim**; ruff check and format clean.
+`config_sha256` unchanged at `3faacaff…`. Seal remains **UNOPENED**; execution remains
 **RELEASE-BLOCKED**.
 
 ## 이 문서가 *아닌* 것 (중복 금지)
