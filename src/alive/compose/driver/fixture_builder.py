@@ -116,7 +116,7 @@ _CONFIG_PATH = "configs/compose_k562_v1_phase2.yaml"
 _MODEL_CLASS_BY_NAME = {
     "l1_bilinear_identifiable": L1Model,
     "l2_saturation": L2Model,
-    "l3_hypernetwork": L3Model,
+    "l3_symmetric_mlp": L3Model,
     "id_only": IDOnlyModel,
 }
 

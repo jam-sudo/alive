@@ -276,7 +276,7 @@ def _predictions_for_role(pair_ids, *, response_dim, headline_factor):
     roster = (
         "l1_bilinear_identifiable",
         "l2_saturation",
-        "l3_hypernetwork",
+        "l3_symmetric_mlp",
         "additive",
         "no_change",
         "perturbation_mean",
@@ -292,7 +292,7 @@ def _predictions_for_role(pair_ids, *, response_dim, headline_factor):
             size=response_dim
         )
         out["l2_saturation"][pid] = additive_pred + 3.0 * rng.normal(size=response_dim)
-        out["l3_hypernetwork"][pid] = additive_pred + 5.0 * rng.normal(size=response_dim)
+        out["l3_symmetric_mlp"][pid] = additive_pred + 5.0 * rng.normal(size=response_dim)
         out["id_only"][pid] = additive_pred + 5.0 * rng.normal(size=response_dim)
         out["gears"][pid] = additive_pred + 5.0 * rng.normal(size=response_dim)
         out["cpa"][pid] = additive_pred + 5.0 * rng.normal(size=response_dim)
@@ -540,7 +540,7 @@ def test_preflight_failure_keeps_access_zero_and_no_terminal(tmp_path):
 # ===========================================================================
 
 
-@pytest.mark.parametrize("drop", ["gears", "cpa", "id_only", "l3_hypernetwork"])
+@pytest.mark.parametrize("drop", ["gears", "cpa", "id_only", "l3_symmetric_mlp"])
 def test_missing_registered_comparator_fails_preflight(tmp_path, drop):
     kit = _make_run(tmp_path)
     # Drop a comparator's predictions from the double-unseen regime; the bundle

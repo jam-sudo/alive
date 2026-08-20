@@ -372,8 +372,9 @@ sequence/feature/factor/response/model/bundle/ledger/pair-index/seed-report chec
 selected hyperparameters, worker/config/resource/env identity, double/single pair count와 ordered seal-request
 checksum, `CONTINUE`, access count 0, forbidden-output absence, owner-approved `accepted_limitations` exact
 roster를 포함한다. Method roster는 정확히
-`[l1_bilinear_identifiable,l2_saturation,l3_hypernetwork,additive,no_change,perturbation_mean,id_only,gears,cpa]`,
-verdict comparator roster는 정확히 `[additive,gears,cpa,id_only,l3_hypernetwork]`이며 order까지 고정한다.
+`[l1_bilinear_identifiable,l2_saturation,l3_symmetric_mlp,additive,no_change,perturbation_mean,id_only,gears,cpa]`,
+verdict comparator roster는 정확히 `[additive,gears,cpa,id_only,l3_symmetric_mlp]`이며 order까지 고정한다.
+**[2026-08-20: `l3_hypernetwork` → `l3_symmetric_mlp` (owner 결정 #6). 이름만 바뀌었고 모델·order는 그대로다.]**
 이 두 roster는 `config2._EXPECTED_METHOD_ROSTER`/`_EXPECTED_COMPARATOR_FAMILY`와 정확히 같고 config가 이미
 강제하므로, driver는 하드코딩 대신 config 상수를 참조해 drift를 피한다.
 `confirmation_checksum`은 자신을

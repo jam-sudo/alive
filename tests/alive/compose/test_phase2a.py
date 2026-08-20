@@ -156,7 +156,7 @@ def _model_factories():
     return {
         "l1_bilinear_identifiable": L1Model,
         "l2_saturation": L2Model,
-        "l3_hypernetwork": L3Model,
+        "l3_symmetric_mlp": L3Model,
         "id_only": IDOnlyModel,
         # Synthetic stand-ins exercise the frozen roster contract. Scientific
         # activation still requires the separately pinned GEARS/CPA backends.

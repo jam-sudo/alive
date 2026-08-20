@@ -118,7 +118,7 @@ metric:
 
 inference:
   method: max_deviation_bootstrap     # reuse alive.eval.bootstrap (CARTOGRAPHER)
-  comparator_family: [additive, gears, cpa, id_only, l3_hypernetwork]
+  comparator_family: [additive, gears, cpa, id_only, l3_symmetric_mlp]
   resampling_unit: perturbation_pair
   shared_resamples_across_contrasts: true
   family_confidence: 0.95
@@ -146,7 +146,16 @@ baselines:                            # roster FROZEN before any outcome (§9 / 
     environment_status: unpinned_activation_blocker
     prediction_representation: cell_raw_counts   # exact per-cell; change only by config revision
     approximation_bias_report_sha256: null   # must stay null for an exact representation
-  ablation_ladder: [l1_bilinear_identifiable, l2_saturation, l3_hypernetwork]  # L1 = headline
+  # L3 was registered as `l3_hypernetwork` until 2026-08-20. The implementation
+  # never was one: it is a two-hidden-layer tanh MLP on the symmetric pair
+  # feature [z_g + z_h, |z_g - z_h|] over a FIXED z. Measured — after fit, z is
+  # byte-identical to the input and the 6 trainable arrays are the MLP's own
+  # weights/biases; no network generates the operator and nothing is end-to-end
+  # in z. The MODEL is unchanged by this rename; only the registered name is,
+  # so that the ladder does not claim an unconstrained-capacity arm it does not
+  # have. Owner decision #6 (option B), 2026-08-20:
+  # docs/superpowers/2026-08-17-compose-ablation-ladder-decisions.md
+  ablation_ladder: [l1_bilinear_identifiable, l2_saturation, l3_symmetric_mlp]  # L1 = headline
 
 leakage_control:
   baseline_training_roles: [singles, combo_calibration]   # GEARS/CPA NEVER see sealed pairs in training

@@ -206,10 +206,33 @@ known-answer recovery(§3.4)를 함께 보고한다.
 - **L1 = A (headline)** 2단계 bilinear 식별 operator.
 - **L2 = C** + 사전등록된 단조 saturation 비선형 $\varepsilon=\sigma(\text{bilinear})$ — 최소 비선형성이
   이득을 주는지 보는 constrained extension. Claim 1의 대수적 식별가능성 주장은 L1에 한정한다.
-- **L3 = B** hypernetwork로 $z$·operator end-to-end 학습 — capacity 최대, **식별가능성 정리 없음**.
+- **L3 = B** (`l3_symmetric_mlp`) 고정 $z$ 위의 **symmetric MLP** — 대칭 pair feature
+  $[z_g+z_h,\ |z_g-z_h|]$에 대한 2-hidden-layer tanh MLP. bilinear 형태를 쓰지 않는 **더 넓은
+  함수족**이지만 **무제약이 아니다**: $z$는 고정 입력이고 그 feature의 함수만 표현할 수 있다.
+  **식별가능성 정리 없음.**
 
-답하는 질문: **식별가능한 핵심 구조(L1; L2는 제약 확장)가 additive(L0)와 무제약 capacity(L3)를
-둘 다 이기는가?**
+답하는 질문: **식별가능한 핵심 구조(L1; L2는 제약 확장)가 additive(L0)와, 같은 고정 $z$ 위의
+비-bilinear 함수족(L3)을 둘 다 이기는가?**
+
+> **[2026-08-20 amendment — owner decision #6, option B.]** 위 L3 정의와 질문 문장은 이번에
+> **교체된 것**이며, 교체 전 원문은 다음과 같았다: *"**L3 = B** hypernetwork로 $z$·operator
+> end-to-end 학습 — capacity 최대, 식별가능성 정리 없음"*, 그리고 질문은 *"…additive(L0)와
+> **무제약 capacity(L3)**를 둘 다 이기는가?"*였다.
+>
+> **왜 교체했나.** 등록된 이름 `l3_hypernetwork`가 구현과 다른 모델을 가리켰다. 2026-08-17 외부
+> 감사(F-04)가 지적했고 재현으로 확인했다: `models.py`의 L3는 **고정 $Z$** 위 MLP이며, fit 후
+> $Z$는 **byte-identical**이고 학습 가능한 배열 6개는 MLP 자신의 weight/bias뿐이다(dims
+> `(8,16,16,5)`). hypernetwork도 아니고 $z$에 대해 end-to-end도 아니다.
+>
+> **무엇이 바뀌고 무엇이 안 바뀌었나.** **모델은 그대로다** — 코드 한 줄 바뀌지 않았고 예측도
+> 동일하다. 바뀐 것은 (1) 등록된 이름, (2) 이 arm이 무엇을 대표한다고 주장하는가이다. 고정 $z$의
+> 대칭 feature에 대한 함수족은 **무제약 capacity가 아니므로**, "L1이 L3를 이긴다"는 결과는
+> **"무제약 capacity를 이긴다"는 주장을 뒷받침하지 않는다.** 그 주장을 하려면 등록된
+> hypernetwork를 실제로 구현해야 하며(결정 문서의 옵션 A), 그것은 별도 spec·baseline·ablation이
+> 필요한 별개 작업이다.
+>
+> 이름은 `comparator_family`와 `ablation_ladder` 양쪽에서 바뀌었고 `config_sha256`이
+> `3faacaff…` → `c25734d5…`로 이동했다 — **새 run identity**이며 이 결정이 만들도록 승인된 것이다.
 
 ### 3.4 합성 recovery 프로토콜 (claim 1 입증, real과 독립)
 

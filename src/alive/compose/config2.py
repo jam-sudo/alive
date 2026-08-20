@@ -93,12 +93,12 @@ _EXPECTED_COMPARATOR_FAMILY: tuple[str, ...] = (
     "gears",
     "cpa",
     "id_only",
-    "l3_hypernetwork",
+    "l3_symmetric_mlp",
 )
 _EXPECTED_METHOD_ROSTER: tuple[str, ...] = (
     "l1_bilinear_identifiable",
     "l2_saturation",
-    "l3_hypernetwork",
+    "l3_symmetric_mlp",
     "additive",
     "no_change",
     "perturbation_mean",
@@ -1157,7 +1157,7 @@ def _validate_baselines(
     ladder = _require(block, "ablation_ladder", "baselines")
     if lower_bounds != ["no_change", "perturbation_mean"]:
         raise Phase2ConfigError("baselines.lower_bounds must be [no_change, perturbation_mean]")
-    if ladder != ["l1_bilinear_identifiable", "l2_saturation", "l3_hypernetwork"]:
+    if ladder != ["l1_bilinear_identifiable", "l2_saturation", "l3_symmetric_mlp"]:
         raise Phase2ConfigError("baselines.ablation_ladder does not match the registered ladder")
     representations: list[tuple[str, str, str | None]] = []
     activation_statuses: list[tuple[str, str | None, str]] = []

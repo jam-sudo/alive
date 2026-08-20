@@ -216,13 +216,13 @@ Recovery는 pre-access ledger에 기록된 seed-variability artifact의 실제 r
 ### 4.1 대상 method
 
 현재 코드에서 외부 seed로 재적합 가능한 stochastic comparator는 `gears`, `cpa`다. 현재
-`l3_hypernetwork`는 module-fixed seed를 사용하는 결정론적 구현이므로 deterministic single-shot으로
+`l3_symmetric_mlp`는 module-fixed seed를 사용하는 결정론적 구현이므로 deterministic single-shot으로
 분류한다. L3에 외부 seed parameter를 추가하려면 별도 protocol amendment와 model checksum schema
 revision이 필요하다.
 
 현재 deterministic roster는 다음과 같다.
 
-- `l1_bilinear_identifiable`, `l2_saturation`, `l3_hypernetwork`, `id_only`
+- `l1_bilinear_identifiable`, `l2_saturation`, `l3_symmetric_mlp`, `id_only`
 - `additive`, `no_change`, `perturbation_mean`
 
 ### 4.2 평가 설계

@@ -42,7 +42,7 @@ RESPONSE_DIM = 5
 ROSTER = (
     "l1_bilinear_identifiable",
     "l2_saturation",
-    "l3_hypernetwork",
+    "l3_symmetric_mlp",
     "additive",
     "no_change",
     "perturbation_mean",
@@ -363,6 +363,6 @@ def test_rejects_unregistered_extra_method():
 
 def test_rejects_roster_method_without_predictions():
     preds = _roster_preds(DOUBLE_PAIRS)
-    del preds["l3_hypernetwork"]
-    with pytest.raises(FreezeError, match="l3_hypernetwork|missing|method"):
+    del preds["l3_symmetric_mlp"]
+    with pytest.raises(FreezeError, match="l3_symmetric_mlp|missing|method"):
         _bundle(predictions_double_unseen=preds)

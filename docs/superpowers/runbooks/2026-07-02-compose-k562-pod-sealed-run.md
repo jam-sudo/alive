@@ -26,7 +26,10 @@
 - primary error: `e = p^{-1} ||δ̂ − δ||²`(낮을수록 좋음).
 - headline: `l1_bilinear_identifiable`.
 - simultaneous comparator family: `additive`, `gears`, `cpa`, `id_only`,
-  `l3_hypernetwork`. L1은 headline이며 L2는 ablation roster에는 있지만 verdict comparator family에는 없다.
+  `l3_symmetric_mlp`. L1은 headline이며 L2는 ablation roster에는 있지만 verdict comparator family에는 없다.
+  **[2026-08-20]** 이 항목은 `l3_hypernetwork`에서 이름만 바뀌었다(owner 결정 #6). **모델은 동일하며**
+  등록 이름이 구현(고정 `z` 위 symmetric MLP)과 일치하도록 정정한 것이다. `config_sha256`은
+  `3faacaff…` → `c25734d5…`로 이동했으므로 **이전 digest에 bind된 evidence는 재생성 대상이다**.
 - `GI_LEARNABLE_WIN`: additive lower bound `> 0.05`이고 모든 learned comparator lower
   bound `> 0`이며 integrity가 valid일 때만 가능하다.
 - additive 조건만 통과하면 `PARTIAL`; additive 조건도 실패하면 `NO_DISTINCT_WIN`;

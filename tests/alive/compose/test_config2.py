@@ -357,7 +357,7 @@ def test_runtime_contract_values_are_exposed_and_hashed():
     assert cfg.method_roster == (
         "l1_bilinear_identifiable",
         "l2_saturation",
-        "l3_hypernetwork",
+        "l3_symmetric_mlp",
         "additive",
         "no_change",
         "perturbation_mean",
@@ -425,7 +425,7 @@ def test_total_k_grid_must_be_4_6_8(tmp_path):
 
 def test_exact_comparator_roster():
     cfg = load_compose_phase2_config(CANON)
-    assert cfg.comparator_family == ("additive", "gears", "cpa", "id_only", "l3_hypernetwork")
+    assert cfg.comparator_family == ("additive", "gears", "cpa", "id_only", "l3_symmetric_mlp")
 
 
 def test_comparator_roster_must_be_exact(tmp_path):
@@ -442,7 +442,7 @@ def test_comparator_roster_reordered_rejected(tmp_path):
         "additive",
         "cpa",
         "id_only",
-        "l3_hypernetwork",
+        "l3_symmetric_mlp",
     ]
     with pytest.raises(Phase2ConfigError):
         load_compose_phase2_config(_write(tmp_path, raw))

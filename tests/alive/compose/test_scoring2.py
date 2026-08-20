@@ -39,7 +39,7 @@ from alive.compose.scoring2 import (
 _CONFIG_PATH = "configs/compose_k562_v1_phase2.yaml"
 
 HEADLINE = "l1_bilinear_identifiable"
-FAMILY = ("additive", "gears", "cpa", "id_only", "l3_hypernetwork")
+FAMILY = ("additive", "gears", "cpa", "id_only", "l3_symmetric_mlp")
 # Numeric-test bootstrap value; the 10000 floor is enforced by the config loader.
 REPS = 200
 SEED = 4321
@@ -136,7 +136,7 @@ def _build_regime(seed_base: int = 100, pair_ids=None):
         "gears": {},
         "cpa": {},
         "id_only": {},
-        "l3_hypernetwork": {},
+        "l3_symmetric_mlp": {},
         "l2_saturation": {},
         "no_change": {},
         "perturbation_mean": {},
@@ -150,7 +150,7 @@ def _build_regime(seed_base: int = 100, pair_ids=None):
         predictions["gears"][pid] = additive_pred[pid] + 5.0 * rng.normal(size=2)
         predictions["cpa"][pid] = additive_pred[pid] + 5.0 * rng.normal(size=2)
         predictions["id_only"][pid] = additive_pred[pid] + 5.0 * rng.normal(size=2)
-        predictions["l3_hypernetwork"][pid] = additive_pred[pid] + 5.0 * rng.normal(size=2)
+        predictions["l3_symmetric_mlp"][pid] = additive_pred[pid] + 5.0 * rng.normal(size=2)
         # descriptive-only roster methods (never enter the verdict pair_errors).
         predictions["l2_saturation"][pid] = additive_pred[pid] + 3.0 * rng.normal(size=2)
         predictions["no_change"][pid] = np.zeros(2)

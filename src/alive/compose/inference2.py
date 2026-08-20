@@ -31,7 +31,7 @@ What it computes
 ----------------
 For the headline method ``l1_bilinear_identifiable`` with per-pair errors
 ``e_L1`` and each comparator ``C`` (registered family
-``additive, gears, cpa, id_only, l3_hypernetwork``) with per-pair errors
+``additive, gears, cpa, id_only, l3_symmetric_mlp``) with per-pair errors
 ``e_C``::
 
     theta_C       = (mean(e_C) - mean(e_L1)) / max(mean(e_C), 1e-12)
@@ -205,7 +205,7 @@ def simultaneous_theta_bounds(
         name in ``comparators``.
     comparators : Sequence[str]
         The EXACT ordered comparator family
-        (``additive, gears, cpa, id_only, l3_hypernetwork``). Non-empty; the
+        (``additive, gears, cpa, id_only, l3_symmetric_mlp``). Non-empty; the
         headline ``l1_bilinear_identifiable`` is NOT a comparator.
     confidence : float
         Family confidence level in ``(0, 1)`` (e.g. ``0.95``).

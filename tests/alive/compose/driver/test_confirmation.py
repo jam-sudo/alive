@@ -72,7 +72,7 @@ def _build_inputs(salt: str = "") -> dict:
         "git_clean": True,
         "preseal_checksums": _preseal_checksums(salt),
         "selected_hyperparameters": {
-            "l3_hypernetwork": {"rank": 8, "lr": 0.001, "epochs": 200},
+            "l3_symmetric_mlp": {"rank": 8, "lr": 0.001, "epochs": 200},
             "l1_bilinear_identifiable": {"ridge": 0.1},
         },
         "worker_identity": _worker_identity(salt),

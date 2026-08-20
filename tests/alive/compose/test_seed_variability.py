@@ -823,7 +823,7 @@ from alive.compose.provenance2 import PROTOCOL  # noqa: E402
 _DETERMINISTIC = {
     "l1_bilinear_identifiable",
     "l2_saturation",
-    "l3_hypernetwork",
+    "l3_symmetric_mlp",
     "id_only",
     "additive",
     "no_change",

@@ -63,7 +63,7 @@ Before calling the store, validate everything that does not require outcomes:
 - exact composite run ID and clean ledger;
 - exact required method roster:
   `l1_bilinear_identifiable`, `additive`, `gears`, `cpa`, `id_only`,
-  `l3_hypernetwork`;
+  `l3_symmetric_mlp`;
 - exact pair-ID sets for both regimes;
 - no missing or extra predictions;
 - canonical pair IDs, shapes and finite values;
