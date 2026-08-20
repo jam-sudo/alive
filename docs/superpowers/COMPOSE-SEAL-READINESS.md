@@ -5,7 +5,7 @@
 > **이 문서는 아무것도 정의하지 않는다** — 세부(task)는 plan, claim은 spec, exact param은 config,
 > 시간순 audit는 git이 authoritative다([sources of truth](../../CLAUDE.md#sources)). 상태 행이 authoritative
 > 문서와 어긋나면 **authoritative 문서가 옳다**; 이 인덱스를 갱신한다.
-> **Updated:** 2026-08-16 @ `b325240` (branch `compose-activation-rank-rule`)
+> **Updated:** 2026-08-20 @ `47bb17b` (branch `compose-audit-exactness-fixes`)
 > `scripts/bump-readiness-stamp.sh` / the pre-commit hook from `HEAD` at commit time, so it names the
 > **parent** of the commit that carries it and can never name itself. Reading it as "one commit stale" is a
 > misreading; git is authoritative for when this file actually changed.
@@ -1558,6 +1558,123 @@ changed, and **task #14 is untouched by this wave** — it still owes the regene
 digest move triggered. Verified: full compose **2125 passed, 2 skipped** — exactly the 2058 of
 2026-08-13 plus the 66 new cause tests and the one new `config2` test, so nothing was displaced;
 ruff check and format clean. Seal remains **UNOPENED**; execution remains **RELEASE-BLOCKED**.
+
+**2026-08-17 — external audit at `4cd2321`: four findings adjudicated by RUNNING them, and closed.**
+An independent read-only audit (`docs/GPT audit/comprehensiveaudit.md`) raised 16 active findings.
+Four are closed here; **three of the four were defects in this project's own three most recent waves**,
+which is the part worth recording.
+
+- **F-10 — the phi-rank artifact did not enforce exact integers, and one message was FALSE.** All three
+  of the audit's claims reproduced against the validator: every count/dimension field accepted an
+  integer-VALUED float (a report with `k_total: 4.0` certified READY), `n_calibration_pairs_skipped:
+  False` passed as `0` because `bool` is an `int` subclass, and `rank > sym_dim` was refused with the
+  message *"rank 37 is BELOW the identifiable subspace dimension sym_dim=36"*. **The third is a
+  regression introduced by the 2026-08-16 cause-split itself.** The message it replaced — "invalid or
+  non-full-rank factor block" — was vague but TRUE for every cause; naming the causes made each one
+  specific and made exactly one specifically WRONG. **Precision is only an improvement when it is also
+  correct.** Fixed: every count and dimension now goes through `_nonnegative_int` (which already
+  rejected `bool` and non-`int` and was simply not being used here), and an over-rank block is its own
+  cause — `rank <= min(n_pairs, sym_dim)` holds by construction, so it is an internally inconsistent
+  report, not a design that failed to span its subspace. **This narrows the accepted set**, deliberately
+  and fail-closed: it is the one place the cause-split wave's "the boundary must not move" rule is
+  knowingly set aside, because the boundary was wrong. The committed real-Norman evidence still
+  validates unchanged.
+- **F-11 — the interpreter binding did not pin the patch level, and its docstring said it did.**
+  Measured: pinned at `3.12.14`, a bare `startswith` also accepted `3.12.149` and `3.12.140evil`. The
+  `rc1`/`+local` tolerance is intended and correct; the defect was precisely a **digit** after the
+  prefix. Closed by merging the pre-existing `fix/interpreter-patch-level-binding` (`1331e6c`), which
+  requires a non-numeric suffix. That commit changed the predicate but left the falsified sentence in
+  the docstring; **the docstring is corrected here and says why it is now true — the code changed, not
+  the wording.**
+- **F-13 / F-14 — sensitive and scratch output were untracked AND unignored.** `error.log` (427 bytes,
+  carrying auth/account metadata), `output/` (208 KiB) and `tmp/` (6.6 MiB) were not matched by any
+  `.gitignore` rule. Closed by merging `fix/gitignore-sensitive-and-scratch` (`362acbd`).
+  **⚠️ Half-closed by design: `error.log` still exists on disk.** Ignoring it removes the
+  accidental-commit path only; deleting it is the owner's action, not a drafter's.
+- **F-16 — the latest readiness changes were not reproducible on `origin/main`.** Closed by merging
+  `compose-activation-rank-rule` into `main` (`058e9dc`, tree-identical to the CI-green tip).
+
+Verification: full compose **2173 passed, 2 skipped** — exactly the 2125 of 2026-08-16 plus 41 new
+cause/exactness tests and the 7 interpreter-binding cases; mutation harness **27/27 killed, each by
+the NAMED test that makes its claim** (M21–M27 added, one per dropped type check plus the over-rank
+branch). Several older anchors moved with the refactor and the harness reported them as `ANCHOR`
+rather than passing silently — the behaviour rule 6 exists for. Ruff check and format clean.
+`config_sha256` is **unchanged** at `3faacaff…`; **task #14 is untouched and still owed.**
+
+**⚠️ OPEN from the same audit, NOT closed here — two HIGH findings that require an owner amendment:**
+**F-04** the registered `l3_hypernetwork` and its implementation are different models (spec §3.3 defines
+L3 as a hypernetwork learning `z` and the operator end-to-end; `models.py` is a two-hidden-layer `tanh`
+MLP on a **fixed** `Z`), and **F-05** the ablation ladder's `lambda` means different things per arm
+(`phase2a.py` scales only the headline, so an L1↔L2/L3 comparison confounds architecture with penalty
+strength — measured `159x / 557x / 2004x` on synthetic fixtures, fixture-dependent as the audit says).
+**F-05 also shows the 2026-08-13 residual record was too narrow:** it named `id_only` and omitted the
+ablation ladder, which is the more consequential case because the ladder is exactly what attributes
+effects to architecture. Both are carried to a costed decision document. **Not adjudicated here:**
+F-01, F-02, F-03, F-06, F-07, F-08, F-09, F-12, F-15. Seal remains **UNOPENED**; execution remains
+**RELEASE-BLOCKED**.
+
+**2026-08-20 — the 2026-08-19 audit edition, and a self-contradiction it found one instance of.**
+The daily audit replaced its canonical file and ran against `2e60eef` (this branch), so the four
+findings closed on 2026-08-17 are gone from its active list. Renumbered, it now carries High 7 /
+Medium 5 / Low 2. **F-04 and F-05 remain active HIGH and remain unsigned** — decisions #6/#7 in
+`2026-08-17-compose-ablation-ladder-decisions.md`.
+
+Its **F-13** is closed here and is worth recording for the shape of the defect rather than its
+severity. `phi_rank.py` asserted *"the accepted set is **unchanged**"* thirty lines above a comment
+explaining that the exactness fix **deliberately narrows** it. Both sentences are mine, written a day
+apart; the first was never retracted when the second contradicted it. **The audit found one site;
+there are five.** Three are live contracts (the validator docstring, the test module docstring, a
+section header) and are unified on the invariant that actually holds across both waves: **the
+boundary has moved exactly once, and only inward — nothing this validator ever refused is accepted
+today.** Two are dated historical records and are **not** retro-edited, because each correctly
+describes the wave it belongs to; the 2026-08-16 decision document gets a dated pointer instead.
+
+The general lesson, since this is the second time in four days a correction of mine outran its own
+record: **when a later wave reverses an earlier claim, the earlier claim has to be retracted at every
+LIVE site in the same commit** — a dated record may keep it, a docstring may not.
+
+Verification: full compose **2173 passed, 2 skipped** (unchanged — this wave is prose only); mutation
+harness **27/27 killed, each by the NAMED test that makes its claim**; ruff check and format clean.
+`config_sha256` unchanged at `3faacaff…`. Seal remains **UNOPENED**; execution remains
+**RELEASE-BLOCKED**.
+
+**2026-08-20 — five registered decisions signed, and task #16 re-scoped after its urgency turned out
+to be my own error.**
+
+**Signed (owner, 2026-08-20).** Conditioning-ceiling decisions **#1, #2, #3** → `CONFIRMED`; they
+change no code (all three are implemented and mutation-verified) and record the scientific
+disposition. **#3 is signed as the ARM only** — the scope note attached to it is explicitly not
+endorsed, because what that arm fixes is reason attribution above a noise threshold that is
+unregistered and unmeasured on real data. Ablation-ladder **#6 → option B** (rename
+`l3_hypernetwork`, amend spec §3.3) and **#7 → option A** (normalize the factor bank so
+`σmax(Φ_cal) = 1`). **Both #6 and #7 move `config_sha256`, so task #14's regeneration must run at the
+FINAL digest** — the owner has taken #14 and will regenerate once the digest is fixed.
+
+#7's approval is annotated at the sign-off with what it commits: the bank artifact becomes
+split-dependent and `_verify_factor_banks`' byte-for-byte binding needs re-plumbing, which is
+seal-adjacent. **No guard will be weakened to make A fit**; if that is the only way, implementation
+stops and the recorded fallback (option D — restrict the L1↔L2/L3 comparison to exploratory, no code,
+digest unchanged) is raised instead.
+
+**Task #16 — the "before 2026-10-24" urgency was wrong and is withdrawn.** This index and several
+session summaries described #16 as *engage an independent archiver before the 2026-10-24 artifact
+expiry*. The artifact expiring then is `2dd23d6…`, a **development** archive that was never going to
+back the seal — the archiver runbook's own §1 already says retention was raised to 400 days and
+protects "only runs made after the change, **including, deliberately, the one that will back the
+seal**". **The seal-backing run does not exist yet**, and its artifact will live ~400 days. There is
+no October deadline on this task and there never was one for the seal's purpose.
+
+**Disposition:** the two committed archives stay as development evidence with their existing honest
+`archived_by`; **no third party is engaged for them.** The independence requirement is **re-scoped to
+bind when the seal-backing CI run is archived** — after the config is final, around the pod trip. The
+justification is stated rather than assumed: this is an **evidence-credibility gate, not a
+seal-safety gate** (no guard protecting the seal depends on it), and `archived_by` is the one link
+nothing machine-checks (`kernel_isolation_ci.py:617` validates only non-empty-string). **Newly
+recorded coupling:** any plan to re-archive from a *current* run for a fresh window changes
+`head_sha`, which is exactly the unresolved `head_sha == C` decision (**L6**) — the two must be
+decided together, which was not written down anywhere before.
+
+Seal remains **UNOPENED**; execution remains **RELEASE-BLOCKED**.
 
 ## 이 문서가 *아닌* 것 (중복 금지)
 

@@ -134,9 +134,13 @@ def _validate_factor_block(
     DEFICIENCY — the one cause that says the registered grid is misspecified —
     from a pair-count bookkeeping mismatch or a malformed condition number.
 
-    The accepted set is **unchanged**: same conditions, same short-circuit order,
-    same ``ValueError`` type. Only the messages are new. This is deliberate — the
-    gate is fail-closed and splitting the message must not move the boundary.
+    **The accepted set has moved exactly once, and only inward.** Splitting the
+    message (2026-08-16) deliberately did NOT move it: same conditions, same
+    short-circuit order, same ``ValueError`` type, only new wording — because
+    splitting a fail-closed gate's message must not change which reports it
+    accepts. The exactness fix (2026-08-17) deliberately DID narrow it, for the
+    reason given at the integer checks below. Both directions are fail-closed:
+    **nothing this validator ever refused is accepted today.**
 
     Parameters
     ----------
@@ -164,15 +168,34 @@ def _validate_factor_block(
         With a cause-specific message for each of the eleven rejections.
     """
     at = f"phi-rank factor block k_total={expected_k}"
-    if block["k_total"] != expected_k:
+    # Every count and dimension is read through _nonnegative_int FIRST, so an
+    # integer-VALUED float (4.0) or a bool (False for 0) is refused rather than
+    # compared. A bare `!=` accepts both -- an exactness hole an external audit
+    # found on 2026-08-17 by feeding this validator `k_total: 4.0` and
+    # `n_calibration_pairs_skipped: False` and watching a "READY" report pass.
+    # This DOES narrow the accepted set, deliberately and in the fail-closed
+    # direction; it is the one place this file's "the boundary must not move"
+    # rule is knowingly set aside, because the boundary was wrong.
+    if _nonnegative_int(block["k_total"], f"{at}: k_total") != expected_k:
         raise ValueError(
             f"{at}: block k_total {block['k_total']!r} does not match its registered grid position"
         )
-    if block["sym_dim"] != sym_dim:
+    if _nonnegative_int(block["sym_dim"], f"{at}: sym_dim") != sym_dim:
         raise ValueError(f"{at}: reported sym_dim {block['sym_dim']!r} is not k(k+1)/2 = {sym_dim}")
-    if block["rank"] != sym_dim:
+    rank = _nonnegative_int(block["rank"], f"{at}: rank")
+    if rank > sym_dim:
+        # A SEPARATE cause, not a deficiency. `rank <= min(n_pairs, sym_dim)`
+        # always holds, so an over-rank block is not a design that failed to span
+        # its subspace -- it is an internally inconsistent report. Folding it into
+        # the deficiency branch made the message say "rank 37 is below sym_dim=36".
         raise ValueError(
-            f"{at}: RANK-DEFICIENT — rank {block['rank']!r} is below the identifiable "
+            f"{at}: rank {rank} EXCEEDS the identifiable subspace dimension "
+            f"sym_dim={sym_dim}; rank <= min(n_pairs, sym_dim) holds by construction, "
+            "so this report is internally inconsistent"
+        )
+    if rank != sym_dim:
+        raise ValueError(
+            f"{at}: RANK-DEFICIENT — rank {rank} is below the identifiable "
             f"subspace dimension sym_dim={sym_dim}, so this registered grid point is "
             "not identifiable on the calibration design"
         )
@@ -181,17 +204,23 @@ def _validate_factor_block(
             f"{at}: is_full_rank is {block['is_full_rank']!r}, not the boolean True "
             "(a truthy 1 is refused: the flag and the rank must agree exactly)"
         )
-    if block["n_calibration_pairs_scored"] != expected_scored_pairs:
+    scored = _nonnegative_int(
+        block["n_calibration_pairs_scored"], f"{at}: n_calibration_pairs_scored"
+    )
+    if scored != expected_scored_pairs:
         raise ValueError(
-            f"{at}: scored {block['n_calibration_pairs_scored']!r} calibration pairs, "
+            f"{at}: scored {scored} calibration pairs, "
             f"but the report declares n_combo_calibration={expected_scored_pairs}"
         )
-    if block["n_calibration_pairs_skipped"] != 0:
+    skipped = _nonnegative_int(
+        block["n_calibration_pairs_skipped"], f"{at}: n_calibration_pairs_skipped"
+    )
+    if skipped != 0:
         raise ValueError(
-            f"{at}: {block['n_calibration_pairs_skipped']!r} calibration pairs were "
+            f"{at}: {skipped} calibration pairs were "
             "skipped; the design must be built on every calibration pair"
         )
-    if _nonnegative_int(block["n_genes"], "phi-rank factor n_genes") != n_z_universe_genes:
+    if _nonnegative_int(block["n_genes"], f"{at}: n_genes") != n_z_universe_genes:
         raise ValueError(
             f"{at}: factor bank covers {block['n_genes']!r} genes, but the envelope "
             f"declares n_z_universe_genes={n_z_universe_genes}"

@@ -11,6 +11,32 @@
 >
 > Settles the local half of the runbook §2.5 requirement that the archive backing the seal be an
 > independent archiver's. Registered in `plans/2026-08-01-compose-pre-pod-local-closure.md` as L5.
+>
+> **[2026-08-20 — owner disposition, and a correction to how this task was being described.]**
+> Task #16 was repeatedly summarised as "engage an independent archiver **before the 2026-10-24
+> expiry**". **That framing is wrong and is withdrawn.** The artifact expiring on 2026-10-24 belongs
+> to `2dd23d6…`, a *development* archive that was never going to back the seal. §1 below already says
+> so: retention was raised to 400 days and protects "only runs made after the change — **including,
+> deliberately, the one that will back the seal**". The seal-backing run **does not exist yet**, and
+> when it happens its artifact will live ~400 days. **There is therefore no October deadline on this
+> task, and there never was one for the seal's purpose.**
+>
+> **Disposition (owner, 2026-08-20).** The two committed archives stay as they are — development
+> evidence, each already carrying an honest `archived_by` that records it is not independent. **No
+> third party is engaged for them.** The independence requirement is **re-scoped to bind at the moment
+> the seal-backing CI run is archived**, which is after the config is final and around the pod trip,
+> not now. This document is the instruction sheet for that moment.
+>
+> **Why independence is worth paying for then and not now:** this is an *evidence-credibility* gate,
+> not a seal-safety gate — no guard protecting the seal depends on it. `archived_by` is validated only
+> as a non-empty string (`kernel_isolation_ci.py:617`), so it is the one link in the chain nothing
+> machine-checks. Its value is realised when the evidence meets an external reader who cannot
+> distinguish "I archived my own CI run and promise it is genuine" from an independent attestation.
+> Before that, an honestly-labelled self-attested development archive costs nothing and claims nothing.
+>
+> **Coupled to L6.** Any plan to re-archive from a *current* run to obtain a fresh window changes
+> `head_sha`, which is exactly the unresolved `head_sha == C` decision (L6). The two must be decided
+> together; that coupling was not previously written down anywhere.
 
 ## 1. Why an independent archiver is required at all
 

@@ -259,6 +259,15 @@ existing test there had been matching the old shared string, so it was really as
 "something about that block was wrong"; it now names its own clause, and a sibling covers
 the rank cause end to end.
 
+> **[2026-08-17 — "the accepted set did not move" is preserved above as it was true on
+> 2026-08-16, and is no longer the whole contract.]** The next day's exactness fix
+> **deliberately narrowed** the accepted set, after an external audit passed a `READY`
+> report carrying `k_total: 4.0` and `n_calibration_pairs_skipped: False`. The invariant
+> that holds across both waves is stronger and simpler: **the boundary has moved exactly
+> once, and only inward — nothing this validator ever refused is accepted today.** The
+> narrowing is recorded in the readiness index's 2026-08-17 entry; the sentence above is
+> not retro-edited because it correctly describes the wave it belongs to.
+
 **Verification.** New suite `tests/alive/compose/test_phi_rank_block_causes.py` (66
 tests); mutation harness `scripts/compose_phi_rank_cause_mutation_harness.py`,
 **20/20 killed, each by the NAMED test that makes its claim**.

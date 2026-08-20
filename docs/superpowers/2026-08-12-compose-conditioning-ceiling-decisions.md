@@ -347,9 +347,9 @@ are separate, later steps under runbook §2.5.
 
 | # | decision | current status | owner sign-off (flip to CONFIRMED — name / date) |
 |---|---|---|---|
-| 1 | Ceiling value `1.0e+8`, anchored data-free at `1/√ε_f64` | PROPOSED | ______________________ |
-| 2 | First application point: per-candidate screen; all-inadmissible → `SelectionError` (exit 10) | PROPOSED | ______________________ |
-| 3 | Second application point: unregularized OOF train folds, `lam == 0.0` only | PROPOSED | ______________________ |
+| 1 | Ceiling value `1.0e+8`, anchored data-free at `1/√ε_f64` | ✅ **CONFIRMED** | owner / 2026-08-20 |
+| 2 | First application point: per-candidate screen; all-inadmissible → `SelectionError` (exit 10) | ✅ **CONFIRMED** | owner / 2026-08-20 |
+| 3 | Second application point: unregularized OOF train folds, `lam == 0.0` only | ✅ **CONFIRMED** | owner / 2026-08-20 — signed as the ARM; see the scope note below, which is **not** thereby endorsed |
 | 4 | Unbounded `‖z‖` scale gap (task #43) | ✅ **DECIDED 2026-08-13** | normalize — implemented as `lambda_scaling` |
 
 > **Note on decision 3.** Signing it endorses the arm, not the scope sentence attached to it. What
