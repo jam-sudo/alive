@@ -74,6 +74,7 @@ _EXPECTED_REGULARIZED_SOLVER = "svd_ridge_filter_factors"
 _EXPECTED_IDENTIFICATION_SELECTION = "calibration_oof_gene_disjoint"
 _EXPECTED_UNREGULARIZED_OOF_RANK_POLICY = "require_full_rank_each_train_fold"
 _EXPECTED_LAMBDA_SCALING = "calibration_sigma_max_squared"
+_EXPECTED_FACTOR_BANK_NORMALIZATION = "sigma_max_z_unit"
 _EXPECTED_RANK_TOLERANCE_RULE = "max_shape_times_float64_eps_times_sigma_max"
 _EXPECTED_OOF_FOLDS = 3
 _EXPECTED_UNCOVERED_TOLERANCE = 0.75
@@ -269,6 +270,7 @@ _KNOWN_IDENTIFICATION = frozenset(
         "unregularized_oof_rank_policy",
         "rank_tolerance_rule",
         "lambda_scaling",
+        "factor_bank_normalization",
         "oof_folds",
         "uncovered_tolerance",
         "condition_ceiling",
@@ -471,6 +473,7 @@ class ComposePhase2Config:
     unregularized_oof_rank_policy: str
     rank_tolerance_rule: str
     lambda_scaling: str
+    factor_bank_normalization: str
     oof_folds: int
     uncovered_tolerance: float
     condition_ceiling: float
@@ -720,6 +723,7 @@ def load_compose_phase2_config(path: str | Path) -> ComposePhase2Config:
         unregularized_oof_rank_policy,
         rank_tolerance_rule,
         lambda_scaling,
+        factor_bank_normalization,
         oof_folds,
         uncovered_tolerance,
         condition_ceiling,
@@ -773,6 +777,7 @@ def load_compose_phase2_config(path: str | Path) -> ComposePhase2Config:
         unregularized_oof_rank_policy=unregularized_oof_rank_policy,
         rank_tolerance_rule=rank_tolerance_rule,
         lambda_scaling=lambda_scaling,
+        factor_bank_normalization=factor_bank_normalization,
         oof_folds=oof_folds,
         uncovered_tolerance=uncovered_tolerance,
         condition_ceiling=condition_ceiling,
@@ -983,6 +988,12 @@ def _validate_identification(
             "identification.rank_tolerance_rule must match the preregistration exactly: "
             f"{_EXPECTED_RANK_TOLERANCE_RULE!r}"
         )
+    factor_bank_normalization = _require(block, "factor_bank_normalization", "identification")
+    if factor_bank_normalization != _EXPECTED_FACTOR_BANK_NORMALIZATION:
+        raise Phase2ConfigError(
+            "identification.factor_bank_normalization must match the preregistration "
+            f"exactly: {_EXPECTED_FACTOR_BANK_NORMALIZATION!r}"
+        )
     lambda_scaling = _require(block, "lambda_scaling", "identification")
     if lambda_scaling != _EXPECTED_LAMBDA_SCALING:
         raise Phase2ConfigError(
@@ -1041,6 +1052,7 @@ def _validate_identification(
         rank_policy,
         rank_rule,
         lambda_scaling,
+        factor_bank_normalization,
         oof_folds,
         tolerance,
         ceiling,

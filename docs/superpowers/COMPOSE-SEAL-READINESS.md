@@ -5,7 +5,7 @@
 > **이 문서는 아무것도 정의하지 않는다** — 세부(task)는 plan, claim은 spec, exact param은 config,
 > 시간순 audit는 git이 authoritative다([sources of truth](../../CLAUDE.md#sources)). 상태 행이 authoritative
 > 문서와 어긋나면 **authoritative 문서가 옳다**; 이 인덱스를 갱신한다.
-> **Updated:** 2026-08-20 @ `47bb17b` (branch `compose-audit-exactness-fixes`)
+> **Updated:** 2026-08-21 @ `dc252d3` (branch `compose-factor-bank-normalization`)
 > `scripts/bump-readiness-stamp.sh` / the pre-commit hook from `HEAD` at commit time, so it names the
 > **parent** of the commit that carries it and can never name itself. Reading it as "one commit stale" is a
 > misreading; git is authoritative for when this file actually changed.
@@ -1675,6 +1675,42 @@ recorded coupling:** any plan to re-archive from a *current* run for a fresh win
 decided together, which was not written down anywhere before.
 
 Seal remains **UNOPENED**; execution remains **RELEASE-BLOCKED**.
+
+**2026-08-21 — decisions #6 and #7 are implemented; #7's normalizer was re-signed, and both
+costs its approval had priced in did NOT materialize.**
+
+**#6 (committed `dc252d3`).** `l3_hypernetwork` → `l3_symmetric_mlp` in `comparator_family` and
+`ablation_ladder`, spec §3.3 amended. The model is untouched. `config_sha256`
+`3faacaff…` → `c25734d5…`.
+
+**#7 — the normalizer changed after sign-off, and that is recorded, not smoothed over.** #7 was
+signed on 2026-08-20 as *"normalize the factor bank so `σmax(Φ_cal) = 1`"*. Implementation began the
+next day and immediately surfaced a fork; it was **raised rather than resolved silently**, and the
+owner re-signed with the normalizer changed to **`σmax(Z) = 1`** (decisions doc §5.1). Both
+normalizers remove the arbitrary bank scale `c`, which is the whole purpose of #7; they differ only
+in cost.
+
+**The two costs annotated on the 2026-08-20 approval did not occur — measured, not assumed.**
+`σmax(Φ_cal)` needs the calibration pair roster, which is what would have made the bank artifact
+split-dependent and forced a re-plumbing of `phase2a._verify_factor_banks`' byte-for-byte binding.
+`σmax(Z)` is computable from `Z` alone. **`phase2a.py` has no diff in this wave** — the seal-adjacent
+verifier is untouched, no guard was weakened, and the recorded fallback (option D) is therefore not
+raised.
+
+**`config_sha256` `c25734d5…` → `5fea3b9e69112b1f6dfd5f6d33249df9d13156ed46011e3dc46f4f8cf3a66100`,
+a new run identity.** This is the **second** move in the wave, so **task #14 must regenerate at
+`5fea3b9e…`** and at no earlier digest. Both digests were measured directly from
+`sha256_json(parsed YAML)` rather than carried over from the decision text.
+
+**Evidence: 13/13 mutations killed**, each attested by the **named failing test** whose own name
+makes the claim, across all four sites that enforce the rule (`zfactor.py` builder and deserializer,
+`config2.py`, the committed config, and `identify.py`'s rank tolerance). Running it found **two
+defects in this wave's own work**, both recorded in the decisions doc §5.2: a cond/rank test that
+compared a normalized matrix with itself and so could not fail under any normalizer, and a
+single-site mutation that survived because a missing config field is refused **twice** — the
+contract only dies when every site enforcing it does.
+
+Neither decision authorizes a run. Seal remains **UNOPENED**; execution remains **RELEASE-BLOCKED**.
 
 ## 이 문서가 *아닌* 것 (중복 금지)
 

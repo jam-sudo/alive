@@ -86,6 +86,20 @@ identification:
   # sqrt(sigma_max) (verified to one ulp), applied here so the bank stays a pure
   # function of the encoders and k_total rather than depending on the split.
   lambda_scaling: calibration_sigma_max_squared
+  # The factor bank is normalized at construction so sigma_max(Z) == 1, removing
+  # the arbitrary bank scale entirely. lambda_scaling above makes the HEADLINE's
+  # penalty relative, but the ablation ladder also contains L2, whose registered
+  # tanh saturation has an INTRINSIC scale that no penalty rescaling can absorb
+  # (measured: applying the headline's scale to L2 makes it WORSE, 2.08 vs 1.88).
+  # Pinning the bank is the only thing that makes all three arms comparable.
+  # sigma_max(Z), not sigma_max(Phi_cal): the latter needs the calibration pair
+  # roster, which would make the bank artifact split-dependent and force a
+  # re-plumbing of phase2a._verify_factor_banks' byte-for-byte binding.
+  # cond(Phi) and rank are invariant to a uniform rescale, so the registered
+  # condition_ceiling and rank policy keep their exact meaning.
+  # Owner decision #7 (2026-08-21):
+  # docs/superpowers/2026-08-17-compose-ablation-ladder-decisions.md
+  factor_bank_normalization: sigma_max_z_unit
   oof_folds: 3
   uncovered_tolerance: 0.75
   # Admissibility bound on cond(Phi). Screened in TWO places inside selection:

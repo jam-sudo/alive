@@ -30,6 +30,10 @@
   **[2026-08-20]** 이 항목은 `l3_hypernetwork`에서 이름만 바뀌었다(owner 결정 #6). **모델은 동일하며**
   등록 이름이 구현(고정 `z` 위 symmetric MLP)과 일치하도록 정정한 것이다. `config_sha256`은
   `3faacaff…` → `c25734d5…`로 이동했으므로 **이전 digest에 bind된 evidence는 재생성 대상이다**.
+  **[2026-08-21]** 결정 #7(factor bank normalization, `sigma_max(Z)=1`)이 digest를 **한 번 더**
+  옮겼다: `c25734d5…` → `5fea3b9e69112b1f6dfd5f6d33249df9d13156ed46011e3dc46f4f8cf3a66100`.
+  **이 wave의 최종 digest는 `5fea3b9e…` 이며 task #14의 재생성은 여기에서 해야 한다** — `c25734d5…`
+  는 중간값이지 목표가 아니다. #7은 seal guard를 건드리지 않았다(`phase2a.py` diff 없음).
 - `GI_LEARNABLE_WIN`: additive lower bound `> 0.05`이고 모든 learned comparator lower
   bound `> 0`이며 integrity가 valid일 때만 가능하다.
 - additive 조건만 통과하면 `PARTIAL`; additive 조건도 실패하면 `NO_DISTINCT_WIN`;

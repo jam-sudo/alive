@@ -42,6 +42,7 @@ encoder revision, the sequence-mapping hash, and a self-excluding SHA-256
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass, field
 from typing import Any, Mapping
 
@@ -52,7 +53,30 @@ from sklearn.decomposition import PCA
 from alive.provenance import sha256_bytes, sha256_json
 
 ZFACTOR_ALGORITHM = "compose_zfactor_pca"
-ZFACTOR_VERSION = "2a.1"
+ZFACTOR_VERSION = "2b.1"
+
+#: Registered factor-bank normalization rule. The bank is scaled by one scalar
+#: so that ``sigma_max(Z) == 1``.
+#:
+#: WHY it exists: the ablation ladder compares arms whose penalties live in
+#: different units, and an ARBITRARY bank scale ``c`` moved L2 and L3 while
+#: leaving the headline fixed (measured: 188% and 61% under a pure units change,
+#: against 3.6e-15 for L1). The headline is scale-invariant because
+#: ``identification.lambda_scaling`` makes its penalty relative; L2's registered
+#: ``tanh`` saturation has an INTRINSIC scale that no penalty rescaling can
+#: absorb, so the only way to make the ladder comparable is to remove ``c``
+#: itself. Pinning the bank does that for every arm at once.
+#:
+#: WHY this normalizer and not ``sigma_max(Phi_cal) = 1``: both remove ``c``, but
+#: ``Phi_cal`` needs the calibration pair roster, which would make the bank
+#: artifact SPLIT-DEPENDENT and force a re-plumbing of ``phase2a._verify_factor_banks``'
+#: byte-for-byte binding -- seal-adjacent code. ``sigma_max(Z)`` is computable
+#: from ``Z`` alone, so the bank stays split-free and the verifier is untouched.
+#: Owner decision #7, re-signed 2026-08-21 after the alternative was measured.
+#:
+#: ``cond(Phi)`` and ``rank`` are invariant to a uniform rescale, so the
+#: registered conditioning ceiling and the rank policy keep their exact meaning.
+FACTOR_BANK_NORMALIZATION = "sigma_max_z_unit"
 
 #: Registered, deterministic PCA sign convention.
 ORIENTATION_POLICY = "sign_of_largest_magnitude_loading_positive"
@@ -123,6 +147,8 @@ class GeneFactorBank:
     esm_components: NDArray[np.float64]
     encoder_revision: str
     sequence_mapping_hash: str
+    normalization: str = FACTOR_BANK_NORMALIZATION
+    normalization_scale: float = 1.0
     checksum: str = field(default="")
 
     # -- provenance -------------------------------------------------------
@@ -144,6 +170,8 @@ class GeneFactorBank:
             "esm_components": _round_array(self.esm_components),
             "encoder_revision": self.encoder_revision,
             "sequence_mapping_hash": self.sequence_mapping_hash,
+            "normalization": self.normalization,
+            "normalization_scale": _round_float(self.normalization_scale),
         }
 
     def artifact_bytes(self) -> bytes:
@@ -318,6 +346,8 @@ def _deserialize_gene_factor_bank(report: Any) -> GeneFactorBank:
         "esm_components",
         "encoder_revision",
         "sequence_mapping_hash",
+        "normalization",
+        "normalization_scale",
         "checksum",
     }
     if not isinstance(report, Mapping) or set(report) != payload_keys:
@@ -372,9 +402,26 @@ def _deserialize_gene_factor_bank(report: Any) -> GeneFactorBank:
     esm_components = _validated_factor_matrix(report["esm_components"], "esm_components", esm_dim)
     encoder_revision = report["encoder_revision"]
     sequence_mapping_hash = report["sequence_mapping_hash"]
+    normalization = report["normalization"]
+    normalization_scale = report["normalization_scale"]
     checksum = report["checksum"]
     if not isinstance(encoder_revision, str) or not encoder_revision:
         raise ValueError("factor-bank encoder_revision must be a non-empty string")
+    # The rule is REGISTERED, so a bank that names a different one is not a bank
+    # this protocol can consume -- refuse it here rather than let a differently
+    # scaled artifact through a checksum that would verify against itself.
+    if normalization != FACTOR_BANK_NORMALIZATION:
+        raise ValueError(
+            f"factor-bank normalization must be {FACTOR_BANK_NORMALIZATION!r}, "
+            f"got {normalization!r}"
+        )
+    if isinstance(normalization_scale, bool) or not isinstance(normalization_scale, (int, float)):
+        raise ValueError("factor-bank normalization_scale must be a number")
+    if not math.isfinite(float(normalization_scale)) or float(normalization_scale) <= 0.0:
+        raise ValueError(
+            f"factor-bank normalization_scale must be finite and positive, "
+            f"got {normalization_scale!r}"
+        )
     if not _is_sha256_hex(sequence_mapping_hash):
         raise ValueError("factor-bank sequence_mapping_hash must be a 64-hex SHA-256 digest")
     if not _is_sha256_hex(checksum):
@@ -392,6 +439,8 @@ def _deserialize_gene_factor_bank(report: Any) -> GeneFactorBank:
         esm_components=esm_components,
         encoder_revision=encoder_revision,
         sequence_mapping_hash=sequence_mapping_hash,
+        normalization=normalization,
+        normalization_scale=float(normalization_scale),
         checksum=checksum,
     )
     observed = sha256_bytes(bank.artifact_bytes())
@@ -531,6 +580,25 @@ def build_gene_factors(
 
     # (5) concatenate [expression ; ESM] per gene -------------------------
     z_full = np.concatenate([expr_scores, esm_scores], axis=1)
+
+    # (6) REGISTERED normalization: one scalar per bank so sigma_max(Z) == 1.
+    # Applied here, at bank construction, rather than at use: phase2a's
+    # _verify_factor_banks binds every runtime matrix row to the bank row byte
+    # for byte, so a bank that stored unnormalized z and a runtime that scaled it
+    # would fail that binding. Normalizing the artifact keeps the verifier
+    # untouched. See FACTOR_BANK_NORMALIZATION for why this normalizer.
+    singular = np.linalg.svd(z_full, compute_uv=False) if z_full.size else np.zeros(1)
+    sigma_max = float(singular[0]) if singular.size else 0.0
+    if not np.isfinite(sigma_max):
+        raise ValueError(
+            f"factor bank k_total={k_total} has a non-finite sigma_max ({sigma_max!r}); "
+            "the bank cannot be normalized"
+        )
+    # sigma_max == 0 iff Z is identically zero, where every scale is a no-op.
+    # Returning 1.0 keeps the rule total instead of dividing by zero.
+    normalization_scale = sigma_max if sigma_max > 0.0 else 1.0
+    z_full = z_full / normalization_scale
+
     z_by_gene = {gene: np.ascontiguousarray(z_full[i]) for i, gene in enumerate(gene_order)}
 
     bank = GeneFactorBank(
@@ -545,6 +613,8 @@ def build_gene_factors(
         esm_components=esm_comp,
         encoder_revision=str(encoder_revision),
         sequence_mapping_hash=str(sequence_mapping_hash),
+        normalization=FACTOR_BANK_NORMALIZATION,
+        normalization_scale=float(normalization_scale),
     )
     checksum = sha256_bytes(bank.artifact_bytes())
     return _with_checksum(bank, checksum)
@@ -737,3 +807,14 @@ def _orientation_signs(components: NDArray[np.float64]) -> NDArray[np.float64]:
 def _round_array(arr: NDArray) -> list:
     """Round-to-12-decimal nested list for stable cross-platform checksums."""
     return np.round(np.asarray(arr, dtype=np.float64), 12).tolist()
+
+
+def _round_float(value: float) -> float:
+    """Round-to-12-decimal scalar, matching :func:`_round_array`.
+
+    The normalization scale enters the checksum, so it must be quantised the
+    same way every other float in the payload is -- otherwise a bank built on
+    one BLAS could differ from an identical bank built on another in the last
+    bits and produce a different artifact checksum.
+    """
+    return float(np.round(float(value), 12))

@@ -179,6 +179,31 @@ ESM는 bolt-on이 아니라 **고정 입력 factor**로 재도입한다(project-
 탐색적 가설 1: 서열 축이 신호를 가질 수 있음을, 이번엔 식별가능 구조 안에서 검증). $z_g$를 먼저
 고정해야 Stage 2가 선형이 된다(end-to-end는 rotation ambiguity로 식별성을 잃음 → ablation L3).
 
+> **[2026-08-21 amendment — owner decision #7, 재서명본.]** factor bank는 이제 **등록된
+> normalization** 아래 구성된다: 하나의 스칼라로 나누어 $\sigma_{\max}(Z)=1$ 이 되게 하고,
+> 제거한 스칼라를 아티팩트에 함께 기록한다(`identification.factor_bank_normalization:
+> sigma_max_z_unit`).
+>
+> **왜.** ablation ladder는 penalty의 **단위가 서로 다른** arm들을 비교하는데, bank scale $c$는
+> 등록된 적 없는 자유도였다. `identification.lambda_scaling`(#43)이 headline의 penalty를 상대화해
+> L1은 이미 scale-free였지만, L2의 등록된 `tanh` saturation은 **고유 scale**을 가져 어떤 penalty
+> 재조정으로도 흡수되지 않는다(실측: headline의 scale을 L2에 적용하면 오히려 **악화**, 1.88 → 2.08).
+> 모든 arm에 동시에 닿는 유일한 방법은 $c$ 자체를 제거하는 것이다. 순수 단위 변경에 대한 held-out
+> 오차: L1 `3.6e-15` → `~1e-15`, L2 **`1.88`** → `~1e-15`, L3 **`0.61`** → `~1e-16`.
+>
+> **정직하게: 이 불변성은 normalization 이후 *구성상 참*이다** — $c$가 입력에서 상쇄되므로 arm들이
+> 다를 수 *없다*. 측정이 더하는 것은 그 상쇄가 부동소수점에서 **정확**하다는 것뿐이다.
+>
+> **$\sigma_{\max}(\Phi_{cal})$ 이 아니라 $\sigma_{\max}(Z)$ 인 이유.** 둘 다 $c$를 제거하지만
+> 전자는 calibration pair roster를 필요로 해 bank 아티팩트가 **split-dependent** 해지고
+> `phase2a._verify_factor_banks`의 byte-for-byte 바인딩(**seal-adjacent**)을 재배선해야 한다.
+> 후자는 $Z$만으로 계산된다 — bank는 split-free로 남고 **verifier는 손대지 않았다.**
+>
+> **바뀌지 않은 것.** $\mathrm{cond}(\Phi)$와 rank는 균일 rescale에 불변이므로(rank tolerance가
+> $\sigma_{\max}$에 **상대적**으로 등록되어 있다) 등록된 `condition_ceiling`과 rank policy는
+> 의미가 정확히 보존된다. 그리고 이것이 arm들을 **단위상 비교 가능**하게 만들지는 **않는다** —
+> 제거된 것은 등록되지 않은 임의 자유도 하나뿐이고, 남은 차이는 각 arm의 등록된 정의의 성질이다.
+
 ### 3.2 Stage 2 (대수적으로 식별가능한 bilinear operator $B$ = headline A)
 
 $$\varepsilon_{gh}[m]=z_g^\top B_m\,z_h,\quad B_m=B_m^\top\ (k\times k),\quad m=1..p;\qquad

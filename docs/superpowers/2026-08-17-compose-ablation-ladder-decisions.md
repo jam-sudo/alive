@@ -138,7 +138,7 @@ attribution is registered as confirmatory. **C must not be chosen — it is meas
 | # | decision | proposed | owner | date |
 |---|---|---|---|---|
 | 6 | `l3_hypernetwork` — rename + spec amendment (option B) | ✅ B | ✅ **APPROVED — option B** | 2026-08-20 |
-| 7 | ladder penalty units — normalize the bank (A) or restrict the claim (D) | ✅ A, else D | ✅ **APPROVED — option A** (the recommendation) | 2026-08-20 |
+| 7 | ladder penalty units — normalize the bank (A) or restrict the claim (D) | ✅ A, else D | ✅ **APPROVED — option A**, re-signed 2026-08-21 with the normalizer changed to `sigma_max(Z) = 1` (§5.1) | 2026-08-20 / 2026-08-21 |
 
 > **[2026-08-20 — what approving #7 as option A commits, restated before implementation.]** A
 > normalizes the factor bank so `σmax(Φ_cal) = 1` and pins the scalar in evidence. Two consequences
@@ -149,3 +149,97 @@ attribution is registered as confirmatory. **C must not be chosen — it is meas
 > L1↔L2/L3 comparison to exploratory; no code, digest unchanged) remains the recorded fallback if the
 > re-plumbing turns out to weaken the binding rather than move it. **No guard will be weakened to make
 > A fit;** if that is the only way, the implementation stops and D is raised instead.
+
+## 5.1 Normalizer changed after sign-off — `sigma_max(Phi_cal)` → `sigma_max(Z)`
+
+**What changed.** #7 was signed on 2026-08-20 as option A *"normalize the factor bank so
+`sigma_max(Phi_cal) = 1`"*. Implementation began on 2026-08-21 and immediately surfaced a fork, which
+was raised rather than resolved silently — the same handling as the fork found while implementing #43.
+The owner re-signed with the normalizer changed to **`sigma_max(Z) = 1`**.
+
+**Why.** Both normalizers remove the arbitrary bank scale `c`, which is the entire purpose of #7. They
+differ only in cost, and the difference is exactly the two consequences the 2026-08-20 sign-off note
+had flagged as the price of A:
+
+| | signed: `sigma_max(Phi_cal) = 1` | implemented: `sigma_max(Z) = 1` |
+|---|---|---|
+| inputs needed | `Z` **and the calibration pair roster** | `Z` alone |
+| bank artifact becomes split-dependent | **yes** | **no** |
+| `phase2a._verify_factor_banks` re-plumbing (seal-adjacent) | **required** | **none — untouched** |
+| removes `c` for every ladder arm | yes | yes (measured below) |
+| headline's relative `lambda` still works | yes | yes |
+
+`_verify_factor_banks` binds every runtime factor row to the bank row byte for byte, so the
+normalization has to live in the artifact either way. Putting a *pair-roster-dependent* scale there is
+what would have forced the re-plumbing; a `Z`-only scale does not.
+
+**Measured.** Under a pure units change (inputs scaled by `c`), held-out error per ladder arm:
+
+| | before #7 | after `sigma_max(Z) = 1` |
+|---|---|---|
+| L1 | `3.6e-15` | `~1e-15` |
+| L2 | **`1.88e+00`** | `~1e-15` |
+| L3 | **`6.1e-01`** | `~1e-16` |
+
+**Stated honestly: after normalization this invariance is true by construction** — `c` cancels out of
+the inputs, so the arms *cannot* differ. That is the point of the change, not a surprising empirical
+result. What the measurement adds is that the cancellation is exact in floating point for arms whose
+penalties are not even in the same units, and that nothing downstream moved: `cond(Phi)` and `rank`
+are invariant to a uniform rescale, so the registered `condition_ceiling` and the rank policy keep
+their exact meaning (asserted in `test_normalization_leaves_cond_and_rank_alone`).
+
+**What this does not do.** It does not make the ladder's arms *comparable in units* — L1 is penalised
+relatively, L2's saturation is absolute, L3's weight decay is in feature units. It removes the one
+degree of freedom that was **unregistered and arbitrary**. Any remaining difference between arms is a
+property of their registered definitions, which is what an ablation is supposed to measure.
+
+**Digest.** `c25734d5…` → `5fea3b9e69112b1f6dfd5f6d33249df9d13156ed46011e3dc46f4f8cf3a66100`, a new
+run identity. With #6 this is the **second** move in this wave, so **task #14 must regenerate at
+`5fea3b9e…`** and not at any earlier digest.
+
+### 5.2 Mutation evidence — 13/13, and the one test that had to be replaced first
+
+The rule is enforced in four places, and the mutable set covers all of them: the bank builder and
+the artifact deserializer (`zfactor.py`), the registered-value check (`config2.py`), the committed
+value itself (`configs/compose_k562_v1_phase2.yaml`), and the rank tolerance that makes the
+"`cond` keeps its meaning" claim true (`identify.py`). Every mutation below was applied to committed
+source, the suite was run, and the source was restored byte-for-byte (verified by digest).
+
+| | mutation | killed by |
+|---|---|---|
+| M01 | the normalization is not applied at all | `test_every_bank_is_built_with_unit_sigma_max` |
+| M02 | normalize by the Frobenius norm instead of `sigma_max` | same |
+| M03 | normalize per column instead of by one scalar | same |
+| M04 | record the scale as `1.0` (the constant a zero bank correctly takes) | `test_the_bank_records_the_scale_it_removed` |
+| M05 | drop the `sigma_max == 0` guard | `test_a_zero_bank_does_not_divide_by_zero` |
+| M06 | the artifact stops refusing a foreign normalization name | `test_a_bank_normalized_under_another_rule_is_refused` |
+| M07 | the artifact stops type-checking the recorded scale | `test_an_unusable_scale_is_refused` |
+| M08 | the artifact stops requiring a finite positive scale | same |
+| M09 | the rank tolerance becomes ABSOLUTE instead of relative to `sigma_max` | `test_normalization_leaves_cond_and_rank_alone` |
+| M10 | the config stops refusing an unregistered value | `test_the_config_refuses_an_unregistered_normalization_value` |
+| M11 | the registered constant drifts from the preregistration | `test_the_config_registers_the_normalization_rule` |
+| M12 | the committed config names a different rule | same |
+| M13 | the field stops being required **at every site** | `test_the_config_refuses_a_missing_normalization_value` |
+
+Each kill is attested by the **named failing test**, not by a nonzero exit code, and in every case
+the killer is the test whose own name makes the claim.
+
+**Two findings came out of running it, and both were defects in this wave's own work.**
+
+**(a) `test_normalization_leaves_cond_and_rank_alone` asserted nothing.** As first written it built
+banks at input scales `1.0` and `100.0` and compared their `rank_diagnostics`. But those banks are
+*normalized*, so they are identical to `2.9e-15` — the test compared a matrix with itself and could
+not have failed under any normalizer, including one that redefined the registered
+`condition_ceiling`. Measured before rewriting, not inferred. The claim it was cited for is a
+property of `rank_diagnostics` (the registered `rank_tolerance_rule` is relative to `sigma_max`), so
+it is now asserted against a *rescale* of one bank: `c = 1e-10`, `c = 1e10`, and the bank's own
+`normalization_scale`, which reconstructs the pre-normalization bank exactly. The extremes are
+load-bearing — an absolute tolerance survives a factor of 100 and is caught only when
+`sigma_min(Phi)` is driven under it, which `c = 1e-10` does because `Phi` is bilinear and scales as
+`c²`.
+
+**(b) The single-site form of M13 SURVIVED,** because a missing config field is refused twice —
+`_close_schema`'s missing-key check *and* `_require`. Killing one leaves the other. That is
+belt-and-braces in the loader, not a gap, but it means the mutation that tests the claim has to
+remove the field's required-ness at *every* site; the version that edited one site was measuring
+redundancy, not the contract.
