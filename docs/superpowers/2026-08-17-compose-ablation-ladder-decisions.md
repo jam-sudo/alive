@@ -194,8 +194,16 @@ degree of freedom that was **unregistered and arbitrary**. Any remaining differe
 property of their registered definitions, which is what an ablation is supposed to measure.
 
 **Digest.** `c25734d5…` → `5fea3b9e69112b1f6dfd5f6d33249df9d13156ed46011e3dc46f4f8cf3a66100`, a new
-run identity. With #6 this is the **second** move in this wave, so **task #14 must regenerate at
-`5fea3b9e…`** and not at any earlier digest.
+run identity. With #6 this is the **second** move in this wave, so **task #14 must not regenerate at
+any earlier digest.**
+
+`5fea3b9e…` is a **floor, not the target.** The committed config still carries five explicit
+activation blockers — `regimes.power_status`, and `revision` / `environment_status` /
+`approximation_bias_report_sha256` on `baselines.gears` and `baselines.cpa` — and the readiness
+index's own step 4 orders config finalization (filling those nulls, which moves the digest again)
+*before* evidence regeneration. Regenerating #14 at `5fea3b9e…` today would bind evidence to a
+lineage that is guaranteed to move. #14's actual target is the digest that stands after the nulls
+are filled, and filling them is pod work (sub-project B).
 
 ### 5.2 Mutation evidence — 13/13, and the one test that had to be replaced first
 

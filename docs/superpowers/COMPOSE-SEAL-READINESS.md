@@ -5,7 +5,7 @@
 > **이 문서는 아무것도 정의하지 않는다** — 세부(task)는 plan, claim은 spec, exact param은 config,
 > 시간순 audit는 git이 authoritative다([sources of truth](../../CLAUDE.md#sources)). 상태 행이 authoritative
 > 문서와 어긋나면 **authoritative 문서가 옳다**; 이 인덱스를 갱신한다.
-> **Updated:** 2026-08-21 @ `dc252d3` (branch `compose-factor-bank-normalization`)
+> **Updated:** 2026-08-21 @ `e1d95cd` (branch `compose-factor-bank-normalization`)
 > `scripts/bump-readiness-stamp.sh` / the pre-commit hook from `HEAD` at commit time, so it names the
 > **parent** of the commit that carries it and can never name itself. Reading it as "one commit stale" is a
 > misreading; git is authoritative for when this file actually changed.
@@ -1698,8 +1698,12 @@ verifier is untouched, no guard was weakened, and the recorded fallback (option 
 raised.
 
 **`config_sha256` `c25734d5…` → `5fea3b9e69112b1f6dfd5f6d33249df9d13156ed46011e3dc46f4f8cf3a66100`,
-a new run identity.** This is the **second** move in the wave, so **task #14 must regenerate at
-`5fea3b9e…`** and at no earlier digest. Both digests were measured directly from
+a new run identity.** This is the **second** move in the wave, so **task #14 must not regenerate at
+any earlier digest** — but `5fea3b9e…` is a **floor, not the target.** The config still carries five
+activation blockers (`regimes.power_status`; `revision` / `environment_status` /
+`approximation_bias_report_sha256` on both deep baselines), and step 4 above orders config
+finalization *before* evidence regeneration. Filling those nulls moves the digest again, so a pod
+trip that regenerates #14 now would bind evidence to a lineage guaranteed to move. Both digests were measured directly from
 `sha256_json(parsed YAML)` rather than carried over from the decision text.
 
 **Evidence: 13/13 mutations killed**, each attested by the **named failing test** whose own name
