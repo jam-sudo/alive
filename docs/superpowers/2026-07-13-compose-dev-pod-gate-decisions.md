@@ -243,8 +243,62 @@ sealed-run runbook past §2.5 (owner-approved exact Git SHA is a separate, later
 | 1 | GEARS revision `cell-gears==0.1.2` + published/default K562 training config | PROPOSED | ______________________ |
 | 2 | GEARS GO-graph/gene2go — Harvard Dataverse `doi:10.7910/DVN/Q2ZV3E`, v2 manifest | **RESOLVED** | ______________________ |
 | 3 | CPA revision `cpa-tools==0.8.5` + published/default combo config | PROPOSED | ______________________ |
-| 4 | `approximation_bias` metric DEFINITION (spec `2026-07-13-compose-approximation-bias-metric-design.md`) | PROPOSED | ______________________ |
+| 4 | `approximation_bias` metric DEFINITION (spec `2026-07-13-compose-approximation-bias-metric-design.md`) | PROPOSED — **definition has changed since drafting; read §6.1 before signing** | ______________________ |
 | 5 | Dev-pod provider: RunPod A100 80GB PCIe, torch cu124 | PROPOSED | ______________________ |
+
+
+### 6.1 What changed since this record was drafted — 2026-08-21 re-verification
+
+Five weeks separate the drafting of this record from the signature it is waiting for, so every cited
+fact was re-measured against the current repository before asking for that signature. **Three of the
+four open decisions are unchanged. One is not, and the owner must not sign it without knowing what
+moved.**
+
+**#1, #3, #5 — verified unchanged, measured today.**
+
+| # | claim | re-measured |
+|---|---|---|
+| 1 | `cell-gears==0.1.2` | present verbatim in `docs/activation-evidence/compose/requirements.gears_env.lock`; file SHA-256 `2d55a062…` still equals the value §7 recorded |
+| 3 | `cpa-tools==0.8.5` | present verbatim in `requirements.cpa_env.lock`; file SHA-256 `7d4d034b…` still equals §7's value |
+| 5 | RunPod A100 80GB PCIe, torch `2.6.0+cu124` | both locks still pin `torch==2.6.0+cu124`; manifest/lock host blocks unchanged |
+
+A stale copy of both locks also sits under `artifacts/compose/` carrying the **superseded**
+`cpa-tools==0.7.2` and a non-cu124 `torch==2.6.0`. It is inert: `artifacts/` is gitignored and every
+consumer reads the committed path (`gears_probe_a.py:171`, `scripts/baselines/gears_worker.py:95`).
+Recorded so nobody re-derives it as a finding.
+
+**#4 — the DEFINITION being signed has changed. Three specific moves, each with the commit.**
+
+1. **Report schema `…_v1` → `…_v3`** (spec §4; `approximation_bias.py:23` implements v3). v3 requires
+   Probe-A admission/registration/verification provenance, recomputes every per-pair derived
+   statistic, and has `run_phase2b` re-verify the driver's immutable snapshot before the seal.
+2. **§2's per-cell term changed representation** (`4f417f5`): `δ_i` was
+   `apply_response_projection(…, representation="raw_pseudobulk_approximation")` **per row**; it is now
+   `representation="cell_raw_counts"` computed **once on the full cell matrix**. The population-mean
+   term still uses `raw_pseudobulk_approximation` on the single mean row. This makes the Jensen gap
+   well-defined — the exact per-cell path against the pseudobulk path — rather than comparing the
+   pseudobulk representation with itself. It is a correction of what is measured, not a re-scoping,
+   but it *is* a change to the definition this row asks the owner to settle.
+3. **The flag's CONSEQUENCE changed** (`4f417f5`): `R ≥ R*` now adds a **mandatory narrative
+   limitation only.** It does **not** substitute comparators — the registered roster, comparator
+   family, margins, multiplicity and verdict all stay unchanged. `R` is a pre-registered proxy, not
+   an exchangeability proof.
+
+**Unchanged in #4:** `R_star = 0.5`; the three flag values (`representation_confounded` / `clear` /
+`indeterminate`); measurement on non-sealed roles only; and the fact that the report is pod-generated
+and Probe-A-gated, so `baselines.gears.approximation_bias_report_sha256` stays `null` until it exists.
+
+**#2 needs no signature** (RESOLVED; §2 says so explicitly). Its §6 row exists for audit completeness.
+
+**What signing does and does not do — unchanged from §6 above, restated because it is the question
+that keeps recurring.** Signing these four settles *choices*. It does **not** edit
+`configs/compose_k562_v1_phase2.yaml`, does not fill any null activation blocker, does not move
+`config_sha256`, does not approve an exact Git SHA, and does not open the seal. It unblocks the
+**development pod**, which is the only path that can produce the real-Norman evidence those nulls
+need. Task 0.1's wheel/sdist hashes and pod image digest remain a **separate open acceptance
+condition** for #1 and #3 — signing settles the version choice, not the reproducibility evidence
+for it.
+
 
 ---
 

@@ -5,7 +5,7 @@
 > **이 문서는 아무것도 정의하지 않는다** — 세부(task)는 plan, claim은 spec, exact param은 config,
 > 시간순 audit는 git이 authoritative다([sources of truth](../../CLAUDE.md#sources)). 상태 행이 authoritative
 > 문서와 어긋나면 **authoritative 문서가 옳다**; 이 인덱스를 갱신한다.
-> **Updated:** 2026-08-21 @ `e1d95cd` (branch `compose-factor-bank-normalization`)
+> **Updated:** 2026-08-21 @ `a8e178b` (branch `compose-factor-bank-normalization`)
 > `scripts/bump-readiness-stamp.sh` / the pre-commit hook from `HEAD` at commit time, so it names the
 > **parent** of the commit that carries it and can never name itself. Reading it as "one commit stale" is a
 > misreading; git is authoritative for when this file actually changed.
@@ -1715,6 +1715,17 @@ single-site mutation that survived because a missing config field is refused **t
 contract only dies when every site enforcing it does.
 
 Neither decision authorizes a run. Seal remains **UNOPENED**; execution remains **RELEASE-BLOCKED**.
+
+**The next gate is not a pod — it is four missing signatures.** `2026-07-13-compose-dev-pod-gate-decisions.md`
+§6 still shows **#1 (GEARS `cell-gears==0.1.2`), #3 (CPA `cpa-tools==0.8.5`), #4 (`approximation_bias`
+DEFINITION) and #5 (dev-pod provider) as `PROPOSED` with empty signature lines.** Those four gate the
+development pod, and the development pod is the only thing that can produce the real-Norman evidence
+the config's five null activation blockers need. Every cited fact was re-measured on 2026-08-21 and
+recorded in a new **§6.1**: #1/#3/#5 are unchanged (lock SHAs `2d55a062…` / `7d4d034b…` still match),
+but **#4's definition has moved since drafting** — schema `v1` → `v3`, §2's per-cell term changed from
+`raw_pseudobulk_approximation` per row to `cell_raw_counts` on the full matrix (`4f417f5`), and the
+fairness flag now adds a narrative limitation only instead of substituting comparators. `R_star = 0.5`
+and the three flag values are unchanged. Signing still edits no config and moves no digest.
 
 ## 이 문서가 *아닌* 것 (중복 금지)
 
