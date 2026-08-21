@@ -1,5 +1,15 @@
 # COMPOSE-K562-v1 — proposal for decision #4: fix the factor-bank scale so `lambda_grid` means something
 
+> **STATUS: APPROVED 2026-08-13 and IMPLEMENTED — see §8.** Approved in the equivalent
+> penalty-side form: `identification.lambda_scaling: calibration_sigma_max_squared`, applied at
+> both solve sites. §8.1 records two residuals that were NOT closed (`id_only` keeps an absolute
+> lambda; whether the registered grid VALUES suit the real design's `cond`).
+>
+> **`config_sha256` HAS moved since this was drafted** — `b158417a…` → `3faacaff…` on this
+> implementation, then twice more in the 2026-08-20/21 ablation-ladder wave, now `5fea3b9e…`.
+> The unchanged-digest sentence in the original banner describes the document at drafting time.
+> The banner as originally written follows.
+>
 > **STATUS: PROPOSED — owner approval required before any code or config change.** This document
 > proposes one concrete resolution of task #43 / readiness item 4b / decision #4 of
 > `2026-08-12-compose-conditioning-ceiling-decisions.md`. It **makes no config edit, no code change

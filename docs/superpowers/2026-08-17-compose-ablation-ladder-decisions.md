@@ -1,5 +1,14 @@
 # COMPOSE-K562-v1 — decisions #6 and #7: the ablation ladder's name and its penalty units
 
+> **STATUS: APPROVED and IMPLEMENTED — see §5, §5.1 and §5.2.** #6 was approved 2026-08-20
+> (option B) and implemented in `dc252d3`; #7 was approved 2026-08-20 (option A), **re-signed
+> 2026-08-21 with the normalizer changed to `sigma_max(Z) = 1`** (§5.1), and implemented in
+> `e1d95cd`. The sign-off table in §5 is the current state.
+>
+> **`config_sha256` HAS moved since this was drafted** — `3faacaff…` → `c25734d5…` (#6) →
+> `5fea3b9e…` (#7). The unchanged-digest sentence in the original banner describes the document
+> at drafting time, not the repository now. The banner as originally written follows.
+>
 > **STATUS: PROPOSED — owner approval required before any code, config or spec change.** This
 > document carries the two HIGH findings from the 2026-08-17 external audit
 > (`docs/GPT audit/comprehensiveaudit.md`, F-04 and F-05) that a drafter must not resolve alone,
