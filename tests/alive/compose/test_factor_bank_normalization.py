@@ -26,6 +26,8 @@ is what stops that from being an assumption.
 
 from __future__ import annotations
 
+import dataclasses
+
 import numpy as np
 import pytest
 import yaml
@@ -37,7 +39,10 @@ from alive.compose.zfactor import (
     FACTOR_BANK_NORMALIZATION,
     _deserialize_gene_factor_bank,
     build_gene_factors,
+    serialize_factor_bank_collection,
+    verify_bank_normalization,
 )
+from alive.provenance import sha256_bytes, sha256_json
 
 _K, _ESM = 4, 2
 
@@ -255,3 +260,143 @@ def test_the_config_refuses_a_missing_normalization_value(tmp_path):
     path.write_text(yaml.safe_dump(raw))
     with pytest.raises(Phase2ConfigError, match="factor_bank_normalization"):
         load_compose_phase2_config(str(path))
+
+
+# --------------------------------------------------------------------------- #
+# 6. the rule is enforced ON THE NUMBERS, at every door
+# --------------------------------------------------------------------------- #
+# 2026-08-22, from an external audit that reproduced it: a bank could declare
+# `sigma_max_z_unit`, record a scale, carry a checksum that verifies against the
+# declaring artifact, and be ACCEPTED with an actual sigma_max(Z) of 7.0. Every
+# check that existed compared the bank with ITSELF -- the checksum recomputes
+# from the same declared numbers, and phase2a's row loop binds the runtime
+# matrix to those same numbers. An unnormalized bank and a matrix copied from it
+# agree perfectly and are both wrong. The owner-approved decision was in the
+# generator and in the config; nothing on the consumption side enforced it.
+#
+# Each forgery below is built to pass EVERY other check -- self-consistent
+# checksum, matching gene universe, byte-identical runtime rows -- so that only
+# the normalization check can reject it. A forgery that trips an older check
+# would make these tests pass for the wrong reason.
+def _forged_bank(factor=7.0, **kw):
+    """A bank scaled off the unit sphere, with its own checksum recomputed."""
+    honest = _bank(**kw)
+    scaled = {g: np.ascontiguousarray(np.asarray(v) * factor) for g, v in honest.z_by_gene.items()}
+    forged = dataclasses.replace(honest, z_by_gene=scaled, checksum="")
+    return dataclasses.replace(forged, checksum=sha256_bytes(forged.artifact_bytes()))
+
+
+def test_a_bank_whose_actual_sigma_max_is_not_one_is_refused():
+    """Door A -- reading a serialized artifact back."""
+    forged = _forged_bank()
+    assert sha256_bytes(forged.artifact_bytes()) == forged.checksum, (
+        "the forgery must be self-consistent, or the checksum check rejects it first "
+        "and this test proves nothing about the normalization"
+    )
+    with pytest.raises(ValueError, match="actual sigma_max"):
+        _deserialize_gene_factor_bank(forged.report())
+
+
+def test_serializing_a_bank_whose_actual_sigma_max_is_not_one_is_refused():
+    """Door C -- before bank objects become the durable carrier."""
+    forged = _forged_bank()
+    with pytest.raises(ValueError, match="actual sigma_max"):
+        serialize_factor_bank_collection({forged.k_total: forged})
+
+
+def test_the_check_accepts_every_honest_bank():
+    """The other direction: the check must not reject what the builder makes.
+
+    A refusal that also refuses honest banks is not a guard, it is an outage --
+    and this repository has turned off a gate for exactly that reason before.
+    """
+    for k in (4, 6, 8):
+        for scale in (1e-6, 1.0, 1e6):
+            bank = _bank(k=k, n_genes=16, scale=scale)
+            verify_bank_normalization(bank)
+            _deserialize_gene_factor_bank(bank.report())
+            serialize_factor_bank_collection({bank.k_total: bank})
+
+
+@pytest.mark.filterwarnings("ignore:invalid value encountered in divide:RuntimeWarning")
+def test_the_degenerate_zero_bank_stays_consumable():
+    """The builder leaves an identically-zero Z alone at scale 1.0, so the check
+    must mirror that. Refusing it would make this library produce an artifact it
+    cannot read back -- a contradiction, not a guard."""
+    genes = [f"G{i:02d}" for i in range(12)]
+    bank = build_gene_factors(
+        delta_by_gene={g: np.zeros(20) for g in genes},
+        sequence_by_gene={g: np.zeros(8) for g in genes},
+        k_total=_K,
+        esm_dim=_ESM,
+        encoder_revision="rev",
+        sequence_mapping_hash="a" * 64,
+    )
+    verify_bank_normalization(bank)
+    assert _deserialize_gene_factor_bank(bank.report()).normalization_scale == 1.0
+
+
+@pytest.mark.filterwarnings("ignore:invalid value encountered in divide:RuntimeWarning")
+def test_a_zero_bank_claiming_a_scale_other_than_one_is_refused():
+    """The zero branch is an exemption for a shape the builder produces, not a
+    hole: a zero bank that records a scale it could not have applied is a lie
+    about provenance even though its factors are harmless."""
+    genes = [f"G{i:02d}" for i in range(12)]
+    bank = build_gene_factors(
+        delta_by_gene={g: np.zeros(20) for g in genes},
+        sequence_by_gene={g: np.zeros(8) for g in genes},
+        k_total=_K,
+        esm_dim=_ESM,
+        encoder_revision="rev",
+        sequence_mapping_hash="a" * 64,
+    )
+    lying = dataclasses.replace(bank, normalization_scale=3.0, checksum="")
+    lying = dataclasses.replace(lying, checksum=sha256_bytes(lying.artifact_bytes()))
+    with pytest.raises(ValueError, match="identically zero"):
+        verify_bank_normalization(lying)
+
+
+def test_phase2a_refuses_a_bank_whose_actual_sigma_max_is_not_one():
+    """Door B -- bank objects handed straight to the pipeline.
+
+    The forgery scales the runtime matrix by the SAME factor, so the row-for-row
+    binding still passes byte for byte and the aggregate checksum is rebuilt.
+    Only the normalization check can reject this.
+    """
+    from alive.compose.phase2a import HashMismatchError, _verify_factor_banks
+    from tests.alive.compose.test_phase2a import _build_instance, _factor_banks, _inputs
+
+    factor = 7.0
+    inst = _build_instance(np.random.default_rng(57))
+    base = _inputs(inst)
+    unit = {
+        k: np.ascontiguousarray(
+            np.asarray(m, dtype=np.float64)
+            / float(np.linalg.svd(np.asarray(m, dtype=np.float64), compute_uv=False)[0])
+        )
+        for k, m in base.factors_by_k.items()
+    }
+    honest_inputs = dataclasses.replace(base, factors_by_k=unit)
+    honest_banks = _factor_banks(honest_inputs)
+    bound = dataclasses.replace(
+        honest_inputs,
+        factor_banks_by_k=honest_banks,
+        factor_checksum=sha256_json(
+            {"factor_banks_by_k": {str(k): honest_banks[k].checksum for k in sorted(honest_banks)}}
+        ),
+    )
+    _verify_factor_banks(bound, require_banks=True)  # control: the honest bind passes
+
+    scaled_inputs = dataclasses.replace(
+        base, factors_by_k={k: np.ascontiguousarray(m * factor) for k, m in unit.items()}
+    )
+    forged_banks = _factor_banks(scaled_inputs)
+    forged = dataclasses.replace(
+        scaled_inputs,
+        factor_banks_by_k=forged_banks,
+        factor_checksum=sha256_json(
+            {"factor_banks_by_k": {str(k): forged_banks[k].checksum for k in sorted(forged_banks)}}
+        ),
+    )
+    with pytest.raises(HashMismatchError, match="actual sigma_max"):
+        _verify_factor_banks(forged, require_banks=True)

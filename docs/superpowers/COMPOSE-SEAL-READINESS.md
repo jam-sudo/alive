@@ -5,7 +5,7 @@
 > **이 문서는 아무것도 정의하지 않는다** — 세부(task)는 plan, claim은 spec, exact param은 config,
 > 시간순 audit는 git이 authoritative다([sources of truth](../../CLAUDE.md#sources)). 상태 행이 authoritative
 > 문서와 어긋나면 **authoritative 문서가 옳다**; 이 인덱스를 갱신한다.
-> **Updated:** 2026-08-21 @ `a8e178b` (branch `compose-factor-bank-normalization`)
+> **Updated:** 2026-08-22 @ `5adeb96` (branch `compose-factor-bank-normalization`)
 > `scripts/bump-readiness-stamp.sh` / the pre-commit hook from `HEAD` at commit time, so it names the
 > **parent** of the commit that carries it and can never name itself. Reading it as "one commit stale" is a
 > misreading; git is authoritative for when this file actually changed.
@@ -1726,6 +1726,35 @@ but **#4's definition has moved since drafting** — schema `v1` → `v3`, §2's
 `raw_pseudobulk_approximation` per row to `cell_raw_counts` on the full matrix (`4f417f5`), and the
 fairness flag now adds a narrative limitation only instead of substituting comparators. `R_star = 0.5`
 and the three flag values are unchanged. Signing still edits no config and moves no digest.
+
+**2026-08-22 — the external audit found decision #7's rule was never enforced on consumption, and
+it was right.**
+
+The Codex audit reported, and I reproduced by running it, that a factor bank could declare
+`sigma_max_z_unit`, record a scale, carry a checksum that verifies against the declaring artifact,
+and be **accepted** with an actual `sigma_max(Z)` of `7.0`. Every check that existed compared the
+bank with itself: the checksum recomputes from the same declared numbers, and
+`phase2a._verify_factor_banks` binds the runtime matrix to those same numbers, so an unnormalized
+bank and a matrix copied from it agree perfectly and are both wrong. The owner-approved decision was
+in the generator and in the config; nothing on the consumption side made it true.
+
+`zfactor.verify_bank_normalization` now enforces it at all three doors a bank can enter through —
+artifact deserialization, `phase2a._verify_factor_banks`, and carrier serialization. The
+byte-for-byte binding is **untouched**: this adds a refusal rather than re-plumbing the binding, so
+#7's seal-adjacent constraint still holds. Tolerance `1e-9` is measured (worst honest round-trip
+deviation `8.4e-13` over 87 banks; the forgery misses by 7 orders). **19/19 mutations killed**, each
+by the named failing test. The change also exposed that `driver/fixture_builder._build_instance` — production code — generated unnormalized factor
+matrices, so every scientific-carrier fixture bound banks that named a rule they broke; it now
+normalizes. Full compose suite **2202 passed, 2 skipped**. Detail in `2026-08-17-compose-ablation-ladder-decisions.md` §5.3.
+
+**`config_sha256` is unchanged at `5fea3b9e…`** — code only, no new run identity, and this
+authorizes no run. Seal remains **UNOPENED**; execution remains **RELEASE-BLOCKED**.
+
+**Recorded about the loop, not the code:** this is the third time the external audit's asymmetric
+view caught a defect in my own most recent wave, and the second time the defect had moved one level
+out from where my own verification was looking — §5.2's 13 mutations were thorough about the
+generator and silent about the consumer. A contract that no test claims cannot be mutated, so
+mutation coverage measures the tests that exist, never the ones missing.
 
 ## 이 문서가 *아닌* 것 (중복 금지)
 

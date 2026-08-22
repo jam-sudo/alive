@@ -260,3 +260,77 @@ load-bearing — an absolute tolerance survives a factor of 100 and is caught on
 belt-and-braces in the loader, not a gap, but it means the mutation that tests the claim has to
 remove the field's required-ness at *every* site; the version that edited one site was measuring
 redundancy, not the contract.
+
+### 5.3 The rule was in the generator and the config, not at the consumption boundary
+
+**Found by the external audit, reproduced here.** On 2026-08-21 the Codex audit reported that a
+factor bank could declare `sigma_max_z_unit`, record a scale, carry a checksum that verifies against
+the declaring artifact, and be **accepted** with an actual `sigma_max(Z)` far from 1. Adjudicated by
+running it, not by reading:
+
+```
+honest bank: sigma_max(Z) = 1.000000000000  declared='sigma_max_z_unit'
+
+FORGED BANK ACCEPTED BY _deserialize_gene_factor_bank
+  declared normalization : 'sigma_max_z_unit'
+  recorded scale         : 7.466811203808
+  ACTUAL sigma_max(Z)    : 7.000000000000
+```
+
+**Why every existing check missed it: each one compared the bank with itself.** The checksum is
+recomputed from the same declared numbers. `phase2a._verify_factor_banks` binds the runtime matrix to
+those same numbers row by row — so an unnormalized bank and a matrix copied from it agree perfectly
+and are both wrong. §5.2's 13 mutations all lived on the generator side or on the *name*; nothing
+asserted that a consumer verifies the invariant, and a contract no test claims cannot be mutated.
+The test file's own docstring had gone half way — *"the **name** has to be checked rather than
+inferred"* — and stopped short of checking the value.
+
+**Fixed at every door a bank can enter through**, via one function, `zfactor.verify_bank_normalization`:
+
+| door | site | on failure |
+|---|---|---|
+| A | `_deserialize_gene_factor_bank` — a serialized artifact read back | `ValueError` |
+| B | `phase2a._verify_factor_banks` — a bank object handed to the pipeline | `HashMismatchError` |
+| C | `serialize_factor_bank_collection` — before bytes become the durable carrier | `ValueError` |
+
+Door B converts rather than propagating: a bare `ValueError` escaping a caller that handles
+`HashMismatchError` is the same escape that let `LinAlgError` past the pre-seal roster once before.
+**`_verify_factor_banks`' byte-for-byte binding is untouched** — this adds a refusal, it does not
+re-plumb the binding, so #7's seal-adjacent constraint still holds.
+
+**Tolerance `1e-9`, measured not chosen.** The normalization is exact to machine precision; what
+sets the floor is the artifact's own 12-decimal rounding. Over 87 banks (`k` ∈ {4,6,8}, 12–2000
+genes, input scales 1e-6/1/1e6, three seeds) the worst in-memory deviation is `4.4e-16` and the worst
+after a serialize/deserialize round trip is `8.4e-13`. `1e-9` leaves an honest bank ~3 orders of
+margin and refuses the `7.0` forgery by 7 orders. There is no ambiguous band.
+
+**The zero bank is mirrored, not exempted.** `build_gene_factors` keeps the rule total by leaving an
+identically-zero `Z` alone at scale `1.0`, so the verifier accepts exactly that shape and no other —
+a zero bank recording any other scale is refused. Refusing the shape outright would have made this
+library produce an artifact it cannot read back.
+
+**Fixtures were declaring a rule they did not obey — and I first measured that blast radius wrong.**
+Running `test_phase2a.py` alone showed exactly one failure, and I reported it as the whole radius.
+The full suite then failed **48 tests**: `driver/fixture_builder._build_instance` — *production* code,
+not a test helper — generates the synthetic factor matrices every scientific-carrier fixture binds
+its banks to, and those matrices were never normalized. The lesson is the narrow one: a targeted run
+measures the target, not the radius; only the full suite measures the radius.
+
+The fix is in `_build_instance` rather than in the fixtures that consume it. A fixture instance whose
+matrices break the registered rule would make **fixture runs exercise a different contract from
+scientific runs**, and since bank rows are bound to those matrices byte for byte it would keep
+producing banks that name a rule they break. `test_phase2a.py::_factor_banks` normalizes its own
+matrices for the same reason. Every failure was the check working; none was a reason to loosen it.
+
+**19/19 mutations killed**, each by the **named failing test** whose own name makes the claim (§5.2's
+13 plus six more: each door's check removed, the tolerance loosened until the forgery fits, the
+zero-bank scale check removed, and door B propagating `ValueError` instead of `HashMismatchError`).
+
+**A second measured redundancy, recorded rather than assumed.** The single-site form of the door-C
+mutation **survived**: `serialize_factor_bank_collection` round-trips every bank through a lossless
+carrier report, and that path passes door A. Door C is therefore redundant inside that function —
+it only fails earlier and names `k`. Measured by instrumenting which line raised, the same way §5.2's
+M13 redundancy was found. The mutation that tests the claim removes it at both sites.
+
+**`config_sha256` is unchanged at `5fea3b9e…`.** This is a code-only change: no registered value
+moved, no new run identity, and nothing here authorizes a run.

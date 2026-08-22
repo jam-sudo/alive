@@ -750,6 +750,22 @@ def test_mutated_outcomes_after_binding_are_rejected():
 def test_factor_bank_artifacts_bind_runtime_factor_rows():
     inst = _build_instance(np.random.default_rng(57))
     base = _inputs(inst)
+    # The bank artifact declares the REGISTERED normalization (owner decision
+    # #7), and since 2026-08-22 _verify_factor_banks checks that the declaration
+    # is true of the numbers rather than only self-consistent. This fixture used
+    # to bind banks built from raw runtime matrices, i.e. banks that named a rule
+    # they did not obey -- the check failing on it was the check working. Give
+    # the fixture matrices the same property a real bank has.
+    base = dataclasses.replace(
+        base,
+        factors_by_k={
+            k: np.ascontiguousarray(
+                np.asarray(m, dtype=np.float64)
+                / float(np.linalg.svd(np.asarray(m, dtype=np.float64), compute_uv=False)[0])
+            )
+            for k, m in base.factors_by_k.items()
+        },
+    )
     banks = _factor_banks(base)
     aggregate = sha256_json(
         {"factor_banks_by_k": {str(k): banks[k].checksum for k in sorted(banks)}}

@@ -78,6 +78,19 @@ ZFACTOR_VERSION = "2b.1"
 #: registered conditioning ceiling and the rank policy keep their exact meaning.
 FACTOR_BANK_NORMALIZATION = "sigma_max_z_unit"
 
+#: Tolerance for VERIFYING ``sigma_max(Z) == 1`` on a bank built elsewhere.
+#: It is dominated not by the normalization -- which is exact to machine
+#: precision -- but by the artifact's own 12-decimal rounding
+#: (:func:`_round_array`), which perturbs the matrix on every round trip.
+#:
+#: Measured over 87 banks (``k`` in {4, 6, 8}, 12--2000 genes, input scales
+#: 1e-6/1/1e6, three seeds): worst in-memory deviation ``4.4e-16``, worst
+#: deviation after a serialize/deserialize round trip ``8.4e-13``. ``1e-9``
+#: leaves an honest bank roughly three orders of margin while refusing the
+#: forgery that motivated this check, which declared the registered rule at
+#: ``sigma_max(Z) = 7.0``.
+FACTOR_BANK_SIGMA_MAX_TOLERANCE = 1e-9
+
 #: Registered, deterministic PCA sign convention.
 ORIENTATION_POLICY = "sign_of_largest_magnitude_loading_positive"
 
@@ -193,6 +206,62 @@ class GeneFactorBank:
         return rep
 
 
+def verify_bank_normalization(bank: GeneFactorBank) -> None:
+    """Check that a bank IS what its declared normalization says it is.
+
+    The registered rule (:data:`FACTOR_BANK_NORMALIZATION`) is a property of the
+    NUMBERS, not of the string that names it. Declaring the rule, recording a
+    scale, and carrying a checksum that verifies against the declaring artifact
+    are all mutually consistent for a bank that was never normalized -- an
+    external audit reproduced exactly that on 2026-08-21, getting a bank
+    accepted that declared ``sigma_max_z_unit`` while its actual
+    ``sigma_max(Z)`` was ``7.0``. The generator applied the owner-approved
+    decision and nothing on the consumption side enforced it.
+
+    This is that enforcement, and it is called at every door a bank can enter
+    through: :func:`serialize_factor_bank_collection` before bank objects become
+    the durable carrier, :func:`_deserialize_gene_factor_bank` when an artifact
+    is read back, and ``phase2a._verify_factor_banks`` when bank objects are
+    handed straight to the pipeline.
+
+    Parameters
+    ----------
+    bank
+        The bank to check; its ``z_by_gene`` rows are read in ``gene_order``.
+
+    Raises
+    ------
+    ValueError
+        If the factors are empty or non-finite, if an identically-zero bank
+        records a scale other than ``1.0``, or if ``sigma_max(Z)`` is not ``1``
+        within :data:`FACTOR_BANK_SIGMA_MAX_TOLERANCE`.
+    """
+    if not bank.gene_order:
+        raise ValueError("factor bank has no genes; the normalization cannot be verified")
+    z = np.array([bank.z_by_gene[gene] for gene in bank.gene_order], dtype=np.float64)
+    if z.size == 0 or not np.all(np.isfinite(z)):
+        raise ValueError("factor bank factors must be a non-empty finite matrix")
+    # The builder keeps the rule TOTAL by leaving an identically-zero Z alone at
+    # scale 1.0 (its sigma_max is 0 and dividing by it is undefined). Mirror that
+    # exactly rather than refusing a bank this library itself can produce; such a
+    # bank carries no factors and is rejected downstream on rank, not here.
+    if not np.any(z):
+        if float(bank.normalization_scale) != 1.0:
+            raise ValueError(
+                "factor bank is identically zero but records a normalization scale of "
+                f"{bank.normalization_scale!r}; the registered rule leaves a zero bank at 1.0"
+            )
+        return
+    sigma_max = float(np.linalg.svd(z, compute_uv=False)[0])
+    if abs(sigma_max - 1.0) > FACTOR_BANK_SIGMA_MAX_TOLERANCE:
+        raise ValueError(
+            f"factor bank declares {bank.normalization!r} but its actual sigma_max(Z) is "
+            f"{sigma_max!r}, not 1 within {FACTOR_BANK_SIGMA_MAX_TOLERANCE!r}; a checksum "
+            "that verifies against the declaring artifact does not make an unnormalized "
+            "bank consumable"
+        )
+
+
 def serialize_factor_bank_collection(
     factor_banks_by_k: Mapping[int, GeneFactorBank],
 ) -> dict[str, Any]:
@@ -224,6 +293,13 @@ def serialize_factor_bank_collection(
                 f"factor bank k={k_total} checksum does not verify: "
                 f"declared={bank.checksum!r}, observed={observed!r}"
             )
+        # A checksum only proves the bank agrees with ITSELF. Verify the
+        # registered normalization holds of the numbers before these bytes
+        # become the durable carrier every later stage binds to.
+        try:
+            verify_bank_normalization(bank)
+        except ValueError as exc:
+            raise ValueError(f"factor bank k={k_total}: {exc}") from exc
         banks[k_total] = bank
 
     aggregate = sha256_json(
@@ -448,6 +524,10 @@ def _deserialize_gene_factor_bank(report: Any) -> GeneFactorBank:
         raise ValueError(
             f"factor-bank checksum does not verify: declared={checksum!r}, observed={observed!r}"
         )
+    # The checksum above is recomputed from the same declared numbers, so it
+    # proves internal consistency only. The REGISTERED rule is a property of
+    # those numbers; verify it before the bank is usable.
+    verify_bank_normalization(bank)
     return bank
 
 

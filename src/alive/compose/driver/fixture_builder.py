@@ -289,6 +289,16 @@ def _build_instance(manifest: Mapping[str, Any], *, k_grid: tuple[int, ...]) -> 
         else:
             extra = [z0[:, i % k0] ** 2 for i in range(kt - k0)]
             factors_by_k[kt] = np.column_stack([z0, *extra])
+        # Registered factor-bank normalization (owner decision #7): the bank is
+        # scaled so sigma_max(Z) == 1, and consumers verify that the declaration
+        # is true of the numbers. A fixture instance whose matrices do not obey
+        # it would make fixture runs exercise a DIFFERENT contract from
+        # scientific runs -- and, since the bank rows are bound to these matrices
+        # byte for byte, would produce a bank that names a rule it breaks.
+        column = np.asarray(factors_by_k[kt], dtype=np.float64)
+        sigma_max = float(np.linalg.svd(column, compute_uv=False)[0])
+        if sigma_max > 0.0:
+            factors_by_k[kt] = np.ascontiguousarray(column / sigma_max)
 
     return {
         "gene_ids": gene_ids,
