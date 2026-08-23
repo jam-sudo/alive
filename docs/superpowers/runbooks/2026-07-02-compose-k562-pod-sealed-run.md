@@ -36,9 +36,13 @@
   #7은 seal guard를 건드리지 않았다(`phase2a.py` diff 없음).
   **[2026-08-23 정정]** 이 항목은 원래 "이 wave의 최종 digest는 `5fea3b9e…` 이며 task #14의
   재생성은 여기에서 해야 한다"였다. 그 문장은 **틀렸다.** `5fea3b9e…`는 **하한이지 목표가
-  아니다** — config에 activation blocker 여섯이 그대로 남아 있고(`regimes.power_status`;
-  `revision`·`environment_status`·`approximation_bias_report_sha256` on `baselines.gears`;
-  `revision`·`environment_status` on `baselines.cpa`), readiness step 4의 순서가 그 null을
+  아니다** — config에 activation blocker **여섯**이 그대로 남아 있고, 열거는 로더
+  (`ComposePhase2Config.activation_blockers`)가 내는 그대로다: `regimes.power_status`;
+  `baselines.gears.revision`; `baselines.gears.environment_status`; `baselines.cpa.revision`;
+  `baselines.cpa.environment_status`; 그리고 **집합 키** `baselines.approximation_bias_report_sha256`
+  (근사 표현 중 bias report 가 없는 것이 하나라도 있으면 로더가 올린다 — 오늘은 GEARS).
+  CPA 의 bias null 은 blocker 가 **아니다**: 표현이 exact(`cell_raw_counts`)이고 로더는 exact
+  `cell_*` 표현을 집합 키에 세지 않는다. readiness step 4의 순서가 그 null을
   채운 **뒤에** evidence를 재생성하도록 정한다. null을 채우면 digest가 또 움직인다.
   정정 커밋 `3557a1c`가 decisions·readiness 두 문서만 고치고 **이 runbook을 빠뜨렸다**(외부
   감사 `docs.final-digest-and-blocker-contract-contradiction`, 재현으로 확인).

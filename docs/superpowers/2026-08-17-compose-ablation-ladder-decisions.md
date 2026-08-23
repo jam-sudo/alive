@@ -206,9 +206,15 @@ property of their registered definitions, which is what an ablation is supposed 
 run identity. With #6 this is the **second** move in this wave, so **task #14 must not regenerate at
 any earlier digest.**
 
-`5fea3b9e…` is a **floor, not the target.** The committed config still carries five explicit
-activation blockers — `regimes.power_status`, and `revision` / `environment_status` /
-`approximation_bias_report_sha256` on `baselines.gears` and `baselines.cpa` — and the readiness
+`5fea3b9e…` is a **floor, not the target.** The committed config still carries **six** explicit
+activation blockers, exactly as `ComposePhase2Config.activation_blockers` measures them —
+`regimes.power_status`; `baselines.gears.revision`; `baselines.gears.environment_status`; `baselines.cpa.revision`;
+`baselines.cpa.environment_status`; and `baselines.approximation_bias_report_sha256`, a single collective
+key the loader raises while any approximate representation lacks its bias report (today: GEARS).
+The CPA bias null is **not** a blocker: its representation is exact (`cell_raw_counts`), the config
+comments the field *"must stay null for an exact representation"*, and the loader never counts
+exact `cell_*` representations toward the collective key.
+And the readiness
 index's own step 4 orders config finalization (filling those nulls, which moves the digest again)
 *before* evidence regeneration. Regenerating #14 at `5fea3b9e…` today would bind evidence to a
 lineage that is guaranteed to move. #14's actual target is the digest that stands after the nulls
