@@ -31,6 +31,16 @@ CODE_DIRS = ("src", "tests", "scripts", "configs")
 HISTORICAL_NUMERIC_REF_ALLOWLIST = {
     "docs/superpowers/2026-07-04-CLAUDE-md-patch-pack.md",
     "docs/superpowers/audits/2026-07-04-repo-doc-consistency-audit.md",
+    # Codex heartbeat's daily audit drop, excluded by .git/info/exclude; absent in clean
+    # clones and never committed here (its history lives on the audit-log branch). It is a
+    # collaboration-loop artifact, not repository documentation, and it is replaced whole
+    # every morning by an agent this rule cannot reach. It earned its place the awkward
+    # way: on 2026-08-23 the audit REPORTED a fragile ref of mine, and had to quote the
+    # offending string three times to do so, which turned this test red for a violation
+    # that had already been fixed. A linter that scans every document cannot tell a
+    # violation from a report about one -- a lesson this comment learned twice, because
+    # its first draft quoted the string here and tripped the code-layer check.
+    "docs/GPT audit/comprehensiveaudit.md",
     # Personal local-only drafts excluded by .git/info/exclude; absent in clean clones.
     "docs/superpowers/plans/2026-06-30-loop-engineering.md",
     "docs/superpowers/plans/2026-06-30-science-dev-profile.md",
