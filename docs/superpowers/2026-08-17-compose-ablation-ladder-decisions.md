@@ -298,11 +298,23 @@ Door B converts rather than propagating: a bare `ValueError` escaping a caller t
 **`_verify_factor_banks`' byte-for-byte binding is untouched** — this adds a refusal, it does not
 re-plumb the binding, so #7's seal-adjacent constraint still holds.
 
-**Tolerance `1e-9`, measured not chosen.** The normalization is exact to machine precision; what
-sets the floor is the artifact's own 12-decimal rounding. Over 87 banks (`k` ∈ {4,6,8}, 12–2000
-genes, input scales 1e-6/1/1e6, three seeds) the worst in-memory deviation is `4.4e-16` and the worst
-after a serialize/deserialize round trip is `8.4e-13`. `1e-9` leaves an honest bank ~3 orders of
-margin and refuses the `7.0` forgery by 7 orders. There is no ambiguous band.
+**Tolerance: derived, not a sampled constant — and the derivation is not mine.** The normalization
+is exact to machine precision; what sets the floor is the artifact's own 12-decimal rounding. I first
+shipped a flat `1e-9`, justified empirically over 87 banks (worst round-trip deviation `8.4e-13`).
+The fix pipeline's **autonomous agent independently fixed the same finding** on 2026-08-22
+(`claude/audit-fixes-2026-08-22`, `d9f4452`) and derived the bound instead of sampling it: by Weyl's
+inequality `|σmax(Z+E) − σmax(Z)| ≤ ‖E‖₂ ≤ ‖E‖_F`, so a bank that was normalized exactly can arrive
+off by at most `5e-13·√(n·k)` plus an SVD backward-error floor.
+
+That is strictly better and it has been adopted here: at Norman scale it is `6.4e-11`, **15.6× tighter
+than the flat constant**, and it grows with the matrix instead of staying pinned to the sizes that
+happened to be sampled. Measured before adopting: 45 honest banks clear it with a worst headroom
+ratio of `0.073`, and the `7.0` forgery is refused by eleven orders.
+
+**The two attempts were strong in different places, which is the whole argument for running both.**
+Mine covered three doors; the autonomous agent's covered one (`_deserialize_gene_factor_bank`) and
+left `phase2a` untouched. Its tolerance was better; my coverage was broader. Neither alone was the
+right answer.
 
 **The zero bank is mirrored, not exempted.** `build_gene_factors` keeps the rule total by leaving an
 identically-zero `Z` alone at scale `1.0`, so the verifier accepts exactly that shape and no other —

@@ -5,7 +5,7 @@
 > **이 문서는 아무것도 정의하지 않는다** — 세부(task)는 plan, claim은 spec, exact param은 config,
 > 시간순 audit는 git이 authoritative다([sources of truth](../../CLAUDE.md#sources)). 상태 행이 authoritative
 > 문서와 어긋나면 **authoritative 문서가 옳다**; 이 인덱스를 갱신한다.
-> **Updated:** 2026-08-23 @ `c301d33` (branch `compose-factor-bank-normalization`)
+> **Updated:** 2026-08-24 @ `1970c68` (branch `compose-factor-bank-normalization`)
 > `scripts/bump-readiness-stamp.sh` / the pre-commit hook from `HEAD` at commit time, so it names the
 > **parent** of the commit that carries it and can never name itself. Reading it as "one commit stale" is a
 > misreading; git is authoritative for when this file actually changed.
@@ -1743,8 +1743,12 @@ in the generator and in the config; nothing on the consumption side made it true
 `zfactor.verify_bank_normalization` now enforces it at all three doors a bank can enter through —
 artifact deserialization, `phase2a._verify_factor_banks`, and carrier serialization. The
 byte-for-byte binding is **untouched**: this adds a refusal rather than re-plumbing the binding, so
-#7's seal-adjacent constraint still holds. Tolerance `1e-9` is measured (worst honest round-trip
-deviation `8.4e-13` over 87 banks; the forgery misses by 7 orders). **19/19 mutations killed**, each
+#7's seal-adjacent constraint still holds. Tolerance is **derived rather than sampled** — `5e-13·√(n·k)` plus an SVD
+backward-error floor, from Weyl's inequality — and the derivation came from the fix pipeline's
+**autonomous agent**, which fixed the same finding independently on `claude/audit-fixes-2026-08-22`
+(`d9f4452`). It is 15.6× tighter than the flat `1e-9` I first shipped and grows with the matrix.
+The two independent attempts were strong in different places — its tolerance, my three-door
+coverage — which is the argument for running both. **19/19 mutations killed**, each
 by the named failing test. The change also exposed that `driver/fixture_builder._build_instance` — production code — generated unnormalized factor
 matrices, so every scientific-carrier fixture bound banks that named a rule they broke; it now
 normalizes. Full compose suite **2202 passed, 2 skipped**. Detail in `2026-08-17-compose-ablation-ladder-decisions.md` §5.3.

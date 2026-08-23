@@ -78,18 +78,12 @@ ZFACTOR_VERSION = "2b.1"
 #: registered conditioning ceiling and the rank policy keep their exact meaning.
 FACTOR_BANK_NORMALIZATION = "sigma_max_z_unit"
 
-#: Tolerance for VERIFYING ``sigma_max(Z) == 1`` on a bank built elsewhere.
-#: It is dominated not by the normalization -- which is exact to machine
-#: precision -- but by the artifact's own 12-decimal rounding
-#: (:func:`_round_array`), which perturbs the matrix on every round trip.
-#:
-#: Measured over 87 banks (``k`` in {4, 6, 8}, 12--2000 genes, input scales
-#: 1e-6/1/1e6, three seeds): worst in-memory deviation ``4.4e-16``, worst
-#: deviation after a serialize/deserialize round trip ``8.4e-13``. ``1e-9``
-#: leaves an honest bank roughly three orders of margin while refusing the
-#: forgery that motivated this check, which declared the registered rule at
-#: ``sigma_max(Z) = 7.0``.
-FACTOR_BANK_SIGMA_MAX_TOLERANCE = 1e-9
+#: Half of :func:`_round_array`'s 12-decimal quantum -- the largest per-element
+#: error the canonical payload round trip can introduce into ``Z``.
+_PAYLOAD_QUANTUM_HALF = 5e-13
+
+#: Floor absorbing the LAPACK SVD's own backward error at ``sigma_max ~ 1``.
+_SIGMA_MAX_FLOOR = 1e-12
 
 #: Registered, deterministic PCA sign convention.
 ORIENTATION_POLICY = "sign_of_largest_magnitude_loading_positive"
@@ -206,6 +200,42 @@ class GeneFactorBank:
         return rep
 
 
+def _sigma_max_tolerance(n_genes: int, k_total: int) -> float:
+    """Numeric slack allowed on a bank's recomputed ``sigma_max``.
+
+    This is a float64 round-trip limit, NOT a scientific threshold. By Weyl's
+    inequality ``|sigma_max(Z + E) - sigma_max(Z)| <= ||E||_2 <= ||E||_F``, and
+    the canonical payload quantises every element to 12 decimals, so a bank that
+    WAS normalized exactly can arrive off by at most
+    ``_PAYLOAD_QUANTUM_HALF * sqrt(n_genes * k_total)``. The bound is worst case
+    -- every element rounding the same way -- so it never needs padding, and it
+    **grows with the matrix** instead of being pinned to the sizes that happened
+    to be sampled.
+
+    This replaces a flat ``1e-9`` that I had justified empirically (87 banks,
+    worst observed round-trip deviation ``8.4e-13``). An empirical constant is
+    only as good as its sample: at Norman scale this derived bound is
+    ``6.4e-11``, **15.6x tighter**, and a flat constant would have stayed put as
+    banks grew. The derivation is not mine -- the fix pipeline's autonomous agent
+    produced it independently on 2026-08-22 (``claude/audit-fixes-2026-08-22``,
+    ``d9f4452``) while fixing the same audit finding, and it is the better half
+    of two independent attempts. Measured before adopting: 45 honest banks
+    (``k`` in {4,6,8}, 12--2000 genes, input scales 1e-6/1/1e6) all clear it with
+    a worst headroom ratio of ``0.073``.
+
+    Parameters
+    ----------
+    n_genes, k_total
+        Shape of the bank's factor matrix.
+
+    Returns
+    -------
+    float
+        Absolute slack allowed around ``1.0``.
+    """
+    return _PAYLOAD_QUANTUM_HALF * math.sqrt(max(n_genes * k_total, 1)) + _SIGMA_MAX_FLOOR
+
+
 def verify_bank_normalization(bank: GeneFactorBank) -> None:
     """Check that a bank IS what its declared normalization says it is.
 
@@ -234,7 +264,7 @@ def verify_bank_normalization(bank: GeneFactorBank) -> None:
     ValueError
         If the factors are empty or non-finite, if an identically-zero bank
         records a scale other than ``1.0``, or if ``sigma_max(Z)`` is not ``1``
-        within :data:`FACTOR_BANK_SIGMA_MAX_TOLERANCE`.
+        within :func:`_sigma_max_tolerance` for the bank's shape.
     """
     if not bank.gene_order:
         raise ValueError("factor bank has no genes; the normalization cannot be verified")
@@ -253,12 +283,12 @@ def verify_bank_normalization(bank: GeneFactorBank) -> None:
             )
         return
     sigma_max = float(np.linalg.svd(z, compute_uv=False)[0])
-    if abs(sigma_max - 1.0) > FACTOR_BANK_SIGMA_MAX_TOLERANCE:
+    tolerance = _sigma_max_tolerance(*z.shape)
+    if abs(sigma_max - 1.0) > tolerance:
         raise ValueError(
             f"factor bank declares {bank.normalization!r} but its actual sigma_max(Z) is "
-            f"{sigma_max!r}, not 1 within {FACTOR_BANK_SIGMA_MAX_TOLERANCE!r}; a checksum "
-            "that verifies against the declaring artifact does not make an unnormalized "
-            "bank consumable"
+            f"{sigma_max!r}, not 1 within {tolerance!r}; a checksum that verifies against "
+            "the declaring artifact does not make an unnormalized bank consumable"
         )
 
 
