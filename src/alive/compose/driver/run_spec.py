@@ -382,6 +382,47 @@ def _check_lexically_under_root(declared: str, root_real: str, *, field: str) ->
 # ---------------------------------------------------------------------------
 
 
+def _deep_freeze(value: Any) -> Any:
+    """Recursively return an immutable view of ``value``.
+
+    ``MappingProxyType(dict(block))`` freezes ONLY the top level: the copy is
+    shallow, so every nested ``dict``/``list`` inside it is still the original
+    mutable object. An external audit reproduced the consequence on 2026-08-22 --
+    on a fully validated scientific spec, ``spec.scientific["sealed_input"]
+    ["source_path"]`` and ``activation_evidence["owner"]`` could both be
+    reassigned after validation, with ``self_checksum`` and ``file_sha256``
+    unchanged, and the mutated owner then flowed into ``ActivationRecord.owner``
+    (reproduced here, both directions, against an unmutated control).
+
+    Measured scope: of this spec's mapping fields only the mode block was
+    shallow (11 mutable nodes). ``pre_seal``, ``worker_blocks``,
+    ``expected_hashes`` and ``run_produced_basenames`` were already deep,
+    because their values are frozen dataclasses or scalars.
+
+    This does not close an exploit through the shipped entry point --
+    ``carrier_loader.load_run_spec_carrier`` takes a *path* and loads the spec
+    itself, so an in-process mutation of an already-loaded object cannot enter
+    it. It makes the documented immutability of the trust object true rather
+    than shallow, which is what the class docstring already claims.
+
+    Parameters
+    ----------
+    value
+        Any JSON-shaped value from a validated spec payload.
+
+    Returns
+    -------
+    Any
+        Mappings become read-only proxies whose values are themselves frozen,
+        sequences become tuples, and scalars are returned unchanged.
+    """
+    if isinstance(value, Mapping):
+        return MappingProxyType({key: _deep_freeze(item) for key, item in value.items()})
+    if isinstance(value, (list, tuple)):
+        return tuple(_deep_freeze(item) for item in value)
+    return value
+
+
 def load_resolved_run_spec(
     path: str | Path,
     *,
@@ -596,8 +637,10 @@ def load_resolved_run_spec(
         run_produced_basenames=MappingProxyType(dict(RUN_PRODUCED_BASENAMES)),
         expected_hashes=MappingProxyType(dict(expected_hashes)),
         worker_blocks=MappingProxyType(worker_blocks),
-        fixture=MappingProxyType(dict(mode_block)) if mode == "fixture" else None,
-        scientific=MappingProxyType(dict(mode_block)) if mode == "scientific" else None,
+        # Deep, not shallow: MappingProxyType(dict(...)) left every nested dict in
+        # the mode block mutable after validation. See _deep_freeze.
+        fixture=_deep_freeze(mode_block) if mode == "fixture" else None,
+        scientific=_deep_freeze(mode_block) if mode == "scientific" else None,
     )
 
 
