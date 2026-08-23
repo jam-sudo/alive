@@ -5,7 +5,7 @@
 > **이 문서는 아무것도 정의하지 않는다** — 세부(task)는 plan, claim은 spec, exact param은 config,
 > 시간순 audit는 git이 authoritative다([sources of truth](../../CLAUDE.md#sources)). 상태 행이 authoritative
 > 문서와 어긋나면 **authoritative 문서가 옳다**; 이 인덱스를 갱신한다.
-> **Updated:** 2026-08-23 @ `b0b42fb` (branch `compose-factor-bank-normalization`)
+> **Updated:** 2026-08-23 @ `c301d33` (branch `compose-factor-bank-normalization`)
 > `scripts/bump-readiness-stamp.sh` / the pre-commit hook from `HEAD` at commit time, so it names the
 > **parent** of the commit that carries it and can never name itself. Reading it as "one commit stale" is a
 > misreading; git is authoritative for when this file actually changed.
@@ -1783,7 +1783,7 @@ spec's mapping fields **only the mode block was shallow** (11 mutable nodes); `p
 `worker_blocks`, `expected_hashes` and `run_produced_basenames` were already deep because their
 values are frozen dataclasses or scalars. So the change is surgical rather than sweeping.
 
-**`run_spec.py` is a registered seal guard (CLAUDE.md §4.3), and this STRENGTHENS it** — it adds
+**`run_spec.py` is a registered seal guard ([CLAUDE.md#enforcement](../../CLAUDE.md#enforcement)), and this STRENGTHENS it** — it adds
 immutability, weakens no check, and changes no registered value. Codex correctly declined to file a
 fix request for it and escalated to the owner; the owner authorized this change.
 
