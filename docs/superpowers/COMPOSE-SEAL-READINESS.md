@@ -5,7 +5,7 @@
 > **이 문서는 아무것도 정의하지 않는다** — 세부(task)는 plan, claim은 spec, exact param은 config,
 > 시간순 audit는 git이 authoritative다([sources of truth](../../CLAUDE.md#sources)). 상태 행이 authoritative
 > 문서와 어긋나면 **authoritative 문서가 옳다**; 이 인덱스를 갱신한다.
-> **Updated:** 2026-08-22 @ `5adeb96` (branch `compose-factor-bank-normalization`)
+> **Updated:** 2026-08-23 @ `9cbf73f` (branch `compose-factor-bank-normalization`)
 > `scripts/bump-readiness-stamp.sh` / the pre-commit hook from `HEAD` at commit time, so it names the
 > **parent** of the commit that carries it and can never name itself. Reading it as "one commit stale" is a
 > misreading; git is authoritative for when this file actually changed.
@@ -1699,10 +1699,12 @@ raised.
 
 **`config_sha256` `c25734d5…` → `5fea3b9e69112b1f6dfd5f6d33249df9d13156ed46011e3dc46f4f8cf3a66100`,
 a new run identity.** This is the **second** move in the wave, so **task #14 must not regenerate at
-any earlier digest** — but `5fea3b9e…` is a **floor, not the target.** The config still carries five
-activation blockers (`regimes.power_status`; `revision` / `environment_status` /
-`approximation_bias_report_sha256` on both deep baselines), and step 4 above orders config
-finalization *before* evidence regeneration. Filling those nulls moves the digest again, so a pod
+any earlier digest** — but `5fea3b9e…` is a **floor, not the target.** The config still carries **six**
+activation blockers — `regimes.power_status`; `revision`, `environment_status` and
+`approximation_bias_report_sha256` on `baselines.gears`; `revision` and `environment_status` on
+`baselines.cpa`. (`baselines.cpa.approximation_bias_report_sha256` is also null but is **not** a
+blocker: the config comments it as *"must stay null for an exact representation"*.) Step 4 above
+orders config finalization *before* evidence regeneration. Filling those nulls moves the digest again, so a pod
 trip that regenerates #14 now would bind evidence to a lineage guaranteed to move. Both digests were measured directly from
 `sha256_json(parsed YAML)` rather than carried over from the decision text.
 
@@ -1720,7 +1722,7 @@ Neither decision authorizes a run. Seal remains **UNOPENED**; execution remains 
 §6 still shows **#1 (GEARS `cell-gears==0.1.2`), #3 (CPA `cpa-tools==0.8.5`), #4 (`approximation_bias`
 DEFINITION) and #5 (dev-pod provider) as `PROPOSED` with empty signature lines.** Those four gate the
 development pod, and the development pod is the only thing that can produce the real-Norman evidence
-the config's five null activation blockers need. Every cited fact was re-measured on 2026-08-21 and
+the config's six null activation blockers need. Every cited fact was re-measured on 2026-08-21 and
 recorded in a new **§6.1**: #1/#3/#5 are unchanged (lock SHAs `2d55a062…` / `7d4d034b…` still match),
 but **#4's definition has moved since drafting** — schema `v1` → `v3`, §2's per-cell term changed from
 `raw_pseudobulk_approximation` per row to `cell_raw_counts` on the full matrix (`4f417f5`), and the

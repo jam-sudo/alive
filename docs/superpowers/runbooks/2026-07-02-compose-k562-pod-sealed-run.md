@@ -32,8 +32,16 @@
   `3faacaff…` → `c25734d5…`로 이동했으므로 **이전 digest에 bind된 evidence는 재생성 대상이다**.
   **[2026-08-21]** 결정 #7(factor bank normalization, `sigma_max(Z)=1`)이 digest를 **한 번 더**
   옮겼다: `c25734d5…` → `5fea3b9e69112b1f6dfd5f6d33249df9d13156ed46011e3dc46f4f8cf3a66100`.
-  **이 wave의 최종 digest는 `5fea3b9e…` 이며 task #14의 재생성은 여기에서 해야 한다** — `c25734d5…`
-  는 중간값이지 목표가 아니다. #7은 seal guard를 건드리지 않았다(`phase2a.py` diff 없음).
+  **task #14의 재생성은 `c25734d5…` 이전 어느 digest에서도 하지 않는다** — 그건 중간값이다.
+  #7은 seal guard를 건드리지 않았다(`phase2a.py` diff 없음).
+  **[2026-08-23 정정]** 이 항목은 원래 "이 wave의 최종 digest는 `5fea3b9e…` 이며 task #14의
+  재생성은 여기에서 해야 한다"였다. 그 문장은 **틀렸다.** `5fea3b9e…`는 **하한이지 목표가
+  아니다** — config에 activation blocker 여섯이 그대로 남아 있고(`regimes.power_status`;
+  `revision`·`environment_status`·`approximation_bias_report_sha256` on `baselines.gears`;
+  `revision`·`environment_status` on `baselines.cpa`), readiness step 4의 순서가 그 null을
+  채운 **뒤에** evidence를 재생성하도록 정한다. null을 채우면 digest가 또 움직인다.
+  정정 커밋 `3557a1c`가 decisions·readiness 두 문서만 고치고 **이 runbook을 빠뜨렸다**(외부
+  감사 `docs.final-digest-and-blocker-contract-contradiction`, 재현으로 확인).
 - `GI_LEARNABLE_WIN`: additive lower bound `> 0.05`이고 모든 learned comparator lower
   bound `> 0`이며 integrity가 valid일 때만 가능하다.
 - additive 조건만 통과하면 `PARTIAL`; additive 조건도 실패하면 `NO_DISTINCT_WIN`;
