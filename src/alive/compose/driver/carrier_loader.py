@@ -50,6 +50,7 @@ See docs/superpowers/specs/2026-07-07-compose-production-driver-design.md §0/§
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -62,7 +63,7 @@ from alive.compose.config2 import (
     ActivationRecord,
     ComposePhase2Config,
     assert_scientific_mode_allowed,
-    load_compose_phase2_config,
+    load_compose_phase2_config_from_text,
 )
 from alive.compose.driver.bias_report_preseal import (
     ApproximationBiasDeclarationError,
@@ -71,6 +72,7 @@ from alive.compose.driver.bias_report_preseal import (
 from alive.compose.driver.fixture_builder import _MODEL_CLASS_BY_NAME
 from alive.compose.driver.pair_index import validate_scientific_sealed_declaration
 from alive.compose.driver.run_spec import (
+    PathSha,
     ResolvedRunSpec,
     RunSpecError,
     load_resolved_run_spec,
@@ -336,8 +338,8 @@ def load_run_spec_carrier(
         spec_path, approved_artifacts_root=approved_artifacts_root, mode_expected="scientific"
     )
     # §5.2: sealed attestation equality (no source access).
-    attestation = _read_json(spec.pre_seal["approved_sealed_input_attestation"].path)
-    pair_index_manifest = _read_json(spec.pre_seal["pair_index_manifest"].path)
+    attestation = _preseal_json(spec, "approved_sealed_input_attestation")
+    pair_index_manifest = _preseal_json(spec, "pair_index_manifest")
     validate_scientific_sealed_declaration(
         sealed_input=spec.scientific["sealed_input"],
         attestation=attestation,
@@ -348,7 +350,9 @@ def load_run_spec_carrier(
     )
     # Load the config before runtime capture so EnvironmentInfo records the exact
     # pre-registered seed roster rather than an empty provenance placeholder.
-    config = load_compose_phase2_config(spec.pre_seal["config"].path)
+    config = load_compose_phase2_config_from_text(
+        _read_verified_bytes(spec.pre_seal["config"], field="config").decode("utf-8")
+    )
     _validate_scientific_approximation_bias_report(spec, config)
     # §5.3: runtime git/environment identity (fail closed vs approved_git_sha).
     context = resolve_scientific_runtime_context(
@@ -480,7 +484,7 @@ def _processed_asset_path(spec: ResolvedRunSpec) -> str:
     ``processed_sha256`` unless the data card binds the raw asset AS the processed analysis asset.
     """
     raw = spec.pre_seal["raw_asset"]
-    card = _read_json(spec.pre_seal["data_card"].path)
+    card = _preseal_json(spec, "data_card")
     declared = card.get("processed_analysis_asset")
     if not isinstance(declared, dict) or declared.get("sha256") != raw.sha256:
         raise RunSpecError(
@@ -526,11 +530,78 @@ def _peek_mode(spec_path: Path) -> str:
 
 
 def _read_json(path: str | Path) -> dict[str, Any]:
-    """Parse a pre-seal JSON stage-1 artifact (already SHA-verified by the loader)."""
+    """Parse a JSON stage-1 artifact whose bytes are NOT digest-bound here.
+
+    Kept for artifacts that carry no declared digest in the run spec. Anything
+    listed in ``spec.pre_seal`` must go through :func:`_read_verified_json`
+    instead -- see the note there.
+    """
     obj = json.loads(Path(path).read_bytes())
     if not isinstance(obj, dict):
         raise RunSpecError(f"stage-1 artifact {path} is not a JSON object")
     return obj
+
+
+def _read_verified_bytes(declared: PathSha, *, field: str) -> bytes:
+    """Read a pre-seal file ONCE and hash the bytes that were actually read.
+
+    ``load_resolved_run_spec`` hashes each pre-seal pathname during validation,
+    but every consumer here used to REOPEN the same pathname afterwards. The two
+    reads are separate syscalls, so "the declared digest was verified" said
+    nothing about the bytes that got parsed: an external audit reproduced a swap
+    inside that window on 2026-08-24, and this repository reproduced it
+    independently -- the carrier loaded a config whose bytes no longer matched
+    the digest the run identity is built from, while a swap performed BEFORE the
+    call was correctly refused.
+
+    Reading once and hashing what was read makes "verified bytes == consumed
+    bytes" true by construction rather than by timing. It does not depend on the
+    filesystem holding still, which is what the previous arrangement assumed
+    without saying so.
+
+    Parameters
+    ----------
+    declared
+        The ``{path, sha256}`` pair the validated run spec recorded.
+    field
+        Pre-seal field name, for the error message.
+
+    Returns
+    -------
+    bytes
+        The exact bytes whose digest matched.
+
+    Raises
+    ------
+    RunSpecError
+        If the bytes read now do not hash to the declared digest.
+    """
+    data = Path(declared.path).read_bytes()
+    actual = hashlib.sha256(data).hexdigest()
+    if actual != declared.sha256:
+        raise RunSpecError(
+            f"pre-seal {field}: bytes read for consumption hash to {actual}, not the "
+            f"declared {declared.sha256} -- the file changed after the run spec verified it"
+        )
+    return data
+
+
+def _read_verified_json(declared: PathSha, *, field: str) -> dict[str, Any]:
+    """Digest-bound :func:`_read_json`: parse the same bytes that were hashed."""
+    obj = json.loads(_read_verified_bytes(declared, field=field))
+    if not isinstance(obj, dict):
+        raise RunSpecError(f"stage-1 artifact {declared.path} is not a JSON object")
+    return obj
+
+
+def _preseal_json(spec: ResolvedRunSpec, field: str) -> dict[str, Any]:
+    """Read a pre-seal JSON artifact by field name, digest-bound.
+
+    The field name is written once. The previous call shape repeated it -- once
+    to index ``spec.pre_seal`` and once for the error message -- which is a
+    place for the two to drift apart.
+    """
+    return _read_verified_json(spec.pre_seal[field], field=field)
 
 
 # --------------------------------------------------------------------------- #
@@ -550,7 +621,7 @@ def _load_phase2a_inputs(spec: ResolvedRunSpec, *, require_factor_banks: bool) -
     payload = _read_json(spec.pre_seal["phase2a_inputs"].path)
     factor_banks_by_k = None
     if require_factor_banks:
-        factor_payload = _read_json(spec.pre_seal["factor_bank"].path)
+        factor_payload = _preseal_json(spec, "factor_bank")
         try:
             factor_banks_by_k, aggregate = deserialize_factor_bank_collection(factor_payload)
         except (TypeError, ValueError) as exc:
@@ -627,8 +698,8 @@ def _load_dev_store_audit(spec: ResolvedRunSpec) -> dict[str, Any]:
     the :class:`~alive.compose.phase2a.OutcomeAccessAudit` is reconstructed from the
     manifest's ``access_audit`` block (its five fields map exactly).
     """
-    source = _read_json(spec.pre_seal["development_outcome_source"].path)
-    manifest = _read_json(spec.pre_seal["development_outcome_manifest"].path)
+    source = _preseal_json(spec, "development_outcome_source")
+    manifest = _preseal_json(spec, "development_outcome_manifest")
     return {
         "combo_calibration_eps": np.asarray(source["combo_calibration_eps"], dtype=np.float64),
         "combo_calibration_pair_ids": tuple(
@@ -640,7 +711,7 @@ def _load_dev_store_audit(spec: ResolvedRunSpec) -> dict[str, Any]:
 
 def _load_response_artifact(spec: ResolvedRunSpec) -> dict[str, Any]:
     """Rehydrate the live response artifact (space + control_mean + fit-role spec)."""
-    payload = _read_json(spec.pre_seal["response_artifact"].path)
+    payload = _preseal_json(spec, "response_artifact")
     return {
         "response_space": _deserialize_response_space(payload["response_space"]),
         "control_mean": np.asarray(payload["control_mean"], dtype=np.float64),
@@ -711,8 +782,8 @@ def _load_sealed_outcome(spec: ResolvedRunSpec) -> dict[str, Any]:
     committed ``FIXTURE_CORPUS_V1`` constant. NO outcome bytes are read (``phase2b``
     opens the source ``O_NOFOLLOW`` at seal time).
     """
-    pair_index_manifest = _read_json(spec.pre_seal["pair_index_manifest"].path)
-    split_manifest = _read_json(spec.pre_seal["pair_manifest"].path)
+    pair_index_manifest = _preseal_json(spec, "pair_index_manifest")
+    split_manifest = _preseal_json(spec, "pair_manifest")
     pair_index = {
         (str(entry["gene_a"]), str(entry["gene_b"])): np.asarray(
             entry["row_indices"], dtype=np.int64
@@ -742,8 +813,8 @@ def _load_scientific_sealed_outcome(spec: ResolvedRunSpec) -> dict[str, Any]:
     perturbation column and combo separator. It NEVER carries the fixture corpus attestation
     triple. No outcome bytes are read (``phase2b`` opens the source ``O_NOFOLLOW`` at seal time).
     """
-    pair_index_manifest = _read_json(spec.pre_seal["pair_index_manifest"].path)
-    split_manifest = _read_json(spec.pre_seal["pair_manifest"].path)
+    pair_index_manifest = _preseal_json(spec, "pair_index_manifest")
+    split_manifest = _preseal_json(spec, "pair_manifest")
     pair_index = {
         (str(entry["gene_a"]), str(entry["gene_b"])): np.asarray(
             entry["row_indices"], dtype=np.int64

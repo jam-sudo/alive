@@ -5,7 +5,7 @@
 > **이 문서는 아무것도 정의하지 않는다** — 세부(task)는 plan, claim은 spec, exact param은 config,
 > 시간순 audit는 git이 authoritative다([sources of truth](../../CLAUDE.md#sources)). 상태 행이 authoritative
 > 문서와 어긋나면 **authoritative 문서가 옳다**; 이 인덱스를 갱신한다.
-> **Updated:** 2026-08-24 @ `a3143ff` (branch `compose-factor-bank-normalization`)
+> **Updated:** 2026-08-25 @ `d92e4a2` (branch `compose-factor-bank-normalization`)
 > `scripts/bump-readiness-stamp.sh` / the pre-commit hook from `HEAD` at commit time, so it names the
 > **parent** of the commit that carries it and can never name itself. Reading it as "one commit stale" is a
 > misreading; git is authoritative for when this file actually changed.
@@ -1800,6 +1800,49 @@ shallow form, stopping the recursion after one level, and a freeze that drops va
 preserving them — the last exists because a freeze that changed the data would be a worse defect
 than the one it fixes. `config_sha256` unchanged; no new run identity; seal remains **UNOPENED** and
 execution **RELEASE-BLOCKED**.
+
+**2026-08-25 — pre-seal reads are digest-bound: the bytes that were verified are the bytes that
+get consumed.**
+
+The external audit reported `provenance.preseal-hash-reopen-toctou`. **Adjudicated by running it, and
+the verdict split.** `load_resolved_run_spec` hashes every pre-seal pathname during validation, and
+`carrier_loader` then REOPENED the same pathnames to parse them — two separate reads, so "the
+declared digest was verified" said nothing about the bytes that were parsed.
+
+| | verdict | evidence |
+|---|---|---|
+| the audit's written reproduction (swap **before** the carrier call) | **REFUTED** | `RunSpecError: config: declared sha256 … != actual file digest …`. The carrier takes a *path* and reloads the spec itself, so a sequential swap never reaches it. |
+| the structural claim (swap **inside** the call, after hashing) | **CONFIRMED** | carrier loaded a config whose bytes no longer matched the digest the run identity is built from |
+
+**The window is intra-call, not sequential.** The audit's write-up missed that distinction and so read
+as more severe than it is. The independent daily reviewer reached the same split verdict from its own
+probes (`toctou_in_window` succeeded, `toctou_sequential` rejected) — the fourth time the loop's
+asymmetric view has converged on a finding, and the first time a finding's **claim was true while its
+reproduction was false**.
+
+**Fix.** `carrier_loader._read_verified_bytes` reads a pre-seal file ONCE and hashes the bytes it
+actually read; `_preseal_json` wraps it for the eleven JSON artifacts, and the config now parses
+through `config2.load_compose_phase2_config_from_text` from those same verified bytes. "Verified
+bytes == consumed bytes" is now true by construction rather than by timing — it no longer assumes the
+filesystem holds still, which the previous arrangement assumed without saying so.
+
+**Scope, stated rather than implied.** This covers every pre-seal artifact `carrier_loader` itself
+parses. Pre-seal *paths* handed onward (`data_card_path`, `raw_asset_path`, `feature_bank_path`) are
+hashed by their consumer at use time (`phase2b.py:490-493`) — measured, not assumed — but those
+digests are recorded for provenance rather than compared against the run spec's declared values.
+Binding them is a separate question and is **not** closed here.
+
+**`run_spec.py` and `carrier_loader.py` are both registered seal guards
+([CLAUDE.md#enforcement](../../CLAUDE.md#enforcement)); this strengthens them** — it adds a refusal,
+removes no check, and moves no registered value. The owner authorized it after the adjudication.
+
+**Verified.** The in-window swap is now refused; the sequential swap is still refused by the spec
+loader; an untouched carrier still loads (non-vacuity). Two mutations killed by the **named** test —
+dropping the digest check entirely, and leaving just the config on the old reopen path, which is the
+one-site-missed shape this repository keeps producing. One existing test needed updating: it mutated
+a data card on disk and now trips the digest guard first, so it re-declares the digest and keeps
+testing what its name claims. `config_sha256` unchanged; seal remains **UNOPENED**; execution remains
+**RELEASE-BLOCKED**.
 
 ## 이 문서가 *아닌* 것 (중복 금지)
 

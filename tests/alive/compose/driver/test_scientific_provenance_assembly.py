@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import dataclasses
+import hashlib
 from pathlib import Path
+from types import MappingProxyType
 
 import pytest
 
 from alive.compose.config2 import load_compose_phase2_config
 from alive.compose.driver.carrier_loader import _assemble_provenance_inputs
-from alive.compose.driver.run_spec import load_resolved_run_spec
+from alive.compose.driver.run_spec import PathSha, load_resolved_run_spec
 from alive.compose.phase2b import ActivationProvenanceInputs
 from alive.provenance import capture_environment, sha256_file
 from tests.alive.compose.driver.scientific_carrier_support import build_scientific_carrier_fixture
@@ -55,6 +58,23 @@ def test_data_card_not_declaring_processed_asset_rejects(tmp_path):
     card_path = Path(spec.pre_seal["data_card"].path)
     card = json.loads(card_path.read_text(encoding="utf-8"))
     card.pop("processed_analysis_asset")
-    card_path.write_text(json.dumps(card, sort_keys=True, separators=(",", ":")))
+    mutated = json.dumps(card, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    card_path.write_bytes(mutated)
+    # Pre-seal reads are digest-bound since 2026-08-25: the bytes consumed must hash
+    # to the digest the run spec declared. Rewriting the card on disk without
+    # re-declaring its digest now trips THAT guard first, which would leave this
+    # test passing for a reason its name does not claim. Re-declare so the subject
+    # under test is still "the card does not name a processed asset".
+    spec = dataclasses.replace(
+        spec,
+        pre_seal=MappingProxyType(
+            {
+                **spec.pre_seal,
+                "data_card": PathSha(
+                    path=str(card_path), sha256=hashlib.sha256(mutated).hexdigest()
+                ),
+            }
+        ),
+    )
     with pytest.raises(ValueError, match="processed"):
         _assemble_provenance_inputs(spec, config, environment=env)

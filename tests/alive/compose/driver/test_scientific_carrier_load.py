@@ -266,3 +266,77 @@ def test_a_typed_rejection_escapes_the_carrier_under_its_own_class(tmp_path, mon
             approved_artifacts_root=bundle.approved_artifacts_root,
             trusted_repo_root=bundle.repo_root,
         )
+
+
+# --------------------------------------------------------------------------- #
+# Pre-seal reads are digest-bound: verified bytes == consumed bytes
+# --------------------------------------------------------------------------- #
+# `load_resolved_run_spec` hashes each pre-seal pathname during validation, and
+# every consumer here used to REOPEN the same pathname afterwards. Two separate
+# reads, so "the declared digest was verified" said nothing about the bytes that
+# were parsed. An external audit reported it on 2026-08-24
+# (`provenance.preseal-hash-reopen-toctou`) and this repository reproduced it
+# independently. The window is INTRA-CALL, not sequential: a swap performed
+# before the carrier runs was already refused by the spec loader, which is the
+# half the audit's own write-up had wrong. Both halves are pinned below.
+def _swap_config_after_the_spec_is_validated(monkeypatch, bundle, extra=b"\n# swapped\n"):
+    """Make the config change in the window between hashing and reopening."""
+    from alive.compose.driver import carrier_loader as cl
+
+    real = cl.load_resolved_run_spec
+    state = {"n": 0}
+
+    def racing(*args, **kwargs):
+        spec = real(*args, **kwargs)  # step 13 hashed every pre-seal path here
+        state["n"] += 1
+        path = Path(spec.pre_seal["config"].path)
+        path.write_bytes(path.read_bytes() + extra)
+        return spec
+
+    monkeypatch.setattr(cl, "load_resolved_run_spec", racing)
+    return state
+
+
+def test_a_preseal_file_swapped_inside_the_load_window_is_refused(tmp_path, monkeypatch):
+    bundle = build_scientific_carrier_fixture(tmp_path / "a", repo_root=tmp_path / "r")
+    state = _swap_config_after_the_spec_is_validated(monkeypatch, bundle)
+
+    with pytest.raises(RunSpecError, match="changed after the run spec verified it"):
+        load_run_spec_carrier(
+            bundle.spec_path,
+            approved_artifacts_root=bundle.approved_artifacts_root,
+            trusted_repo_root=bundle.repo_root,
+        )
+    assert state["n"] == 1, "the swap must actually have happened, or this proves nothing"
+
+
+def test_a_preseal_file_swapped_before_the_call_is_refused_by_the_spec_loader(tmp_path):
+    """The boundary the audit's write-up got wrong: a sequential swap never
+    reached the carrier at all, because the carrier takes a PATH and reloads."""
+    bundle = build_scientific_carrier_fixture(tmp_path / "a", repo_root=tmp_path / "r")
+    spec = load_resolved_run_spec(
+        bundle.spec_path,
+        approved_artifacts_root=bundle.approved_artifacts_root,
+        mode_expected="scientific",
+    )
+    path = Path(spec.pre_seal["config"].path)
+    path.write_bytes(path.read_bytes() + b"\n# swapped\n")
+
+    with pytest.raises(RunSpecError, match="declared sha256"):
+        load_run_spec_carrier(
+            bundle.spec_path,
+            approved_artifacts_root=bundle.approved_artifacts_root,
+            trusted_repo_root=bundle.repo_root,
+        )
+
+
+def test_an_untouched_carrier_still_loads(tmp_path):
+    """Non-vacuity for the two refusals above: without a swap the same call
+    succeeds, so they are rejecting the swap and not the fixture."""
+    bundle = build_scientific_carrier_fixture(tmp_path / "a", repo_root=tmp_path / "r")
+    carrier = load_run_spec_carrier(
+        bundle.spec_path,
+        approved_artifacts_root=bundle.approved_artifacts_root,
+        trusted_repo_root=bundle.repo_root,
+    )
+    assert carrier is not None

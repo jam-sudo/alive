@@ -691,7 +691,34 @@ def load_compose_phase2_config(path: str | Path) -> ComposePhase2Config:
         If the file is empty, carries unknown or missing keys, or any
         scientifically load-bearing value deviates from the pre-registration.
     """
-    raw: dict[str, Any] | None = yaml.safe_load(Path(path).read_text())
+    return load_compose_phase2_config_from_text(Path(path).read_text())
+
+
+def load_compose_phase2_config_from_text(text: str) -> ComposePhase2Config:
+    """Validate a Phase-2 config from TEXT already in hand.
+
+    :func:`load_compose_phase2_config` is the path form and delegates here. This
+    entry point exists so a caller that has already read a file's bytes -- and
+    verified their digest -- can parse *those same bytes* instead of reopening
+    the path. Reopening is what let verified bytes and consumed bytes diverge
+    (``provenance.preseal-hash-reopen-toctou``, reproduced 2026-08-24).
+
+    Parameters
+    ----------
+    text
+        The YAML document.
+
+    Returns
+    -------
+    ComposePhase2Config
+        A frozen, fully validated config.
+
+    Raises
+    ------
+    Phase2ConfigError
+        Same conditions as the path form.
+    """
+    raw: dict[str, Any] | None = yaml.safe_load(text)
     if not isinstance(raw, dict) or not raw:
         raise Phase2ConfigError("config is empty or not a mapping")
 
