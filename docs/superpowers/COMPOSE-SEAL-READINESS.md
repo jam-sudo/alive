@@ -5,7 +5,7 @@
 > **이 문서는 아무것도 정의하지 않는다** — 세부(task)는 plan, claim은 spec, exact param은 config,
 > 시간순 audit는 git이 authoritative다([sources of truth](../../CLAUDE.md#sources)). 상태 행이 authoritative
 > 문서와 어긋나면 **authoritative 문서가 옳다**; 이 인덱스를 갱신한다.
-> **Updated:** 2026-08-28 @ `f73b63e` (branch `compose-factor-bank-normalization`)
+> **Updated:** 2026-08-28 @ `d0d5bb4` (branch `compose-factor-bank-normalization`)
 > `scripts/bump-readiness-stamp.sh` / the pre-commit hook from `HEAD` at commit time, so it names the
 > **parent** of the commit that carries it and can never name itself. Reading it as "one commit stale" is a
 > misreading; git is authoritative for when this file actually changed.
@@ -1905,6 +1905,71 @@ inflation calibrated on `combo_calibration` (41 pairs / 37 genes, comparable str
 and are therefore a **new run identity** requiring sign-off. No registered inference value was
 changed here: `config_sha256` unchanged, sealed access count **0**, seal remains **UNOPENED**,
 execution remains **RELEASE-BLOCKED**.
+
+**2026-08-28 — claim replay: the audit's reproduction holds, its severity does not, and the
+real gap was that nothing wrote the contract down.**
+
+The external audit reported `seal.claim-materialization-replay` with a stated reproduction:
+materialise one claim twice and both calls return a payload while the durable audit holds a single
+record. **Reproduced verbatim** — sequentially and concurrently.
+
+**Everything replay could exploit is already closed, and measured.**
+
+| what a replay would need | state |
+|---|---|
+| widen or narrow the payload selector | refused — `test_materialize_forged_pair_ids_fails_closed` |
+| a second claim under any `run_id` | refused — pinned by two tests |
+| win a concurrent claim | one winner — `atomic_write_once` + `FileExistsError` |
+| production calling it twice | it does not — `test_phase2b` pins the exact event sequence |
+| serve different bytes | the source is fd-pinned (below) |
+
+The consumption boundary is `claim_sealed_access`, which writes the durable audit record **first**
+so that a crash during materialisation still burns the path. Materialisation is idempotent by
+design, and the code says so — but only in a comment.
+
+**A correction to an earlier reading of this finding.** An in-memory probe appeared to show that a
+replay re-reads the source and can therefore serve different data under one audit record. That is a
+property of the *stub*, not of the pipeline. `phase2b_cmd._open_verified_sealed_source` refuses a
+symlink and a non-regular node, streams SHA-256 through an open descriptor, requires
+`(dev, ino, size, mtime_ns)` unchanged across the hash, compares against the declared digest, and
+then hands downstream an **fd-backed path** — its docstring names the purpose, "closing the
+hash-then-reopen pathname race". The validator opens that descriptor once and the store retains the
+resulting object, so a replay re-slices the same verified inode. That property is already tested:
+`test_verified_descriptor_survives_source_path_replacement`.
+
+**So the residual was documentary.** Nothing in the spec defines whether "opened exactly once"
+counts claims or materialisations, and — measured by walking every test with `ast` — **no test in
+the repository called `materialize_claimed` twice.** The contract was unstated and unprotected
+against drift.
+
+**Done here (tests only; no registered value moved, no guard behaviour changed).** Four tests in
+`test_seal_boundary_split.py` pin the replay contract: a replay returns a byte-identical payload; a
+replay does not inflate the durable access count; the validator is latched so a replay re-slices the
+**validated** source rather than the constructed one; and one test records the residual honestly —
+at the store layer alone the payload bytes are not bound, and the binding lives one layer up in the
+driver. Four mutations, each killed by the test whose own name makes the claim, including an
+inverted one: giving the store a payload cache turns the residual test red, so that record notices a
+fix instead of quietly aging.
+
+**Proposed for sign-off — one sentence for spec §10.5, not written by me into the spec:**
+
+> The sealed cohort is *consumed* by `claim_sealed_access`, which durably records the access before
+> any row is materialised; `materialize_claimed` is idempotent and MAY be called more than once for
+> a single claim. The registered access count therefore counts claims, not materialisations, and the
+> identity of the bytes served is pinned by the run's `processed_sha256` together with the
+> descriptor-pinned sealed source, not by the audit record.
+
+**Severity, stated against the audit's.** The audit marked this "seal open 직접 차단". It is **not a
+blocker**: no measured path lets a replay read anything the single claim did not authorise. The
+documentation and test items *were* pre-seal work, because neither can be done retroactively once
+the seal opens — and both are now done except the signature.
+
+**Not fixed, recorded.** In-place mutation of the already-open inode would defeat descriptor
+pinning, and `_open_verified_sealed_source` does not re-check identity at materialisation time. That
+requires a hostile local writer, is outside this finding, and is **not** closed here.
+
+`config_sha256` unchanged; sealed access count **0**; seal remains **UNOPENED**; execution remains
+**RELEASE-BLOCKED**.
 
 ## 이 문서가 *아닌* 것 (중복 금지)
 
