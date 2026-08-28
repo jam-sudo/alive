@@ -1,0 +1,134 @@
+REAL_22p_21g                 sgd=0.00 deg=2.10 share=0.152  coverage=0.9620 [0.9523,0.9717]  q=0.3466  229.0s
+REAL_22p_21g                 sgd=0.30 deg=2.10 share=0.152  coverage=0.9307 [0.9178,0.9435]  q=0.4460  230.3s
+REAL_22p_21g                 sgd=0.60 deg=2.10 share=0.152  coverage=0.9240 [0.9106,0.9374]  q=0.7341  235.1s
+REAL_22p_21g                 sgd=0.90 deg=2.10 share=0.152  coverage=0.9373 [0.9251,0.9496]  q=1.2705  240.7s
+CONTROL_matching_no_sharing  sgd=0.00 deg=1.00 share=0.000  coverage=0.9660 [0.9568,0.9752]  q=0.3551  238.6s
+CONTROL_matching_no_sharing  sgd=0.30 deg=1.00 share=0.000  coverage=0.9700 [0.9614,0.9786]  q=0.4515  233.8s
+CONTROL_matching_no_sharing  sgd=0.60 deg=1.00 share=0.000  coverage=0.9693 [0.9606,0.9781]  q=0.7230  231.6s
+CONTROL_matching_no_sharing  sgd=0.90 deg=1.00 share=0.000  coverage=0.9720 [0.9637,0.9803]  q=1.1879  231.5s
+{
+ "n_trials": 1500,
+ "sigma_shared": 0.6,
+ "rows": [
+  {
+   "arm": "REAL_22p_21g",
+   "sigma_gene_diff": 0.0,
+   "n_genes_used": 21,
+   "mean_degree": 2.0952380952380953,
+   "max_degree": 5,
+   "shared_gene_pair_fraction": 0.15151515151515152,
+   "coverage": 0.962,
+   "ci95": [
+    0.9523241355390504,
+    0.9716758644609496
+   ],
+   "mean_band_halfwidth": 0.3466353210786992,
+   "secs": 229.0
+  },
+  {
+   "arm": "REAL_22p_21g",
+   "sigma_gene_diff": 0.3,
+   "n_genes_used": 21,
+   "mean_degree": 2.0952380952380953,
+   "max_degree": 5,
+   "shared_gene_pair_fraction": 0.15151515151515152,
+   "coverage": 0.9306666666666666,
+   "ci95": [
+    0.9178114748416001,
+    0.9435218584917332
+   ],
+   "mean_band_halfwidth": 0.4460440680259538,
+   "secs": 230.3
+  },
+  {
+   "arm": "REAL_22p_21g",
+   "sigma_gene_diff": 0.6,
+   "n_genes_used": 21,
+   "mean_degree": 2.0952380952380953,
+   "max_degree": 5,
+   "shared_gene_pair_fraction": 0.15151515151515152,
+   "coverage": 0.924,
+   "ci95": [
+    0.9105892451517449,
+    0.9374107548482552
+   ],
+   "mean_band_halfwidth": 0.7340649642100643,
+   "secs": 235.1
+  },
+  {
+   "arm": "REAL_22p_21g",
+   "sigma_gene_diff": 0.9,
+   "n_genes_used": 21,
+   "mean_degree": 2.0952380952380953,
+   "max_degree": 5,
+   "shared_gene_pair_fraction": 0.15151515151515152,
+   "coverage": 0.9373333333333334,
+   "ci95": [
+    0.9250681012626325,
+    0.9495985654040342
+   ],
+   "mean_band_halfwidth": 1.2705312518742373,
+   "secs": 240.7
+  },
+  {
+   "arm": "CONTROL_matching_no_sharing",
+   "sigma_gene_diff": 0.0,
+   "n_genes_used": 44,
+   "mean_degree": 1.0,
+   "max_degree": 1,
+   "shared_gene_pair_fraction": 0.0,
+   "coverage": 0.966,
+   "ci95": [
+    0.9568285402688558,
+    0.9751714597311442
+   ],
+   "mean_band_halfwidth": 0.3551036366187898,
+   "secs": 238.6
+  },
+  {
+   "arm": "CONTROL_matching_no_sharing",
+   "sigma_gene_diff": 0.3,
+   "n_genes_used": 44,
+   "mean_degree": 1.0,
+   "max_degree": 1,
+   "shared_gene_pair_fraction": 0.0,
+   "coverage": 0.97,
+   "ci95": [
+    0.9613670955061462,
+    0.9786329044938538
+   ],
+   "mean_band_halfwidth": 0.4514965253372743,
+   "secs": 233.8
+  },
+  {
+   "arm": "CONTROL_matching_no_sharing",
+   "sigma_gene_diff": 0.6,
+   "n_genes_used": 44,
+   "mean_degree": 1.0,
+   "max_degree": 1,
+   "shared_gene_pair_fraction": 0.0,
+   "coverage": 0.9693333333333334,
+   "ci95": [
+    0.9606080346645622,
+    0.9780586320021045
+   ],
+   "mean_band_halfwidth": 0.7230328932078288,
+   "secs": 231.6
+  },
+  {
+   "arm": "CONTROL_matching_no_sharing",
+   "sigma_gene_diff": 0.9,
+   "n_genes_used": 44,
+   "mean_degree": 1.0,
+   "max_degree": 1,
+   "shared_gene_pair_fraction": 0.0,
+   "coverage": 0.972,
+   "ci95": [
+    0.9636512282100897,
+    0.9803487717899102
+   ],
+   "mean_band_halfwidth": 1.1878984589034505,
+   "secs": 231.5
+  }
+ ]
+}

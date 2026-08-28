@@ -5,7 +5,7 @@
 > **이 문서는 아무것도 정의하지 않는다** — 세부(task)는 plan, claim은 spec, exact param은 config,
 > 시간순 audit는 git이 authoritative다([sources of truth](../../CLAUDE.md#sources)). 상태 행이 authoritative
 > 문서와 어긋나면 **authoritative 문서가 옳다**; 이 인덱스를 갱신한다.
-> **Updated:** 2026-08-25 @ `d92e4a2` (branch `compose-factor-bank-normalization`)
+> **Updated:** 2026-08-28 @ `f73b63e` (branch `compose-factor-bank-normalization`)
 > `scripts/bump-readiness-stamp.sh` / the pre-commit hook from `HEAD` at commit time, so it names the
 > **parent** of the commit that carries it and can never name itself. Reading it as "one commit stale" is a
 > misreading; git is authoritative for when this file actually changed.
@@ -1843,6 +1843,68 @@ one-site-missed shape this repository keeps producing. One existing test needed 
 a data card on disk and now trips the digest guard first, so it re-declares the digest and keeps
 testing what its name claims. `config_sha256` unchanged; seal remains **UNOPENED**; execution remains
 **RELEASE-BLOCKED**.
+
+**2026-08-26 — the headline pair set has no independent rows, and the registered bootstrap
+undercovers through one specific channel.**
+
+The external audit reported `stats.pair-gene-dependence` as a **logical** argument: if pairs sharing a
+gene have non-zero error covariance, the pair-i.i.d. bootstrap's effective sample size and
+max-deviation quantile *could* be wrong. Nothing was measured. Measuring it split the verdict, and
+changed what has to be measured next. Full evidence, scripts and raw output:
+[`evidence/2026-08-26-pair-gene-dependence-coverage/`](evidence/2026-08-26-pair-gene-dependence-coverage/README.md).
+
+**Structure — measured, and reproduced against committed pod evidence (7/7).** Reading only
+`obs['perturbation']` labels (never `.X`; eligibility and split are outcome-independent by spec §2.2),
+the registered split reproduces `singles 105 · pairs 131 · z-universe genes 73 · calibration genes 44 ·
+roles 41/22/68`. The headline `sealed_double_unseen` role is **22 pairs drawn from 21 genes**: mean
+gene degree 2.10, and **not one of the 22 pairs is gene-disjoint from all the others**. The
+pair-i.i.d. assumption is not approximately satisfied here; it is violated by construction.
+
+| | verdict | evidence |
+|---|---|---|
+| structural premise ("sharing exists") | **CONFIRMED, measured** | 22 pairs / 21 genes / **0 independent rows** |
+| the mechanism as the audit worded it | **partly REFUTED** | shared pair-difficulty cancels in the ratio — 20 conditions, no effect |
+| the channel that actually bites | **CONFIRMED (corrected)** | only **method-differential** gene effects survive into `d_i` |
+| magnitude under that channel | **measured (model)** | 0.95 → **0.924–0.937**; zero-sharing control does not move |
+| that channel's real size in Norman | **UNMEASURED** | needs Phase 2a dev outcomes on `combo_calibration` |
+
+**Why the audit's own mechanism does not bite.** θ is a ratio, `1 - mean(e_L1)/mean(e_C)`. A gene
+effect common to every method is a shared multiplier that largely cancels between numerator and
+denominator; what remains is extra marginal dispersion, which the i.i.d. bootstrap absorbs by widening
+the band (q 0.308 → 0.446). Twenty conditions — the real graph at ICC 0 → 0.41, plus a synthetic
+ladder from degree 1.0 to 5.5 — all landed in 0.955–0.967, at or above nominal. **A design that only
+opens that channel cannot show a loss**; it prints the same answer whether the finding is true or
+false. Those twenty conditions are therefore both a negative result and the non-vacuity control for
+the arm below.
+
+**The channel that does bite.** Give each method its own gene effect — a gene one method handles well
+and another handles badly. That component does not cancel out of `d_i = e_C - e_L1` and is correlated
+across every pair containing the gene. Run on the **real** headline structure with the registered
+estimator (n=22, 10 000 replicates, five comparators, family confidence 0.95, 1500 trials per cell),
+family-wise coverage falls to **0.9307 / 0.9240 / 0.9373** — every CI below nominal, a family-wise
+error rate up to roughly **1.5×** the registered 5%. The control with identical added variance and
+**zero** gene sharing does not move at all (0.966–0.972). The loss is caused by the sharing, not by
+the variance.
+
+**The obvious remedy does not exist for this split.** `sealed_double_unseen` has **two** connected
+components, sizes 19 and 3 — 86.4% of pairs in one. A cluster bootstrap would have an effective
+cluster count of 2; a gene-level resample over 21 genes changes n per replicate and with it the
+registered estimand. This design has no resampling unit that absorbs the dependence, which is itself
+something the owner needs to know before choosing.
+
+**Why this is not cosmetic, and why now.** The verdict gates in spec §10.5 are a direct function of
+these lower bounds (`GI_LEARNABLE_WIN` = additive lower bound > 0.05 AND each of the other four > 0).
+An optimistic bound is an optimistic verdict. The spec states no pair-i.i.d. assumption anywhere, so
+the confirmatory coverage claim currently reads as unconditional. Invariants 1 and 17 require the
+evaluation harness to be fixed before outcome access, so this cannot be revisited after the seal.
+
+**Open — owner decision, deliberately not taken here.** (1) limit the confirmatory claim to the
+pair-i.i.d. assumption and pre-register a sensitivity report; (2) pre-register a design-effect band
+inflation calibrated on `combo_calibration` (41 pairs / 37 genes, comparable structure) during Phase
+2a; (3) leave the inference unchanged and state the assumption in §10.5. All three touch spec/config
+and are therefore a **new run identity** requiring sign-off. No registered inference value was
+changed here: `config_sha256` unchanged, sealed access count **0**, seal remains **UNOPENED**,
+execution remains **RELEASE-BLOCKED**.
 
 ## 이 문서가 *아닌* 것 (중복 금지)
 
