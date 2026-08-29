@@ -298,6 +298,8 @@ _KNOWN_INFERENCE = frozenset(
         "shared_resamples_across_contrasts",
         "family_confidence",
         "bootstrap_replicates",
+        "simultaneous_coverage_claim",
+        "sensitivity_band_inflation",
     }
 )
 _KNOWN_REGIMES = frozenset(
@@ -495,6 +497,8 @@ class ComposePhase2Config:
     shared_resamples_across_contrasts: bool
     family_confidence: float
     bootstrap_replicates: int
+    simultaneous_coverage_claim: str
+    sensitivity_band_inflation: tuple[float, ...]
     role_names: tuple[str, ...]
     fit_roles: tuple[str, ...]
     sealed_minimum_n: int
@@ -783,6 +787,8 @@ def load_compose_phase2_config_from_text(text: str) -> ComposePhase2Config:
         shared_resamples,
         family_confidence,
         bootstrap_replicates,
+        simultaneous_coverage_claim,
+        sensitivity_band_inflation,
     ) = _validate_inference(_require(raw, "inference", "top-level"))
     role_names, fit_roles = _validate_roles(
         _require(raw, "split", "top-level"),
@@ -826,6 +832,8 @@ def load_compose_phase2_config_from_text(text: str) -> ComposePhase2Config:
         shared_resamples_across_contrasts=shared_resamples,
         family_confidence=family_confidence,
         bootstrap_replicates=bootstrap_replicates,
+        simultaneous_coverage_claim=simultaneous_coverage_claim,
+        sensitivity_band_inflation=sensitivity_band_inflation,
         role_names=role_names,
         fit_roles=fit_roles,
         sealed_minimum_n=sealed_minimum_n,
@@ -1299,9 +1307,18 @@ def _validate_metric(
     )
 
 
+# 2026-08-29 결정(pair-dependence). 등록된 pair-i.i.d. bootstrap 의 simultaneous coverage
+# 주장은 **무조건이 아니다** — headline 구조가 그 가정을 구성상 위배한다(22 pairs / 21 genes,
+# 유전자를 하나도 공유하지 않는 행 0 개). 주장을 가정 아래로 제한하고, 밴드 팽창 사다리를
+# 얼려 verdict 가 어디서 뒤집히는지 함께 보고한다. 사다리는 descriptive-only 이며
+# verdict 는 언제나 첫 값(1.0, 등록된 밴드)에서만 판정한다.
+_EXPECTED_SIMULTANEOUS_COVERAGE_CLAIM = "conditional_on_registered_resampling_unit"
+_EXPECTED_SENSITIVITY_BAND_INFLATION = (1.0, 1.1, 1.15, 1.25)
+
+
 def _validate_inference(
     block: dict[str, Any],
-) -> tuple[tuple[str, ...], str, str, bool, float, int]:
+) -> tuple[tuple[str, ...], str, str, bool, float, int, str, tuple[float, ...]]:
     """Validate the comparator roster and bootstrap settings."""
     _close_schema(block, _KNOWN_INFERENCE, "inference")
 
@@ -1351,6 +1368,25 @@ def _validate_inference(
             f"{_EXPECTED_BOOTSTRAP_REPLICATES}, got {bootstrap_replicates}"
         )
 
+    coverage_claim = _require(block, "simultaneous_coverage_claim", "inference")
+    if coverage_claim != _EXPECTED_SIMULTANEOUS_COVERAGE_CLAIM:
+        raise Phase2ConfigError(
+            "inference.simultaneous_coverage_claim must be "
+            f"{_EXPECTED_SIMULTANEOUS_COVERAGE_CLAIM!r}, got {coverage_claim!r}"
+        )
+
+    ladder_raw = _require(block, "sensitivity_band_inflation", "inference")
+    if not isinstance(ladder_raw, list) or not all(
+        isinstance(x, (int, float)) and not isinstance(x, bool) for x in ladder_raw
+    ):
+        raise Phase2ConfigError("inference.sensitivity_band_inflation must be a list of numbers")
+    ladder = tuple(float(x) for x in ladder_raw)
+    if ladder != _EXPECTED_SENSITIVITY_BAND_INFLATION:
+        raise Phase2ConfigError(
+            "inference.sensitivity_band_inflation must match the registered ladder exactly: "
+            f"expected {list(_EXPECTED_SENSITIVITY_BAND_INFLATION)}, got {list(ladder)}"
+        )
+
     return (
         comparator_family,
         method,
@@ -1358,6 +1394,8 @@ def _validate_inference(
         shared,
         family_confidence,
         bootstrap_replicates,
+        coverage_claim,
+        ladder,
     )
 
 

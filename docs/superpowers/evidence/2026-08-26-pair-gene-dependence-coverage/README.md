@@ -1,7 +1,9 @@
 # `stats.pair-gene-dependence` — 재현 판정과 실측 크기
 
 **protocol** COMPOSE-K562-v1 · **일자** 2026-08-26 · **seal** UNOPENED (이 측정은 seal 을
-열지 않았고 sealed outcome 을 읽지 않았다) · **config_sha256** 불변 `5fea3b9e…`
+열지 않았고 sealed outcome 을 읽지 않았다) · **측정 당시 config_sha256** `5fea3b9e…`
+(이 측정은 등록값을 바꾸지 않았다). **2026-08-29 이 증거에서 나온 결정이 digest 를
+`0d207746…` 로 옮겼다** — `2026-08-29-compose-pair-dependence-decision.md` 참조.
 
 외부 감사(`stats.pair-gene-dependence`)는 **논증**만 제시했다: "동일 gene 을 공유하는 pair 들의
 error covariance 가 0 이 아니면 pair-i.i.d. bootstrap 의 effective sample size 와 max-deviation

@@ -6,8 +6,10 @@
 > `e1d95cd`. The sign-off table in §5 is the current state.
 >
 > **`config_sha256` HAS moved since this was drafted** — `3faacaff…` → `c25734d5…` (#6) →
-> `5fea3b9e…` (#7). The unchanged-digest sentence in the original banner describes the document
-> at drafting time, not the repository now. The banner as originally written follows.
+> `5fea3b9e…` (#7) → `0d207746…` (2026-08-29 pair-dependence decision; see
+> `2026-08-29-compose-pair-dependence-decision.md`). The unchanged-digest sentence in the original
+> banner describes the document at drafting time, not the repository now. The banner as originally
+> written follows.
 >
 > **STATUS: PROPOSED — owner approval required before any code, config or spec change.** This
 > document carries the two HIGH findings from the 2026-08-17 external audit

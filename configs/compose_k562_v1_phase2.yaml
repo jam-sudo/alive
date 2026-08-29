@@ -137,6 +137,14 @@ inference:
   shared_resamples_across_contrasts: true
   family_confidence: 0.95
   bootstrap_replicates: 10000
+  # 2026-08-29 결정: simultaneous coverage 주장은 등록된 resampling unit 가정 아래에서만
+  # 성립한다(무조건이 아니다). headline sealed_double_unseen 은 22 pairs 를 21 genes 에서
+  # 뽑아 유전자를 하나도 공유하지 않는 행이 0 개이므로 pair-i.i.d. 는 구성상 위배된다.
+  simultaneous_coverage_claim: conditional_on_registered_resampling_unit
+  # verdict 는 λ=1.0 (등록된 밴드)에서만 판정한다. 나머지 λ 는 **descriptive-only** 로
+  # 함께 보고해 승리가 어디서 뒤집히는지 드러낸다. 값은 실측 앵커가 있다(결정문 참조):
+  # 1.0 등록 하한 · 1.1 sgd 0.3/0.9 회복 · 1.15 최악(sgd 0.6) 회복 · 1.25 여유.
+  sensitivity_band_inflation: [1.0, 1.1, 1.15, 1.25]
 
 regimes:
   headline_candidate: double_unseen

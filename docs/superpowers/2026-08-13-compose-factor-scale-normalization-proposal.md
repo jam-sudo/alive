@@ -6,7 +6,8 @@
 > lambda; whether the registered grid VALUES suit the real design's `cond`).
 >
 > **`config_sha256` HAS moved since this was drafted** — `b158417a…` → `3faacaff…` on this
-> implementation, then twice more in the 2026-08-20/21 ablation-ladder wave, now `5fea3b9e…`.
+> implementation, twice more in the 2026-08-20/21 ablation-ladder wave (`c25734d5…`, `5fea3b9e…`),
+> and once more on 2026-08-29 for the pair-dependence decision, now `0d207746…`.
 > The unchanged-digest sentence in the original banner describes the document at drafting time.
 > The banner as originally written follows.
 >

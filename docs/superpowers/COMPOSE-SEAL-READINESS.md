@@ -5,7 +5,7 @@
 > **이 문서는 아무것도 정의하지 않는다** — 세부(task)는 plan, claim은 spec, exact param은 config,
 > 시간순 audit는 git이 authoritative다([sources of truth](../../CLAUDE.md#sources)). 상태 행이 authoritative
 > 문서와 어긋나면 **authoritative 문서가 옳다**; 이 인덱스를 갱신한다.
-> **Updated:** 2026-08-28 @ `d0d5bb4` (branch `compose-factor-bank-normalization`)
+> **Updated:** 2026-08-29 @ `ec1fb7b` (branch `compose-factor-bank-normalization`)
 > `scripts/bump-readiness-stamp.sh` / the pre-commit hook from `HEAD` at commit time, so it names the
 > **parent** of the commit that carries it and can never name itself. Reading it as "one commit stale" is a
 > misreading; git is authoritative for when this file actually changed.
@@ -1970,6 +1970,64 @@ requires a hostile local writer, is outside this finding, and is **not** closed 
 
 `config_sha256` unchanged; sealed access count **0**; seal remains **UNOPENED**; execution remains
 **RELEASE-BLOCKED**.
+
+**2026-08-29 — the four dev-pod signatures are given, and the pair-dependence decision moves the
+config digest to `0d20774637775eda79cb682a5d28bf7df40bf5b0a3f5768ef109ba7fa37c6c99`.**
+
+**Signatures (A1).** The owner signed dev-pod gate decisions **#1, #3, #4 and #5** together on
+2026-08-29; the record is `2026-07-13-compose-dev-pod-gate-decisions.md` §6.2, with §6's table
+flipped to CONFIRMED. #4 is recorded explicitly against the **§6.1 v3 definition**, not the v1 text
+the row was drafted against, so the signature cannot be read as approving the older definition. The
+record also enumerates what the signatures do **not** cover — config edits, activation blockers,
+`config_sha256`, an exact Git SHA, the seal, Task 0.1's wheel/sdist hashes and pod image digest, and
+the exact `epoch / batch / optimizer / early-stop / seed`, which are read off the installed wheel on
+the pod. That last carve-out is the scope the standing finding
+`docs.dev-pod-signature-scope-overclaim` names, cut out at the moment of signing rather than left to
+be argued afterwards.
+
+**Decision (A2).** `2026-08-29-compose-pair-dependence-decision.md`. The confirmatory coverage claim
+is now conditional on the registered resampling unit, and a band-inflation ladder is frozen so the
+report states where the verdict flips instead of asserting that it does not. The primary verdict is
+untouched: it is decided at λ = 1.0 exactly as spec §10.5 says, and the sensitivity report is
+descriptive-only.
+
+Two alternatives were rejected on the record. A design-effect inflation calibrated on
+`combo_calibration` fails because that role is where GEARS and CPA **train** — carrying an
+intraclass correlation from in-sample behaviour to the extrapolating sealed role is the cross-role
+transfer invariant 7 forbids — and because an ICC from 41 pairs over 37 genes would multiply the
+headline band by a very noisy number. Stating the assumption and changing nothing else fails because
+it is labelling without analysis and uses none of the advantage of the seal being closed.
+
+The ladder `[1.0, 1.1, 1.15, 1.25]` is anchored, not guessed: sweeping λ from the same simulated
+trials (coverage(λ) = P(m ≤ λq), so no re-run of the estimator) the minimum inflation restoring
+nominal coverage measured **1.0 / 1.10 / 1.15 / 1.10** across the σ ladder. The whole measured
+degradation is repaired by widening the band 15%, and the worst case is **interior** (σ=0.60, with
+recovery at σ=0.90 as q outgrows the dependence), so the measured range brackets it. The anchor is
+model-based, not Norman-based — which is exactly why the decision reports the verdict at each λ
+rather than asserting the true one.
+
+**Registered, and loader-enforced** — `inference.simultaneous_coverage_claim` and
+`inference.sensitivity_band_inflation`, in the same shape as `shared_resamples_across_contrasts` and
+decision #7's `factor_bank_normalization`: exact match, failing closed at two sites. Ten tests pin
+them, including one that pins the ladder CONSTANT's own invariants (leads with 1.0, climbs, never
+below 1) because an exact-match config check cannot notice the constant itself going wrong, and one
+that asserts the verdict thresholds did **not** move.
+
+**`config_sha256` moves: `5fea3b9e…` → `0d207746…`** — a **new run identity**, re-derived
+independently (`sha256_json(yaml.safe_load(config))`) and agreeing with the loader. It is still a
+**floor, not the target**: the config still carries **six** activation blockers, so the digest moves
+again when they are filled, and task #14's regeneration still belongs at that later digest. Every
+current-state document that quoted the old digest was updated (both decision banners, the runbook's
+dated chain, the pair-dependence evidence README); the historical statements inside dated entries
+were left alone, because they were true when written.
+
+**One thing this change surfaced by tripping it.** Moving the digest made
+`test_activation_blocker_doc_contract` **skip** on this document — the standing finding
+`tests.activation-blocker-contract-skips-on-config-change`, demonstrated live by the very change it
+warns about. The skip is now a hard failure: a document that enumerates the blockers must carry the
+committed digest, or it is stale rather than exempt.
+
+Seal remains **UNOPENED**; execution remains **RELEASE-BLOCKED**; sealed access count **0**.
 
 ## 이 문서가 *아닌* 것 (중복 금지)
 

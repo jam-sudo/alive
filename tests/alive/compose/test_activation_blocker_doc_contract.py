@@ -77,10 +77,20 @@ def test_documented_blockers_match_the_loader(
     cfg = load_compose_phase2_config(_CANON)
     text = (_ROOT / relative).read_text(encoding="utf-8")
 
-    # The claim is pinned to the digest the document records. Once the committed
-    # config moves to a new lineage the paragraph is history, not current state.
-    if cfg.config_sha256[:8] not in text:
-        pytest.skip("committed config digest moved past the one this document records")
+    # 2026-08-29: this used to `pytest.skip` when the document did not carry the
+    # committed digest -- and the standing audit finding
+    # `tests.activation-blocker-contract-skips-on-config-change` said that turns
+    # green precisely when the check is most needed. It was demonstrated live: the
+    # pair-dependence decision moved the digest and this contract silently skipped
+    # on the readiness index. Every document in `_DOCS` is CURRENT state, so a
+    # missing digest means stale, not exempt. If one ever becomes history, it moves
+    # to an explicit archive roster pinned to its own digest -- it does not get to
+    # opt out by drifting.
+    assert cfg.config_sha256[:8] in text, (
+        f"{relative} enumerates activation blockers but does not carry the committed "
+        f"config digest {cfg.config_sha256[:8]!r}; a current document must track the "
+        "live config lineage"
+    )
 
     blockers = cfg.activation_blockers
     assert len(blockers) == 6, "fixture assumption: the loader measures six blockers today"

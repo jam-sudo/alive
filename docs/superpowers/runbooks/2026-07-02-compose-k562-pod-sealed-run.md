@@ -41,6 +41,12 @@
   `baselines.gears.revision`; `baselines.gears.environment_status`; `baselines.cpa.revision`;
   `baselines.cpa.environment_status`; 그리고 **집합 키** `baselines.approximation_bias_report_sha256`
   (근사 표현 중 bias report 가 없는 것이 하나라도 있으면 로더가 올린다 — 오늘은 GEARS).
+  **[2026-08-29]** pair-dependence 결정이 digest 를 한 번 더 옮겼다: `5fea3b9e…` →
+  `0d20774637775eda79cb682a5d28bf7df40bf5b0a3f5768ef109ba7fa37c6c99`.
+  `inference.simultaneous_coverage_claim` 과 `inference.sensitivity_band_inflation` 두 값이
+  등록됐다(결정문 `docs/superpowers/2026-08-29-compose-pair-dependence-decision.md`).
+  **하한이 `5fea3b9e…`에서 `0d207746…`로 올라갔을 뿐 여전히 하한이다** — blocker 여섯이
+  그대로라 task #14 의 재생성 지점은 아니다. 아래 2026-08-23 정정의 논리가 그대로 적용된다.
   CPA 의 bias null 은 blocker 가 **아니다**: 표현이 exact(`cell_raw_counts`)이고 로더는 exact
   `cell_*` 표현을 집합 키에 세지 않는다. readiness step 4의 순서가 그 null을
   채운 **뒤에** evidence를 재생성하도록 정한다. null을 채우면 digest가 또 움직인다.
