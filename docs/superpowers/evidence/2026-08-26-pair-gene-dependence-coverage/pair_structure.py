@@ -9,6 +9,7 @@ eligibility/split 을 outcome-independent 로 못박는다). backed='r' 로 연�
                                      calibration genes 44 · roles 41/22/68
 다섯 값이 전부 맞으면 이 재현은 pod 이 돌린 것과 같은 split 이다.
 """
+
 from __future__ import annotations
 
 import json
@@ -23,23 +24,29 @@ H5AD = "/Users/jam/ALIVE-data/norman/NormanWeissman2019_filtered.h5ad"
 PERT_KEY, CONTROL, SEP = "perturbation", "control", "_"
 MIN_CELLS_GENE = MIN_CELLS_PAIR = 50
 CAL_FRACTION, SPLIT_SEED = 0.6, 11
-EXPECTED = {"n_singles": 105, "n_pairs": 131, "n_genes_in_pairs": 73,
-            "n_calibration_genes": 44, "n_combo_calibration": 41,
-            "n_sealed_double_unseen": 22, "n_sealed_single_unseen": 68}
+EXPECTED = {
+    "n_singles": 105,
+    "n_pairs": 131,
+    "n_genes_in_pairs": 73,
+    "n_calibration_genes": 44,
+    "n_combo_calibration": 41,
+    "n_sealed_double_unseen": 22,
+    "n_sealed_single_unseen": 68,
+}
 
 adata = ad.read_h5ad(H5AD, backed="r")
 labels = np.asarray(adata.obs[PERT_KEY].values, dtype=object)
 adata.file.close()
 
 singles, doubles, control = parse_labels(labels, control_token=CONTROL, combo_sep=SEP)
-genes_ok = eligible_genes(singles, min_cells=MIN_CELLS_GENE,
-                          available_feature_ids=set(singles))
+genes_ok = eligible_genes(singles, min_cells=MIN_CELLS_GENE, available_feature_ids=set(singles))
 pairs = eligible_pairs(doubles, set(genes_ok), min_cells=MIN_CELLS_PAIR)
 split = build_pair_split(pairs, seed=SPLIT_SEED, calibration_fraction=CAL_FRACTION)
 
 genes_in_pairs = sorted({g for p in pairs for g in p})
 got = {
-    "n_singles": len(genes_ok), "n_pairs": len(pairs),
+    "n_singles": len(genes_ok),
+    "n_pairs": len(pairs),
     "n_genes_in_pairs": len(genes_in_pairs),
     "n_calibration_genes": len(split.combo_genes),
     "n_combo_calibration": len(split.combo_calibration),
@@ -69,8 +76,11 @@ def structure(name, plist):
     isolated = sum(1 for a, b in plist if deg[a] == 1 and deg[b] == 1)
     d = np.array(sorted(deg.values()))
     return {
-        "role": name, "n_pairs": n, "n_genes_used": len(deg),
-        "mean_degree": float(d.mean()), "max_degree": int(d.max()),
+        "role": name,
+        "n_pairs": n,
+        "n_genes_used": len(deg),
+        "mean_degree": float(d.mean()),
+        "max_degree": int(d.max()),
         "degree_histogram": {int(v): int((d == v).sum()) for v in np.unique(d)},
         "shared_gene_pair_fraction": shared / total if total else 0.0,
         "n_shared_gene_pair_couples": int(shared),
@@ -89,8 +99,10 @@ for r in rows:
     print(f"  distinct genes      : {r['n_genes_used']}")
     print(f"  mean / max degree   : {r['mean_degree']:.2f} / {r['max_degree']}")
     print(f"  degree histogram    : {r['degree_histogram']}")
-    print(f"  유전자 공유하는 pair 쌍: {r['n_shared_gene_pair_couples']} "
-          f"/ {r['n_pairs']*(r['n_pairs']-1)//2} = {r['shared_gene_pair_fraction']:.3f}")
+    print(
+        f"  유전자 공유하는 pair 쌍: {r['n_shared_gene_pair_couples']} "
+        f"/ {r['n_pairs'] * (r['n_pairs'] - 1) // 2} = {r['shared_gene_pair_fraction']:.3f}"
+    )
     print(f"  아무 유전자도 안 겹치는 pair: {r['n_pairs_sharing_no_gene']}")
 print()
 print(json.dumps({"known_answer_match": ok, "rows": rows}, indent=1))

@@ -17,6 +17,7 @@ quantile 이 잘못될 수 있다"고 **논증**했다. 측정은 없었다. 여
   G 는 **유전자**마다 하나 — 같은 유전자를 쓰는 pair 들이 이걸 공유한다. sg=0 이면
   구조가 있어도 의존성은 0 이다(= 두 번째 대조군, 기제를 분리한다).
 """
+
 from __future__ import annotations
 
 import itertools
@@ -32,9 +33,9 @@ COMPARATORS = ["additive", "gears", "cpa", "id_only", "l3_symmetric_mlp"]
 MU_HEADLINE = 1.0
 MU_COMP = {"additive": 1.30, "gears": 1.20, "cpa": 1.25, "id_only": 1.60, "l3_symmetric_mlp": 1.15}
 THETA_TRUE = {c: (MU_COMP[c] - MU_HEADLINE) / MU_COMP[c] for c in COMPARATORS}
-N_PAIRS = 22                 # 실측값 (sealed_double_unseen)
-CONFIDENCE = 0.95            # 등록값
-REPLICATES = 10000           # 등록값 — 줄이지 않는다
+N_PAIRS = 22  # 실측값 (sealed_double_unseen)
+CONFIDENCE = 0.95  # 등록값
+REPLICATES = 10000  # 등록값 — 줄이지 않는다
 
 
 def matching(n_edges: int) -> list[tuple[int, int]]:
@@ -121,20 +122,25 @@ def coverage(pairs, n_genes, sigma_gene, sigma_pair, sigma_meth, n_trials, base_
 
 
 ARMS = [
-    ("A_matching_d1",   matching(22),                       44),
-    ("B_g16_d2.75",     dense_subset(16, 22, seed=3),       16),
-    ("C_cycle_d2",      cycle(22),                          22),
-    ("D_circulant_d4",  circulant(11, (1, 2)),              11),
-    ("E_dense_d5.5",    dense_subset(8, 22, seed=5),         8),
+    ("A_matching_d1", matching(22), 44),
+    ("B_g16_d2.75", dense_subset(16, 22, seed=3), 16),
+    ("C_cycle_d2", cycle(22), 22),
+    ("D_circulant_d4", circulant(11, (1, 2)), 11),
+    ("E_dense_d5.5", dense_subset(8, 22, seed=5), 8),
 ]
 
 if __name__ == "__main__":
     n_trials = int(sys.argv[1]) if len(sys.argv) > 1 else 1000
     sigma_pair, sigma_meth = 0.35, 0.45
     out = {
-        "n_pairs": N_PAIRS, "confidence": CONFIDENCE, "replicates": REPLICATES,
-        "n_trials": n_trials, "theta_true": THETA_TRUE,
-        "sigma_pair": sigma_pair, "sigma_meth": sigma_meth, "arms": [],
+        "n_pairs": N_PAIRS,
+        "confidence": CONFIDENCE,
+        "replicates": REPLICATES,
+        "n_trials": n_trials,
+        "theta_true": THETA_TRUE,
+        "sigma_pair": sigma_pair,
+        "sigma_meth": sigma_meth,
+        "arms": [],
     }
     for name, pairs, g in ARMS:
         assert len(pairs) == N_PAIRS, (name, len(pairs))
@@ -145,12 +151,21 @@ if __name__ == "__main__":
             # 유전자 하나를 공유하는 두 pair 의 log-error 급내상관 — sigma_gene 을
             # 해석 가능한 값으로 바꿔 둔다(척도 자체는 임의).
             icc = (sigma_gene**2 / 2) / (sigma_gene**2 + sigma_pair**2 + sigma_meth**2)
-            row = {"arm": name, "sigma_gene": sigma_gene, "icc_one_shared_gene": icc,
-                   **st, **cov, "secs": round(time.time() - t0, 1)}
+            row = {
+                "arm": name,
+                "sigma_gene": sigma_gene,
+                "icc_one_shared_gene": icc,
+                **st,
+                **cov,
+                "secs": round(time.time() - t0, 1),
+            }
             out["arms"].append(row)
-            print(f"{name:16s} sg={sigma_gene:.2f} icc={icc:.3f} deg={st['mean_degree']:.2f} "
-                  f"share={st['shared_gene_pair_fraction']:.3f}  "
-                  f"coverage={cov['coverage']:.4f} "
-                  f"[{cov['ci95'][0]:.4f},{cov['ci95'][1]:.4f}]  "
-                  f"q={cov['mean_band_halfwidth']:.4f}  {row['secs']}s", flush=True)
+            print(
+                f"{name:16s} sg={sigma_gene:.2f} icc={icc:.3f} deg={st['mean_degree']:.2f} "
+                f"share={st['shared_gene_pair_fraction']:.3f}  "
+                f"coverage={cov['coverage']:.4f} "
+                f"[{cov['ci95'][0]:.4f},{cov['ci95'][1]:.4f}]  "
+                f"q={cov['mean_band_halfwidth']:.4f}  {row['secs']}s",
+                flush=True,
+            )
     print(json.dumps(out, indent=1))
