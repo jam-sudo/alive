@@ -669,6 +669,56 @@ def _open_verified_sealed_source(source_path: Path, expected_sha: str) -> Iterat
                 f"{str(source_path)!r}; refusing a pathname reopen"
             )
         yield descriptor_path
+
+        # --- post-hash window: prove the bytes did not change under us ---------
+        # 2026-08-30, `seal.verified-fd-posthash-mutation`, reproduced independently
+        # on both sides of the audit loop: descriptor pinning defeats a *pathname*
+        # swap, but not an IN-PLACE write to the inode we hold open. Measured on the
+        # real function: `same_inode=True`, verified digest != the digest of the
+        # bytes actually read through the descriptor.
+        #
+        # Prevention is not available at this layer -- a local writer with write
+        # permission can modify a file we hold read-only, and nothing here can stop
+        # it. What IS available is making the divergence impossible to go unnoticed,
+        # which is the property the seal's evidence actually rests on: "the bytes we
+        # recorded as verified are the bytes we consumed" must be true or the run
+        # must fail. So the digest is re-streamed through the SAME descriptor after
+        # consumption and must still equal the declared one.
+        #
+        # This runs only on the normal path, never in `finally`: on an exception the
+        # original failure is the one that matters and must not be masked.
+        #
+        # Cost measured on the real sealed source (0.70 GB): 0.2 s. Once per run.
+        os.lseek(fd, 0, os.SEEK_SET)
+        post = hashlib.sha256()
+        while True:
+            chunk = os.read(fd, _HASH_CHUNK)
+            if not chunk:
+                break
+            post.update(chunk)
+        post_stat = os.fstat(fd)
+        identity_final = (
+            post_stat.st_dev,
+            post_stat.st_ino,
+            post_stat.st_size,
+            post_stat.st_mtime_ns,
+        )
+        post_sha = post.hexdigest()
+        if post_sha != expected_sha:
+            raise Phase2bSubcommandError(
+                f"sealed source {str(source_path)!r} was modified IN PLACE while it was open: "
+                f"the bytes verified before consumption hash to {expected_sha!r} but the same "
+                f"descriptor now hashes to {post_sha!r}. The inode is unchanged "
+                f"(identity before={identity_after!r} after={identity_final!r}), so a pathname "
+                "check could not have seen this. Fail closed: what was consumed is not what was "
+                "verified."
+            )
+        if identity_final != identity_after:
+            raise Phase2bSubcommandError(
+                f"sealed source {str(source_path)!r} changed identity while it was open "
+                f"(before={identity_after!r} after={identity_final!r}) even though its bytes still "
+                "hash to the declared digest. Fail closed rather than reason about how."
+            )
     finally:
         os.close(fd)
 

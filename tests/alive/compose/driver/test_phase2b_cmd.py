@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -249,6 +250,100 @@ def test_verified_descriptor_survives_source_path_replacement(tmp_path: Path) ->
         replacement_path.replace(source_path)
         assert source_path.read_bytes() == replacement
         assert descriptor_path.read_bytes() == original
+
+
+# --------------------------------------------------------------------------- #
+# Guard: the post-hash window -- an IN-PLACE write to the open inode
+#
+# `seal.verified-fd-posthash-mutation`, 2026-08-30. Descriptor pinning defeats a
+# pathname swap (the test above) but NOT a write into the inode already held open:
+# reproduced independently on both sides of the audit loop as `same_inode=True`
+# with the verified digest differing from the bytes actually read back.
+#
+# Prevention is not available here -- nothing in this process can stop a local
+# writer with write permission. What the fix buys is that the divergence cannot
+# pass unnoticed, which is the property the seal's evidence rests on.
+# --------------------------------------------------------------------------- #
+def test_in_place_mutation_of_the_open_inode_is_refused(tmp_path: Path) -> None:
+    """The exact reproduction, pinned: same inode, different bytes, must fail."""
+    source_path = tmp_path / "source.h5ad"
+    original = b"original-sealed-source" * 64
+    source_path.write_bytes(original)
+    expected_sha = hashlib.sha256(original).hexdigest()
+    before_ino = source_path.stat().st_ino
+
+    with pytest.raises(phase2b_mod.Phase2bSubcommandError, match="modified IN PLACE"):
+        with phase2b_mod._open_verified_sealed_source(source_path, expected_sha) as descriptor_path:
+            with open(source_path, "r+b") as handle:
+                handle.seek(0)
+                handle.write(b"tampered-sealed-source" * 64)
+                handle.flush()
+                os.fsync(handle.fileno())
+            # the consumer reads the MUTATED bytes through the pinned descriptor
+            assert Path(descriptor_path).read_bytes() != original
+    assert source_path.stat().st_ino == before_ino, "the reproduction requires the same inode"
+
+
+def test_in_place_mutation_is_caught_even_when_mtime_is_restored(tmp_path: Path) -> None:
+    """The check is digest-based, not stat-based.
+
+    An adversary who bothers to mutate the inode can also restore
+    `(size, mtime)` with `os.utime`, which is exactly what makes an
+    identity-only re-check insufficient. Re-streaming the digest through the same
+    descriptor does not care.
+    """
+    source_path = tmp_path / "source.h5ad"
+    original = b"O" * 4096
+    source_path.write_bytes(original)
+    expected_sha = hashlib.sha256(original).hexdigest()
+    stat_before = source_path.stat()
+
+    with pytest.raises(phase2b_mod.Phase2bSubcommandError, match="modified IN PLACE"):
+        with phase2b_mod._open_verified_sealed_source(source_path, expected_sha):
+            with open(source_path, "r+b") as handle:
+                handle.seek(0)
+                handle.write(b"X" * 4096)  # same LENGTH, so st_size is unchanged
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.utime(source_path, ns=(stat_before.st_atime_ns, stat_before.st_mtime_ns))
+            assert source_path.stat().st_mtime_ns == stat_before.st_mtime_ns
+            assert source_path.stat().st_size == stat_before.st_size
+
+
+def test_an_untouched_sealed_source_still_passes(tmp_path: Path) -> None:
+    """Non-vacuity: a check that refuses everything is an outage, not a guard."""
+    source_path = tmp_path / "source.h5ad"
+    original = b"untouched-sealed-source" * 64
+    source_path.write_bytes(original)
+    expected_sha = hashlib.sha256(original).hexdigest()
+
+    with phase2b_mod._open_verified_sealed_source(source_path, expected_sha) as descriptor_path:
+        assert Path(descriptor_path).read_bytes() == original
+
+
+def test_a_failure_inside_the_window_is_not_masked_by_the_recheck(tmp_path: Path) -> None:
+    """The re-check runs on the normal path only.
+
+    If the consumer raises, that exception is the one that matters. Putting the
+    re-verification in a `finally` would replace a real failure with a digest
+    complaint and send whoever reads the terminal after the wrong thing.
+    """
+    source_path = tmp_path / "source.h5ad"
+    original = b"Z" * 4096
+    source_path.write_bytes(original)
+    expected_sha = hashlib.sha256(original).hexdigest()
+
+    class _ConsumerFailure(RuntimeError):
+        pass
+
+    with pytest.raises(_ConsumerFailure):
+        with phase2b_mod._open_verified_sealed_source(source_path, expected_sha):
+            # mutate as well, so the re-check WOULD have something to complain about
+            with open(source_path, "r+b") as handle:
+                handle.seek(0)
+                handle.write(b"Y" * 4096)
+                handle.flush()
+            raise _ConsumerFailure("the consumer's own failure")
 
 
 # --------------------------------------------------------------------------- #

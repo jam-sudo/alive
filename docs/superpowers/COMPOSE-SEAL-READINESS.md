@@ -5,7 +5,7 @@
 > **이 문서는 아무것도 정의하지 않는다** — 세부(task)는 plan, claim은 spec, exact param은 config,
 > 시간순 audit는 git이 authoritative다([sources of truth](../../CLAUDE.md#sources)). 상태 행이 authoritative
 > 문서와 어긋나면 **authoritative 문서가 옳다**; 이 인덱스를 갱신한다.
-> **Updated:** 2026-08-29 @ `ec1fb7b` (branch `compose-factor-bank-normalization`)
+> **Updated:** 2026-08-30 @ `57d455b` (branch `compose-factor-bank-normalization`)
 > `scripts/bump-readiness-stamp.sh` / the pre-commit hook from `HEAD` at commit time, so it names the
 > **parent** of the commit that carries it and can never name itself. Reading it as "one commit stale" is a
 > misreading; git is authoritative for when this file actually changed.
@@ -2028,6 +2028,45 @@ warns about. The skip is now a hard failure: a document that enumerates the bloc
 committed digest, or it is stale rather than exempt.
 
 Seal remains **UNOPENED**; execution remains **RELEASE-BLOCKED**; sealed access count **0**.
+
+**2026-08-30 — the post-hash window: descriptor pinning stops a pathname swap, not a write into
+the inode it pins.**
+
+This one was on the record as an unfixed residual before it was a finding. The 2026-08-28 claim-replay
+entry closed with it in plain words: in-place mutation of an already-open inode defeats descriptor
+pinning, `_open_verified_sealed_source` does not re-check identity at consumption time, it needs a
+hostile local writer, and it was **not** closed there. The daily reviewer then reproduced it against
+the real function and raised it as a **High** (`seal.verified-fd-posthash-mutation`), and reproducing
+it here independently gives the same three facts: `same_inode=True`, the verified digest and the
+digest of the bytes actually read back differ, and what comes back is the tampered content. The
+function has no diff against `origin/main`, so the shape is on main too.
+
+**The boundary is exact, and narrower than it first looks.** Mutation *before* or *during* hashing is
+still refused — the existing `(dev, ino, size, mtime_ns)` comparison across the hash catches it. The
+gap is strictly the window *after* the digest is taken and the descriptor handed on.
+
+**Prevention is not available at this layer and pretending otherwise would be the wrong fix.** A local
+writer with write permission can modify a file this process holds open read-only; nothing here stops
+that. What the seal's evidence actually rests on is narrower and is achievable: *the bytes recorded as
+verified are the bytes consumed*. So the digest is re-streamed through the **same descriptor** after
+consumption and must still equal the declared one. Divergence stops being silent and becomes a
+fail-closed abort. Cost measured on the real sealed source — 0.70 GB, **0.2 s**, once per run.
+
+**Two design choices, both pinned by tests rather than by comment.** The re-check is digest-based, not
+stat-based, because an adversary willing to mutate the inode will also restore `(size, mtime)` with
+`utime` — a test does exactly that and still gets a refusal. And the re-check runs on the **normal
+path only, never in `finally`**: on a consumer failure the original exception is the one that matters,
+and a `finally` would replace it with a digest complaint. A mutation that moves the block into
+`finally` is killed by the test whose name makes that claim.
+
+**Verified.** Four mutations, each killed by the named test: removing the re-check entirely (restores
+the reproduction), degrading it to an identity-only check (defeated by the mtime restore), moving it
+into `finally` (masks the consumer's exception), and making it always fail (caught by the non-vacuity
+control, because a guard that refuses everything is an outage). `phase2b_cmd.py` is a registered seal
+guard — this **adds a refusal, removes no check, and moves no registered value.**
+
+`config_sha256` unchanged at `0d207746…`; seal remains **UNOPENED**; execution remains
+**RELEASE-BLOCKED**; sealed access count **0**.
 
 ## 이 문서가 *아닌* 것 (중복 금지)
 
