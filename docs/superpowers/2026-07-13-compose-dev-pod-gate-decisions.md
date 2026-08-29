@@ -240,11 +240,11 @@ sealed-run runbook past §2.5 (owner-approved exact Git SHA is a separate, later
 
 | # | decision | current status | owner sign-off (flip to CONFIRMED — name / date) |
 |---|---|---|---|
-| 1 | GEARS revision `cell-gears==0.1.2` + published/default K562 training config | PROPOSED | ______________________ |
+| 1 | GEARS revision `cell-gears==0.1.2` + published/default K562 training config | **CONFIRMED** | Jae Min Yoon / 2026-08-29 |
 | 2 | GEARS GO-graph/gene2go — Harvard Dataverse `doi:10.7910/DVN/Q2ZV3E`, v2 manifest | **RESOLVED** | ______________________ |
-| 3 | CPA revision `cpa-tools==0.8.5` + published/default combo config | PROPOSED | ______________________ |
-| 4 | `approximation_bias` metric DEFINITION (spec `2026-07-13-compose-approximation-bias-metric-design.md`) | PROPOSED — **definition has changed since drafting; read §6.1 before signing** | ______________________ |
-| 5 | Dev-pod provider: RunPod A100 80GB PCIe, torch cu124 | PROPOSED | ______________________ |
+| 3 | CPA revision `cpa-tools==0.8.5` + published/default combo config | **CONFIRMED** | Jae Min Yoon / 2026-08-29 |
+| 4 | `approximation_bias` metric DEFINITION (spec `2026-07-13-compose-approximation-bias-metric-design.md`) | **CONFIRMED — the §6.1 v3 definition, not the v1 one this row was drafted against** | Jae Min Yoon / 2026-08-29 |
+| 5 | Dev-pod provider: RunPod A100 80GB PCIe, torch cu124 | **CONFIRMED** | Jae Min Yoon / 2026-08-29 |
 
 
 ### 6.1 What changed since this record was drafted — 2026-08-21 re-verification
@@ -298,6 +298,50 @@ that keeps recurring.** Signing these four settles *choices*. It does **not** ed
 need. Task 0.1's wheel/sdist hashes and pod image digest remain a **separate open acceptance
 condition** for #1 and #3 — signing settles the version choice, not the reproducibility evidence
 for it.
+
+
+### 6.2 Signature record — 2026-08-29
+
+The owner signed **#1, #3, #4 and #5 together** on 2026-08-29, after §6.1's re-verification was put
+in front of them. Recorded here rather than only in the table so that what was signed is legible
+without reconstructing it from four cells.
+
+**#1 — `cell-gears==0.1.2` + the published/default K562 training config.** Settles the *version
+choice*. §6.1 re-measured `requirements.gears_env.lock` and its SHA-256 `2d55a062…` against §7's
+recorded value and found them unchanged.
+
+**#3 — `cpa-tools==0.8.5` + the published/default combo config.** Settles the *version choice*.
+`requirements.cpa_env.lock` SHA-256 `7d4d034b…` re-measured unchanged.
+
+**#4 — the `approximation_bias` DEFINITION, in its current v3 form.** This row was drafted against a
+v1 definition and the definition moved before it was signed, so the signature is recorded against
+what is actually in the repository today, enumerated so it cannot be read as approving the older
+text: report schema `…_v3` (`approximation_bias.py:23`); §2's per-cell term computed once over the
+full cell matrix as `cell_raw_counts` rather than per row as `raw_pseudobulk_approximation`
+(`4f417f5`, which made the Jensen gap well defined instead of comparing the pseudobulk
+representation with itself); and `R ≥ R*` adding a **mandatory narrative limitation only**, never a
+comparator substitution. `R_star = 0.5`, the three flag values, and measurement on non-sealed roles
+only are unchanged.
+
+**#5 — dev-pod provider: RunPod A100 80GB PCIe, torch `2.6.0+cu124`.** Settles the *provider and
+platform choice*. Both locks re-measured still pinning `torch==2.6.0+cu124`.
+
+**What these four signatures do NOT cover.** Enumerated explicitly because the standing audit finding
+`docs.dev-pod-signature-scope-overclaim` is precisely that this record mixes settled package/provider
+choices with runtime configuration that is not yet measured. Signing does not:
+
+- edit `configs/compose_k562_v1_phase2.yaml`, fill any null activation blocker, or move
+  `config_sha256`;
+- approve an exact Git SHA, or advance the sealed-run runbook past §2.5;
+- open the seal, or authorise any sealed run;
+- accept Task 0.1's wheel/sdist hashes or the pod image digest — those remain a **separate open
+  acceptance condition** for #1 and #3, as §6.1 already states;
+- approve the exact `epoch / batch / optimizer / early-stop / seed` used by either baseline. Those
+  are to be read off the **installed wheel on the pod** and recorded then. They are the specific
+  scope the overclaim finding names, and they are outside this signature.
+
+What the signatures do is unblock the **development pod**, which is the only path that can produce
+the real-Norman evidence the null blockers need.
 
 
 ---
