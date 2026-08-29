@@ -5,7 +5,7 @@
 > **이 문서는 아무것도 정의하지 않는다** — 세부(task)는 plan, claim은 spec, exact param은 config,
 > 시간순 audit는 git이 authoritative다([sources of truth](../../CLAUDE.md#sources)). 상태 행이 authoritative
 > 문서와 어긋나면 **authoritative 문서가 옳다**; 이 인덱스를 갱신한다.
-> **Updated:** 2026-08-30 @ `57d455b` (branch `compose-factor-bank-normalization`)
+> **Updated:** 2026-08-30 @ `96e2ba5` (branch `compose-factor-bank-normalization`)
 > `scripts/bump-readiness-stamp.sh` / the pre-commit hook from `HEAD` at commit time, so it names the
 > **parent** of the commit that carries it and can never name itself. Reading it as "one commit stale" is a
 > misreading; git is authoritative for when this file actually changed.
@@ -2067,6 +2067,45 @@ guard — this **adds a refusal, removes no check, and moves no registered value
 
 `config_sha256` unchanged at `0d207746…`; seal remains **UNOPENED**; execution remains
 **RELEASE-BLOCKED**; sealed access count **0**.
+
+**2026-08-30 — the sensitivity report the 2026-08-29 decision registered now exists, and it is
+checked against the verdict function rather than against a copy of its rules.**
+
+The decision froze the contract (`inference.sensitivity_band_inflation`) and said in §7 that the
+report consuming it was the next increment. It is here: `inference2.inflate_bounds` and
+`inference2.band_sensitivity`.
+
+**What it computes.** Inflation widens the shared band and never touches `theta`, so the result is
+shaped exactly like `ComposeSimultaneousBounds` and can be handed to `verdict2.sealed_verdict`
+unchanged. The flip point is **closed form, not searched**: the clause holds while
+`theta_C - lambda*q > t_C`, so the crossing sits at `lambda = (theta_C - t_C)/q`, with the additive
+contrast measured against the material margin and the learned family against theirs. The report also
+carries `verdict_holds_below_lambda = min(flip)`, the inflation at which the first clause fails and
+the conjunction stops holding.
+
+**The load-bearing test compares the report with the real decision function.** Just inside the
+reported flip, `sealed_verdict` still returns `GI_LEARNABLE_WIN`; just outside it does not. A report
+that reimplemented the clause logic and drifted from the function that decides the run would be worse
+than no report, and this is what would notice. It earned its place immediately: the mutation that
+aggregates the flip with `max` instead of `min` is caught by that test as well as by the one whose
+name makes the claim.
+
+**Boundaries kept.** `lambda = 1.0` reproduces the registered bounds byte for byte — the value the
+verdict is decided on is not perturbed by the thing reporting around it. A factor below 1 is refused
+outright, because narrowing the registered band is the single thing this must never do. A zero-width
+band reports `inf` rather than `0`, since no inflation moves it.
+
+**Verified.** Fourteen tests; eight mutations, each killed by the test whose own name makes the
+claim — inflating at λ=1.0, dragging `theta` along with the band, admitting a factor below 1, solving
+the flip against the wrong threshold, aggregating with `max`, dropping the leading-1.0 check,
+dropping strict monotonicity, and mapping a zero band to 0 instead of `inf`.
+
+Nothing registered moved: `config_sha256` unchanged at `0d207746…`, thresholds unchanged, the report
+is descriptive-only. Seal remains **UNOPENED**; execution remains **RELEASE-BLOCKED**.
+
+**Still open on this thread.** Wiring the report into the Phase-2b run output (it is a library
+function today, called by nothing in the driver) and the spec §10.5 sentence, which the daily reviewer
+correctly notes still lives only in a readiness proposal and is unsigned.
 
 ## 이 문서가 *아닌* 것 (중복 금지)
 
