@@ -5,7 +5,7 @@
 > **이 문서는 아무것도 정의하지 않는다** — 세부(task)는 plan, claim은 spec, exact param은 config,
 > 시간순 audit는 git이 authoritative다([sources of truth](../../CLAUDE.md#sources)). 상태 행이 authoritative
 > 문서와 어긋나면 **authoritative 문서가 옳다**; 이 인덱스를 갱신한다.
-> **Updated:** 2026-08-30 @ `530b4c8` (branch `compose-factor-bank-normalization`)
+> **Updated:** 2026-08-30 @ `6355749` (branch `compose-factor-bank-normalization`)
 > `scripts/bump-readiness-stamp.sh` / the pre-commit hook from `HEAD` at commit time, so it names the
 > **parent** of the commit that carries it and can never name itself. Reading it as "one commit stale" is a
 > misreading; git is authoritative for when this file actually changed.
@@ -2196,7 +2196,23 @@ report payload OUTSIDE those five components, with its own checksum. Where a res
 spec question, not a coding preference, so the wiring waits for the signature rather than being
 chosen by whoever writes the code.
 
-Neither amendment moves `config_sha256`; seal remains **UNOPENED**; execution remains
+**2026-08-30 (same day) — a third sentence joined them, and adjudicating it reversed the finding's
+direction.** `driver.preflight-output-contract` is **CONFIRMED as a fact**: the driver design spec
+§3.2 ends with "화면에는 canonical payload와 full checksum을 출력한다" and `preflight_cmd.py`
+contains no `print` at all. The audit offered two remedies — add the stdout, or amend the spec to an
+artifact-only contract — and measuring the runbook decides between them rather than leaving it to
+taste. The runbook makes the flow file-mediated **by design**: a *second operator* reconciles
+`seal_confirmation_manifest.json` and reads `confirmation_checksum` from it. CLAUDE.md §1 ranks the
+runbook above a design spec for execution contracts, and "print to screen" is operator UX, not a
+scientific claim. Dumping the canonical payload to a terminal would also make a screen transcript
+resemble a record of a two-person reconciliation that is supposed to happen against the file. **The
+implementation is right; the spec sentence is the defect**, and adding the stdout would have made the
+code match a sentence that contradicts the operating procedure. The replacement text is drafted in
+the same amendments document — not applied, because removing a "print this" requirement from an
+owner-approved spec is exactly what should not be done by whoever finds it inconvenient, even when
+the evidence says the requirement was the mistake.
+
+None of the three amendments moves `config_sha256`; seal remains **UNOPENED**; execution remains
 **RELEASE-BLOCKED**.
 
 ## 이 문서가 *아닌* 것 (중복 금지)

@@ -1,4 +1,10 @@
-# COMPOSE-K562-v1 — two §10.5 amendments awaiting signature
+# COMPOSE-K562-v1 — three spec sentences awaiting signature
+
+> **On the filename.** It says `spec-10-5` because the first two amendments live in
+> `specs/2026-06-22-compose-epistasis-operator-design.md` §10.5. §5 adds a third, in the
+> **driver** design spec. The file was not renamed: a document's identity is its path, and
+> renaming it a day after it was committed costs more than a narrow name does. The content is
+> what it says here.
 
 > **STATUS: PROPOSED — owner signature required.** Both sentences describe things the repository
 > already does; neither changes the estimator, the comparator family, the margins, the multiplicity
@@ -84,3 +90,41 @@ each registered $\lambda$ *because* that magnitude is unknown; it does not asser
 
 Neither closes the remaining pre-seal path bindings (`data_card_path`, `feature_bank_path`), which
 are a separate question recorded in the readiness index.
+
+---
+
+## 5. Amendment C — preflight's registered stdout, adjudicated against the runbook
+
+**Finding:** `driver.preflight-output-contract`. **CONFIRMED as a fact.**
+`specs/2026-07-07-compose-production-driver-design.md` §3.2 ends with
+*"화면에는 canonical payload와 full checksum을 출력한다"*, and
+`driver/preflight_cmd.py` contains **no `print` at all** — it installs the write-once manifest and
+returns an exit code.
+
+**But the audit's two options are not equally right, and measuring the runbook decides it.** The
+execution contract is explicit that the flow is file-mediated *by design*:
+
+> ⚑ `--confirm-seal`에 넣는 값은 `<run_id>`가 아니다. `preflight`가 성공 시
+> `<run_dir>/seal_confirmation_manifest.json`을 write-once로 설치하며 … **두 번째 운영자가
+> manifest를 대조한 후**, 거기 적힌 정확한 `confirmation_checksum` 값을 `--confirm-seal`에 입력한다.
+
+That is a **two-operator control whose medium is the artifact**. CLAUDE.md §1 ranks the
+runbook above a design spec for execution contracts, and "print to screen" is an operator-UX
+contract, not a scientific claim. It also sits badly with the CLI's own stdout discipline: dumping
+the full canonical payload — ordered seal-request checksums, pair counts — onto a terminal makes a
+screen transcript look like a record of a two-person reconciliation that is supposed to happen
+against the file.
+
+**So the implementation is right and the SPEC SENTENCE is the defect.** Adding deterministic stdout
+(the audit's option a) would make the code match a sentence that contradicts the operating procedure.
+
+**Proposed replacement for that sentence in `2026-07-07-compose-production-driver-design.md` §3.2:**
+
+> `confirmation_checksum`은 자신을 제외한 payload의 `sha256_json`이다. payload는 화면이 아니라
+> write-once manifest 파일로만 남긴다 — 확인은 runbook §6의 2인 통제대로 그 파일을 대조해 수행하며,
+> `preflight`는 stdout에 아무것도 쓰지 않는다.
+
+**Why this needs a signature rather than an edit.** The sentence being removed is in an
+owner-approved design spec, and removing a "print this" requirement is exactly the kind of change
+that should not be made by whoever finds it inconvenient — even when, as here, the evidence says the
+requirement was the mistake.
