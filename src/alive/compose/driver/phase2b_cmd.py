@@ -72,7 +72,6 @@ import fcntl
 import hashlib
 import json
 import os
-import stat
 import sys
 from pathlib import Path
 from typing import Any, Iterator, Mapping
@@ -83,7 +82,7 @@ from alive.compose.approximation_bias import (
     ApproximationBiasEvidence,
     ApproximationBiasValidationError,
 )
-from alive.compose.config2 import load_compose_phase2_config
+from alive.compose.config2 import ComposePhase2Config, load_compose_phase2_config_from_text
 from alive.compose.driver.bias_report_preseal import (
     ApproximationBiasDeclarationError,
     gears_approximation_bias_sha,
@@ -91,6 +90,12 @@ from alive.compose.driver.bias_report_preseal import (
 )
 from alive.compose.driver.confirmation import verify_seal_confirmation_manifest
 from alive.compose.driver.preflight_cmd import build_confirmation_inputs
+from alive.compose.driver.preseal_read import (
+    PresealBytesError,
+    PresealDescriptorError,
+    read_verified_bytes,
+    verified_descriptor,
+)
 from alive.compose.driver.run_dir_state import (
     DRIVER_LOCK_FILE,
     TERMINAL_BASENAMES,
@@ -168,6 +173,26 @@ class Phase2bSubcommandError(RuntimeError):
 # --------------------------------------------------------------------------- #
 # Public subcommand
 # --------------------------------------------------------------------------- #
+
+
+def _preseal_bytes(spec: ResolvedRunSpec, field: str) -> bytes:
+    """Digest-bound read of a pre-seal artifact (see `driver.preseal_read`).
+
+    2026-08-30: this used to be `Path(spec.pre_seal[field].path).read_bytes()` --
+    a SECOND read of a pathname whose digest was checked during spec validation,
+    so "already-SHA-verified bytes" described the first read, not this one. The
+    shared helper reads once and hashes what it read.
+    """
+    declared = spec.pre_seal[field]
+    try:
+        return read_verified_bytes(declared.path, declared.sha256, field=field)
+    except PresealBytesError as exc:
+        raise Phase2bSubcommandError(str(exc)) from exc
+
+
+def _preseal_config(spec: ResolvedRunSpec) -> ComposePhase2Config:
+    """Load the pre-seal config from the exact bytes whose digest matched."""
+    return load_compose_phase2_config_from_text(_preseal_bytes(spec, "config").decode("utf-8"))
 
 
 def run_phase2b_subcommand(
@@ -278,7 +303,7 @@ def _run_confirmed_phase2b(
     spec = load_resolved_run_spec(
         spec_path, approved_artifacts_root=approved_artifacts_root, mode_expected=mode
     )
-    config = load_compose_phase2_config(spec.pre_seal["config"].path)
+    config = _preseal_config(spec)
     approximation_bias_report_evidence = _resolve_approximation_bias_report(
         spec, config, response_artifact=run_spec.response_artifact
     )
@@ -588,139 +613,25 @@ def _build_sealed_store(
 
 @contextlib.contextmanager
 def _open_verified_sealed_source(source_path: Path, expected_sha: str) -> Iterator[Path]:
-    """Yield an fd-backed path to the integrity-checked sealed source.
+    """Descriptor-pinned read of the sealed source, delegating to the shared helper.
 
-    Opens the source with ``O_NOFOLLOW`` (rejecting a symlink final component),
-    fstat-verifies it is a regular file, captures its
-    ``(device, inode, size, mtime_ns)`` identity, streams the SHA-256, then
-    re-captures the identity and requires it unchanged (a mutation during
-    hashing fails closed). The streamed digest must equal ``expected_sha``.
-    The original descriptor remains open while the yielded ``/proc/self/fd`` or
-    ``/dev/fd`` path is used, closing the hash-then-reopen pathname race.
+    The implementation moved to :func:`alive.compose.driver.preseal_read.verified_descriptor`
+    on 2026-08-30 so the pre-seal bias lane could reuse it. That lane could not be
+    closed the obvious way: its reconstruction helper lives in
+    ``src/alive/compose/approximation_bias.py``, which is inside the FROZEN
+    kernel-isolation closure, and editing it invalidates archived Linux CI evidence
+    that only a fresh CI run can re-establish (`test_kernel_isolation_ci` caught
+    exactly that when the first attempt tried). Sharing this contextmanager closes
+    the lane without touching a single byte the proof covers.
 
-    Raises
-    ------
-    Phase2bSubcommandError
-        On a symlink / non-regular node, an identity change during hashing, an
-        unreadable file, a digest mismatch, or an unavailable/mismatched
-        descriptor-backed path.
+    `PresealDescriptorError` is converted to this module's error, so the existing
+    contract and every message it is matched on are unchanged.
     """
-    if source_path.is_symlink():
-        raise Phase2bSubcommandError(
-            f"sealed source {str(source_path)!r} is a symlink (node-kind policy)"
-        )
-    flags = os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0)
     try:
-        fd = os.open(source_path, flags)
-    except OSError as exc:
-        raise Phase2bSubcommandError(
-            f"cannot open sealed source {str(source_path)!r} (O_NOFOLLOW): {exc}"
-        ) from exc
-    try:
-        pre = os.fstat(fd)
-        if not stat.S_ISREG(pre.st_mode):
-            raise Phase2bSubcommandError(
-                f"sealed source {str(source_path)!r} is not a regular file (node-kind policy)"
-            )
-        identity_before = (pre.st_dev, pre.st_ino, pre.st_size, pre.st_mtime_ns)
-        digest = hashlib.sha256()
-        while True:
-            chunk = os.read(fd, _HASH_CHUNK)
-            if not chunk:
-                break
-            digest.update(chunk)
-        post = os.fstat(fd)
-        identity_after = (post.st_dev, post.st_ino, post.st_size, post.st_mtime_ns)
-        if identity_before != identity_after:
-            raise Phase2bSubcommandError(
-                f"sealed source {str(source_path)!r} changed identity during hashing "
-                f"(before={identity_before!r} after={identity_after!r})"
-            )
-        actual_sha = digest.hexdigest()
-        if actual_sha != expected_sha:
-            raise Phase2bSubcommandError(
-                f"sealed source {str(source_path)!r} digest mismatch "
-                f"(expected {expected_sha!r}, got {actual_sha!r})"
-            )
-
-        os.lseek(fd, 0, os.SEEK_SET)
-        descriptor_path: Path | None = None
-        for candidate in (Path(f"/proc/self/fd/{fd}"), Path(f"/dev/fd/{fd}")):
-            try:
-                candidate_fd = os.open(candidate, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0))
-            except OSError:
-                continue
-            try:
-                candidate_stat = os.fstat(candidate_fd)
-                candidate_identity = (
-                    candidate_stat.st_dev,
-                    candidate_stat.st_ino,
-                    candidate_stat.st_size,
-                    candidate_stat.st_mtime_ns,
-                )
-            finally:
-                os.close(candidate_fd)
-            if candidate_identity == identity_after:
-                descriptor_path = candidate
-                break
-        if descriptor_path is None:
-            raise Phase2bSubcommandError(
-                "cannot obtain an identity-matched descriptor path for sealed source "
-                f"{str(source_path)!r}; refusing a pathname reopen"
-            )
-        yield descriptor_path
-
-        # --- post-hash window: prove the bytes did not change under us ---------
-        # 2026-08-30, `seal.verified-fd-posthash-mutation`, reproduced independently
-        # on both sides of the audit loop: descriptor pinning defeats a *pathname*
-        # swap, but not an IN-PLACE write to the inode we hold open. Measured on the
-        # real function: `same_inode=True`, verified digest != the digest of the
-        # bytes actually read through the descriptor.
-        #
-        # Prevention is not available at this layer -- a local writer with write
-        # permission can modify a file we hold read-only, and nothing here can stop
-        # it. What IS available is making the divergence impossible to go unnoticed,
-        # which is the property the seal's evidence actually rests on: "the bytes we
-        # recorded as verified are the bytes we consumed" must be true or the run
-        # must fail. So the digest is re-streamed through the SAME descriptor after
-        # consumption and must still equal the declared one.
-        #
-        # This runs only on the normal path, never in `finally`: on an exception the
-        # original failure is the one that matters and must not be masked.
-        #
-        # Cost measured on the real sealed source (0.70 GB): 0.2 s. Once per run.
-        os.lseek(fd, 0, os.SEEK_SET)
-        post = hashlib.sha256()
-        while True:
-            chunk = os.read(fd, _HASH_CHUNK)
-            if not chunk:
-                break
-            post.update(chunk)
-        post_stat = os.fstat(fd)
-        identity_final = (
-            post_stat.st_dev,
-            post_stat.st_ino,
-            post_stat.st_size,
-            post_stat.st_mtime_ns,
-        )
-        post_sha = post.hexdigest()
-        if post_sha != expected_sha:
-            raise Phase2bSubcommandError(
-                f"sealed source {str(source_path)!r} was modified IN PLACE while it was open: "
-                f"the bytes verified before consumption hash to {expected_sha!r} but the same "
-                f"descriptor now hashes to {post_sha!r}. The inode is unchanged "
-                f"(identity before={identity_after!r} after={identity_final!r}), so a pathname "
-                "check could not have seen this. Fail closed: what was consumed is not what was "
-                "verified."
-            )
-        if identity_final != identity_after:
-            raise Phase2bSubcommandError(
-                f"sealed source {str(source_path)!r} changed identity while it was open "
-                f"(before={identity_after!r} after={identity_final!r}) even though its bytes still "
-                "hash to the declared digest. Fail closed rather than reason about how."
-            )
-    finally:
-        os.close(fd)
+        with verified_descriptor(source_path, expected_sha) as descriptor_path:
+            yield descriptor_path
+    except PresealDescriptorError as exc:
+        raise Phase2bSubcommandError(str(exc)) from exc
 
 
 def _resolve_approximation_bias_report(

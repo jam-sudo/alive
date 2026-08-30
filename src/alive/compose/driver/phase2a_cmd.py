@@ -48,8 +48,12 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from alive.compose.baselines_combo import BaselineAdapter
-from alive.compose.config2 import load_compose_phase2_config
+from alive.compose.config2 import ComposePhase2Config, load_compose_phase2_config_from_text
 from alive.compose.driver.identity_lock import assemble_baseline_backends
+from alive.compose.driver.preseal_read import (
+    PresealBytesError,
+    read_verified_bytes,
+)
 from alive.compose.driver.run_dir_state import assert_run_dir_roster
 from alive.compose.driver.run_spec import (
     RUN_PRODUCED_BASENAMES,
@@ -114,6 +118,26 @@ class Phase2aSubcommandError(RuntimeError):
 # --------------------------------------------------------------------------- #
 
 
+def _preseal_bytes(spec: ResolvedRunSpec, field: str) -> bytes:
+    """Digest-bound read of a pre-seal artifact (see `driver.preseal_read`).
+
+    2026-08-30: this used to be `Path(spec.pre_seal[field].path).read_bytes()` --
+    a SECOND read of a pathname whose digest was checked during spec validation,
+    so "already-SHA-verified bytes" described the first read, not this one. The
+    shared helper reads once and hashes what it read.
+    """
+    declared = spec.pre_seal[field]
+    try:
+        return read_verified_bytes(declared.path, declared.sha256, field=field)
+    except PresealBytesError as exc:
+        raise Phase2aSubcommandError(str(exc)) from exc
+
+
+def _preseal_config(spec: ResolvedRunSpec) -> ComposePhase2Config:
+    """Load the pre-seal config from the exact bytes whose digest matched."""
+    return load_compose_phase2_config_from_text(_preseal_bytes(spec, "config").decode("utf-8"))
+
+
 def run_phase2a_subcommand(
     run_spec: Any,
     *,
@@ -168,7 +192,7 @@ def run_phase2a_subcommand(
     )
 
     # Step 3: assemble the in-memory objects (inputs / dev store / adapters).
-    config = load_compose_phase2_config(spec.pre_seal["config"].path)
+    config = _preseal_config(spec)
     inputs: Phase2aInputs = run_spec.phase2a_inputs
     dev_store = _build_development_store(run_spec)
     response_artifact = run_spec.response_artifact

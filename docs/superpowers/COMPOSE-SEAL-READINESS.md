@@ -5,7 +5,7 @@
 > **이 문서는 아무것도 정의하지 않는다** — 세부(task)는 plan, claim은 spec, exact param은 config,
 > 시간순 audit는 git이 authoritative다([sources of truth](../../CLAUDE.md#sources)). 상태 행이 authoritative
 > 문서와 어긋나면 **authoritative 문서가 옳다**; 이 인덱스를 갱신한다.
-> **Updated:** 2026-08-30 @ `96e2ba5` (branch `compose-factor-bank-normalization`)
+> **Updated:** 2026-08-30 @ `eb8d707` (branch `compose-factor-bank-normalization`)
 > `scripts/bump-readiness-stamp.sh` / the pre-commit hook from `HEAD` at commit time, so it names the
 > **parent** of the commit that carries it and can never name itself. Reading it as "one commit stale" is a
 > misreading; git is authoritative for when this file actually changed.
@@ -2106,6 +2106,65 @@ is descriptive-only. Seal remains **UNOPENED**; execution remains **RELEASE-BLOC
 **Still open on this thread.** Wiring the report into the Phase-2b run output (it is a library
 function today, called by nothing in the driver) and the spec §10.5 sentence, which the daily reviewer
 correctly notes still lives only in a readiness proposal and is unsigned.
+
+**2026-08-30 — every pre-seal read lane is digest-bound now, in ONE place, and a frozen kernel
+proof decided how the last one was closed.**
+
+The audit re-raised `provenance.preseal-hash-reopen-toctou` as "only some lanes are closed", and
+named the lines. It was right, and the first one it named is the sharpest: `carrier_loader:621` read
+`phase2a_inputs` with a plain path read while its eleven siblings in the same file went through the
+digest-bound helper. **The 2026-08-25 fix missed a sibling inside the very file it was fixing.**
+
+**So the helper stopped living in a consumer.** `driver/preseal_read.py` now holds it and every lane
+calls it: the `phase2a_inputs` lane, `preflight_cmd`'s config plus its two raw byte reads plus the
+pair manifest, the config load in `phase2a_cmd` and `phase2b_cmd`, and the bias lane. Fixing this in
+one place is now the only way to fix it at all — the same structural move made twice on the
+collaboration side this week for the worktree pin and the agent timeout. `carrier_loader._read_json`
+lost its last caller and was deleted rather than left as a path anyone could reach for.
+
+Each caller converts `PresealBytesError` into the error its own contract already raises. Widening a
+caller's exception type to import a new one would redefine an existing contract in order to add a
+check, which this repository has already recorded as its own mistake.
+
+**Three drift guards fired, and the point was not to bump their numbers.** A new driver module has to
+join the structural-scan roster or the §4 scan silently stops covering the package. A new exception
+class has to be classified. The classification took thought: `PRESEAL_REJECTION` in that registry
+means *actually maps to exit 10*, and these classes must never reach the CLI — every call site
+converts them, and one arriving at the CLI would mean a site forgot, which must surface as a bug
+rather than be dressed up as a clean pre-seal rejection. They are `UNREACHABLE_FROM_DRIVER`, and the
+label is made true by a **behavioural** test that trips a real digest mismatch per module rather than
+grepping for an `except` clause.
+
+**The last lane could not be closed the obvious way, and a guard is why.** The bias lane's
+reconstruction helper lives in `src/alive/compose/approximation_bias.py`, which is inside the
+**frozen kernel-isolation closure**. Adding a text-taking variant there invalidated the archived
+Linux CI proof at `2dd23d6`, and `test_kernel_isolation_ci` said so — that evidence can only be
+re-established by a fresh Linux run, which is not something to spend on a refactor's convenience. The
+edit was reverted. Instead the descriptor-pinned reader moved out of `phase2b_cmd` into the shared
+module, and the bias lane hands the reconstruction helper a **descriptor path**: same "verified bytes
+== consumed bytes" property, zero bytes changed inside the proof.
+
+**Two defects were introduced during that relocation and caught by the tests written for it.**
+Widening the signature to `str | Path` while the body kept calling `Path` methods meant the bias lane
+raised `AttributeError` instead of verifying — a widened parameter type the body does not honour is
+not a widened type. And the first version of the bias conversion test called the shared function
+directly, exercising no conversion at all: it would have passed whatever `bias_report_preseal` did.
+
+**Verified.** Five mutations killed by the named test, including restoring the missed
+`phase2a_inputs` lane and dropping the conversion in two different modules. Full repository suite
+**2945 passed / 3 skipped**; ruff clean. `config_sha256` unchanged at `0d207746…`; seal remains
+**UNOPENED**; execution remains **RELEASE-BLOCKED**.
+
+**Not closed here, and named rather than implied.** `data_card_path` and `feature_bank_path` are
+still handed onward as paths and hashed by their consumer for provenance rather than compared against
+the run spec's declared digests. `raw_asset_path` is already descriptor-pinned. Binding the other two
+means changing what their consumers promise, and that is a separate question.
+
+**A process correction worth keeping.** A mutation battery was killed by a 10-minute tool timeout
+before its `finally` ran, leaving a mutation in the tree — the roster entry it had deleted stayed
+deleted. The "restored byte-for-byte" line these batteries print only appears when the battery
+survives. Restoration has to be checked from OUTSIDE the battery; `git status` caught it, and
+batteries now run in the background where a timeout cannot kill them mid-mutation.
 
 ## 이 문서가 *아닌* 것 (중복 금지)
 

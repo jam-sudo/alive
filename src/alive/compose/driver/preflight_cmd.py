@@ -57,7 +57,10 @@ import json
 from pathlib import Path
 from typing import Any
 
-from alive.compose.config2 import ComposePhase2Config, load_compose_phase2_config
+from alive.compose.config2 import (
+    ComposePhase2Config,
+    load_compose_phase2_config_from_text,
+)
 from alive.compose.driver.confirmation import (
     build_seal_confirmation_manifest,
     install_seal_confirmation_manifest,
@@ -73,10 +76,15 @@ from alive.compose.driver.phase2a_cmd import (
     LEDGER_RESOLVED_RUN_SPEC,
     LEDGER_SEED_REPORT,
 )
+from alive.compose.driver.preseal_read import (
+    PresealBytesError,
+    read_verified_bytes,
+)
 from alive.compose.driver.run_dir_state import assert_run_dir_roster
 from alive.compose.driver.run_spec import (
     RUN_PRODUCED_BASENAMES,
     ResolvedRunSpec,
+    RunSpecError,
     compute_execution_id,
     load_resolved_run_spec,
 )
@@ -129,6 +137,26 @@ class PreflightSubcommandError(RuntimeError):
 # --------------------------------------------------------------------------- #
 # Public subcommand
 # --------------------------------------------------------------------------- #
+
+
+def _preseal_bytes(spec: ResolvedRunSpec, field: str) -> bytes:
+    """Digest-bound read of a pre-seal artifact (see `driver.preseal_read`).
+
+    2026-08-30: this used to be `Path(spec.pre_seal[field].path).read_bytes()` --
+    a SECOND read of a pathname whose digest was checked during spec validation,
+    so "already-SHA-verified bytes" described the first read, not this one. The
+    shared helper reads once and hashes what it read.
+    """
+    declared = spec.pre_seal[field]
+    try:
+        return read_verified_bytes(declared.path, declared.sha256, field=field)
+    except PresealBytesError as exc:
+        raise RunSpecError(str(exc)) from exc
+
+
+def _preseal_config(spec: ResolvedRunSpec) -> ComposePhase2Config:
+    """Load the pre-seal config from the exact bytes whose digest matched."""
+    return load_compose_phase2_config_from_text(_preseal_bytes(spec, "config").decode("utf-8"))
 
 
 def run_preflight_subcommand(
@@ -194,7 +222,7 @@ def run_preflight_subcommand(
     ledger_path = run_dir / RUN_PRODUCED_BASENAMES["run_ledger"]
     ledger = RunLedger.read(ledger_path)
 
-    config = load_compose_phase2_config(spec.pre_seal["config"].path)
+    config = _preseal_config(spec)
     pair_manifest = _load_pair_manifest(spec)
     expected_response_dim = _expected_response_dim(run_spec)
 
@@ -210,8 +238,8 @@ def run_preflight_subcommand(
     # pre-seal bytes — WITHOUT opening the sealed source (the semantic obs-
     # alignment check is phase2b step 5's post-claim validator).
     # A violation raises RunSpecError → the CLI's pre-seal exit 10 (no seal armed).
-    manifest_bytes = Path(spec.pre_seal["pair_index_manifest"].path).read_bytes()
-    attestation_bytes = Path(spec.pre_seal["approved_sealed_input_attestation"].path).read_bytes()
+    manifest_bytes = _preseal_bytes(spec, "pair_index_manifest")
+    attestation_bytes = _preseal_bytes(spec, "approved_sealed_input_attestation")
     validate_pair_index_manifest_preseal(
         json.loads(manifest_bytes),
         attestation=json.loads(attestation_bytes),
@@ -498,7 +526,7 @@ def _load_pair_manifest(spec: ResolvedRunSpec) -> dict[str, Any]:
     """
     path = Path(spec.pre_seal["pair_manifest"].path)
     try:
-        manifest = json.loads(path.read_bytes())
+        manifest = json.loads(_preseal_bytes(spec, "pair_manifest"))
     except (OSError, ValueError) as exc:
         raise PreflightSubcommandError(f"cannot read pair manifest {path}: {exc}") from exc
     if not isinstance(manifest, dict):

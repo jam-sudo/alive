@@ -50,7 +50,6 @@ See docs/superpowers/specs/2026-07-07-compose-production-driver-design.md §0/§
 from __future__ import annotations
 
 import dataclasses
-import hashlib
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -71,6 +70,10 @@ from alive.compose.driver.bias_report_preseal import (
 )
 from alive.compose.driver.fixture_builder import _MODEL_CLASS_BY_NAME
 from alive.compose.driver.pair_index import validate_scientific_sealed_declaration
+from alive.compose.driver.preseal_read import (
+    PresealBytesError,
+    read_verified_bytes,
+)
 from alive.compose.driver.run_spec import (
     PathSha,
     ResolvedRunSpec,
@@ -529,65 +532,24 @@ def _peek_mode(spec_path: Path) -> str:
     return mode
 
 
-def _read_json(path: str | Path) -> dict[str, Any]:
-    """Parse a JSON stage-1 artifact whose bytes are NOT digest-bound here.
-
-    Kept for artifacts that carry no declared digest in the run spec. Anything
-    listed in ``spec.pre_seal`` must go through :func:`_read_verified_json`
-    instead -- see the note there.
-    """
-    obj = json.loads(Path(path).read_bytes())
-    if not isinstance(obj, dict):
-        raise RunSpecError(f"stage-1 artifact {path} is not a JSON object")
-    return obj
-
-
 def _read_verified_bytes(declared: PathSha, *, field: str) -> bytes:
-    """Read a pre-seal file ONCE and hash the bytes that were actually read.
+    """Digest-bound read, delegating to the shared helper.
 
-    ``load_resolved_run_spec`` hashes each pre-seal pathname during validation,
-    but every consumer here used to REOPEN the same pathname afterwards. The two
-    reads are separate syscalls, so "the declared digest was verified" said
-    nothing about the bytes that got parsed: an external audit reproduced a swap
-    inside that window on 2026-08-24, and this repository reproduced it
-    independently -- the carrier loaded a config whose bytes no longer matched
-    the digest the run identity is built from, while a swap performed BEFORE the
-    call was correctly refused.
-
-    Reading once and hashing what was read makes "verified bytes == consumed
-    bytes" true by construction rather than by timing. It does not depend on the
-    filesystem holding still, which is what the previous arrangement assumed
-    without saying so.
-
-    Parameters
-    ----------
-    declared
-        The ``{path, sha256}`` pair the validated run spec recorded.
-    field
-        Pre-seal field name, for the error message.
-
-    Returns
-    -------
-    bytes
-        The exact bytes whose digest matched.
-
-    Raises
-    ------
-    RunSpecError
-        If the bytes read now do not hash to the declared digest.
+    The implementation and its rationale moved to
+    :mod:`alive.compose.driver.preseal_read` on 2026-08-30, because keeping it
+    here meant every other consumer of a pre-seal path had its own ungoverned
+    read -- including one lane inside this very file. `PresealBytesError` is
+    converted to this module's `RunSpecError` so the existing contract is
+    unchanged.
     """
-    data = Path(declared.path).read_bytes()
-    actual = hashlib.sha256(data).hexdigest()
-    if actual != declared.sha256:
-        raise RunSpecError(
-            f"pre-seal {field}: bytes read for consumption hash to {actual}, not the "
-            f"declared {declared.sha256} -- the file changed after the run spec verified it"
-        )
-    return data
+    try:
+        return read_verified_bytes(declared.path, declared.sha256, field=field)
+    except PresealBytesError as exc:
+        raise RunSpecError(str(exc)) from exc
 
 
 def _read_verified_json(declared: PathSha, *, field: str) -> dict[str, Any]:
-    """Digest-bound :func:`_read_json`: parse the same bytes that were hashed."""
+    """Digest-bound JSON read: parse the same bytes that were hashed."""
     obj = json.loads(_read_verified_bytes(declared, field=field))
     if not isinstance(obj, dict):
         raise RunSpecError(f"stage-1 artifact {declared.path} is not a JSON object")
@@ -618,7 +580,7 @@ def _load_phase2a_inputs(spec: ResolvedRunSpec, *, require_factor_banks: bool) -
     source of truth). ``content_checksum`` is recomputed in ``__post_init__`` and
     reproduces the serialized value because every field is byte-faithful.
     """
-    payload = _read_json(spec.pre_seal["phase2a_inputs"].path)
+    payload = _preseal_json(spec, "phase2a_inputs")
     factor_banks_by_k = None
     if require_factor_banks:
         factor_payload = _preseal_json(spec, "factor_bank")

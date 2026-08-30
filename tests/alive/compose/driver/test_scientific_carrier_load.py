@@ -279,8 +279,12 @@ def test_a_typed_rejection_escapes_the_carrier_under_its_own_class(tmp_path, mon
 # independently. The window is INTRA-CALL, not sequential: a swap performed
 # before the carrier runs was already refused by the spec loader, which is the
 # half the audit's own write-up had wrong. Both halves are pinned below.
-def _swap_config_after_the_spec_is_validated(monkeypatch, bundle, extra=b"\n# swapped\n"):
-    """Make the config change in the window between hashing and reopening."""
+def _swap_after_the_spec_is_validated(monkeypatch, field, mutate):
+    """Make a pre-seal file change in the window between hashing and reopening.
+
+    ``mutate`` receives the current bytes and returns the replacement, so a JSON
+    artifact can be edited as JSON rather than by appending a YAML comment.
+    """
     from alive.compose.driver import carrier_loader as cl
 
     real = cl.load_resolved_run_spec
@@ -289,17 +293,43 @@ def _swap_config_after_the_spec_is_validated(monkeypatch, bundle, extra=b"\n# sw
     def racing(*args, **kwargs):
         spec = real(*args, **kwargs)  # step 13 hashed every pre-seal path here
         state["n"] += 1
-        path = Path(spec.pre_seal["config"].path)
-        path.write_bytes(path.read_bytes() + extra)
+        path = Path(spec.pre_seal[field].path)
+        path.write_bytes(mutate(path.read_bytes()))
         return spec
 
     monkeypatch.setattr(cl, "load_resolved_run_spec", racing)
     return state
 
 
+def _swap_config_after_the_spec_is_validated(monkeypatch, bundle, extra=b"\n# swapped\n"):
+    """Back-compat wrapper: the config lane, which the 2026-08-25 fix landed on."""
+    return _swap_after_the_spec_is_validated(monkeypatch, "config", lambda b: b + extra)
+
+
 def test_a_preseal_file_swapped_inside_the_load_window_is_refused(tmp_path, monkeypatch):
     bundle = build_scientific_carrier_fixture(tmp_path / "a", repo_root=tmp_path / "r")
     state = _swap_config_after_the_spec_is_validated(monkeypatch, bundle)
+
+    with pytest.raises(RunSpecError, match="changed after the run spec verified it"):
+        load_run_spec_carrier(
+            bundle.spec_path,
+            approved_artifacts_root=bundle.approved_artifacts_root,
+            trusted_repo_root=bundle.repo_root,
+        )
+    assert state["n"] == 1, "the swap must actually have happened, or this proves nothing"
+
+
+def test_the_phase2a_inputs_lane_is_digest_bound_too(tmp_path, monkeypatch):
+    """The sibling the first fix missed.
+
+    2026-08-25 bound eleven JSON reads and the config, and left
+    `phase2a_inputs` on a plain path read -- the one-site-missed shape this
+    repository keeps producing, this time inside the commit that was fixing it.
+    An external audit named the exact line. Swapping THIS field in the window must
+    be refused for the same reason the config lane is.
+    """
+    bundle = build_scientific_carrier_fixture(tmp_path / "a", repo_root=tmp_path / "r")
+    state = _swap_after_the_spec_is_validated(monkeypatch, "phase2a_inputs", lambda b: b + b" ")
 
     with pytest.raises(RunSpecError, match="changed after the run spec verified it"):
         load_run_spec_carrier(

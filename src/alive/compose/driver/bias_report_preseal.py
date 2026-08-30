@@ -17,16 +17,20 @@ own boundary error type.
 
 from __future__ import annotations
 
+import contextlib
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any, Mapping
 
 from alive.compose.approximation_bias import (
     ApproximationBiasEvidence,
+    ApproximationBiasValidationError,
     basis_config_sha256_from_final_config,
     load_approximation_bias_report,
     measurement_contract_sha256,
 )
 from alive.compose.config2 import ComposePhase2Config
+from alive.compose.driver.preseal_read import PresealDescriptorError, verified_descriptor
 from alive.compose.driver.run_spec import ResolvedRunSpec
 from alive.compose.fit_role import build_response_projection
 from alive.provenance import sha256_json
@@ -47,6 +51,30 @@ class ApproximationBiasDeclarationError(ValueError):
     original two-tier messaging (declaration errors surface verbatim; content
     failures are wrapped as "failed pre-seal validation").
     """
+
+
+@contextlib.contextmanager
+def _verified_config_descriptor(spec: ResolvedRunSpec) -> Iterator[Path]:
+    """Descriptor-pinned view of the pre-seal config, as this module's error.
+
+    The reconstruction helper this feeds takes a PATH and lives in
+    `alive/compose/approximation_bias.py`, which is inside the frozen
+    kernel-isolation closure -- adding a text-taking variant there invalidates
+    archived Linux CI evidence, and `test_kernel_isolation_ci` caught exactly that
+    when the first attempt tried it. Handing it a descriptor path gets the same
+    "verified bytes == consumed bytes" property with zero bytes changed inside the
+    proof.
+
+    Extracted so the conversion is testable on its own: `PresealDescriptorError` is
+    classified UNREACHABLE_FROM_DRIVER, which is only honest while every caller
+    converts it.
+    """
+    declared = spec.pre_seal["config"]
+    try:
+        with verified_descriptor(declared.path, declared.sha256) as descriptor_path:
+            yield descriptor_path
+    except PresealDescriptorError as exc:
+        raise ApproximationBiasValidationError(str(exc)) from exc
 
 
 def gears_approximation_bias_sha(config: ComposePhase2Config) -> str | None:
@@ -118,10 +146,18 @@ def resolve_pinned_approximation_bias_evidence(
         control_mean=response_artifact["control_mean"],
         raw_data_sha256=response_artifact["raw_data_sha256"],
     )
-    basis_sha = basis_config_sha256_from_final_config(
-        spec.pre_seal["config"].path,
-        expected_report_sha256=expected_sha,
-    )
+    # The reconstruction helper takes a PATH, and it lives in
+    # `alive/compose/approximation_bias.py` -- inside the frozen kernel-isolation
+    # closure, so adding a text-taking variant there would invalidate archived
+    # Linux CI evidence (`test_kernel_isolation_ci` caught precisely that). Hand it
+    # a DESCRIPTOR path instead: the bytes are hashed through the fd that stays
+    # open, so the helper's own read cannot resolve a different file. Same property,
+    # zero bytes changed inside the proof.
+    with _verified_config_descriptor(spec) as config_fd_path:
+        basis_sha = basis_config_sha256_from_final_config(
+            config_fd_path,
+            expected_report_sha256=expected_sha,
+        )
     return load_approximation_bias_report(
         Path(str(declaration.get("path"))),
         expected_content_sha256=expected_sha,
