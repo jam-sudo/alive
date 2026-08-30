@@ -5,7 +5,7 @@
 > **이 문서는 아무것도 정의하지 않는다** — 세부(task)는 plan, claim은 spec, exact param은 config,
 > 시간순 audit는 git이 authoritative다([sources of truth](../../CLAUDE.md#sources)). 상태 행이 authoritative
 > 문서와 어긋나면 **authoritative 문서가 옳다**; 이 인덱스를 갱신한다.
-> **Updated:** 2026-08-30 @ `eb8d707` (branch `compose-factor-bank-normalization`)
+> **Updated:** 2026-08-30 @ `530b4c8` (branch `compose-factor-bank-normalization`)
 > `scripts/bump-readiness-stamp.sh` / the pre-commit hook from `HEAD` at commit time, so it names the
 > **parent** of the commit that carries it and can never name itself. Reading it as "one commit stale" is a
 > misreading; git is authoritative for when this file actually changed.
@@ -2165,6 +2165,39 @@ before its `finally` ran, leaving a mutation in the tree — the roster entry it
 deleted. The "restored byte-for-byte" line these batteries print only appears when the battery
 survives. Restoration has to be checked from OUTSIDE the battery; `git status` caught it, and
 batteries now run in the background where a timeout cannot kill them mid-mutation.
+
+**2026-08-30 — the two §10.5 sentences that were settled everywhere except in the spec.**
+
+Both of these came out of adjudications the owner has already settled, and in both the settlement
+landed in code, config and this index but **not in the spec** — which is the claim contract, so until
+it says them the claim is not what the repository actually does. The daily reviewer named the first
+gap exactly: the "materialise MAY repeat" wording exists only as a readiness proposal, unsigned, and
+it recorded that as a standing Medium.
+
+Drafted signature-ready in `2026-08-30-compose-spec-10-5-amendments.md`, not written into the spec:
+
+- **A — the consumption boundary is the claim.** `claim_sealed_access` records the durable audit
+  before any row is materialised, so a crash mid-materialisation still burns the path;
+  `materialize_claimed` is idempotent. The registered access count therefore counts **claims**, and
+  the identity of the bytes served is pinned by `processed_sha256` plus the descriptor-pinned source
+  rather than by the audit record. Signing does not authorise repeated materialisation as a practice
+  — production calls it once and a test pins that — it removes the reader-dependence in "opened
+  exactly once".
+- **B — the coverage claim is conditional, and the sensitivity's placement.** The 2026-08-29 decision
+  registered the config values and `inference2.band_sensitivity` computes the report, but the spec
+  still reads unconditionally and does not say where the report goes.
+
+**B carries the one implementation consequence, and that is why it is held.**
+`Phase2bResult.result_checksum` is a registered five-component composition (spec §2.1). The
+sensitivity is descriptive-only, so it must **not** enter that composition — putting it there would
+make a descriptive report part of the run's registered identity, the opposite of what the decision
+says. The proposal is that it is computed from the same bounds the verdict used and written into the
+report payload OUTSIDE those five components, with its own checksum. Where a result is recorded is a
+spec question, not a coding preference, so the wiring waits for the signature rather than being
+chosen by whoever writes the code.
+
+Neither amendment moves `config_sha256`; seal remains **UNOPENED**; execution remains
+**RELEASE-BLOCKED**.
 
 ## 이 문서가 *아닌* 것 (중복 금지)
 
