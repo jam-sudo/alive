@@ -5,7 +5,7 @@
 > **이 문서는 아무것도 정의하지 않는다** — 세부(task)는 plan, claim은 spec, exact param은 config,
 > 시간순 audit는 git이 authoritative다([sources of truth](../../CLAUDE.md#sources)). 상태 행이 authoritative
 > 문서와 어긋나면 **authoritative 문서가 옳다**; 이 인덱스를 갱신한다.
-> **Updated:** 2026-09-03 @ `7209332` (branch `compose-factor-bank-normalization`)
+> **Updated:** 2026-09-03 @ `60a3f96` (branch `compose-factor-bank-normalization`)
 > `scripts/bump-readiness-stamp.sh` / the pre-commit hook from `HEAD` at commit time, so it names the
 > **parent** of the commit that carries it and can never name itself. Reading it as "one commit stale" is a
 > misreading; git is authoritative for when this file actually changed.
@@ -2214,6 +2214,37 @@ the evidence says the requirement was the mistake.
 
 None of the three amendments moves `config_sha256`; seal remains **UNOPENED**; execution remains
 **RELEASE-BLOCKED**.
+
+**2026-09-03 — amendment A asserted a property the tree measurably lacks; it is now conditional.**
+
+The 09/02 audit and the 09/03 review both stopped at the same sentence. As drafted, A said
+`materialize_claimed`는 **멱등이며** — unconditionally idempotent. The repository pins the opposite
+at this very pin: `test_the_store_alone_does_not_bind_the_payload_bytes`, added by `91616d5` as an
+honest residual record, requires that changing the source between two materialisations produce
+*different* payloads while the audit stays one row. The review ran it (`1 passed`) rather than
+reading it, and refused the sentence as unsignable. That is the right outcome — an amendment may not
+assert what the code does not do, and this one was mine.
+
+The sentence is reworded to be true as written: `materialize_claimed` may be called more than once
+for a claim, this is **not** called idempotent, and identical bytes across two calls hold only while
+the sealed source's bytes are unchanged — a condition bound by the run's `processed_sha256` and the
+descriptor-pinned, post-consumption-re-verified source. Two residuals are named in the amendment as
+explicitly **not** closed by signing it: `seal.claim-materialization-replay` and
+`seal.transient-inode-mutation-restoration` (the latter reproduced with a control arm on 09/03 — the
+non-restored control is refused by name, the restored one is not).
+
+Also on this date, the branch was **red** and I had not noticed: two fragile numeric-section
+references to `CLAUDE.md` that I wrote (this file `:2205`, the amendments document `:111`) failed
+`test_live_documentation_has_no_fragile_section_number_refs`. Fixed to `CLAUDE.md#sources` in
+`60a3f96`; full suite **2945 passed / 3 skipped / 0 failed**. The failure was found by the external
+audit and reproduced by the review, not by me — I ran targeted tests again after touching docs, which
+is the exact mistake this repository has already recorded once. And writing *this* paragraph
+reintroduced the very pattern it describes — the literal offending string, inside the sentence
+explaining it, turned the suite red again for one edit cycle. The guard is a regex over live docs:
+prose *about* the pattern is indistinguishable from a use of it, so describe it, never quote it.
+
+A remains PROPOSED and unsigned; B and C are unchanged. `config_sha256` still `0d207746…`; seal
+**UNOPENED**; execution **RELEASE-BLOCKED**.
 
 ## 이 문서가 *아닌* 것 (중복 금지)
 

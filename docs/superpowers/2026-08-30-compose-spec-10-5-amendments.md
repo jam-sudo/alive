@@ -43,14 +43,32 @@ counts.
 
 > sealed cohort의 *소비*는 `claim_sealed_access`가 수행한다. 이 호출은 어떤 row도 materialise하기
 > 전에 durable audit record를 먼저 기록하므로, materialisation 도중 crash가 나도 audit path는
-> 소진된다. `materialize_claimed`는 멱등이며 하나의 claim에 대해 두 번 이상 호출될 수 있다.
-> 따라서 등록된 access count는 materialisation이 아니라 **claim**을 센다. 내어준 bytes의 identity는
-> audit record가 아니라 run의 `processed_sha256`과 descriptor로 고정된 sealed source가 함께
-> 보증한다.
+> 소진된다. `materialize_claimed`는 하나의 claim에 대해 두 번 이상 호출될 수 있다 — **다만 이를
+> 멱등이라고 쓰지 않는다.** audit record 자체는 내어준 bytes를 결속하지 않으며, 두 호출이 같은
+> bytes를 낸다는 것은 sealed source의 bytes가 그 사이에 바뀌지 않았을 때에 한해 참이다. 그 조건은
+> run의 `processed_sha256`과, descriptor로 고정되고 소비 후 재검증되는 sealed source가 함께
+> 보증한다. 따라서 등록된 access count는 materialisation이 아니라 **claim**을 센다.
 
 **What signing this does not do.** It does not authorise repeated materialisation as a practice —
 production calls it once and a test pins that. It states which operation the count refers to, so the
 sentence "the seal is opened exactly once" is unambiguous rather than reader-dependent.
+
+**And it does not assert idempotence.** The first draft of this sentence said `materialize_claimed`
+는 멱등이며 — unconditionally. That is false at this pin and the repository already pins the
+opposite: `test_the_store_alone_does_not_bind_the_payload_bytes` (added by `91616d5` as an honest
+residual record) requires that changing the source between two materialisations produce *different*
+payloads while the audit stays one row. The 2026-09-03 review ran that test at this pin (`1 passed`)
+and refused the sentence as unsignable, which is the correct outcome: an amendment may not assert a
+property the tree measurably lacks. Two residuals stay open and are **not** closed by signing this:
+
+- `seal.claim-materialization-replay` — the store alone does not bind payload bytes.
+- `seal.transient-inode-mutation-restoration` — a transient in-place mutation that is restored
+  before the post-consumption re-verification still passes the descriptor check (reproduced with a
+  control arm on 2026-09-03; the non-restored control is refused by name).
+
+The conditional wording above is what makes the sentence true as written. It is deliberately weaker
+than the draft: it says the count refers to claims, and names what actually binds the bytes, without
+promising a property the descriptor cannot yet deliver.
 
 ## 3. Amendment B — the coverage claim is conditional, and where the sensitivity is reported
 
