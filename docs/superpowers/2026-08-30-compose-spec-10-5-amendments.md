@@ -108,7 +108,7 @@ execution contract is explicit that the flow is file-mediated *by design*:
 > `<run_dir>/seal_confirmation_manifest.json`을 write-once로 설치하며 … **두 번째 운영자가
 > manifest를 대조한 후**, 거기 적힌 정확한 `confirmation_checksum` 값을 `--confirm-seal`에 입력한다.
 
-That is a **two-operator control whose medium is the artifact**. CLAUDE.md §1 ranks the
+That is a **two-operator control whose medium is the artifact**. CLAUDE.md#sources ranks the
 runbook above a design spec for execution contracts, and "print to screen" is an operator-UX
 contract, not a scientific claim. It also sits badly with the CLI's own stdout discipline: dumping
 the full canonical payload — ordered seal-request checksums, pair counts — onto a terminal makes a

@@ -5,7 +5,7 @@
 > **이 문서는 아무것도 정의하지 않는다** — 세부(task)는 plan, claim은 spec, exact param은 config,
 > 시간순 audit는 git이 authoritative다([sources of truth](../../CLAUDE.md#sources)). 상태 행이 authoritative
 > 문서와 어긋나면 **authoritative 문서가 옳다**; 이 인덱스를 갱신한다.
-> **Updated:** 2026-08-30 @ `6355749` (branch `compose-factor-bank-normalization`)
+> **Updated:** 2026-09-03 @ `7209332` (branch `compose-factor-bank-normalization`)
 > `scripts/bump-readiness-stamp.sh` / the pre-commit hook from `HEAD` at commit time, so it names the
 > **parent** of the commit that carries it and can never name itself. Reading it as "one commit stale" is a
 > misreading; git is authoritative for when this file actually changed.
@@ -2202,7 +2202,7 @@ direction.** `driver.preflight-output-contract` is **CONFIRMED as a fact**: the 
 contains no `print` at all. The audit offered two remedies — add the stdout, or amend the spec to an
 artifact-only contract — and measuring the runbook decides between them rather than leaving it to
 taste. The runbook makes the flow file-mediated **by design**: a *second operator* reconciles
-`seal_confirmation_manifest.json` and reads `confirmation_checksum` from it. CLAUDE.md §1 ranks the
+`seal_confirmation_manifest.json` and reads `confirmation_checksum` from it. CLAUDE.md#sources ranks the
 runbook above a design spec for execution contracts, and "print to screen" is operator UX, not a
 scientific claim. Dumping the canonical payload to a terminal would also make a screen transcript
 resemble a record of a two-person reconciliation that is supposed to happen against the file. **The
