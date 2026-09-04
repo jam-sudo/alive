@@ -1566,6 +1566,114 @@ def test_build_activation_provenance_inputs_hashes_real_files(tmp_path):
     assert inputs.git_commit == _environment().git_commit
 
 
+def _provenance_fixture(tmp_path):
+    """Small files for the activation-provenance inputs, gears pinned at 0.1.2."""
+    processed = tmp_path / "processed.h5ad"
+    feature_bank = tmp_path / "features.json"
+    dependency = tmp_path / "dependency.json"
+    gears = tmp_path / "gears.lock"
+    cpa = tmp_path / "cpa.lock"
+    processed.write_bytes(b"processed")
+    feature_bank.write_bytes(b"features")
+    dependency.write_text("{}", encoding="utf-8")
+    gears.write_text("cell-gears==0.1.2\n", encoding="utf-8")
+    cpa.write_text("cpa-tools==0.7.2\n", encoding="utf-8")
+    return processed, feature_bank, dependency, gears, cpa
+
+
+def _install_swapping_open(monkeypatch, target: str, fire_on: int, state: dict, new_text: str):
+    """Count opens of *target* and rewrite it just before its *fire_on*-th open.
+
+    Installed on **both** ``builtins.open`` and ``io.open``. That is not belt and
+    braces -- it is required, and measuring it is how this probe was fixed:
+    ``sha256_file`` calls the bare ``open`` (``builtins.open``) while
+    ``Path.read_text`` calls ``io.open``, and the two names are separate
+    references. Patching only ``builtins.open`` counted ONE of the two reads, so
+    the first version of the test below passed against the unfixed code. The
+    control arm ``test_the_swap_probe_is_not_vacuous`` is what caught that.
+    """
+    import builtins
+    import io
+    import os
+
+    real_open = builtins.open
+
+    def wrapper(file, *args, **kwargs):
+        try:
+            key = os.fspath(file)
+        except TypeError:
+            key = None
+        if key == target:
+            state["opens"] = state.get("opens", 0) + 1
+            if state["opens"] == fire_on:
+                state["fired"] = True
+                with real_open(key, "w", encoding="utf-8") as fh:
+                    fh.write(new_text)
+        return real_open(file, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", wrapper)
+    monkeypatch.setattr(io, "open", wrapper)
+
+
+def test_the_requirements_file_is_read_once_so_a_swap_has_no_window(tmp_path, monkeypatch):
+    """The recorded revision and the recorded digest must come from ONE read.
+
+    The previous shape hashed ``gears_requirements_path`` with ``sha256_file`` and
+    then reopened the SAME pathname to parse the pinned revision. A writer landing
+    between the two reads makes ``dependency_lock_sha256`` and ``gears_revision``
+    describe different bytes, and nothing refuses it -- reproduced by the external
+    audit and by the 2026-09-03 review with a control arm. Two of the six
+    registered activation blockers are exactly these revisions, so the window
+    corrupts the evidence a dev-pod run is meant to produce.
+    """
+    processed, feature_bank, dependency, gears, cpa = _provenance_fixture(tmp_path)
+    state: dict = {}
+    _install_swapping_open(monkeypatch, str(gears), 2, state, "cell-gears==9.9.9\n")
+    inputs = build_activation_provenance_inputs(
+        processed_path=processed,
+        feature_bank_path=feature_bank,
+        dependency_lock_path=dependency,
+        gears_requirements_path=gears,
+        cpa_requirements_path=cpa,
+        environment=_environment(),
+        device="cuda:0",
+        precision="float32",
+    )
+    monkeypatch.undo()
+
+    assert state.get("opens") == 1, (
+        "the requirements file was opened more than once -- the gap between those "
+        f"reads is the TOCTOU window (opens={state.get('opens')})"
+    )
+    assert not state.get("fired"), "the swap fired, so a second read existed"
+    assert inputs.gears_revision == "0.1.2"
+    assert gears.read_text(encoding="utf-8") == "cell-gears==0.1.2\n"
+
+
+def test_the_swap_probe_is_not_vacuous(tmp_path, monkeypatch):
+    """Control arm: the same injection DOES corrupt a deliberate two-read function.
+
+    Without this, the test above would pass for a function that never reads the
+    file at all, and would be measuring nothing.
+    """
+    _, _, _, gears, _ = _provenance_fixture(tmp_path)
+    state: dict = {}
+    _install_swapping_open(monkeypatch, str(gears), 2, state, "cell-gears==9.9.9\n")
+
+    def two_reads(path):
+        first = hashlib.sha256(Path(path).read_bytes()).hexdigest()
+        second = Path(path).read_text(encoding="utf-8").strip()
+        return first, second
+
+    digest, line = two_reads(gears)
+    monkeypatch.undo()
+
+    assert state.get("opens") == 2
+    assert state.get("fired") is True
+    assert line == "cell-gears==9.9.9"
+    assert digest == hashlib.sha256(b"cell-gears==0.1.2\n").hexdigest()
+
+
 # ===========================================================================
 # D2 Task 6 — pre-access seed-variability binding wired into Phase-2b preflight
 # ===========================================================================

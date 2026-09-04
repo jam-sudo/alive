@@ -117,7 +117,13 @@ from alive.compose.verdict2 import (
     SealedAxis,
     sealed_verdict,
 )
-from alive.provenance import EnvironmentInfo, RunLedger, sha256_file, sha256_json
+from alive.provenance import (
+    EnvironmentInfo,
+    RunLedger,
+    sha256_bytes,
+    sha256_file,
+    sha256_json,
+)
 
 #: The two sealed regime role labels, bound to the single canonical roster in
 #: :mod:`alive.compose.split` rather than re-spelled here.
@@ -465,13 +471,40 @@ def build_activation_provenance_inputs(
 ) -> ActivationProvenanceInputs:
     """Build activation provenance from actual files and the captured environment."""
 
-    def _pinned_revision(path: str | Path, package: str) -> str:
-        prefix = package.casefold() + "=="
+    def _read_once(path: str | Path) -> bytes:
+        """Read a small provenance input exactly once.
+
+        The digest and every value parsed out of these files must describe the
+        SAME bytes. The previous shape hashed the pathname with ``sha256_file``
+        and then reopened it to parse the pinned revision -- two reads of one
+        pathname, with a window between them. A writer landing in that window
+        makes ``dependency_lock_sha256`` and ``gears_revision`` describe different
+        bytes and nothing refuses it (reproduced by an external audit and by the
+        2026-09-03 review with a control arm). Two of the six registered
+        activation blockers are exactly those revisions, so the window corrupts
+        the evidence a dev-pod run is meant to produce.
+
+        Reading once removes the window rather than narrowing it: there is no
+        second read to disagree with the first. Only the small requirements/lock
+        files come through here -- ``processed_path`` and ``feature_bank_path``
+        stay on streaming ``sha256_file`` because they are hashed once already and
+        can be multi-GB.
+        """
         try:
-            lines = Path(path).read_text(encoding="utf-8").splitlines()
+            return Path(path).read_bytes()
         except OSError as exc:
             raise Phase2bError(
                 f"failed to read dependency requirements {str(path)!r}: {exc}"
+            ) from exc
+
+    def _pinned_revision(raw: bytes, path: str | Path, package: str) -> str:
+        """Parse the pinned revision out of bytes already hashed by the caller."""
+        prefix = package.casefold() + "=="
+        try:
+            lines = raw.decode("utf-8").splitlines()
+        except UnicodeDecodeError as exc:
+            raise Phase2bError(
+                f"failed to decode dependency requirements {str(path)!r}: {exc}"
             ) from exc
         matches = [line.strip() for line in lines if line.strip().casefold().startswith(prefix)]
         if len(matches) != 1:
@@ -480,14 +513,16 @@ def build_activation_provenance_inputs(
             )
         return matches[0].split("==", 1)[1]
 
-    paths = {
-        "dependency_manifest": dependency_lock_path,
-        "gears_requirements": gears_requirements_path,
-        "cpa_requirements": cpa_requirements_path,
+    # One read per file; the digest below and the revisions above come from these
+    # exact bytes. `sha256_file` on the same pathname would be a second read.
+    raw_by_name = {
+        "dependency_manifest": _read_once(dependency_lock_path),
+        "gears_requirements": _read_once(gears_requirements_path),
+        "cpa_requirements": _read_once(cpa_requirements_path),
     }
     try:
         dependency_digest = sha256_json(
-            {name: sha256_file(path) for name, path in sorted(paths.items())}
+            {name: sha256_bytes(raw) for name, raw in sorted(raw_by_name.items())}
         )
         processed_digest = sha256_file(processed_path)
         feature_digest = sha256_file(feature_bank_path)
@@ -498,8 +533,12 @@ def build_activation_provenance_inputs(
         processed_sha256=processed_digest,
         feature_bank_sha256=feature_digest,
         dependency_lock_sha256=dependency_digest,
-        gears_revision=_pinned_revision(gears_requirements_path, "cell-gears"),
-        cpa_revision=_pinned_revision(cpa_requirements_path, "cpa-tools"),
+        gears_revision=_pinned_revision(
+            raw_by_name["gears_requirements"], gears_requirements_path, "cell-gears"
+        ),
+        cpa_revision=_pinned_revision(
+            raw_by_name["cpa_requirements"], cpa_requirements_path, "cpa-tools"
+        ),
         python_version=environment.python_version,
         platform=environment.platform,
         device=device,
