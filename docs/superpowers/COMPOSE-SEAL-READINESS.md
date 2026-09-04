@@ -5,7 +5,7 @@
 > **이 문서는 아무것도 정의하지 않는다** — 세부(task)는 plan, claim은 spec, exact param은 config,
 > 시간순 audit는 git이 authoritative다([sources of truth](../../CLAUDE.md#sources)). 상태 행이 authoritative
 > 문서와 어긋나면 **authoritative 문서가 옳다**; 이 인덱스를 갱신한다.
-> **Updated:** 2026-09-03 @ `60a3f96` (branch `compose-factor-bank-normalization`)
+> **Updated:** 2026-09-03 @ `60a8c5f` (branch `compose-factor-bank-normalization`)
 > `scripts/bump-readiness-stamp.sh` / the pre-commit hook from `HEAD` at commit time, so it names the
 > **parent** of the commit that carries it and can never name itself. Reading it as "one commit stale" is a
 > misreading; git is authoritative for when this file actually changed.
@@ -2245,6 +2245,48 @@ prose *about* the pattern is indistinguishable from a use of it, so describe it,
 
 A remains PROPOSED and unsigned; B and C are unchanged. `config_sha256` still `0d207746…`; seal
 **UNOPENED**; execution **RELEASE-BLOCKED**.
+
+**2026-09-03 (later) — the provenance TOCTOU is closed BEFORE the pod run, not after; amendment A is
+signed; the zero-width report fix is adopted.**
+
+Ordering was the point. `build_activation_provenance_inputs` hashed the requirements pathnames with
+`sha256_file` and then **reopened the same pathnames** to parse the pinned revisions — two reads, with
+a window between them. A writer landing in that window makes `dependency_lock_sha256` and
+`gears_revision`/`cpa_revision` describe different bytes, and nothing refuses it. Two of the six
+registered activation blockers ARE those revisions (`baselines.gears.revision`,
+`baselines.cpa.revision`), so a dev-pod run executed against the old shape would have produced exactly
+the evidence the seal depends on, with a defect inside it. Fixing after regenerating would have meant
+regenerating twice.
+
+Closed by reading once: the small requirements/lock files are read a single time and both the digest
+and the parsed revisions come from those bytes. `processed_path` and `feature_bank_path` stay on
+streaming `sha256_file` — they are hashed once already and can be multi-GB. **The recorded values do
+not move**: `sha256_bytes(raw)` and `sha256_file(path)` over the same bytes were measured equal
+(`b38e1af1…` both ways), so no existing provenance digest changes.
+
+Measured, not asserted. The probe injects a writer at the second open of the requirements file and
+asserts the file is opened exactly once. Before the fix: `opens=2, fired=True` — the window
+reproduced by name. After: `opens=1`, the swap never fires, the revision is the original.
+**The control arm earned its place twice over.** The first version of the probe patched only
+`builtins.open`, which `sha256_file` uses but `Path.read_text` does not — it counted one of the two
+reads and **passed against the unfixed code**. `test_the_swap_probe_is_not_vacuous` failed and
+exposed it; the injection now covers `io.open` as well. A probe that cannot see the defect is worth
+less than no probe, because it reports safety.
+
+Also in this wave:
+
+- **Amendment A signed (Jae Min Yoon, 2026-09-03)** — on the reworded sentence. The signature record
+  in the amendments document enumerates what it does *not* close: `seal.claim-materialization-replay`
+  and `seal.transient-inode-mutation-restoration` both stay registered and open. B and C remain
+  PROPOSED.
+- **`f338925` adopted** (`908446d`, cherry-picked with owner approval) — the zero-width-band report no
+  longer reports a clause that already lost at the registered band as unmovable. It was the fix
+  pipeline's first unattended commit; the pipeline does not merge its own work and the owner side did
+  not either until the red/green was reproduced independently, twice.
+
+`config_sha256` remains `0d207746…`; seal **UNOPENED**; execution **RELEASE-BLOCKED**. The critical
+path is unchanged and is now unobstructed: regenerate the six activation blockers on the dev pod at
+this digest.
 
 ## 이 문서가 *아닌* 것 (중복 금지)
 

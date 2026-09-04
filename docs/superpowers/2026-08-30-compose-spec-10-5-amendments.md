@@ -6,16 +6,41 @@
 > renaming it a day after it was committed costs more than a narrow name does. The content is
 > what it says here.
 
-> **STATUS: PROPOSED — owner signature required.** Both sentences describe things the repository
-> already does; neither changes the estimator, the comparator family, the margins, the multiplicity
-> correction, or any verdict threshold. What is missing is that the SPEC does not say them, and the
-> spec is the claim contract.
+> **STATUS: A SIGNED (2026-09-03) · B and C PROPOSED — owner signature required.**
+> All three describe things the repository already does; none changes the estimator, the comparator
+> family, the margins, the multiplicity correction, or any verdict threshold. What is missing is that
+> the SPEC does not say them, and the spec is the claim contract.
 >
-> **Neither moves `config_sha256`.** Both are prose in `specs/2026-06-22-compose-epistasis-operator-design.md`
-> §10.5. Amendment B additionally decides WHERE an already-implemented report is emitted, which is
-> the one thing here with an implementation consequence — recorded in §3.
+> **None moves `config_sha256`.** A and B are prose in
+> `specs/2026-06-22-compose-epistasis-operator-design.md` §10.5; C is prose in the driver design spec.
+> Amendment B additionally decides WHERE an already-implemented report is emitted, which is the one
+> thing here with an implementation consequence — recorded in §3.
 
-**Owner sign-off — ______________________ (name / date).**
+| amendment | subject | status |
+|---|---|---|
+| **A** — the consumption boundary is the claim | §10.5 | **SIGNED — Jae Min Yoon / 2026-09-03** |
+| **B** — the coverage claim is conditional, and where the sensitivity is reported | §10.5 | PROPOSED — signature required |
+| **C** — preflight stdout | driver spec | PROPOSED — signature required |
+
+**Signature record — Amendment A, Jae Min Yoon, 2026-09-03.**
+
+Signed on the **reworded** sentence, not the draft. The draft asserted `materialize_claimed` 는
+멱등이며 unconditionally; the 2026-09-03 review ran
+`test_the_store_alone_does_not_bind_the_payload_bytes` at this pin (`1 passed`) and refused it,
+because that test requires the opposite. The sentence now states the count refers to **claims**,
+declines to call the operation idempotent, and names what actually binds the bytes.
+
+What this signature does **not** cover, stated so nobody reads it wider later:
+
+- It does not close `seal.claim-materialization-replay`. The store alone does not bind payload bytes;
+  that residual stays registered.
+- It does not close `seal.transient-inode-mutation-restoration`. A transient in-place mutation
+  restored before the post-consumption re-verification still passes the descriptor check
+  (reproduced with a control arm on 2026-09-03 — the non-restored control is refused by name).
+- It does not authorise repeated materialisation as a practice. Production materialises once and a
+  test pins that.
+- It does not move `config_sha256` (`0d207746…` unchanged), does not open the seal, and does not
+  lift RELEASE-BLOCKED.
 
 ---
 
