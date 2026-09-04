@@ -8,10 +8,10 @@ estimator and every threshold unchanged and re-reports the bounds at a frozen
 ladder of band inflations, so the report states WHERE the verdict flips instead
 of asserting that it does not.
 
-The load-bearing test here is the last one: the flip point is checked against the
-REAL `sealed_verdict`, not against a reimplementation of its clauses. A report
-that quietly disagreed with the function that decides the run would be worse than
-no report.
+The load-bearing tests are the ones that check the report against the REAL
+`sealed_verdict`, not against a reimplementation of its clauses. A report that
+quietly disagreed with the function that decides the run would be worse than no
+report.
 """
 
 from __future__ import annotations
@@ -127,16 +127,82 @@ def test_the_flip_point_is_exact_for_every_comparator():
         assert at_flip == pytest.approx(threshold, abs=1e-12)
 
 
-def test_a_zero_width_band_never_flips():
-    b = _bounds({c: 0.3 for c in FAMILY}, q=0.0)
+def _zero_width_bounds(**theta_overrides: float) -> ComposeSimultaneousBounds:
+    """q = 0 bounds; every comparator wins comfortably unless overridden."""
+    theta = {
+        "additive": 0.30,
+        "gears": 0.24,
+        "cpa": 0.26,
+        "id_only": 0.34,
+        "l3_symmetric_mlp": 0.22,
+    }
+    theta.update(theta_overrides)
+    return _bounds(theta, q=0.0)
+
+
+def test_a_zero_width_winner_never_flips():
+    """Every theta strictly above its threshold: the clause holds at every lambda.
+
+    ``+inf`` exactly, not merely "infinite" -- the sign is the encoding.
+    """
+    b = _zero_width_bounds()
     s = band_sensitivity(
         bounds=b,
         band_inflation=LADDER,
         additive_margin=ADDITIVE_MARGIN,
         learned_margin=LEARNED_MARGIN,
     )
-    assert all(math.isinf(v) for v in s.flip_lambda.values())
-    assert math.isinf(s.verdict_holds_below_lambda)
+    assert all(v == math.inf for v in s.flip_lambda.values())
+    assert s.verdict_holds_below_lambda == math.inf
+    assert _verdict(b) is SealedAxis.GI_LEARNABLE_WIN
+    assert _verdict(inflate_bounds(b, LADDER[-1])) is SealedAxis.GI_LEARNABLE_WIN
+
+
+def test_a_zero_width_loser_fails_at_the_registered_band_not_at_inf():
+    """theta below its threshold with q = 0: the clause never held at any lambda.
+
+    The docstring encoding is explicit: a value at or below 1.0 means the clause
+    does not hold at the registered band either. Reporting inf here would claim
+    an already-lost conjunction holds at every finite inflation.
+    """
+    b = _zero_width_bounds(additive=0.03)
+    assert _verdict(b) is SealedAxis.NO_DISTINCT_WIN
+
+    s = band_sensitivity(
+        bounds=b,
+        band_inflation=LADDER,
+        additive_margin=ADDITIVE_MARGIN,
+        learned_margin=LEARNED_MARGIN,
+    )
+    assert s.flip_lambda["additive"] == -math.inf
+    assert all(s.flip_lambda[c] == math.inf for c in FAMILY if c != "additive")
+    assert s.verdict_holds_below_lambda <= 1.0
+
+
+@pytest.mark.parametrize(
+    ("comparator", "threshold", "expected_axis"),
+    [
+        ("additive", ADDITIVE_MARGIN, SealedAxis.NO_DISTINCT_WIN),
+        ("gears", LEARNED_MARGIN, SealedAxis.PARTIAL),
+    ],
+)
+def test_a_zero_width_equality_fails_under_the_strict_clause(comparator, threshold, expected_axis):
+    """theta exactly at the threshold with q = 0: the strict ``>`` clause fails.
+
+    This is the audited misreport: `sealed_verdict` already decides against the
+    conjunction at lambda = 1, so the report must not answer ``inf``.
+    """
+    b = _zero_width_bounds(**{comparator: threshold})
+    assert _verdict(b) is expected_axis
+
+    s = band_sensitivity(
+        bounds=b,
+        band_inflation=LADDER,
+        additive_margin=ADDITIVE_MARGIN,
+        learned_margin=LEARNED_MARGIN,
+    )
+    assert s.flip_lambda[comparator] == -math.inf
+    assert s.verdict_holds_below_lambda <= 1.0
 
 
 def test_the_reported_flip_is_the_earliest_clause_to_fail():

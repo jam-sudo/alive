@@ -341,7 +341,10 @@ class ComposeBandSensitivity:
         holding``, i.e. where ``theta_C - lambda * q`` reaches its registered
         threshold. Closed form ``(theta_C - threshold) / q``; no search. A value
         at or below ``1.0`` means the clause does not hold at the registered band
-        either, and ``inf`` means a zero-width band that no inflation can move.
+        either. A zero-width band is not moved by any inflation, so its clause
+        keeps its lambda = 1 state everywhere: ``inf`` when it holds, ``-inf``
+        when it already fails (the strict clause fails at ``theta_C`` exactly on
+        the threshold too).
     verdict_holds_below_lambda : float
         ``min(flip_lambda)`` -- the inflation at which the first clause fails, so
         the whole conjunction stops holding.
@@ -456,8 +459,14 @@ def band_sensitivity(
         threshold = float(additive_margin) if c == "additive" else float(learned_margin)
         margin_above_threshold = float(bounds.theta[c]) - threshold
         # theta_C - lambda*q == threshold  =>  lambda = (theta_C - threshold)/q.
-        # A zero-width band is not moved by any inflation.
-        flip[c] = math.inf if q == 0.0 else margin_above_threshold / q
+        # A zero-width band is not moved by any inflation, so the clause keeps
+        # its lambda = 1 state at every lambda: inf when it holds, -inf (the
+        # documented at-or-below-1.0 encoding) when it already fails. The
+        # verdict clause is strict, so a margin of exactly zero fails too.
+        if q == 0.0:
+            flip[c] = math.inf if margin_above_threshold > 0.0 else -math.inf
+        else:
+            flip[c] = margin_above_threshold / q
 
     return ComposeBandSensitivity(
         comparators=tuple(bounds.comparators),
