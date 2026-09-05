@@ -15,6 +15,7 @@ import sys
 from pathlib import Path
 
 from alive.compose.activation_evidence import validate_dependency_lock
+from tests.alive.compose.smoke_evidence_support import write_tiny_fit_role_artifact
 
 REPO = Path(__file__).resolve().parents[1]
 CLI = REPO / "scripts" / "compose_smoke_evidence.py"
@@ -33,29 +34,37 @@ ARTIFACT_NAMES = (
 def _bundle(tmp_path, *, overlap=False, drift=False):
     """A self-contained inputs bundle: staged evidence dir + files + inputs.json.
 
-    `overlap` puts a sealed pair in gears' training roster (promotion refuses);
-    `drift` resolves cpa's wheelhouse from a lock with one extra pin (only the
-    validator, comparing against the evidence directory's pins, refuses).
+    `overlap` puts a row carrying the sealed pair into gears' fit-role artifact
+    (promotion refuses); `drift` resolves cpa's wheelhouse from a lock with one
+    extra pin (only the validator, comparing against the evidence directory's
+    pins, refuses).
     """
     staged = tmp_path / "compose"
     shutil.copytree(EVIDENCE, staged)
 
     backends = {}
     for backend in ("gears", "cpa"):
+        artifact = write_tiny_fit_role_artifact(
+            tmp_path / backend / "fit_role_artifact.h5ad",
+            with_sealed_row=(overlap and backend == "gears"),
+        )
         objects = {}
         for index, name in enumerate(ARTIFACT_NAMES):
-            blob = tmp_path / backend / f"{name}.bin"
-            blob.parent.mkdir(parents=True, exist_ok=True)
-            blob.write_bytes(f"{backend}-{name}-{index}".encode())
+            if name == "fit_role_artifact":
+                blob = Path(artifact.path)
+            else:
+                blob = tmp_path / backend / f"{name}.bin"
+                blob.parent.mkdir(parents=True, exist_ok=True)
+                blob.write_bytes(f"{backend}-{name}-{index}".encode())
             objects[name] = {
                 "path": str(blob),
                 "uri": f"s3://alive-compose-evidence/{backend}/{name}",
                 "immutable_version": f"v{index}Ab9",
             }
-        training = ["A+B", "W+X"] if (overlap and backend == "gears") else ["A+B", "C+D"]
         backends[backend] = {
-            "training_pair_ids": training,
-            "sealed_pair_ids": ["W+X", "Y+Z"],
+            "fit_role_artifact": artifact.to_payload_block(),
+            "approved_root": str(tmp_path),
+            "sealed_pair_ids": [["AAA", "BBB"]],
             "exit_code": 0,
             "artifacts": objects,
         }
@@ -187,7 +196,7 @@ def test_a_second_run_cannot_disturb_a_published_complete_lock(tmp_path):
     """The reviewer's scenario: a valid run, then another one on the same directory.
 
     Run 1 publishes a COMPLETE lock whose record binds five sidecar files by SHA.
-    Run 2 supplies a different training roster. With sidecars written before
+    Run 2 is another promotion onto it. With sidecars written before
     validation, run 2 overwrote run 1's roster file under the same name, and run
     1's lock -- still on disk, still saying COMPLETE -- no longer validated: a
     later run had destroyed the evidence of a successful one. A COMPLETE lock is a
@@ -199,7 +208,7 @@ def test_a_second_run_cannot_disturb_a_published_complete_lock(tmp_path):
     after_first = _snapshot(staged)
 
     bundle = json.loads(inputs.read_text(encoding="utf-8"))
-    bundle["backends"]["gears"]["training_pair_ids"] = ["E+F", "G+H"]
+    bundle["summary"] = "a second run onto the same directory"
     inputs.write_text(json.dumps(bundle), encoding="utf-8")
 
     result = _run(inputs, staged)
@@ -226,3 +235,19 @@ def test_a_bundle_missing_a_field_is_a_usage_error_not_a_traceback(tmp_path):
     assert result.returncode == 2
     assert "git_sha" in result.stderr
     assert "Traceback" not in result.stderr
+
+
+def test_a_harness_roster_in_the_bundle_that_disagrees_with_the_artifact_is_refused(tmp_path):
+    """`training_pair_ids` in the bundle is optional; if present it must match the artifact."""
+    staged, inputs = _bundle(tmp_path)
+    bundle = json.loads(inputs.read_text(encoding="utf-8"))
+    bundle["backends"]["cpa"]["training_pair_ids"] = ["AAA", "BBB", "CEBPE", "CEBPE_KLF1"]
+    inputs.write_text(json.dumps(bundle), encoding="utf-8")
+
+    result = _run(inputs, staged)
+
+    assert result.returncode == 1
+    assert "KLF1" in result.stderr
+    assert json.loads((staged / LOCK_NAME).read_text())["run_gate"]["evidence_status"] == (
+        "INCOMPLETE"
+    )

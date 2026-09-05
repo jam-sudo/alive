@@ -22,8 +22,10 @@ The inputs bundle is one JSON object::
       "summary": "<run_gate.summary for this run>",
       "backends": {
         "gears": {
-          "training_pair_ids": [...],     # what the smoke ACTUALLY fitted on
-          "sealed_pair_ids":  [...],
+          "fit_role_artifact": {...},     # the payload-v2 block the worker consumed
+          "approved_root": "...",         # the worker's --approved-root
+          "sealed_pair_ids": [["GENEA", "GENEB"], ...],   # the payload's pair_ids
+          "training_pair_ids": [...],     # OPTIONAL: the harness's own report; must match
           "exit_code": 0,
           "artifacts": {"<name>": {"path": ..., "uri": ..., "immutable_version": ...}}
         },
@@ -36,10 +38,13 @@ The inputs bundle is one JSON object::
       }
     }
 
-``training_pair_ids`` and ``exit_code`` come from the smoke harness and are
-operator-attested: the roster is hashed and checked for sealed overlap, but it is
-not re-derived from the fit-role artifact here. Deriving it is an open decision
-(review C2); until then the bundle's roster is the claim.
+The training roster is DERIVED from the fit-role artifact (review C2): the
+artifact named by ``fit_role_artifact`` is read through the worker's own guard
+(``read_verified_fit_role_artifact``) and the roster is what its ``singles`` /
+``combo_calibration`` rows carry. ``training_pair_ids`` in the bundle is optional
+and, when present, must equal the derived roster. Still operator-attested:
+``exit_code`` and the content of the ``fit_role_row_identity`` object (only its
+bytes are hashed).
 
 Exit codes
 ----------
@@ -60,6 +65,7 @@ from alive.compose.smoke_evidence import (
     build_smoke_artifact_manifest,
     build_smoke_pair_roster,
     build_wheelhouse_manifest,
+    merge_backend_record,
     promote_lock_to_complete,
     publish_promotion,
 )
@@ -73,8 +79,11 @@ def _promote(inputs_path: Path, evidence_dir: Path) -> int:
     for backend, supplied in bundle["backends"].items():
         roster, roster_record = build_smoke_pair_roster(
             backend=backend,
-            training_pair_ids=supplied["training_pair_ids"],
+            fit_role_artifact=supplied["fit_role_artifact"],
+            approved_root=supplied["approved_root"],
             sealed_pair_ids=supplied["sealed_pair_ids"],
+            harness_training_pair_ids=supplied.get("training_pair_ids"),
+            combo_sep=supplied.get("combo_sep", "_"),
         )
         artifacts, artifact_record = build_smoke_artifact_manifest(
             backend=backend, artifacts=supplied["artifacts"]
@@ -82,11 +91,11 @@ def _promote(inputs_path: Path, evidence_dir: Path) -> int:
         backends[backend] = {
             "roster": roster,
             "artifacts": artifacts,
-            "record": {
-                **roster_record,
-                **artifact_record,
-                "exit_code": supplied["exit_code"],
-            },
+            "record": merge_backend_record(
+                roster_record=roster_record,
+                artifact_record=artifact_record,
+                exit_code=supplied["exit_code"],
+            ),
         }
 
     wheelhouse = build_wheelhouse_manifest(

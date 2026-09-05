@@ -17,14 +17,27 @@ import shutil
 from pathlib import Path
 
 from alive.compose.activation_evidence import _validate_pinned_requirements
+from alive.compose.fit_role import (
+    FitRoleArtifactSpec,
+    FitRoleExtraction,
+    extract_fit_roles,
+    generate_fit_role_artifact,
+)
 from alive.compose.smoke_evidence import (
     LOCK_NAME,
     build_smoke_artifact_manifest,
     build_smoke_pair_roster,
     build_wheelhouse_manifest,
+    merge_backend_record,
     promote_lock_to_complete,
     publish_promotion,
 )
+from tests.alive.compose.test_fit_role import _extractor
+
+#: The one sealed pair the tiny artifact's extractor registers (test_fit_role._extractor).
+TINY_SEALED_PAIRS: tuple[tuple[str, str], ...] = (("AAA", "BBB"),)
+#: What the tiny artifact's non-control rows carry, sorted unique, as the roster records it.
+TINY_TRAINING_TOKENS: tuple[str, ...] = ("AAA", "BBB", "CEBPE", "CEBPE_KLF1", "KLF1")
 
 _EVIDENCE_ROOT = Path(__file__).resolve().parents[3] / "docs/activation-evidence/compose"
 _LINEAGE_FILES = (
@@ -40,6 +53,54 @@ _ARTIFACT_NAMES = (
     "command_log",
     "checkpoint",
 )
+
+
+def write_tiny_fit_role_artifact(
+    path: Path, *, with_sealed_row: bool = False, without_combo_rows: bool = False
+) -> FitRoleArtifactSpec:
+    """Write a real (tiny) fit-role ``.h5ad`` at ``path`` and return its spec.
+
+    Rows come from ``test_fit_role._extractor``: control, KLF1, CEBPE, CEBPE_KLF1
+    (calibration combo), AAA, BBB; the sealed pair is (AAA, BBB). ``with_sealed_row``
+    appends a row carrying the sealed combo token under the ``combo_calibration``
+    role -- the leak Task 0.1's negative test must see refused. ``without_combo_rows``
+    drops the calibration combo so the artifact lacks one of the two fit roles.
+    """
+    if without_combo_rows:
+        extractor = _extractor(
+            obs_source_row_id=[f"r{i}" for i in range(6)],
+            obs_perturbation=["control", "KLF1", "CEBPE", "AAA", "BBB", "KLF1"],
+        )
+    else:
+        extractor = _extractor()
+    extraction = extract_fit_roles(extractor=extractor)
+    if with_sealed_row:
+        import numpy as np
+        from scipy import sparse
+
+        leaked = ("r9", "combo_calibration", "AAA_BBB")
+        extra = sparse.csr_matrix(np.ones((1, extraction.X.shape[1])))
+        counts = dict(extraction.role_counts)
+        counts["combo_calibration"] += 1
+        extraction = FitRoleExtraction(
+            X=sparse.vstack([extraction.X, extra]).tocsr(),
+            var_names=extraction.var_names,
+            rows=(*extraction.rows, leaked),
+            role_counts=counts,
+            raw_data_sha256=extraction.raw_data_sha256,
+            pair_manifest_sha256=extraction.pair_manifest_sha256,
+            eligibility_hash=extraction.eligibility_hash,
+        )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return generate_fit_role_artifact(
+        extraction=extraction,
+        out_path=str(path),
+        config_sha256="cfg",
+        data_card_sha256="dc",
+        calibration_gene_set_hash="cg",
+        generator_code_sha256="gen",
+        writer_environment_sha256="env",
+    )
 
 
 def publish_synthetic_complete_lock(
@@ -70,16 +131,21 @@ def publish_synthetic_complete_lock(
 
     backends = {}
     for backend in ("gears", "cpa"):
+        artifact = write_tiny_fit_role_artifact(objects_dir / backend / "fit_role_artifact.h5ad")
         roster, roster_record = build_smoke_pair_roster(
             backend=backend,
-            training_pair_ids=[f"{backend}:train:a", f"{backend}:train:b"],
-            sealed_pair_ids=[f"{backend}:sealed:a", f"{backend}:sealed:b"],
+            fit_role_artifact=artifact.to_payload_block(),
+            approved_root=objects_dir,
+            sealed_pair_ids=TINY_SEALED_PAIRS,
         )
         objects = {}
         for name in _ARTIFACT_NAMES:
-            path = objects_dir / backend / f"{name}.bin"
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(f"{backend}:{name}".encode())
+            if name == "fit_role_artifact":
+                path = Path(artifact.path)
+            else:
+                path = objects_dir / backend / f"{name}.bin"
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(f"{backend}:{name}".encode())
             objects[name] = {
                 "path": path,
                 "uri": f"s3://example.invalid/compose/{backend}/{name}",
@@ -91,7 +157,9 @@ def publish_synthetic_complete_lock(
         backends[backend] = {
             "roster": roster,
             "artifacts": manifest,
-            "record": {**roster_record, **artifact_record, "exit_code": 0},
+            "record": merge_backend_record(
+                roster_record=roster_record, artifact_record=artifact_record, exit_code=0
+            ),
         }
 
     environments = {}

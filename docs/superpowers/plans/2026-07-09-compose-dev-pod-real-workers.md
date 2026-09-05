@@ -144,8 +144,11 @@ Git and bind their bytes by SHA-256 in the dependency lock.
   both sides of every cross-check from one computation, refuses sealed overlap, a non-zero
   exit code, a BLOCKED activation text or a malformed identity before building anything,
   validates a staged copy with `validate_dependency_lock`, and publishes the sidecars
-  write-once with the lock last. A refusal leaves the directory byte-identical. The bundle's
-  `training_pair_ids` and `exit_code` are the harness's attestation (open decision C2).
+  write-once with the lock last. A refusal leaves the directory byte-identical. The training
+  roster is derived from the fit-role artifact through the worker's own verified reader
+  (`read_verified_fit_role_artifact`), so the roster and `fit_role_artifact_sha256` describe
+  one object; `exit_code`, the sealed pair list (`sealed_pair_ids`, the payload's `pair_ids`)
+  and the content of the row-identity object remain the harness's attestation.
 - [ ] **Acceptance:**
   `validate_dependency_lock(...)` returns `run_gate.evidence_status == "COMPLETE"`; a
   negative test that inserts one sealed pair into the training roster fails closed; both

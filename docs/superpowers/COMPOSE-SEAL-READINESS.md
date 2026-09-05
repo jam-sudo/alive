@@ -5,7 +5,7 @@
 > **이 문서는 아무것도 정의하지 않는다** — 세부(task)는 plan, claim은 spec, exact param은 config,
 > 시간순 audit는 git이 authoritative다([sources of truth](../../CLAUDE.md#sources)). 상태 행이 authoritative
 > 문서와 어긋나면 **authoritative 문서가 옳다**; 이 인덱스를 갱신한다.
-> **Updated:** 2026-09-05 @ `5ce8533` (branch `compose-factor-bank-normalization`)
+> **Updated:** 2026-09-05 @ `a5a258e` (branch `compose-factor-bank-normalization`)
 > `scripts/bump-readiness-stamp.sh` / the pre-commit hook from `HEAD` at commit time, so it names the
 > **parent** of the commit that carries it and can never name itself. Reading it as "one commit stale" is a
 > misreading; git is authoritative for when this file actually changed.
@@ -2318,13 +2318,21 @@ six mutation kills I had claimed and then found two Critical and eight Important
   write) with the lock last by atomic rename. A refusal leaves the directory **byte-identical**,
   which is now what the tests measure (whole-directory snapshot before/after, I7) rather than what
   the docstring said. A COMPLETE input lock is refused before anything is built (I8).
-- **C2 — `VERIFIED_ZERO_OVERLAP` is certified on an operator-typed roster.** `training_pair_ids`
-  and `exit_code` come from the bundle; the producer hashes the roster and measures its overlap with
-  the sealed pairs, but it does not derive the roster from the fit-role artifact, so a harness that
-  reports the wrong roster is certified on that report. **OPEN — owner decision:** derive the roster
-  from the fit-role artifact (`fit_role.row_identity_sha256`) and refuse on mismatch (recommended),
-  or mark the roster/exit code explicitly as operator-attested in the emitted evidence. Until then
-  the CLI's docstring, the plan's Task 0.1 and this entry say which it is: attested.
+- **C2 — `VERIFIED_ZERO_OVERLAP` was certified on an operator-typed roster.** `training_pair_ids`
+  came from the bundle; the producer hashed it and measured its overlap with the sealed pairs, but
+  nothing bound it to what the smoke actually fitted on. Closed (owner chose the recommended
+  option): the roster is now **derived** from the fit-role artifact named by the payload's
+  `fit_role_artifact` block, read through the worker's own guard
+  (`read_verified_fit_role_artifact`: SHA on a stable descriptor, re-hash after read, snapshot
+  identity rebound to the spec). The training roster is the sorted unique perturbation tokens of
+  the `singles` / `combo_calibration` rows; both roles must be present or the producer refuses
+  (`training_roles` is established, not asserted); sealed pairs are canonicalised to the artifact's
+  own token form so the intersection is measured in one encoding; a harness-reported roster, if
+  supplied, must equal the derived one; and `fit_role_artifact_sha256` is the digest of the bytes
+  the roster came from, cross-checked at the record merge against the manifest builder's own hash
+  of the file. Task 0.1's negative test now runs on a real artifact carrying a sealed row, and the
+  producer reports the overlap rather than laundering it (a mutation that dropped sealed tokens
+  from the derived roster is killed by the test whose name says so).
 - **Important, all closed:** the four run-identity/prose fields were inherited from the INCOMPLETE
   lock (I1: now inputs; `activation` must not say BLOCKED, the one contradiction the validator's
   COMPLETE branch never reads); sidecar names now the plan's `{gears,cpa}_smoke_pair_roster.json` /
@@ -2339,7 +2347,12 @@ six mutation kills I had claimed and then found two Critical and eight Important
 **What this does NOT close** — stated because the first draft of this very entry said "atomically"
 and "leaves the committed lock untouched" about code that did neither, and the review measured it:
 
-- **C2** above. The seal-safety claim rests on the harness's attestation until the owner decides.
+- What C2's closure still takes on attestation, stated so nobody reads "derived" as "everything":
+  `exit_code`; the sealed pair list itself (the bundle's `sealed_pair_ids`, i.e. the payload's
+  `pair_ids`, is canonicalised and measured against the roster but not re-derived from the committed
+  split manifest whose digest the artifact's provenance names — that is the natural next binding);
+  and the content of the `fit_role_row_identity` object, which has no producer or schema in this
+  repository and is bound by bytes only.
 - `readiness.activation-evidence-incomplete` stays OPEN. A producer exists; the lock is unchanged
   and still reads `activation=BLOCKED`. The blockers are filled by a pod run, not by these commits.
 - `provenance.activation-input-snapshot-mismatch` stays OPEN, and its scope is now measured wider
@@ -2355,7 +2368,7 @@ and "leaves the committed lock untouched" about code that did neither, and the r
   post-consumption re-verification), untouched here.
 
 `config_sha256` remains `0d207746…`; seal **UNOPENED**; execution **RELEASE-BLOCKED**. Full suite
-per commit: the review wave is one commit, validated by one run of the tree it commits — 2991 passed / 3 skipped / 0 failed (18m15s); the numbers on this line were filled in after that run and are the only bytes that differ from it.
+per commit: the review wave is two commits (`a5a258e` C1·I1~I8, then C2), each validated by one run of the tree it commits — `a5a258e` 2991 passed / 3 skipped / 0 failed (18m15s); C2 2996 passed / 3 skipped / 0 failed (18m17s); the numbers on this line were filled in after each run and are the only bytes that differ from it.
 
 ## 이 문서가 *아닌* 것 (중복 금지)
 

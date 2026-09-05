@@ -28,6 +28,7 @@ import os
 import re
 import shutil
 import tempfile
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -37,6 +38,7 @@ from alive.compose.activation_evidence import (
     _validate_pinned_requirements,
     validate_dependency_lock,
 )
+from alive.compose.fit_role import FitRoleArtifactSpec, read_verified_fit_role_artifact
 from alive.compose.roles import CALIBRATION_ROLE_NAME
 from alive.io import atomic_write_once
 from alive.provenance import sha256_file, sha256_json
@@ -50,6 +52,7 @@ __all__ = [
     "build_smoke_artifact_manifest",
     "build_smoke_pair_roster",
     "build_wheelhouse_manifest",
+    "merge_backend_record",
     "promote_lock_to_complete",
     "publish_promotion",
 ]
@@ -78,6 +81,7 @@ _PROTOCOL = "COMPOSE-K562-v1"
 #: The exact fit roster, in the order the validator requires. ``singles`` has no
 #: shared constant; the calibration role is bound to the canonical vocabulary.
 _TRAINING_ROLES = ["singles", CALIBRATION_ROLE_NAME]
+_HEX64 = re.compile(r"[0-9a-f]{64}")
 _HEX40 = re.compile(r"[0-9a-f]{40}")
 _IMAGE_DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
 _UTC_ISO8601 = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")
@@ -129,54 +133,187 @@ def _normalize_package(name: str) -> str:
     return name.lower().replace("_", "-")
 
 
+def _spec_from_payload_block(block: Mapping[str, Any]) -> FitRoleArtifactSpec:
+    """The payload-v2 ``fit_role_artifact`` block as the live spec the workers rebuild.
+
+    Same eleven fields the workers map (``scripts/baselines/cpa_worker.py``); the
+    block's derived keys (``format``, ``role_obs_key``, ...) are not constructor
+    fields. Every field is then checked against the artifact itself by
+    :func:`read_verified_fit_role_artifact`, so a wrong value here is refused by
+    the guard, not carried.
+    """
+    try:
+        return FitRoleArtifactSpec(
+            path=str(block["path"]),
+            sha256=str(block["sha256"]),
+            content_manifest_sha256=str(block["content_manifest_sha256"]),
+            raw_data_sha256=str(block["raw_data_sha256"]),
+            pair_manifest_sha256=str(block["pair_manifest_sha256"]),
+            eligibility_hash=str(block["eligibility_hash"]),
+            row_identity_sha256=str(block["row_identity_sha256"]),
+            gene_order_sha256=str(block["gene_order_sha256"]),
+            n_cells=int(block["n_cells"]),
+            n_genes=int(block["n_genes"]),
+            role_counts={str(k): int(v) for k, v in dict(block["role_counts"]).items()},
+        )
+    except (KeyError, TypeError, ValueError, AttributeError) as exc:
+        raise ValueError(
+            f"fit_role_artifact must be the payload's fit_role_artifact block: {exc!r}"
+        ) from exc
+
+
+def _canonical_sealed_tokens(sealed_pair_ids: Sequence[Sequence[str]], combo_sep: str) -> list[str]:
+    """Sealed pairs in the exact token form the artifact stores combos in.
+
+    The artifact writes a combo as the byte-ordered ``GENEA<sep>GENEB``; the split
+    manifest and payload carry pairs as two-element lists in either order. The
+    roster's two sides are only comparable in one encoding -- otherwise their
+    intersection is empty for the wrong reason.
+    """
+    tokens = set()
+    for pair in sealed_pair_ids:
+        if (
+            isinstance(pair, str)
+            or len(pair) != 2
+            or not all(isinstance(gene, str) and gene for gene in pair)
+        ):
+            raise ValueError(
+                f"sealed_pair_ids entries must be two non-empty gene ids, got {pair!r}"
+            )
+        a, b = (str(pair[0]), str(pair[1]))
+        first, second = (a, b) if a.encode("utf-8") < b.encode("utf-8") else (b, a)
+        tokens.add(f"{first}{combo_sep}{second}")
+    return sorted(tokens)
+
+
 def build_smoke_pair_roster(
     *,
     backend: str,
-    training_pair_ids: list[str],
-    sealed_pair_ids: list[str],
+    fit_role_artifact: Mapping[str, Any],
+    approved_root: str | Path,
+    sealed_pair_ids: Sequence[Sequence[str]],
+    harness_training_pair_ids: Sequence[str] | None = None,
+    combo_sep: str = "_",
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Build a pair-roster manifest and the run-gate record fields bound to it.
+    """Derive the pair-roster manifest from the fit-role artifact the smoke trained on.
+
+    The roster is not accepted from the caller (review C2): it is read out of the
+    artifact named by the payload's ``fit_role_artifact`` block, through the same
+    guard a worker runs before fitting -- :func:`read_verified_fit_role_artifact`
+    verifies the file's SHA-256 on a stable descriptor, re-hashes it after the
+    read, and rebinds the loaded snapshot's row identity, gene order and content
+    manifest to the spec. The training roster is the sorted unique perturbation
+    tokens of the rows whose role is ``singles`` or ``combo_calibration``; both
+    roles must be present, since the validator requires exactly that roster.
 
     Parameters
     ----------
     backend : str
         ``"gears"`` or ``"cpa"``; must match the record's position in the lock.
-    training_pair_ids : list of str
-        Pair IDs the smoke actually fits on. Sorted and de-duplicated here so the
-        caller cannot hand the validator a non-canonical roster; the record's
-        hashes are taken from the same normalised list the manifest carries.
-    sealed_pair_ids : list of str
-        Pair IDs the protocol seals; present only so the disjointness can be measured.
-        Normalised the same way.
+    fit_role_artifact : Mapping
+        The payload-v2 ``fit_role_artifact`` block (path, sha256 and the identity
+        digests) the worker consumed.
+    approved_root : str or Path
+        Directory the artifact must live inside (the worker's ``--approved-root``).
+    sealed_pair_ids : Sequence of pair
+        The protocol's sealed pairs, as ``[gene_a, gene_b]`` in either order (the
+        payload's ``pair_ids``). Canonicalised to the artifact's token form.
+    harness_training_pair_ids : Sequence of str, optional
+        What the smoke harness itself reports it fitted on. Not a source of the
+        roster; when given it must equal the derived roster exactly.
+    combo_sep : str, default ``"_"``
+        Separator the artifact uses inside combo tokens.
 
     Returns
     -------
     tuple of (dict, dict)
         The ``compose_smoke_pair_roster_v1`` manifest, and the fragment of
-        ``run_gate.required_evidence[backend]`` that the manifest determines.
+        ``run_gate.required_evidence[backend]`` it determines -- including
+        ``fit_role_artifact_sha256``, the digest of the bytes the roster came from.
 
     Raises
     ------
     ValueError
-        If ``backend`` is not one of the protocol's two backends.
+        If ``backend`` is not one of the protocol's two backends, if the block is
+        malformed, if the artifact lacks one of the two fit roles, if a sealed pair
+        is malformed, or if the harness roster disagrees with the artifact.
+    FitRoleArtifactError
+        If the artifact does not match its spec (path policy, bytes, identity).
     """
+    _require_backend(backend)
+    spec = _spec_from_payload_block(fit_role_artifact)
+    artifact_sha256 = spec.sha256.removeprefix("sha256:")
+    if _HEX64.fullmatch(artifact_sha256) is None:
+        raise ValueError(f"fit_role_artifact.sha256 must be sha256:<64 hex>, got {spec.sha256!r}")
+    sealed_tokens = _canonical_sealed_tokens(sealed_pair_ids, combo_sep)
+
+    adata = read_verified_fit_role_artifact(spec.path, spec=spec, approved_root=str(approved_root))
+    training_rows = [
+        (str(role), str(token))
+        for role, token in zip(adata.obs["role"], adata.obs["perturbation"], strict=True)
+        if str(role) in _TRAINING_ROLES
+    ]
+    present_roles = {role for role, _ in training_rows}
+    if present_roles != set(_TRAINING_ROLES):
+        missing = sorted(set(_TRAINING_ROLES) - present_roles)
+        raise ValueError(
+            f"fit-role artifact has no rows for roles {missing}; the smoke did not fit the "
+            f"exact roster {_TRAINING_ROLES} the plan requires, and training_roles is "
+            "established from the rows, not asserted"
+        )
+    training_tokens = sorted({token for _, token in training_rows})
+    if harness_training_pair_ids is not None:
+        claimed = sorted({str(token) for token in harness_training_pair_ids})
+        if claimed != training_tokens:
+            raise ValueError(
+                f"{backend} harness training roster disagrees with the fit-role artifact — "
+                f"missing_from_harness={sorted(set(training_tokens) - set(claimed))} "
+                f"not_in_artifact={sorted(set(claimed) - set(training_tokens))}"
+            )
+
     roster: dict[str, Any] = {
         "schema": PAIR_ROSTER_SCHEMA,
         "protocol": _PROTOCOL,
-        "backend": _require_backend(backend),
+        "backend": backend,
         "training_roles": list(_TRAINING_ROLES),
-        "training_pair_ids": sorted(set(training_pair_ids)),
-        "sealed_pair_ids": sorted(set(sealed_pair_ids)),
+        "training_pair_ids": training_tokens,
+        "sealed_pair_ids": sealed_tokens,
     }
     roster["manifest_checksum"] = sha256_json(roster)
     record: dict[str, Any] = {
         "training_pair_roster_sha256": sha256_json(roster["training_pair_ids"]),
         "sealed_pair_roster_sha256": sha256_json(roster["sealed_pair_ids"]),
-        "sealed_pair_overlap_count": len(
-            set(roster["training_pair_ids"]) & set(roster["sealed_pair_ids"])
-        ),
+        "sealed_pair_overlap_count": len(set(training_tokens) & set(sealed_tokens)),
+        "fit_role_artifact_sha256": artifact_sha256,
     }
     return roster, record
+
+
+def merge_backend_record(
+    *,
+    roster_record: Mapping[str, Any],
+    artifact_record: Mapping[str, Any],
+    exit_code: int,
+) -> dict[str, Any]:
+    """Join the two builders' record fragments, refusing any value they disagree on.
+
+    The roster builder read the fit-role artifact through the verified descriptor;
+    the artifact-manifest builder hashed the same file again. The two measurements
+    of ``fit_role_artifact_sha256`` meet here. Equal digests mean both reads saw
+    the same bytes, so the roster and the recorded digest describe one object; a
+    difference means the file changed between the reads, and the record would
+    otherwise describe a roster from one file and a digest of another.
+    """
+    merged: dict[str, Any] = dict(roster_record)
+    for key, value in artifact_record.items():
+        if key in merged and merged[key] != value:
+            raise ValueError(
+                f"{key} differs between the roster derivation ({merged[key]}) and the "
+                f"artifact manifest ({value}); the two reads did not see the same bytes"
+            )
+        merged[key] = value
+    merged["exit_code"] = exit_code
+    return merged
 
 
 def build_smoke_artifact_manifest(

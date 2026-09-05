@@ -25,12 +25,19 @@ from alive.compose.activation_evidence import (
     _validate_wheelhouse_manifest,
     validate_dependency_lock,
 )
+from alive.compose.fit_role import FitRoleArtifactError
 from alive.compose.smoke_evidence import (
     build_smoke_artifact_manifest,
     build_smoke_pair_roster,
     build_wheelhouse_manifest,
+    merge_backend_record,
     promote_lock_to_complete,
     publish_promotion,
+)
+from tests.alive.compose.smoke_evidence_support import (
+    TINY_SEALED_PAIRS,
+    TINY_TRAINING_TOKENS,
+    write_tiny_fit_role_artifact,
 )
 
 
@@ -40,59 +47,122 @@ def _write(tmp_path, payload):
     return path
 
 
-def test_the_emitted_roster_and_record_are_accepted_by_the_committed_validator(tmp_path):
-    """One call emits both sides, so the validator's cross-checks cannot disagree.
-
-    `_validate_pair_roster_manifest` requires the record's
-    `training_pair_roster_sha256` / `sealed_pair_roster_sha256` /
-    `sealed_pair_overlap_count` to match the manifest it is handed. Producing the
-    two separately means getting the same thing right twice; producing them from
-    one computation makes the cross-check true by construction.
-    """
+def _roster_from(tmp_path, *, backend="gears", sealed=TINY_SEALED_PAIRS, **kwargs):
+    artifact = write_tiny_fit_role_artifact(tmp_path / "fit_role_artifact.h5ad", **kwargs)
     roster, record = build_smoke_pair_roster(
-        backend="gears",
-        training_pair_ids=["A+B", "C+D"],
-        sealed_pair_ids=["W+X", "Y+Z"],
+        backend=backend,
+        fit_role_artifact=artifact.to_payload_block(),
+        approved_root=tmp_path,
+        sealed_pair_ids=sealed,
     )
+    return artifact, roster, record
+
+
+def test_the_training_roster_is_derived_from_the_verified_fit_role_artifact(tmp_path):
+    """The roster is what the artifact's fit rows carry, read through the worker's own guard.
+
+    Review C2: the first producer hashed a roster the operator typed into the
+    bundle and certified `VERIFIED_ZERO_OVERLAP` on it. Now the artifact named by
+    the payload's `fit_role_artifact` block is read with
+    `read_verified_fit_role_artifact` -- SHA-verified on a stable descriptor,
+    snapshot identity rebound to the spec -- and the roster is the sorted unique
+    perturbation tokens of its `singles` / `combo_calibration` rows. The record's
+    `fit_role_artifact_sha256` is the digest of the bytes that roster came from.
+    """
+    artifact, roster, record = _roster_from(tmp_path)
+
+    assert roster["training_pair_ids"] == list(TINY_TRAINING_TOKENS)
+    assert roster["sealed_pair_ids"] == ["AAA_BBB"]
+    assert record["sealed_pair_overlap_count"] == 0
+    assert record["fit_role_artifact_sha256"] == artifact.sha256.removeprefix("sha256:")
     _validate_pair_roster_manifest(_write(tmp_path, roster), backend="gears", record=record)
 
 
-def test_the_roster_is_canonicalised_sorted_and_unique(tmp_path):
-    """Task 0.1 requires canonical sorted unique rosters; the caller must not have to.
+def test_sealed_pairs_are_canonicalised_to_the_artifact_s_token_form(tmp_path):
+    """Both rosters must use ONE encoding or their intersection is vacuously empty.
 
-    The validator refuses `values != sorted(set(values))`. Normalising here rather
-    than at every call site means one place can be wrong instead of many, and the
-    hashes in the record are taken from the SAME normalised list the manifest
-    carries.
+    The artifact stores a combo as the byte-ordered `GENEA_GENEB` token; the split
+    manifest and payload carry sealed pairs as `[a, b]` lists in either order. A
+    producer that compared `("BBB", "AAA")` with `"AAA_BBB"` would report zero
+    overlap for a training roster that contained the sealed pair -- the
+    `e3b0c442` shape: two things equal only because neither was measured.
     """
-    roster, record = build_smoke_pair_roster(
-        backend="cpa",
-        training_pair_ids=["C+D", "A+B", "C+D"],
-        sealed_pair_ids=["Y+Z", "W+X", "W+X"],
-    )
-    assert roster["training_pair_ids"] == ["A+B", "C+D"]
-    assert roster["sealed_pair_ids"] == ["W+X", "Y+Z"]
-    _validate_pair_roster_manifest(_write(tmp_path, roster), backend="cpa", record=record)
+    _, roster, _ = _roster_from(tmp_path, sealed=[("BBB", "AAA"), ["AAA", "BBB"]])
+    assert roster["sealed_pair_ids"] == ["AAA_BBB"]
 
 
-def test_a_sealed_pair_in_the_training_roster_fails_closed(tmp_path):
+def test_a_sealed_combo_row_in_the_artifact_is_reported_not_laundered(tmp_path):
     """Task 0.1's named acceptance condition: one sealed pair in training refuses.
 
-    The producer must REPORT the overlap, never launder it. A "helpful"
-    implementation that silently dropped overlapping pairs from the training
-    roster would hand the validator a clean roster while the smoke had in fact
-    fitted on a sealed pair -- evidence that certifies the opposite of what
-    happened. That mutation is what this test exists to kill.
+    The artifact here carries a row with the sealed token `AAA_BBB` under the
+    `combo_calibration` role -- the leak a broken extractor would produce. The
+    derived roster must contain it and the overlap must be 1, so that the
+    committed validator refuses; a producer that dropped the row while deriving
+    would hand the validator a clean roster for a smoke that fitted on a sealed
+    pair. This is what the derivation exists to make impossible to hide.
     """
-    roster, record = build_smoke_pair_roster(
-        backend="gears",
-        training_pair_ids=["A+B", "W+X"],
-        sealed_pair_ids=["W+X", "Y+Z"],
-    )
+    _, roster, record = _roster_from(tmp_path, with_sealed_row=True)
+
+    assert "AAA_BBB" in roster["training_pair_ids"]
     assert record["sealed_pair_overlap_count"] == 1
-    assert "W+X" in roster["training_pair_ids"]
     with pytest.raises(ActivationEvidenceError, match="overlaps sealed pairs"):
         _validate_pair_roster_manifest(_write(tmp_path, roster), backend="gears", record=record)
+
+
+def test_a_harness_roster_that_disagrees_with_the_artifact_is_refused(tmp_path):
+    """When the harness also reports what it fitted on, the two must agree exactly."""
+    artifact = write_tiny_fit_role_artifact(tmp_path / "fit_role_artifact.h5ad")
+    claimed = [token for token in TINY_TRAINING_TOKENS if token != "KLF1"]
+    with pytest.raises(ValueError, match="KLF1"):
+        build_smoke_pair_roster(
+            backend="gears",
+            fit_role_artifact=artifact.to_payload_block(),
+            approved_root=tmp_path,
+            sealed_pair_ids=TINY_SEALED_PAIRS,
+            harness_training_pair_ids=claimed,
+        )
+
+
+def test_an_artifact_lacking_one_of_the_two_fit_roles_is_refused(tmp_path):
+    """`training_roles` is established from the rows, not asserted from a constant.
+
+    The validator requires exactly `["singles", "combo_calibration"]`. An artifact
+    with no calibration-combo rows is a smoke that did not fit the roster the plan
+    requires; writing the constant anyway would certify a fit that did not happen.
+    """
+    with pytest.raises(ValueError, match="combo_calibration"):
+        _roster_from(tmp_path, without_combo_rows=True)
+
+
+def test_an_artifact_whose_bytes_are_not_the_spec_s_is_refused(tmp_path):
+    """The guard's SHA check is the producer's too; a swapped artifact yields no roster."""
+    artifact = write_tiny_fit_role_artifact(tmp_path / "fit_role_artifact.h5ad")
+    with open(artifact.path, "ab") as handle:
+        handle.write(b"\x00")
+    with pytest.raises(FitRoleArtifactError):
+        build_smoke_pair_roster(
+            backend="gears",
+            fit_role_artifact=artifact.to_payload_block(),
+            approved_root=tmp_path,
+            sealed_pair_ids=TINY_SEALED_PAIRS,
+        )
+
+
+def test_merge_refuses_a_manifest_hashed_from_a_different_artifact_than_the_roster(tmp_path):
+    """Two reads of the artifact are one only if they hashed the same bytes.
+
+    The roster builder reads the artifact through the verified descriptor; the
+    artifact-manifest builder hashes the file again for `fit_role_artifact_sha256`.
+    A swap between the two would make the record describe a roster from one file
+    and a digest of another. The merge is where the two measurements meet, and it
+    refuses unless they agree.
+    """
+    with pytest.raises(ValueError, match="fit_role_artifact_sha256"):
+        merge_backend_record(
+            roster_record={"fit_role_artifact_sha256": "a" * 64, "sealed_pair_overlap_count": 0},
+            artifact_record={"fit_role_artifact_sha256": "b" * 64},
+            exit_code=0,
+        )
 
 
 _ARTIFACT_NAMES = (
@@ -105,13 +175,20 @@ _ARTIFACT_NAMES = (
 )
 
 
-def _artifact_inputs(tmp_path):
-    """Six real files plus a durable URI and immutable version for each."""
+def _artifact_inputs(tmp_path, *, fit_role_artifact=None):
+    """Six real files plus a durable URI and immutable version for each.
+
+    `fit_role_artifact`, when given, is the real `.h5ad` the roster was derived
+    from; otherwise a stand-in blob (the builder only hashes it).
+    """
     tmp_path.mkdir(parents=True, exist_ok=True)
     inputs = {}
     for index, name in enumerate(_ARTIFACT_NAMES):
-        path = tmp_path / f"{name}.bin"
-        path.write_bytes(f"{name}-bytes-{index}".encode())
+        if name == "fit_role_artifact" and fit_role_artifact is not None:
+            path = Path(fit_role_artifact)
+        else:
+            path = tmp_path / f"{name}.bin"
+            path.write_bytes(f"{name}-bytes-{index}".encode())
         inputs[name] = {
             "path": path,
             "uri": f"s3://alive-compose-evidence/gears/{name}",
@@ -263,24 +340,31 @@ def _wheelhouse_for_real_locks(staged, tmp_path):
 
 
 def _backends_for(tmp_path, *, overlap=False, exit_code=0):
-    """Builder outputs for both backends; `overlap` puts a sealed pair in training."""
+    """Builder outputs for both backends; `overlap` puts a sealed row in gears' artifact."""
     backends = {}
     for backend in ("gears", "cpa"):
-        training = ["A+B", "W+X"] if (overlap and backend == "gears") else ["A+B", "C+D"]
+        artifact = write_tiny_fit_role_artifact(
+            tmp_path / backend / "fit_role_artifact.h5ad",
+            with_sealed_row=(overlap and backend == "gears"),
+        )
         roster, roster_record = build_smoke_pair_roster(
-            backend=backend, training_pair_ids=training, sealed_pair_ids=["W+X", "Y+Z"]
+            backend=backend,
+            fit_role_artifact=artifact.to_payload_block(),
+            approved_root=tmp_path,
+            sealed_pair_ids=TINY_SEALED_PAIRS,
         )
         artifacts, artifact_record = build_smoke_artifact_manifest(
-            backend=backend, artifacts=_artifact_inputs(tmp_path / backend)
+            backend=backend,
+            artifacts=_artifact_inputs(tmp_path / backend, fit_role_artifact=artifact.path),
         )
         backends[backend] = {
             "roster": roster,
             "artifacts": artifacts,
-            "record": {
-                **roster_record,
-                **artifact_record,
-                "exit_code": exit_code if backend == "cpa" else 0,
-            },
+            "record": merge_backend_record(
+                roster_record=roster_record,
+                artifact_record=artifact_record,
+                exit_code=exit_code if backend == "cpa" else 0,
+            ),
         }
     return backends
 
@@ -404,11 +488,12 @@ def test_promotion_refuses_a_lock_that_is_already_complete(tmp_path):
     before changing anything.
     """
     staged = _staged_evidence(tmp_path)
-    publish_promotion(_promote(staged, tmp_path, _backends_for(tmp_path)), evidence_dir=staged)
+    backends = _backends_for(tmp_path)
+    publish_promotion(_promote(staged, tmp_path, backends), evidence_dir=staged)
     published = _snapshot(staged)
 
     with pytest.raises(ValueError, match="COMPLETE"):
-        _promote(staged, tmp_path, _backends_for(tmp_path))
+        _promote(staged, tmp_path, backends)
     assert _snapshot(staged) == published
 
 
@@ -572,7 +657,10 @@ def test_the_builders_refuse_a_backend_outside_the_protocol_roster(tmp_path, bui
     """`backend` names a position in the lock; anything else has nowhere to go."""
     with pytest.raises(ValueError, match="backend"):
         build_smoke_pair_roster(
-            backend=builder_backend, training_pair_ids=["A+B"], sealed_pair_ids=["W+X"]
+            backend=builder_backend,
+            fit_role_artifact={},
+            approved_root=tmp_path,
+            sealed_pair_ids=TINY_SEALED_PAIRS,
         )
     with pytest.raises(ValueError, match="backend"):
         build_smoke_artifact_manifest(backend=builder_backend, artifacts=_artifact_inputs(tmp_path))
@@ -608,9 +696,7 @@ def test_the_training_roles_are_the_fit_contract_s_allowed_roles(tmp_path):
     """The roster's roles are bound to `ALLOWED_ADAPTER_ROLES`, not retyped."""
     from alive.compose.baselines_combo import ALLOWED_ADAPTER_ROLES
 
-    roster, _ = build_smoke_pair_roster(
-        backend="gears", training_pair_ids=["A+B"], sealed_pair_ids=["W+X"]
-    )
+    _, roster, _ = _roster_from(tmp_path)
     assert set(roster["training_roles"]) == set(ALLOWED_ADAPTER_ROLES)
 
 
