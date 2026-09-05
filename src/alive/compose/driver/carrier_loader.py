@@ -479,12 +479,14 @@ def _assemble_activation_record(
 # --------------------------------------------------------------------------- #
 
 
-def _processed_asset_path(spec: ResolvedRunSpec) -> str:
-    """Return raw_asset.path ONLY if the validated data card declares it the processed asset (§4).
+def _processed_asset(spec: ResolvedRunSpec) -> PathSha:
+    """Return raw_asset as a ``PathSha`` ONLY if the data card declares it the processed asset (§4).
 
     The final PREPARE schema must add a separately verified ``processed_asset`` field if the raw
     asset is genuinely raw; until then this refuses to record a raw-file digest as
     ``processed_sha256`` unless the data card binds the raw asset AS the processed analysis asset.
+    Returns the declared object, path AND digest: the digest is what the provenance builder
+    verifies the bytes against.
     """
     raw = spec.pre_seal["raw_asset"]
     card = _preseal_json(spec, "data_card")
@@ -495,20 +497,34 @@ def _processed_asset_path(spec: ResolvedRunSpec) -> str:
             "record a raw-file digest as processed_sha256 (spec §4 requires a separate "
             "processed_asset field for a genuinely raw asset)"
         )
-    return raw.path
+    return raw
 
 
 def _assemble_provenance_inputs(
     spec: ResolvedRunSpec, config: ComposePhase2Config, *, environment: EnvironmentInfo
 ) -> ActivationProvenanceInputs:
-    """Build the typed Phase-2b provenance via the existing helper (§4 authoritative-source map)."""
+    """Build the typed Phase-2b provenance via the existing helper (§4 authoritative-source map).
+
+    Each of the five file inputs crosses this boundary as ``(path, sha256)`` -- the exact
+    declaration ``load_resolved_run_spec`` verified. The previous shape passed ``.path`` alone
+    and the builder recorded whatever the file hashed to by then, so a replacement landing
+    between run-spec verification and this call became provenance. Carrying the digest lets the
+    builder refuse bytes that are not the declared ones, and this is the only place the five
+    declarations are unwrapped, so the fix is applied to all five lanes at once rather than to
+    the one a review happened to name.
+    """
     scientific = spec.scientific
+    processed = _processed_asset(spec)
+    feature_bank = spec.pre_seal["feature_bank"]
+    dependency = scientific["dependency_manifest"]
+    gears = spec.worker_blocks["gears"].requirements_lock
+    cpa = spec.worker_blocks["cpa"].requirements_lock
     return build_activation_provenance_inputs(
-        processed_path=_processed_asset_path(spec),
-        feature_bank_path=spec.pre_seal["feature_bank"].path,
-        dependency_lock_path=scientific["dependency_manifest"]["path"],
-        gears_requirements_path=spec.worker_blocks["gears"].requirements_lock.path,
-        cpa_requirements_path=spec.worker_blocks["cpa"].requirements_lock.path,
+        processed=(processed.path, processed.sha256),
+        feature_bank=(feature_bank.path, feature_bank.sha256),
+        dependency_lock=(dependency["path"], dependency["sha256"]),
+        gears_requirements=(gears.path, gears.sha256),
+        cpa_requirements=(cpa.path, cpa.sha256),
         environment=environment,
         device=scientific["device"],
         precision=scientific["precision"],

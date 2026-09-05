@@ -12,7 +12,7 @@ import pytest
 from alive.compose.config2 import load_compose_phase2_config
 from alive.compose.driver.carrier_loader import _assemble_provenance_inputs
 from alive.compose.driver.run_spec import PathSha, load_resolved_run_spec
-from alive.compose.phase2b import ActivationProvenanceInputs
+from alive.compose.phase2b import ActivationProvenanceInputs, Phase2bError
 from alive.provenance import capture_environment, sha256_file
 from tests.alive.compose.driver.scientific_carrier_support import build_scientific_carrier_fixture
 
@@ -77,4 +77,47 @@ def test_data_card_not_declaring_processed_asset_rejects(tmp_path):
         ),
     )
     with pytest.raises(ValueError, match="processed"):
+        _assemble_provenance_inputs(spec, config, environment=env)
+
+
+_LANES = {
+    "raw_asset": (lambda spec: spec.pre_seal["raw_asset"].path, "processed"),
+    "feature_bank": (lambda spec: spec.pre_seal["feature_bank"].path, "feature_bank"),
+    "dependency_manifest": (
+        lambda spec: spec.scientific["dependency_manifest"]["path"],
+        "dependency_lock",
+    ),
+    "gears_requirements": (
+        lambda spec: spec.worker_blocks["gears"].requirements_lock.path,
+        "gears_requirements",
+    ),
+    "cpa_requirements": (
+        lambda spec: spec.worker_blocks["cpa"].requirements_lock.path,
+        "cpa_requirements",
+    ),
+}
+
+
+@pytest.mark.parametrize("lane", sorted(_LANES))
+def test_a_pre_seal_input_swapped_after_the_run_spec_verified_it_is_refused(tmp_path, lane):
+    """The five declared digests must cross the boundary, not be discarded at it.
+
+    `load_resolved_run_spec` verifies every `PathSha` it accepts. This assembler
+    then unwrapped five of them to bare `.path` and handed the paths to a function
+    that re-read the files and recorded whatever digest they had by then. A
+    replacement landing between the two -- the feature-bank residual of the
+    2026-09-03 review and the worker-requirements lane of 2026-09-05, three lines
+    apart in this call -- was recorded as provenance and refused by nothing. Each
+    lane is now handed to the builder as `(path, declared sha256)` and a mismatch
+    is refused before any digest is recorded.
+    """
+    bundle = build_scientific_carrier_fixture(tmp_path / "a", repo_root=tmp_path / "r")
+    spec, config, env = _spec_config_env(bundle)
+    locate, field = _LANES[lane]
+    path = Path(locate(spec))
+    # Append rather than rewrite: a requirements lock keeps its pins, so the only
+    # reason left to refuse is that the bytes are no longer the declared ones.
+    path.write_bytes(path.read_bytes() + b"\n# replaced after the run spec verified it\n")
+
+    with pytest.raises(Phase2bError, match=field):
         _assemble_provenance_inputs(spec, config, environment=env)

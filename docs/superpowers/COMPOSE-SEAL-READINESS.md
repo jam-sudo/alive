@@ -5,7 +5,7 @@
 > **이 문서는 아무것도 정의하지 않는다** — 세부(task)는 plan, claim은 spec, exact param은 config,
 > 시간순 audit는 git이 authoritative다([sources of truth](../../CLAUDE.md#sources)). 상태 행이 authoritative
 > 문서와 어긋나면 **authoritative 문서가 옳다**; 이 인덱스를 갱신한다.
-> **Updated:** 2026-09-05 @ `a5a258e` (branch `compose-factor-bank-normalization`)
+> **Updated:** 2026-09-05 @ `73cb60d` (branch `compose-factor-bank-normalization`)
 > `scripts/bump-readiness-stamp.sh` / the pre-commit hook from `HEAD` at commit time, so it names the
 > **parent** of the commit that carries it and can never name itself. Reading it as "one commit stale" is a
 > misreading; git is authoritative for when this file actually changed.
@@ -2355,20 +2355,27 @@ and "leaves the committed lock untouched" about code that did neither, and the r
   repository and is bound by bytes only.
 - `readiness.activation-evidence-incomplete` stays OPEN. A producer exists; the lock is unchanged
   and still reads `activation=BLOCKED`. The blockers are filled by a pod run, not by these commits.
-- `provenance.activation-input-snapshot-mismatch` stays OPEN, and its scope is now measured wider
-  than the 2026-09-03 fix addressed. `60a8c5f` closed the double read INSIDE
-  `build_activation_provenance_inputs`. The remaining window is at the boundary that calls it:
-  `driver/carrier_loader.py` `_assemble_provenance_inputs` unwraps five declared `PathSha` objects to
-  bare `.path` and discards every digest, then hands the paths to a function that re-reads them. The
-  feature-bank residual and the worker-requirements lane the review reported on separate days are
-  three lines apart in that call. The fix is to make the boundary carry the digest and verify at the
-  read through `driver/preseal_read.py` — the module built for exactly this, which this call site was
-  never routed through. Seal-guard files; needs the owner's word.
+- `provenance.activation-input-snapshot-mismatch` — the boundary window is **closed for all five
+  lanes** (third commit of this wave). `60a8c5f` had closed the double read INSIDE
+  `build_activation_provenance_inputs`; the window that remained was at the boundary that calls
+  it: `driver/carrier_loader.py` `_assemble_provenance_inputs` unwrapped five declared `PathSha`
+  objects to bare `.path` and the builder recorded whatever the files hashed to by then. The
+  feature-bank residual and the worker-requirements lane the review reported on separate days
+  were that one window in two of the five lanes. Now each input crosses the boundary as
+  `(path, sha256)` and the builder refuses bytes that do not hash to the declaration, naming the
+  lane, before any digest is recorded — `sha256_bytes` on the one read for the three small files,
+  streamed `sha256_file` for the two large ones. The check lives in the builder rather than in
+  `driver/preseal_read` because no core module imports from `driver/`; it is the same comparison.
+  Ten tests, five per side; the mutation that re-hashes the file at the boundary instead of
+  passing the declaration is killed by the five driver-lane tests alone, which is the claim they
+  make. Still OPEN: `seal.transient-inode-mutation-restoration` below, and nothing further is
+  claimed — a consumer that re-reads one of these paths later is outside what these ten tests
+  measure.
 - `seal.transient-inode-mutation-restoration` stays OPEN. Different lane (`verified_descriptor`,
   post-consumption re-verification), untouched here.
 
 `config_sha256` remains `0d207746…`; seal **UNOPENED**; execution **RELEASE-BLOCKED**. Full suite
-per commit: the review wave is two commits (`a5a258e` C1·I1~I8, then C2), each validated by one run of the tree it commits — `a5a258e` 2991 passed / 3 skipped / 0 failed (18m15s); C2 2996 passed / 3 skipped / 0 failed (18m17s); the numbers on this line were filled in after each run and are the only bytes that differ from it.
+per commit: the review wave is three commits (`a5a258e` C1·I1~I8, `73cb60d` C2, then the provenance boundary), each validated by one run of the tree it commits — `a5a258e` 2991 passed / 3 skipped / 0 failed (18m15s); `73cb60d` 2996 passed / 3 skipped / 0 failed (18m17s); boundary 3006 passed / 3 skipped / 0 failed (18m18s); the numbers on this line were filled in after each run and are the only bytes that differ from it.
 
 ## 이 문서가 *아닌* 것 (중복 금지)
 

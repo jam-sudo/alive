@@ -1537,6 +1537,11 @@ def test_build_provenance_rejects_environment_mismatch(tmp_path):
         )
 
 
+def _declared(path: Path) -> tuple[Path, str]:
+    """``(path, sha256)`` as the validated run spec would declare it -- the boundary's shape."""
+    return path, hashlib.sha256(path.read_bytes()).hexdigest()
+
+
 def test_build_activation_provenance_inputs_hashes_real_files(tmp_path):
     processed = tmp_path / "processed.h5ad"
     feature_bank = tmp_path / "features.json"
@@ -1549,11 +1554,11 @@ def test_build_activation_provenance_inputs_hashes_real_files(tmp_path):
     gears.write_text("cell-gears==0.1.2\n", encoding="utf-8")
     cpa.write_text("cpa-tools==0.7.2\n", encoding="utf-8")
     inputs = build_activation_provenance_inputs(
-        processed_path=processed,
-        feature_bank_path=feature_bank,
-        dependency_lock_path=dependency,
-        gears_requirements_path=gears,
-        cpa_requirements_path=cpa,
+        processed=_declared(processed),
+        feature_bank=_declared(feature_bank),
+        dependency_lock=_declared(dependency),
+        gears_requirements=_declared(gears),
+        cpa_requirements=_declared(cpa),
         environment=_environment(),
         device="cuda:0",
         precision="float32",
@@ -1579,6 +1584,44 @@ def _provenance_fixture(tmp_path):
     gears.write_text("cell-gears==0.1.2\n", encoding="utf-8")
     cpa.write_text("cpa-tools==0.7.2\n", encoding="utf-8")
     return processed, feature_bank, dependency, gears, cpa
+
+
+_PROVENANCE_FIELDS = (
+    "processed",
+    "feature_bank",
+    "dependency_lock",
+    "gears_requirements",
+    "cpa_requirements",
+)
+
+
+@pytest.mark.parametrize("field", _PROVENANCE_FIELDS)
+def test_a_provenance_input_whose_bytes_are_not_the_declared_digest_is_refused(tmp_path, field):
+    """The boundary carries the digest the run spec verified, and the read checks it.
+
+    `60a8c5f` closed the double read INSIDE this function. The window that
+    remained was at its boundary: the caller unwrapped five declared `PathSha`
+    objects to bare paths and this function hashed whatever was on disk NOW. A
+    file replaced between run-spec verification and provenance assembly was
+    recorded with the replacement's digest, and nothing refused it -- the
+    feature-bank residual and the worker-requirements lane the daily review
+    reported on separate days are the same window in two of the five lanes.
+    Now each input is `(path, declared_sha256)` and bytes that do not hash to the
+    declaration are refused, naming the lane.
+    """
+    files = dict(zip(_PROVENANCE_FIELDS, _provenance_fixture(tmp_path), strict=True))
+    declared = {name: _declared(path) for name, path in files.items()}
+    # A replacement that still parses, so the ONLY reason to refuse is the digest.
+    swapped = {
+        "gears_requirements": b"cell-gears==0.1.2\n# replaced after verification\n",
+        "cpa_requirements": b"cpa-tools==0.7.2\n# replaced after verification\n",
+    }.get(field, b"replaced after the run spec verified it")
+    files[field].write_bytes(swapped)
+
+    with pytest.raises(Phase2bError, match=field):
+        build_activation_provenance_inputs(
+            **declared, environment=_environment(), device="cuda:0", precision="float32"
+        )
 
 
 def _install_swapping_open(monkeypatch, target: str, fire_on: int, state: dict, new_text: str):
@@ -1627,17 +1670,19 @@ def test_the_requirements_file_is_read_once_so_a_swap_has_no_window(tmp_path, mo
     corrupts the evidence a dev-pod run is meant to produce.
     """
     processed, feature_bank, dependency, gears, cpa = _provenance_fixture(tmp_path)
+    # The declarations are the run spec's reads, made BEFORE the probe is armed;
+    # the probe counts only the builder's own opens of the file.
+    declared = {
+        "processed": _declared(processed),
+        "feature_bank": _declared(feature_bank),
+        "dependency_lock": _declared(dependency),
+        "gears_requirements": _declared(gears),
+        "cpa_requirements": _declared(cpa),
+    }
     state: dict = {}
     _install_swapping_open(monkeypatch, str(gears), 2, state, "cell-gears==9.9.9\n")
     inputs = build_activation_provenance_inputs(
-        processed_path=processed,
-        feature_bank_path=feature_bank,
-        dependency_lock_path=dependency,
-        gears_requirements_path=gears,
-        cpa_requirements_path=cpa,
-        environment=_environment(),
-        device="cuda:0",
-        precision="float32",
+        **declared, environment=_environment(), device="cuda:0", precision="float32"
     )
     monkeypatch.undo()
 

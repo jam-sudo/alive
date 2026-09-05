@@ -460,45 +460,81 @@ class ActivationProvenanceInputs:
 
 def build_activation_provenance_inputs(
     *,
-    processed_path: str | Path,
-    feature_bank_path: str | Path,
-    dependency_lock_path: str | Path,
-    gears_requirements_path: str | Path,
-    cpa_requirements_path: str | Path,
+    processed: tuple[str | Path, str],
+    feature_bank: tuple[str | Path, str],
+    dependency_lock: tuple[str | Path, str],
+    gears_requirements: tuple[str | Path, str],
+    cpa_requirements: tuple[str | Path, str],
     environment: EnvironmentInfo,
     device: str,
     precision: str,
 ) -> ActivationProvenanceInputs:
-    """Build activation provenance from actual files and the captured environment."""
+    """Build activation provenance from the declared files, refusing bytes that are not theirs.
 
-    def _read_once(path: str | Path) -> bytes:
-        """Read a small provenance input exactly once.
+    Every input is ``(path, declared_sha256)`` exactly as the validated run spec
+    recorded it. The digest crosses this boundary instead of being discarded at
+    it: the previous signature took bare paths, so the caller unwrapped five
+    verified ``PathSha`` objects to ``.path`` and this function recorded whatever
+    the files hashed to by the time it ran. A replacement landing between run-spec
+    verification and provenance assembly was recorded as provenance and refused by
+    nothing -- the feature-bank residual and the worker-requirements lane the daily
+    review reported on separate days were that one window in two of the five lanes.
 
-        The digest and every value parsed out of these files must describe the
-        SAME bytes. The previous shape hashed the pathname with ``sha256_file``
-        and then reopened it to parse the pinned revision -- two reads of one
-        pathname, with a window between them. A writer landing in that window
-        makes ``dependency_lock_sha256`` and ``gears_revision`` describe different
-        bytes and nothing refuses it (reproduced by an external audit and by the
-        2026-09-03 review with a control arm). Two of the six registered
-        activation blockers are exactly those revisions, so the window corrupts
-        the evidence a dev-pod run is meant to produce.
+    Small files (the dependency lock and both requirements locks) are read once and
+    the bytes that were read are hashed and compared with the declaration; the
+    pinned revisions are parsed from those same bytes (``60a8c5f`` closed the double
+    read inside this function; this closes the boundary around it). The two large
+    inputs are streamed through ``sha256_file`` and compared the same way. A
+    mismatch raises :class:`Phase2bError` naming the lane, before any digest is
+    recorded.
+    """
 
-        Reading once removes the window rather than narrowing it: there is no
-        second read to disagree with the first. Only the small requirements/lock
-        files come through here -- ``processed_path`` and ``feature_bank_path``
-        stay on streaming ``sha256_file`` because they are hashed once already and
-        can be multi-GB.
-        """
+    def _declared(item: tuple[str | Path, str], field: str) -> tuple[Path, str]:
         try:
-            return Path(path).read_bytes()
+            path, declared = item
+        except (TypeError, ValueError) as exc:
+            raise Phase2bError(
+                f"activation provenance input {field} must be (path, declared_sha256)"
+            ) from exc
+        if not isinstance(declared, str) or not declared:
+            raise Phase2bError(
+                f"activation provenance input {field} has no declared sha256 to verify against"
+            )
+        return Path(path), declared
+
+    def _refuse(field: str, path: Path, actual: str, declared: str) -> Phase2bError:
+        return Phase2bError(
+            f"activation provenance input {field} at {str(path)!r}: bytes hash to {actual}, "
+            f"not the declared {declared} -- the file changed after the run spec verified it"
+        )
+
+    def _read_verified(item: tuple[str | Path, str], field: str) -> bytes:
+        """Read a small provenance input exactly once and prove it is the declared one."""
+        path, declared = _declared(item, field)
+        try:
+            raw = path.read_bytes()
         except OSError as exc:
             raise Phase2bError(
                 f"failed to read dependency requirements {str(path)!r}: {exc}"
             ) from exc
+        actual = sha256_bytes(raw)
+        if actual != declared:
+            raise _refuse(field, path, actual, declared)
+        return raw
+
+    def _verify_streamed(item: tuple[str | Path, str], field: str) -> str:
+        """Stream-hash a large provenance input and prove it is the declared one."""
+        path, declared = _declared(item, field)
+        try:
+            actual = sha256_file(path)
+        except OSError as exc:
+            raise Phase2bError(f"failed to hash activation provenance input: {exc}") from exc
+        if actual != declared:
+            raise _refuse(field, path, actual, declared)
+        return actual
 
     def _pinned_revision(raw: bytes, path: str | Path, package: str) -> str:
-        """Parse the pinned revision out of bytes already hashed by the caller."""
+        """Parse the pinned revision out of bytes already verified above."""
         prefix = package.casefold() + "=="
         try:
             lines = raw.decode("utf-8").splitlines()
@@ -513,21 +549,20 @@ def build_activation_provenance_inputs(
             )
         return matches[0].split("==", 1)[1]
 
-    # One read per file; the digest below and the revisions above come from these
-    # exact bytes. `sha256_file` on the same pathname would be a second read.
+    # One verified read per small file; the digest below and the revisions come
+    # from these exact bytes, and those bytes are the ones the run spec declared.
     raw_by_name = {
-        "dependency_manifest": _read_once(dependency_lock_path),
-        "gears_requirements": _read_once(gears_requirements_path),
-        "cpa_requirements": _read_once(cpa_requirements_path),
+        "dependency_manifest": _read_verified(dependency_lock, "dependency_lock"),
+        "gears_requirements": _read_verified(gears_requirements, "gears_requirements"),
+        "cpa_requirements": _read_verified(cpa_requirements, "cpa_requirements"),
     }
-    try:
-        dependency_digest = sha256_json(
-            {name: sha256_bytes(raw) for name, raw in sorted(raw_by_name.items())}
-        )
-        processed_digest = sha256_file(processed_path)
-        feature_digest = sha256_file(feature_bank_path)
-    except OSError as exc:
-        raise Phase2bError(f"failed to hash activation provenance input: {exc}") from exc
+    dependency_digest = sha256_json(
+        {name: sha256_bytes(raw) for name, raw in sorted(raw_by_name.items())}
+    )
+    processed_digest = _verify_streamed(processed, "processed")
+    feature_digest = _verify_streamed(feature_bank, "feature_bank")
+    gears_requirements_path, _ = _declared(gears_requirements, "gears_requirements")
+    cpa_requirements_path, _ = _declared(cpa_requirements, "cpa_requirements")
 
     return ActivationProvenanceInputs(
         processed_sha256=processed_digest,
