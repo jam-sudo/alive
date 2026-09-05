@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
+from pathlib import Path
 
 import pytest
 
@@ -21,11 +23,13 @@ from alive.compose.activation_evidence import (
     _validate_pinned_requirements,
     _validate_smoke_artifact_manifest,
     _validate_wheelhouse_manifest,
+    validate_dependency_lock,
 )
 from alive.compose.smoke_evidence import (
     build_smoke_artifact_manifest,
     build_smoke_pair_roster,
     build_wheelhouse_manifest,
+    promote_lock_to_complete,
 )
 
 
@@ -102,6 +106,7 @@ _ARTIFACT_NAMES = (
 
 def _artifact_inputs(tmp_path):
     """Six real files plus a durable URI and immutable version for each."""
+    tmp_path.mkdir(parents=True, exist_ok=True)
     inputs = {}
     for index, name in enumerate(_ARTIFACT_NAMES):
         path = tmp_path / f"{name}.bin"
@@ -224,3 +229,154 @@ def test_a_wheel_missing_from_the_wheelhouse_is_refused(tmp_path):
     del wheels["torch"]
     with pytest.raises(ValueError, match="torch"):
         build_wheelhouse_manifest(environments=envs)
+
+
+_EVIDENCE_DIR = Path(__file__).resolve().parents[3] / "docs/activation-evidence/compose"
+
+
+def _staged_evidence(tmp_path):
+    """The committed evidence directory, copied so a test never writes into the repo."""
+    staged = tmp_path / "compose"
+    shutil.copytree(_EVIDENCE_DIR, staged)
+    return staged
+
+
+def _wheelhouse_for_real_locks(staged, tmp_path):
+    """One real (tiny) artifact file per pin in each committed requirements lock."""
+    envs = {}
+    for env_name in ("gears_env", "cpa_env"):
+        lock = staged / f"requirements.{env_name}.lock"
+        pins = _validate_pinned_requirements(lock)
+        wheels = {}
+        for name, version in pins.items():
+            wheel = tmp_path / "wheels" / env_name / f"{name}-{version}.whl"
+            wheel.parent.mkdir(parents=True, exist_ok=True)
+            wheel.write_bytes(f"{env_name}/{name}/{version}".encode())
+            wheels[name] = {
+                "path": wheel,
+                "filename": wheel.name,
+                "source_url": f"https://pypi.org/simple/{name}/{wheel.name}",
+            }
+        envs[env_name] = (lock, wheels)
+    return envs
+
+
+def _backends_for(tmp_path, *, overlap=False, exit_code=0):
+    """Builder outputs for both backends; `overlap` puts a sealed pair in training."""
+    backends = {}
+    for backend in ("gears", "cpa"):
+        training = ["A+B", "W+X"] if (overlap and backend == "gears") else ["A+B", "C+D"]
+        roster, roster_record = build_smoke_pair_roster(
+            backend=backend, training_pair_ids=training, sealed_pair_ids=["W+X", "Y+Z"]
+        )
+        artifacts, artifact_record = build_smoke_artifact_manifest(
+            backend=backend, artifacts=_artifact_inputs(tmp_path / backend)
+        )
+        backends[backend] = {
+            "roster": roster,
+            "artifacts": artifacts,
+            "record": {
+                **roster_record,
+                **artifact_record,
+                "exit_code": exit_code if backend == "cpa" else 0,
+            },
+        }
+    return backends
+
+
+def _promote(staged, tmp_path, backends):
+    return promote_lock_to_complete(
+        lock=json.loads((staged / "gears_cpa_dependency_lock.json").read_text(encoding="utf-8")),
+        evidence_dir=staged,
+        backends=backends,
+        wheelhouse=build_wheelhouse_manifest(
+            environments=_wheelhouse_for_real_locks(staged, tmp_path)
+        ),
+        container_image_digest="sha256:" + "b" * 64,
+        git_sha="a" * 40,
+    )
+
+
+def test_promoting_the_committed_lock_yields_evidence_status_complete(tmp_path):
+    """Task 0.1's acceptance condition, end to end on the real committed lock.
+
+    `INCOMPLETE -> COMPLETE` touches nine places in the lock: the seal-safety
+    status, three completion flags, the artifact-hash flag, the wheelhouse path and
+    hash, the image digest, the reproducibility status, the missing-evidence list,
+    and the top-level checksum. Flipping those by hand means getting nine things
+    consistent; half a flip is refused by the validator with no clue which half.
+    One function flips them together or not at all.
+    """
+    staged = _staged_evidence(tmp_path)
+    lock_path = staged / "gears_cpa_dependency_lock.json"
+    lock = json.loads(lock_path.read_text(encoding="utf-8"))
+    assert lock["run_gate"]["evidence_status"] == "INCOMPLETE"
+
+    backends = {}
+    for backend in ("gears", "cpa"):
+        roster, roster_record = build_smoke_pair_roster(
+            backend=backend,
+            training_pair_ids=["A+B", "C+D"],
+            sealed_pair_ids=["W+X", "Y+Z"],
+        )
+        inputs = _artifact_inputs(tmp_path / backend)
+        artifacts, artifact_record = build_smoke_artifact_manifest(
+            backend=backend, artifacts=inputs
+        )
+        backends[backend] = {
+            "roster": roster,
+            "artifacts": artifacts,
+            "record": {**roster_record, **artifact_record, "exit_code": 0},
+        }
+
+    wheelhouse = build_wheelhouse_manifest(
+        environments=_wheelhouse_for_real_locks(staged, tmp_path)
+    )
+    promoted = promote_lock_to_complete(
+        lock=lock,
+        evidence_dir=staged,
+        backends=backends,
+        wheelhouse=wheelhouse,
+        container_image_digest="sha256:" + "b" * 64,
+        git_sha="a" * 40,
+    )
+    lock_path.write_text(json.dumps(promoted), encoding="utf-8")
+
+    validated = validate_dependency_lock(lock_path)
+    assert validated["run_gate"]["evidence_status"] == "COMPLETE"
+    assert validated["run_gate"]["seal_safety_status"] == "VERIFIED_ZERO_OVERLAP"
+
+
+def test_promotion_refuses_to_certify_zero_overlap_it_did_not_verify(tmp_path):
+    """`VERIFIED_ZERO_OVERLAP` must be established here, not merely asserted.
+
+    Promotion writes that exact string into the lock. Writing it unconditionally
+    means the producer claims a verification it never performed and leans on the
+    validator to catch the lie downstream -- the same shape as an amendment that
+    asserts a property the tree lacks.
+    """
+    staged = _staged_evidence(tmp_path)
+    with pytest.raises(ValueError, match="overlap"):
+        _promote(staged, tmp_path, _backends_for(tmp_path, overlap=True))
+
+
+def test_promotion_refuses_a_nonzero_exit_code(tmp_path):
+    """A smoke that did not exit 0 is not evidence that it ran."""
+    staged = _staged_evidence(tmp_path)
+    with pytest.raises(ValueError, match="exit_code"):
+        _promote(staged, tmp_path, _backends_for(tmp_path, exit_code=1))
+
+
+def test_a_refused_promotion_writes_nothing_into_the_evidence_directory(tmp_path):
+    """Refusal must leave no manifest behind.
+
+    The docstring claims nothing is written when promotion refuses. That claim is
+    only true while the checks stay ahead of the writes; moving them below would
+    leave a refused run's manifests sitting in the evidence directory, where the
+    next operator would find artefacts of a run that never qualified.
+    """
+    staged = _staged_evidence(tmp_path)
+    before = sorted(p.name for p in staged.iterdir())
+    with pytest.raises(ValueError):
+        _promote(staged, tmp_path, _backends_for(tmp_path, overlap=True))
+    assert sorted(p.name for p in staged.iterdir()) == before

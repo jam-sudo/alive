@@ -17,6 +17,8 @@ validator itself.
 
 from __future__ import annotations
 
+import copy
+import json
 from pathlib import Path
 from typing import Any
 
@@ -30,12 +32,14 @@ __all__ = [
     "build_smoke_artifact_manifest",
     "build_smoke_pair_roster",
     "build_wheelhouse_manifest",
+    "promote_lock_to_complete",
 ]
 
 PAIR_ROSTER_SCHEMA = "compose_smoke_pair_roster_v1"
 ARTIFACT_MANIFEST_SCHEMA = "compose_backend_smoke_artifact_manifest_v1"
 WHEELHOUSE_SCHEMA = "compose_python_artifact_manifest_v1"
 _WHEELHOUSE_ENVIRONMENTS = frozenset({"gears_env", "cpa_env"})
+_BACKENDS = frozenset({"gears", "cpa"})
 #: The six objects the validator requires, mapped to their run-gate record field.
 #: Spelled here to match the validator's own table; the round-trip test binds them.
 _ARTIFACT_RECORD_FIELDS = {
@@ -236,3 +240,129 @@ def build_wheelhouse_manifest(
     manifest: dict[str, Any] = {"schema": WHEELHOUSE_SCHEMA, "environments": built}
     manifest["manifest_checksum"] = sha256_json(manifest)
     return manifest
+
+
+def _write_manifest(evidence_dir: Path, filename: str, payload: dict[str, Any]) -> tuple[str, str]:
+    """Write a manifest and return its (relative path, SHA-256) as written.
+
+    The validator binds ``*_manifest_path`` to ``*_manifest_sha256`` by re-hashing
+    the file it finds. Writing the bytes here and hashing what was written is what
+    makes the recorded pair describe the same object; a caller that wrote the file
+    and separately reported a digest could report one for bytes it later replaced.
+    """
+    target = evidence_dir / filename
+    target.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return filename, sha256_file(target)
+
+
+def promote_lock_to_complete(
+    *,
+    lock: dict[str, Any],
+    evidence_dir: Path,
+    backends: dict[str, dict[str, Any]],
+    wheelhouse: dict[str, Any],
+    container_image_digest: str,
+    git_sha: str,
+) -> dict[str, Any]:
+    """Flip the dependency lock from INCOMPLETE to COMPLETE atomically.
+
+    The transition touches nine places: ``run_gate.seal_safety_status``, the two
+    per-backend completion flags, the lock-wide completion flag,
+    ``package_artifact_hashes_complete``, the wheelhouse path and hash, the
+    container image digest, the reproducibility status, ``missing_evidence``, and
+    the top-level ``manifest_checksum``. Half a flip is refused by the validator
+    without saying which half, so this either performs all of it or raises.
+
+    Parameters
+    ----------
+    lock : dict
+        The parsed INCOMPLETE lock. Not mutated; a new object is returned.
+    evidence_dir : Path
+        Directory the lock lives in. The generated manifests are written here and
+        referenced by paths relative to it.
+    backends : dict
+        ``backend -> {"roster", "artifacts", "record"}`` where ``record`` carries
+        the digest fields the two builders produced plus ``exit_code``.
+    wheelhouse : dict
+        The manifest from :func:`build_wheelhouse_manifest`.
+    container_image_digest : str
+        ``sha256:<64 hex>`` of the pod image. A mutable tag is not a digest.
+    git_sha : str
+        The full 40-hex commit the pod ran.
+
+    Returns
+    -------
+    dict
+        The promoted lock, ready to be written and validated.
+
+    Raises
+    ------
+    ValueError
+        If the backends are not exactly ``{"gears", "cpa"}``, if any roster overlaps
+        the sealed pairs, or if any smoke did not exit 0. Nothing is written in
+        those cases.
+    """
+    if set(backends) != _BACKENDS:
+        raise ValueError(f"promotion needs exactly {sorted(_BACKENDS)}, got {sorted(backends)}")
+
+    # Establish the two claims the promoted lock makes before writing anything.
+    # `VERIFIED_ZERO_OVERLAP` and "the smoke ran" are assertions; a producer that
+    # writes them without checking is claiming a verification it never performed and
+    # leaning on the validator to catch it downstream -- and by then the manifests are
+    # already in the evidence directory.
+    for backend in sorted(_BACKENDS):
+        record = backends[backend]["record"]
+        overlap = record.get("sealed_pair_overlap_count")
+        if overlap != 0:
+            raise ValueError(
+                f"{backend} smoke training roster overlaps sealed pairs "
+                f"(sealed_pair_overlap_count={overlap}); refusing to certify "
+                "VERIFIED_ZERO_OVERLAP for a run that did not achieve it"
+            )
+        if record.get("exit_code") != 0:
+            raise ValueError(
+                f"{backend} smoke exit_code={record.get('exit_code')}; a run that did "
+                "not exit 0 is not evidence that it ran"
+            )
+
+    promoted = copy.deepcopy(lock)
+    run_gate = promoted["run_gate"]
+    required: dict[str, Any] = {}
+    for backend in sorted(_BACKENDS):
+        supplied = backends[backend]
+        roster_path, roster_sha = _write_manifest(
+            evidence_dir, f"smoke_pair_roster.{backend}.json", supplied["roster"]
+        )
+        artifact_path, artifact_sha = _write_manifest(
+            evidence_dir, f"smoke_artifact_manifest.{backend}.json", supplied["artifacts"]
+        )
+        required[backend] = {
+            **supplied["record"],
+            "pair_roster_manifest_path": roster_path,
+            "pair_roster_manifest_sha256": roster_sha,
+            "artifact_manifest_path": artifact_path,
+            "artifact_manifest_sha256": artifact_sha,
+        }
+        promoted["environments"][f"{backend}_env"]["target_run_evidence_complete"] = True
+
+    wheelhouse_path, wheelhouse_sha = _write_manifest(
+        evidence_dir, "python_artifact_manifest.json", wheelhouse
+    )
+
+    run_gate["required_evidence"] = required
+    run_gate["evidence_status"] = "COMPLETE"
+    run_gate["seal_safety_status"] = "VERIFIED_ZERO_OVERLAP"
+    run_gate["missing_evidence"] = []
+    promoted["both_backends_run_evidence_complete"] = True
+    promoted["environment_reproducibility"] = {
+        "version_pins_complete": True,
+        "package_artifact_hashes_complete": True,
+        "wheelhouse_manifest_path": wheelhouse_path,
+        "wheelhouse_manifest_sha256": wheelhouse_sha,
+        "container_image_digest": container_image_digest,
+        "status": "COMPLETE",
+    }
+    promoted["git_sha"] = git_sha
+    promoted.pop("manifest_checksum", None)
+    promoted["manifest_checksum"] = sha256_json(promoted)
+    return promoted
