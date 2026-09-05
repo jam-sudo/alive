@@ -30,6 +30,7 @@ from alive.compose.smoke_evidence import (
     build_smoke_pair_roster,
     build_wheelhouse_manifest,
     promote_lock_to_complete,
+    publish_promotion,
 )
 
 
@@ -284,17 +285,69 @@ def _backends_for(tmp_path, *, overlap=False, exit_code=0):
     return backends
 
 
-def _promote(staged, tmp_path, backends):
+_HOST = {"gpu": "NVIDIA A100 80GB PCIe", "nvidia_driver": "550.127.05", "uv_version": "uv 0.9.0"}
+_PROSE = {
+    "generated_at_utc": "2026-09-05T21:00:00Z",
+    "host": _HOST,
+    "activation": "fit-role smoke evidence captured on the dev pod (plan Task 0.1)",
+    "summary": "Both backends completed the fit-role smoke; rosters are disjoint from the seal.",
+}
+
+
+def _promote(
+    staged,
+    tmp_path,
+    backends,
+    *,
+    container_image_digest="sha256:" + "b" * 64,
+    git_sha="a" * 40,
+    wheelhouse=None,
+    **prose,
+):
     return promote_lock_to_complete(
         lock=json.loads((staged / "gears_cpa_dependency_lock.json").read_text(encoding="utf-8")),
-        evidence_dir=staged,
         backends=backends,
-        wheelhouse=build_wheelhouse_manifest(
-            environments=_wheelhouse_for_real_locks(staged, tmp_path)
-        ),
-        container_image_digest="sha256:" + "b" * 64,
-        git_sha="a" * 40,
+        wheelhouse=wheelhouse
+        or build_wheelhouse_manifest(environments=_wheelhouse_for_real_locks(staged, tmp_path)),
+        container_image_digest=container_image_digest,
+        git_sha=git_sha,
+        **{**_PROSE, **prose},
     )
+
+
+def _drifted_wheelhouse(staged, tmp_path):
+    """A wheelhouse built from a cpa lock that carries one pin the committed lock lacks.
+
+    Promotion cannot see the drift -- it derives the roster from whatever lock it
+    is handed -- while the validator compares the manifest against the pins in the
+    evidence directory. This is the realistic validator-only refusal: a pod that
+    resolved its wheelhouse from a stale requirements lock.
+    """
+    drifted = tmp_path / "requirements.cpa_env.drifted.lock"
+    drifted.write_text(
+        (staged / "requirements.cpa_env.lock").read_text(encoding="utf-8") + "extra-pkg==1.0\n",
+        encoding="utf-8",
+    )
+    envs = _wheelhouse_for_real_locks(staged, tmp_path)
+    lock, wheels = envs["cpa_env"]
+    wheel = tmp_path / "wheels" / "cpa_env" / "extra-pkg-1.0.whl"
+    wheel.write_bytes(b"extra")
+    wheels["extra-pkg"] = {
+        "path": wheel,
+        "filename": wheel.name,
+        "source_url": f"https://pypi.org/simple/extra-pkg/{wheel.name}",
+    }
+    envs["cpa_env"] = (drifted, wheels)
+    return build_wheelhouse_manifest(environments=envs)
+
+
+def _snapshot(directory):
+    """Every file under `directory` with its exact bytes, so nothing can change unnoticed."""
+    return {
+        str(path.relative_to(directory)): path.read_bytes()
+        for path in sorted(directory.rglob("*"))
+        if path.is_file()
+    }
 
 
 def test_promoting_the_committed_lock_yields_evidence_status_complete(tmp_path):
@@ -305,42 +358,16 @@ def test_promoting_the_committed_lock_yields_evidence_status_complete(tmp_path):
     hash, the image digest, the reproducibility status, the missing-evidence list,
     and the top-level checksum. Flipping those by hand means getting nine things
     consistent; half a flip is refused by the validator with no clue which half.
-    One function flips them together or not at all.
+    One function flips them together or not at all, and publishing puts the lock
+    and every sidecar it binds on disk where the committed validator accepts them.
     """
     staged = _staged_evidence(tmp_path)
     lock_path = staged / "gears_cpa_dependency_lock.json"
-    lock = json.loads(lock_path.read_text(encoding="utf-8"))
-    assert lock["run_gate"]["evidence_status"] == "INCOMPLETE"
-
-    backends = {}
-    for backend in ("gears", "cpa"):
-        roster, roster_record = build_smoke_pair_roster(
-            backend=backend,
-            training_pair_ids=["A+B", "C+D"],
-            sealed_pair_ids=["W+X", "Y+Z"],
-        )
-        inputs = _artifact_inputs(tmp_path / backend)
-        artifacts, artifact_record = build_smoke_artifact_manifest(
-            backend=backend, artifacts=inputs
-        )
-        backends[backend] = {
-            "roster": roster,
-            "artifacts": artifacts,
-            "record": {**roster_record, **artifact_record, "exit_code": 0},
-        }
-
-    wheelhouse = build_wheelhouse_manifest(
-        environments=_wheelhouse_for_real_locks(staged, tmp_path)
+    assert json.loads(lock_path.read_text(encoding="utf-8"))["run_gate"]["evidence_status"] == (
+        "INCOMPLETE"
     )
-    promoted = promote_lock_to_complete(
-        lock=lock,
-        evidence_dir=staged,
-        backends=backends,
-        wheelhouse=wheelhouse,
-        container_image_digest="sha256:" + "b" * 64,
-        git_sha="a" * 40,
-    )
-    lock_path.write_text(json.dumps(promoted), encoding="utf-8")
+
+    publish_promotion(_promote(staged, tmp_path, _backends_for(tmp_path)), evidence_dir=staged)
 
     validated = validate_dependency_lock(lock_path)
     assert validated["run_gate"]["evidence_status"] == "COMPLETE"
@@ -367,16 +394,263 @@ def test_promotion_refuses_a_nonzero_exit_code(tmp_path):
         _promote(staged, tmp_path, _backends_for(tmp_path, exit_code=1))
 
 
-def test_a_refused_promotion_writes_nothing_into_the_evidence_directory(tmp_path):
-    """Refusal must leave no manifest behind.
+def test_promotion_refuses_a_lock_that_is_already_complete(tmp_path):
+    """A COMPLETE lock is a published result; promoting it again is a new lineage.
 
-    The docstring claims nothing is written when promotion refuses. That claim is
-    only true while the checks stay ahead of the writes; moving them below would
-    leave a refused run's manifests sitting in the evidence directory, where the
-    next operator would find artefacts of a run that never qualified.
+    The first draft deep-copied whatever lock it was handed and overwrote the nine
+    fields, so a second promotion onto a COMPLETE lock would have replaced the
+    evidence of the first run with that of the second under the same identity --
+    the overwrite `CLAUDE.md#provenance` forbids. Establish the input state
+    before changing anything.
     """
     staged = _staged_evidence(tmp_path)
-    before = sorted(p.name for p in staged.iterdir())
-    with pytest.raises(ValueError):
-        _promote(staged, tmp_path, _backends_for(tmp_path, overlap=True))
-    assert sorted(p.name for p in staged.iterdir()) == before
+    publish_promotion(_promote(staged, tmp_path, _backends_for(tmp_path)), evidence_dir=staged)
+    published = _snapshot(staged)
+
+    with pytest.raises(ValueError, match="COMPLETE"):
+        _promote(staged, tmp_path, _backends_for(tmp_path))
+    assert _snapshot(staged) == published
+
+
+def test_publishing_a_promotion_the_validator_refuses_leaves_the_directory_byte_identical(
+    tmp_path,
+):
+    """The validator checks things promotion cannot; its refusal must cost nothing.
+
+    The wheelhouse roster is one of them: promotion derives it from the lock it is
+    handed, the validator compares it with the pins in the evidence directory, and
+    a pod that resolved its wheelhouse from a stale lock passes the first and fails
+    the second. The first producer wrote the five sidecar manifests into the
+    evidence directory *before* anyone validated the result, so a refused run left
+    files behind under the names the next run would use, and a refused run after a
+    successful one overwrote that run's bound sidecars. The contract is now: every
+    byte is staged and validated elsewhere first, and a refusal changes nothing
+    under the evidence directory.
+    """
+    staged = _staged_evidence(tmp_path)
+    before = _snapshot(staged)
+    promotion = _promote(
+        staged, tmp_path, _backends_for(tmp_path), wheelhouse=_drifted_wheelhouse(staged, tmp_path)
+    )
+
+    with pytest.raises(ActivationEvidenceError):
+        publish_promotion(promotion, evidence_dir=staged)
+    assert _snapshot(staged) == before
+
+
+def test_publishing_refuses_when_a_sidecar_name_is_already_taken(tmp_path):
+    """A sidecar is published write-once; an existing file under its name is refused.
+
+    The lock is published last and is the commit point, so a crash between the
+    sidecars and the lock leaves sidecars without a lock that binds them. The
+    next run must not silently overwrite those -- or a stray file of the same
+    name -- and it must not publish half the set before finding out: existence
+    is established for every name before the first write.
+    """
+    staged = _staged_evidence(tmp_path)
+    promotion = _promote(staged, tmp_path, _backends_for(tmp_path))
+    taken = sorted(promotion.files)[-1]
+    (staged / taken).write_bytes(b"not this run's")
+    before = _snapshot(staged)
+
+    with pytest.raises(FileExistsError, match=taken):
+        publish_promotion(promotion, evidence_dir=staged)
+    assert _snapshot(staged) == before
+
+
+def test_the_sidecars_carry_the_names_the_dev_pod_plan_declares(tmp_path):
+    """The dev-pod plan's file structure names the sidecars; the producer must use them.
+
+    `docs/superpowers/plans/2026-07-09-compose-dev-pod-real-workers.md` declares
+    `{gears,cpa}_smoke_pair_roster.json`, `{gears,cpa}_smoke_artifacts.json` and
+    `python_artifact_manifest.json` as the files Task 0.1 creates. The first
+    producer invented its own spellings, which the validator accepts (it binds by
+    path + SHA, not by name) and the plan's reader would not find.
+    """
+    staged = _staged_evidence(tmp_path)
+    promotion = _promote(staged, tmp_path, _backends_for(tmp_path))
+    assert set(promotion.files) == {
+        "gears_smoke_pair_roster.json",
+        "cpa_smoke_pair_roster.json",
+        "gears_smoke_artifacts.json",
+        "cpa_smoke_artifacts.json",
+        "python_artifact_manifest.json",
+    }
+
+
+def test_promotion_stamps_the_run_identity_and_prose_the_caller_supplies(tmp_path):
+    """`generated_at_utc`, `host`, `activation` and `run_gate.summary` are this run's.
+
+    The first producer inherited all four from the INCOMPLETE lock, so a COMPLETE
+    lock carried the July compatibility observation's timestamp, host and the prose
+    "no immutable smoke manifest ... was captured" -- a record that contradicted
+    itself. The validator's INCOMPLETE branch requires the activation text to say
+    BLOCKED and its COMPLETE branch does not read the text at all, so an inherited
+    BLOCKED text validates COMPLETE while announcing the opposite.
+    """
+    staged = _staged_evidence(tmp_path)
+    promotion = _promote(staged, tmp_path, _backends_for(tmp_path))
+    lock = promotion.lock
+    assert lock["generated_at_utc"] == _PROSE["generated_at_utc"]
+    assert lock["host"] == _HOST
+    assert lock["activation"] == _PROSE["activation"]
+    assert lock["run_gate"]["summary"] == _PROSE["summary"]
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "match"),
+    [
+        ("activation", "BLOCKED — the smoke input roster was not captured", "BLOCKED"),
+        ("activation", "   ", "activation"),
+        ("generated_at_utc", "2026-09-05 21:00:00", "generated_at_utc"),
+        ("host", {}, "host"),
+        ("host", {"gpu": ""}, "host"),
+        ("summary", "  ", "summary"),
+    ],
+    ids=[
+        "activation-still-blocked",
+        "activation-blank",
+        "generated_at-not-utc-iso8601",
+        "host-empty",
+        "host-blank-value",
+        "summary-blank",
+    ],
+)
+def test_promotion_refuses_run_identity_or_prose_it_cannot_stand_behind(
+    tmp_path, field, value, match
+):
+    """Each input is established here rather than left for a later reader to notice.
+
+    The validator's INCOMPLETE branch requires the activation text to contain
+    BLOCKED; its COMPLETE branch reads nothing, so a COMPLETE lock that still says
+    BLOCKED is the one contradiction nothing downstream refuses. The timestamp is
+    the one the plan asks the pod to record; a local-time or free-form value is not
+    it. `host` is the pod's identity and an empty or blank one records no pod.
+    """
+    staged = _staged_evidence(tmp_path)
+    with pytest.raises(ValueError, match=match):
+        _promote(staged, tmp_path, _backends_for(tmp_path), **{field: value})
+
+
+@pytest.mark.parametrize(
+    ("override", "match"),
+    [
+        ({"git_sha": "abc123"}, "git_sha"),
+        ({"container_image_digest": "latest"}, "container_image_digest"),
+    ],
+    ids=["short-git-sha", "image-tag-not-digest"],
+)
+def test_promotion_refuses_a_malformed_run_identity(tmp_path, override, match):
+    """The lock's identity fields are checked here, not left to the validator.
+
+    Establish-before-write, carried to the siblings of the overlap/exit-code checks
+    that the first draft stopped at: a 7-character SHA or an image *tag* would have
+    been built into the lock and refused at publish time -- the right outcome, but
+    after the wheelhouse was hashed and with an error about the lock rather than
+    about the input.
+    """
+    staged = _staged_evidence(tmp_path)
+    with pytest.raises(ValueError, match=match):
+        _promote(staged, tmp_path, _backends_for(tmp_path), **override)
+
+
+def test_promotion_refuses_a_backend_record_filed_under_the_other_backend(tmp_path):
+    """A gears roster under the cpa key is two records disagreeing about one thing.
+
+    The validator checks `roster["backend"] == backend` per record, so this would
+    be refused at publish time. Establishing it here says which input is wrong.
+    """
+    staged = _staged_evidence(tmp_path)
+    backends = _backends_for(tmp_path)
+    backends["gears"], backends["cpa"] = backends["cpa"], backends["gears"]
+    with pytest.raises(ValueError, match="backend"):
+        _promote(staged, tmp_path, backends)
+
+
+@pytest.mark.parametrize("builder_backend", ["GEARS", "scgpt"])
+def test_the_builders_refuse_a_backend_outside_the_protocol_roster(tmp_path, builder_backend):
+    """`backend` names a position in the lock; anything else has nowhere to go."""
+    with pytest.raises(ValueError, match="backend"):
+        build_smoke_pair_roster(
+            backend=builder_backend, training_pair_ids=["A+B"], sealed_pair_ids=["W+X"]
+        )
+    with pytest.raises(ValueError, match="backend"):
+        build_smoke_artifact_manifest(backend=builder_backend, artifacts=_artifact_inputs(tmp_path))
+
+
+@pytest.mark.parametrize(
+    "uri",
+    ["file:///workspace/smoke/checkpoint.pt", "/workspace/smoke/checkpoint.pt", "checkpoint.pt"],
+    ids=["file-scheme", "absolute-path", "bare-name"],
+)
+def test_the_artifact_manifest_refuses_a_uri_that_is_not_durable(tmp_path, uri):
+    """Task 0.1: "a durable URI"; a pod-local path is gone with the pod."""
+    inputs = _artifact_inputs(tmp_path)
+    inputs["checkpoint"]["uri"] = uri
+    with pytest.raises(ValueError, match="uri"):
+        build_smoke_artifact_manifest(backend="gears", artifacts=inputs)
+
+
+def test_an_artifact_entry_with_an_unexpected_key_is_refused(tmp_path):
+    """Passing `sha256` in an entry is the exact thing the builder exists to prevent.
+
+    The digest is measured here; a caller-supplied one was silently ignored, which
+    let a caller believe it had been recorded. Unknown keys are refused so that the
+    contract is visible at the call site.
+    """
+    inputs = _artifact_inputs(tmp_path)
+    inputs["checkpoint"]["sha256"] = "0" * 64
+    with pytest.raises(ValueError, match="sha256"):
+        build_smoke_artifact_manifest(backend="gears", artifacts=inputs)
+
+
+def test_the_training_roles_are_the_fit_contract_s_allowed_roles(tmp_path):
+    """The roster's roles are bound to `ALLOWED_ADAPTER_ROLES`, not retyped."""
+    from alive.compose.baselines_combo import ALLOWED_ADAPTER_ROLES
+
+    roster, _ = build_smoke_pair_roster(
+        backend="gears", training_pair_ids=["A+B"], sealed_pair_ids=["W+X"]
+    )
+    assert set(roster["training_roles"]) == set(ALLOWED_ADAPTER_ROLES)
+
+
+def test_a_wheel_supplied_under_an_unnormalised_name_is_found(tmp_path):
+    """`cell_gears` and `cell-gears` are one package; the lookup must know that.
+
+    The first builder normalised names only for the roster comparison and then
+    looked the artifact up under the pin's normalised name -- so an underscore in
+    the caller's key passed the comparison and raised `KeyError` one line later.
+    Normalise once, use the normalised map for everything.
+    """
+    envs = _wheelhouse_inputs(tmp_path)
+    lock, wheels = envs["gears_env"]
+    wheels["Cell_GEARS"] = wheels.pop("cell-gears")
+    manifest = build_wheelhouse_manifest(environments=envs)
+    assert [e["name"] for e in manifest["environments"]["gears_env"]] == ["cell-gears", "torch"]
+
+
+def test_two_wheels_that_normalise_to_one_package_are_refused(tmp_path):
+    """After normalisation a duplicate is two artifacts claiming one pin."""
+    envs = _wheelhouse_inputs(tmp_path)
+    lock, wheels = envs["gears_env"]
+    wheels["cell_gears"] = dict(wheels["cell-gears"])
+    with pytest.raises(ValueError, match="cell-gears"):
+        build_wheelhouse_manifest(environments=envs)
+
+
+def test_a_wheel_whose_declared_filename_is_not_the_hashed_file_s_name_is_refused(tmp_path):
+    """The manifest names a file and records a digest; they must be the same file."""
+    envs = _wheelhouse_inputs(tmp_path)
+    lock, wheels = envs["cpa_env"]
+    wheels["torch"]["filename"] = "torch-2.4.0-cp312-manylinux.whl"
+    with pytest.raises(ValueError, match="filename"):
+        build_wheelhouse_manifest(environments=envs)
+
+
+def test_a_wheel_entry_with_an_unexpected_key_is_refused(tmp_path):
+    """Same contract as the artifact entries: a `sha256` supplied here is ignored, so refuse it."""
+    envs = _wheelhouse_inputs(tmp_path)
+    lock, wheels = envs["cpa_env"]
+    wheels["torch"]["sha256"] = "0" * 64
+    with pytest.raises(ValueError, match="sha256"):
+        build_wheelhouse_manifest(environments=envs)

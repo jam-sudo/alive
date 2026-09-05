@@ -5,7 +5,7 @@
 > **이 문서는 아무것도 정의하지 않는다** — 세부(task)는 plan, claim은 spec, exact param은 config,
 > 시간순 audit는 git이 authoritative다([sources of truth](../../CLAUDE.md#sources)). 상태 행이 authoritative
 > 문서와 어긋나면 **authoritative 문서가 옳다**; 이 인덱스를 갱신한다.
-> **Updated:** 2026-09-03 @ `60a8c5f` (branch `compose-factor-bank-normalization`)
+> **Updated:** 2026-09-05 @ `5ce8533` (branch `compose-factor-bank-normalization`)
 > `scripts/bump-readiness-stamp.sh` / the pre-commit hook from `HEAD` at commit time, so it names the
 > **parent** of the commit that carries it and can never name itself. Reading it as "one commit stale" is a
 > misreading; git is authoritative for when this file actually changed.
@@ -2287,6 +2287,75 @@ Also in this wave:
 `config_sha256` remains `0d207746…`; seal **UNOPENED**; execution **RELEASE-BLOCKED**. The critical
 path is unchanged and is now unobstructed: regenerate the six activation blockers on the dev pod at
 this digest.
+
+**2026-09-05 — the activation evidence had a strict validator and no producer; it has one now,
+and an independent review of it found the producer's first draft claiming more than it did.**
+
+`alive.compose.activation_evidence` has validated the dev-pod smoke evidence exactly since it was
+written, and nothing produced it. The consequence sat in the committed lock the whole time:
+`activation=BLOCKED`, `run_gate.evidence_status=INCOMPLETE`, and all 28 `required_evidence` fields
+null. The only path to filling them was by hand on the pod, which is the shape this repository keeps
+finding — a measurement and its record written separately, free to drift.
+
+`alive.compose.smoke_evidence` + `scripts/compose_smoke_evidence.py` close that path
+(`f76231e`…`5ce8533`, then the review wave below). Each builder derives BOTH sides of a cross-check
+the validator performs, from one computation: the pair roster's ids and the record's hashes of them;
+the artifact digests, **measured rather than accepted**; the wheelhouse roster, derived from the
+requirements locks with the validator's own parser. Task 0.1's acceptance condition
+(`validate_dependency_lock` → `COMPLETE`; one sealed pair in training fails closed) passes on the
+real committed lock in a staged copy.
+
+**The independent review** (opus, 2026-09-05, prompted with the seven mutation rules) verified the
+six mutation kills I had claimed and then found two Critical and eight Important defects I had not:
+
+- **C1 — a refused run destroyed a successful one.** The first CLI validated a candidate lock before
+  replacing the committed one, and I described that as leaving the directory untouched. It did not:
+  the five sidecar manifests were written *before* validation, under the names the next run would
+  use. Run 1 (valid) → COMPLETE; run 2 (refused) → run 1's sidecars overwritten, run 1's lock no
+  longer validated. Closed: promotion writes nothing; `publish_promotion` copies the evidence
+  directory to a temporary staging area, validates the staged lock, and only then publishes the
+  sidecars write-once (`io.atomic_write_once`, existence established for every name before the first
+  write) with the lock last by atomic rename. A refusal leaves the directory **byte-identical**,
+  which is now what the tests measure (whole-directory snapshot before/after, I7) rather than what
+  the docstring said. A COMPLETE input lock is refused before anything is built (I8).
+- **C2 — `VERIFIED_ZERO_OVERLAP` is certified on an operator-typed roster.** `training_pair_ids`
+  and `exit_code` come from the bundle; the producer hashes the roster and measures its overlap with
+  the sealed pairs, but it does not derive the roster from the fit-role artifact, so a harness that
+  reports the wrong roster is certified on that report. **OPEN — owner decision:** derive the roster
+  from the fit-role artifact (`fit_role.row_identity_sha256`) and refuse on mismatch (recommended),
+  or mark the roster/exit code explicitly as operator-attested in the emitted evidence. Until then
+  the CLI's docstring, the plan's Task 0.1 and this entry say which it is: attested.
+- **Important, all closed:** the four run-identity/prose fields were inherited from the INCOMPLETE
+  lock (I1: now inputs; `activation` must not say BLOCKED, the one contradiction the validator's
+  COMPLETE branch never reads); sidecar names now the plan's `{gears,cpa}_smoke_pair_roster.json` /
+  `{gears,cpa}_smoke_artifacts.json` (I2); establish-before-write carried to its siblings — `git_sha`,
+  image digest, backend membership, a record filed under the other backend, non-durable `uri` (I3);
+  wheelhouse keys normalised once with the validator's rule and duplicates refused (I4: `Cell_GEARS`
+  passed the roster comparison and raised `KeyError` a line later); declared `filename` must be the
+  hashed file's name (I5); the two test lock builders that hand-rolled the contract in duplicate now
+  go through the producer (I6); unknown entry keys refused (a caller-supplied `sha256` was silently
+  ignored); CLI usage errors exit 2, not a traceback.
+
+**What this does NOT close** — stated because the first draft of this very entry said "atomically"
+and "leaves the committed lock untouched" about code that did neither, and the review measured it:
+
+- **C2** above. The seal-safety claim rests on the harness's attestation until the owner decides.
+- `readiness.activation-evidence-incomplete` stays OPEN. A producer exists; the lock is unchanged
+  and still reads `activation=BLOCKED`. The blockers are filled by a pod run, not by these commits.
+- `provenance.activation-input-snapshot-mismatch` stays OPEN, and its scope is now measured wider
+  than the 2026-09-03 fix addressed. `60a8c5f` closed the double read INSIDE
+  `build_activation_provenance_inputs`. The remaining window is at the boundary that calls it:
+  `driver/carrier_loader.py` `_assemble_provenance_inputs` unwraps five declared `PathSha` objects to
+  bare `.path` and discards every digest, then hands the paths to a function that re-reads them. The
+  feature-bank residual and the worker-requirements lane the review reported on separate days are
+  three lines apart in that call. The fix is to make the boundary carry the digest and verify at the
+  read through `driver/preseal_read.py` — the module built for exactly this, which this call site was
+  never routed through. Seal-guard files; needs the owner's word.
+- `seal.transient-inode-mutation-restoration` stays OPEN. Different lane (`verified_descriptor`,
+  post-consumption re-verification), untouched here.
+
+`config_sha256` remains `0d207746…`; seal **UNOPENED**; execution **RELEASE-BLOCKED**. Full suite
+per commit: the review wave is one commit, validated by one run of the tree it commits — 2991 passed / 3 skipped / 0 failed (18m15s); the numbers on this line were filled in after that run and are the only bytes that differ from it.
 
 ## 이 문서가 *아닌* 것 (중복 금지)
 

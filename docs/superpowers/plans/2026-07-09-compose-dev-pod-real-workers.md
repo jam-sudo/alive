@@ -139,6 +139,13 @@ Git and bind their bytes by SHA-256 in the dependency lock.
 - [ ] Populate both backends' exact fields in `run_gate.required_evidence`, set per-backend
   completion flags, remove `missing_evidence`, and change `seal_safety_status` to
   `VERIFIED_ZERO_OVERLAP` only after the checks above pass. Recompute `manifest_checksum`.
+  Do this with `scripts/compose_smoke_evidence.py promote --inputs <bundle> --evidence-dir
+  docs/activation-evidence/compose` (`alive.compose.smoke_evidence`), not by hand: it derives
+  both sides of every cross-check from one computation, refuses sealed overlap, a non-zero
+  exit code, a BLOCKED activation text or a malformed identity before building anything,
+  validates a staged copy with `validate_dependency_lock`, and publishes the sidecars
+  write-once with the lock last. A refusal leaves the directory byte-identical. The bundle's
+  `training_pair_ids` and `exit_code` are the harness's attestation (open decision C2).
 - [ ] **Acceptance:**
   `validate_dependency_lock(...)` returns `run_gate.evidence_status == "COMPLETE"`; a
   negative test that inserts one sealed pair into the training roster fails closed; both

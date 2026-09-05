@@ -14,6 +14,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from alive.compose.activation_evidence import validate_dependency_lock
+
 REPO = Path(__file__).resolve().parents[1]
 CLI = REPO / "scripts" / "compose_smoke_evidence.py"
 EVIDENCE = REPO / "docs/activation-evidence/compose"
@@ -28,8 +30,13 @@ ARTIFACT_NAMES = (
 )
 
 
-def _bundle(tmp_path, *, overlap=False):
-    """A self-contained inputs bundle: staged evidence dir + files + inputs.json."""
+def _bundle(tmp_path, *, overlap=False, drift=False):
+    """A self-contained inputs bundle: staged evidence dir + files + inputs.json.
+
+    `overlap` puts a sealed pair in gears' training roster (promotion refuses);
+    `drift` resolves cpa's wheelhouse from a lock with one extra pin (only the
+    validator, comparing against the evidence directory's pins, refuses).
+    """
     staged = tmp_path / "compose"
     shutil.copytree(EVIDENCE, staged)
 
@@ -56,6 +63,13 @@ def _bundle(tmp_path, *, overlap=False):
     wheelhouse = {}
     for env_name in ("gears_env", "cpa_env"):
         lock = staged / f"requirements.{env_name}.lock"
+        if drift and env_name == "cpa_env":
+            lock = tmp_path / "requirements.cpa_env.drifted.lock"
+            lock.write_text(
+                (staged / "requirements.cpa_env.lock").read_text(encoding="utf-8")
+                + "extra-pkg==1.0\n",
+                encoding="utf-8",
+            )
         wheels = {}
         for line in lock.read_text(encoding="utf-8").splitlines():
             line = line.strip()
@@ -82,6 +96,10 @@ def _bundle(tmp_path, *, overlap=False):
             {
                 "git_sha": "a" * 40,
                 "container_image_digest": "sha256:" + "b" * 64,
+                "generated_at_utc": "2026-09-05T21:00:00Z",
+                "host": {"gpu": "NVIDIA A100 80GB PCIe", "nvidia_driver": "550.127.05"},
+                "activation": "READY — fit-role smoke evidence captured on the dev pod",
+                "summary": "Both backends completed the fit-role smoke; rosters disjoint.",
                 "backends": backends,
                 "wheelhouse": wheelhouse,
             }
@@ -135,37 +153,76 @@ def test_refused_evidence_exits_nonzero_and_leaves_the_lock_incomplete(tmp_path)
     assert lock["run_gate"]["evidence_status"] == "INCOMPLETE"
 
 
-def test_a_lock_that_fails_validation_does_not_replace_the_committed_one(tmp_path):
-    """Write-then-validate would leave a broken lock behind on failure.
+def _snapshot(directory):
+    """Every file under `directory` with its exact bytes, so nothing can change unnoticed."""
+    return {
+        str(path.relative_to(directory)): path.read_bytes()
+        for path in sorted(directory.rglob("*"))
+        if path.is_file()
+    }
 
-    `container_image_digest` is checked by the validator, not by promotion, so a
-    malformed one gets all the way to the written file. If the tool overwrites the
-    committed lock and only then discovers it does not validate, the evidence
-    directory is left holding a lock nobody can use and the next operator inherits
-    it. Validate first, replace second.
+
+def test_a_run_the_validator_refuses_leaves_the_evidence_directory_byte_identical(tmp_path):
+    """Refusal must leave the WHOLE directory as it was found, not just the lock.
+
+    A wheelhouse resolved from a stale requirements lock passes every producer-side
+    check and is refused by the validator against the evidence directory's pins.
+    The first CLI protected only the lock (validate a candidate, then replace)
+    while the five sidecar manifests had already been written into the evidence
+    directory before validation ran -- a refused run left its rosters and artifact
+    manifests behind under the very names the next successful run would use. The
+    claim is stronger and simpler: a refused run changes no byte under the
+    evidence directory.
     """
-    staged, inputs = _bundle(tmp_path)
-    bundle = json.loads(inputs.read_text(encoding="utf-8"))
-    bundle["container_image_digest"] = "latest"  # a tag is not a digest
-    inputs.write_text(json.dumps(bundle), encoding="utf-8")
-    before = (staged / LOCK_NAME).read_bytes()
+    staged, inputs = _bundle(tmp_path, drift=True)
+    before = _snapshot(staged)
 
     result = _run(inputs, staged)
 
     assert result.returncode != 0
-    assert (staged / LOCK_NAME).read_bytes() == before
+    assert _snapshot(staged) == before
 
 
-def test_a_failed_validation_leaves_no_candidate_file_behind(tmp_path):
-    """The evidence directory is left as it was found, not littered.
+def test_a_second_run_cannot_disturb_a_published_complete_lock(tmp_path):
+    """The reviewer's scenario: a valid run, then another one on the same directory.
 
-    A `.candidate` left in place is a half-written lock sitting next to the real
-    one, and the next reader has to know which is which.
+    Run 1 publishes a COMPLETE lock whose record binds five sidecar files by SHA.
+    Run 2 supplies a different training roster. With sidecars written before
+    validation, run 2 overwrote run 1's roster file under the same name, and run
+    1's lock -- still on disk, still saying COMPLETE -- no longer validated: a
+    later run had destroyed the evidence of a successful one. A COMPLETE lock is a
+    published result; a second promotion onto it is refused before anything is
+    written.
+    """
+    staged, inputs = _bundle(tmp_path)
+    assert _run(inputs, staged).returncode == 0
+    after_first = _snapshot(staged)
+
+    bundle = json.loads(inputs.read_text(encoding="utf-8"))
+    bundle["backends"]["gears"]["training_pair_ids"] = ["E+F", "G+H"]
+    inputs.write_text(json.dumps(bundle), encoding="utf-8")
+
+    result = _run(inputs, staged)
+
+    assert result.returncode != 0
+    assert _snapshot(staged) == after_first
+    assert validate_dependency_lock(staged / LOCK_NAME)["run_gate"]["evidence_status"] == "COMPLETE"
+
+
+def test_a_bundle_missing_a_field_is_a_usage_error_not_a_traceback(tmp_path):
+    """Exit 2 and the missing key's name; not a `KeyError` traceback and exit 1.
+
+    Exit 1 means "refused": the inputs were understood and found wanting. A bundle
+    the tool cannot even read is a different failure and an operator reading `$?`
+    must be able to tell them apart.
     """
     staged, inputs = _bundle(tmp_path)
     bundle = json.loads(inputs.read_text(encoding="utf-8"))
-    bundle["container_image_digest"] = "latest"
+    del bundle["git_sha"]
     inputs.write_text(json.dumps(bundle), encoding="utf-8")
 
-    assert _run(inputs, staged).returncode != 0
-    assert list(staged.glob("*.candidate")) == []
+    result = _run(inputs, staged)
+
+    assert result.returncode == 2
+    assert "git_sha" in result.stderr
+    assert "Traceback" not in result.stderr

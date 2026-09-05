@@ -46,6 +46,7 @@ from alive.compose.fit_role import build_response_projection
 from alive.compose.split import ROLE_NAMES, build_split_manifest
 from alive.compose.zfactor import GeneFactorBank, serialize_factor_bank_collection
 from alive.provenance import sha256_bytes, sha256_file, sha256_json
+from tests.alive.compose.smoke_evidence_support import publish_synthetic_complete_lock
 
 _CANON_CONFIG = "configs/compose_k562_v1_phase2.yaml"
 _EVIDENCE_ROOT = Path("docs/activation-evidence/compose")
@@ -236,143 +237,22 @@ def _rebind_bias_report_to_scientific_inputs(
 
 
 def _build_dependency_lock_evidence(ev: Path, *, gears_lock: Path, cpa_lock: Path) -> Path:
-    """Build a READY ``gears_cpa_reproducible_dependency_lock`` evidence file under ``ev``.
+    """Publish a COMPLETE ``gears_cpa_reproducible_dependency_lock`` under ``ev``.
 
-    Reproduces the READY dependency-lock construction from
-    ``tests/alive/compose/test_config2.py::_activation_record_for_config`` (deterministic,
-    file-driven): copies the committed ``requirements.gears_env.lock`` /
-    ``requirements.cpa_env.lock`` / ``go_resource_manifest.json`` from
-    ``docs/activation-evidence/compose``, fills every per-backend ``required_evidence`` digest +
-    pair roster + artifact manifest, marks the wheelhouse/reproducibility block COMPLETE,
-    recomputes ``manifest_checksum``, and writes the lock under ``ev``. ``gears_lock`` /
-    ``cpa_lock`` are accepted for call-site symmetry with the worker requirement locks; the
-    dependency-lock evidence itself is derived entirely from the committed docs lineage.
+    Built by the real producer (``alive.compose.smoke_evidence``) via
+    ``tests/alive/compose/smoke_evidence_support.py``, so the fixture lock is assembled
+    the way a pod lock is -- measured digests, roster derived from the committed
+    requirements locks, staged validation, write-once publish -- rather than by a
+    hand-rolled copy of the contract. ``gears_lock`` / ``cpa_lock`` are accepted for
+    call-site symmetry with the worker requirement locks; the dependency-lock evidence
+    itself is derived entirely from the committed docs lineage.
     """
     del gears_lock, cpa_lock
-    for name in (
-        "requirements.gears_env.lock",
-        "requirements.cpa_env.lock",
-        "go_resource_manifest.json",
-    ):
-        shutil.copyfile(_EVIDENCE_ROOT / name, ev / name)
-    dependency = json.loads(
-        (_EVIDENCE_ROOT / "gears_cpa_dependency_lock.json").read_text(encoding="utf-8")
+    return publish_synthetic_complete_lock(
+        ev,
+        objects_dir=ev.parent / "smoke_objects",
+        activation="READY — synthetic scientific-carrier evidence",
     )
-    dependency["activation"] = "READY — synthetic scientific-carrier evidence"
-    dependency["both_backends_run_evidence_complete"] = True
-    dependency["run_gate"]["evidence_status"] = "COMPLETE"
-    dependency["run_gate"]["seal_safety_status"] = "VERIFIED_ZERO_OVERLAP"
-    dependency["run_gate"]["missing_evidence"] = []
-    digest_fields = (
-        "norman_source_sha256",
-        "fit_role_artifact_sha256",
-        "fit_role_row_identity_sha256",
-        "smoke_script_sha256",
-        "command_log_sha256",
-        "checkpoint_sha256",
-    )
-    for index, backend in enumerate(("gears", "cpa"), start=1):
-        record = dependency["run_gate"]["required_evidence"][backend]
-        for offset, field in enumerate(digest_fields, start=index):
-            record[field] = f"{offset:064x}"
-        training_pairs = [f"{backend}:train:a", f"{backend}:train:b"]
-        sealed_pairs = [f"{backend}:sealed:a", f"{backend}:sealed:b"]
-        roster = {
-            "schema": "compose_smoke_pair_roster_v1",
-            "protocol": "COMPOSE-K562-v1",
-            "backend": backend,
-            "training_roles": ["singles", "combo_calibration"],
-            "training_pair_ids": training_pairs,
-            "sealed_pair_ids": sealed_pairs,
-        }
-        roster["manifest_checksum"] = sha256_json(roster)
-        roster_path = ev / f"{backend}_pair_roster.json"
-        roster_path.write_text(
-            json.dumps(roster, sort_keys=True, separators=(",", ":")), encoding="utf-8"
-        )
-        record["training_pair_roster_sha256"] = sha256_json(training_pairs)
-        record["sealed_pair_roster_sha256"] = sha256_json(sealed_pairs)
-        record["sealed_pair_overlap_count"] = 0
-        record["pair_roster_manifest_path"] = roster_path.name
-        record["pair_roster_manifest_sha256"] = hashlib.sha256(roster_path.read_bytes()).hexdigest()
-        artifact_fields = {
-            "norman_source": "norman_source_sha256",
-            "fit_role_artifact": "fit_role_artifact_sha256",
-            "fit_role_row_identity": "fit_role_row_identity_sha256",
-            "smoke_script": "smoke_script_sha256",
-            "command_log": "command_log_sha256",
-            "checkpoint": "checkpoint_sha256",
-        }
-        artifact_manifest = {
-            "schema": "compose_backend_smoke_artifact_manifest_v1",
-            "protocol": "COMPOSE-K562-v1",
-            "backend": backend,
-            "artifacts": {
-                name: {
-                    "uri": f"s3://example.invalid/compose/{backend}/{name}",
-                    "immutable_version": "synthetic-unit-test-version",
-                    "sha256": record[field],
-                }
-                for name, field in artifact_fields.items()
-            },
-        }
-        artifact_manifest["manifest_checksum"] = sha256_json(artifact_manifest)
-        artifact_manifest_path = ev / f"{backend}_artifact_manifest.json"
-        artifact_manifest_path.write_text(
-            json.dumps(artifact_manifest, sort_keys=True, separators=(",", ":")), encoding="utf-8"
-        )
-        record["artifact_manifest_path"] = artifact_manifest_path.name
-        record["artifact_manifest_sha256"] = hashlib.sha256(
-            artifact_manifest_path.read_bytes()
-        ).hexdigest()
-        record["exit_code"] = 0
-        dependency["environments"][f"{backend}_env"]["target_run_evidence_complete"] = True
-    reproducibility = dependency["environment_reproducibility"]
-    reproducibility["package_artifact_hashes_complete"] = True
-    artifact_environments: dict[str, list[dict[str, str]]] = {}
-    for backend in ("gears", "cpa"):
-        artifacts = []
-        requirements_path = ev / f"requirements.{backend}_env.lock"
-        for line in requirements_path.read_text(encoding="utf-8").splitlines():
-            if not line:
-                continue
-            name, version = line.split("==", 1)
-            filename = f"{name}-{version}-py3-none-any.whl"
-            artifacts.append(
-                {
-                    "name": name,
-                    "version": version,
-                    "filename": filename,
-                    "source_url": f"https://packages.example.invalid/{filename}",
-                    "sha256": hashlib.sha256(filename.encode()).hexdigest(),
-                }
-            )
-        artifact_environments[f"{backend}_env"] = artifacts
-    wheelhouse = {
-        "schema": "compose_python_artifact_manifest_v1",
-        "environments": artifact_environments,
-    }
-    wheelhouse["manifest_checksum"] = sha256_json(wheelhouse)
-    wheelhouse_path = ev / "wheelhouse_manifest.json"
-    wheelhouse_path.write_text(
-        json.dumps(wheelhouse, sort_keys=True, separators=(",", ":")), encoding="utf-8"
-    )
-    reproducibility["wheelhouse_manifest_path"] = wheelhouse_path.name
-    reproducibility["wheelhouse_manifest_sha256"] = hashlib.sha256(
-        wheelhouse_path.read_bytes()
-    ).hexdigest()
-    reproducibility["container_image_digest"] = "sha256:" + "b" * 64
-    reproducibility["status"] = "COMPLETE"
-    go_path = ev / "go_resource_manifest.json"
-    dependency["go_resource_manifest"]["sha256"] = hashlib.sha256(go_path.read_bytes()).hexdigest()
-    dependency["manifest_checksum"] = sha256_json(
-        {key: value for key, value in dependency.items() if key != "manifest_checksum"}
-    )
-    dependency_path = ev / "gears_cpa_dependency_lock.json"
-    dependency_path.write_text(
-        json.dumps(dependency, sort_keys=True, separators=(",", ":")), encoding="utf-8"
-    )
-    return dependency_path
 
 
 def _build_activation_evidence(

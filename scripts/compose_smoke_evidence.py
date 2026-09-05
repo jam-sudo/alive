@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
 """Assemble the dev-pod smoke evidence and prove it validates.
 
-Thin entry point (``CLAUDE.md#repo``): the assembly lives in
-:mod:`alive.compose.smoke_evidence`. What this layer adds is that the operator
-cannot walk away with a lock that does not validate -- after writing, the
-committed ``validate_dependency_lock`` is re-run on the bytes on disk and a
-non-COMPLETE result is a non-zero exit, not a line of output nobody reads.
+Thin entry point (``CLAUDE.md#repo``): the assembly and the publish transaction
+live in :mod:`alive.compose.smoke_evidence`. What this layer adds is the exit
+code: a refused promotion is a non-zero exit, not a line of output nobody reads.
 
 Usage
 -----
@@ -18,6 +16,10 @@ The inputs bundle is one JSON object::
     {
       "git_sha": "<40 hex, the clean detached commit the pod ran>",
       "container_image_digest": "sha256:<64 hex>",
+      "generated_at_utc": "<YYYY-MM-DDTHH:MM:SSZ, the pod's recorded start time>",
+      "host": {"gpu": ..., "nvidia_driver": ..., "uv_version": ...},
+      "activation": "READY — <what this evidence is; must start with READY>",
+      "summary": "<run_gate.summary for this run>",
       "backends": {
         "gears": {
           "training_pair_ids": [...],     # what the smoke ACTUALLY fitted on
@@ -34,32 +36,33 @@ The inputs bundle is one JSON object::
       }
     }
 
-``training_pair_ids`` comes from the smoke harness, which knows what it fitted on.
-It is deliberately not re-derived here: a second derivation could disagree with
-the first, and the roster's whole purpose is to record what happened.
+``training_pair_ids`` and ``exit_code`` come from the smoke harness and are
+operator-attested: the roster is hashed and checked for sealed overlap, but it is
+not re-derived from the fit-role artifact here. Deriving it is an open decision
+(review C2); until then the bundle's roster is the claim.
 
 Exit codes
 ----------
-0 promoted and validated COMPLETE · 1 refused (nothing written) · 2 usage error.
+0 promoted and validated COMPLETE · 1 refused (nothing written) · 2 usage error
+(unreadable or incomplete bundle, I/O failure; nothing written).
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 from pathlib import Path
 
-from alive.compose.activation_evidence import ActivationEvidenceError, validate_dependency_lock
+from alive.compose.activation_evidence import ActivationEvidenceError
 from alive.compose.smoke_evidence import (
+    LOCK_NAME,
     build_smoke_artifact_manifest,
     build_smoke_pair_roster,
     build_wheelhouse_manifest,
     promote_lock_to_complete,
+    publish_promotion,
 )
-
-LOCK_NAME = "gears_cpa_dependency_lock.json"
 
 
 def _promote(inputs_path: Path, evidence_dir: Path) -> int:
@@ -92,33 +95,18 @@ def _promote(inputs_path: Path, evidence_dir: Path) -> int:
             for env_name, env in bundle["wheelhouse"].items()
         }
     )
-    promoted = promote_lock_to_complete(
+    promotion = promote_lock_to_complete(
         lock=json.loads(lock_path.read_text(encoding="utf-8")),
-        evidence_dir=evidence_dir,
         backends=backends,
         wheelhouse=wheelhouse,
         container_image_digest=bundle["container_image_digest"],
         git_sha=bundle["git_sha"],
+        generated_at_utc=bundle["generated_at_utc"],
+        host=bundle["host"],
+        activation=bundle["activation"],
+        summary=bundle["summary"],
     )
-    # Validate first, replace second. The validator resolves every referenced path
-    # relative to the lock's own directory, so the candidate is written beside the
-    # committed lock rather than in a temp directory. Overwriting first and
-    # discovering afterwards that the result does not validate would leave the
-    # evidence directory holding a lock nobody can use, for the next operator to
-    # inherit -- and some of what the validator checks (the image digest, for one)
-    # is not checked by promotion.
-    candidate = lock_path.with_name(lock_path.name + ".candidate")
-    candidate.write_text(json.dumps(promoted, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    try:
-        validated = validate_dependency_lock(candidate)
-        status = validated["run_gate"]["evidence_status"]
-        if status != "COMPLETE":
-            raise ActivationEvidenceError(f"candidate validates as {status}, not COMPLETE")
-    except (ActivationEvidenceError, ValueError) as exc:
-        candidate.unlink(missing_ok=True)
-        print(f"FAILED: candidate does not validate: {exc}", file=sys.stderr)
-        return 1
-    os.replace(candidate, lock_path)
+    validated = publish_promotion(promotion, evidence_dir=evidence_dir)
     print(
         f"OK: {lock_path} validates COMPLETE "
         f"({validated['run_gate']['seal_safety_status']}); no seal was opened."
@@ -136,9 +124,12 @@ def main(argv: list[str]) -> int:
 
     try:
         return _promote(args.inputs, args.evidence_dir)
-    except (ValueError, ActivationEvidenceError) as exc:
+    except (ValueError, ActivationEvidenceError, FileExistsError) as exc:
         print(f"REFUSED: {exc}", file=sys.stderr)
         return 1
+    except KeyError as exc:
+        print(f"usage error: inputs bundle is missing {exc}", file=sys.stderr)
+        return 2
     except OSError as exc:
         print(f"usage/IO error: {exc}", file=sys.stderr)
         return 2
