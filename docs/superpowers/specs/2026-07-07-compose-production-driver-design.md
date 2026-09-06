@@ -378,7 +378,11 @@ verdict comparator roster는 정확히 `[additive,gears,cpa,id_only,l3_symmetric
 이 두 roster는 `config2._EXPECTED_METHOD_ROSTER`/`_EXPECTED_COMPARATOR_FAMILY`와 정확히 같고 config가 이미
 강제하므로, driver는 하드코딩 대신 config 상수를 참조해 drift를 피한다.
 `confirmation_checksum`은 자신을
-제외한 payload의 `sha256_json`이다. 화면에는 canonical payload와 full checksum을 출력한다.
+제외한 payload의 `sha256_json`이다. payload는 화면이 아니라 write-once manifest 파일로만 남긴다 — 확인은
+runbook §6의 2인 통제대로 그 파일을 대조해 수행하며, `preflight`는 stdout에 아무것도 쓰지 않는다.
+**[수정안 C — 2026-09-05 위임 아래 서명. 이전 문장 "화면에는 canonical payload와 full checksum을
+출력한다"는 runbook의 파일 매개 2인 통제와 충돌했고 구현은 처음부터 출력하지 않았다(`preflight_cmd.py`에
+print 없음, 실측). 테스트 `test_preflight_writes_nothing_to_stdout`가 이를 고정한다.]**
 
 ### 3.3 `phase2b --confirm-seal <confirmation_checksum>`
 

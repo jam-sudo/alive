@@ -168,6 +168,30 @@ def test_preflight_passes_installs_and_reconstructs(tmp_path: Path) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# Contract 1b (Amendment C, signed 2026-09-05): preflight writes NOTHING to stdout
+# --------------------------------------------------------------------------- #
+def test_preflight_writes_nothing_to_stdout(tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
+    """The confirmation payload reaches the second operator as a file, never as a screen.
+
+    The driver design spec once said "화면에는 canonical payload와 full checksum을
+    출력한다". The runbook's two-operator control is mediated by the write-once
+    manifest, and a terminal transcript of ordered seal-request checksums would
+    look like a record of a reconciliation that is supposed to happen against
+    the file. Amendment C replaced the sentence; this pins the behaviour the
+    implementation always had, so a later "helpful" print is refused by name.
+    """
+    fx = _run_chain(tmp_path)
+    capsys.readouterr()  # drain anything the fixture chain printed
+
+    rc = run_preflight_subcommand(fx, approved_artifacts_root=tmp_path, run_dir=fx.run_dir)
+
+    assert rc == PREFLIGHT_PASS_EXIT
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert (fx.run_dir / _CONFIRMATION).exists()
+
+
+# --------------------------------------------------------------------------- #
 # Contract 2: ordered_seal_request_checksum == phase2b intent_checksum bytes
 # --------------------------------------------------------------------------- #
 def test_ordered_seal_request_checksum_matches_phase2b_expression(tmp_path: Path) -> None:

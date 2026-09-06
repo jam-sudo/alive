@@ -1,4 +1,4 @@
-# COMPOSE-K562-v1 — three spec sentences awaiting signature
+# COMPOSE-K562-v1 — three spec sentences (all signed as of 2026-09-05)
 
 > **On the filename.** It says `spec-10-5` because the first two amendments live in
 > `specs/2026-06-22-compose-epistasis-operator-design.md` §10.5. §5 adds a third, in the
@@ -6,21 +6,22 @@
 > renaming it a day after it was committed costs more than a narrow name does. The content is
 > what it says here.
 
-> **STATUS: A SIGNED (2026-09-03) · B and C PROPOSED — owner signature required.**
+> **STATUS: A SIGNED (2026-09-03; inserted into the spec and clause-revised 2026-09-05 under delegation) · B SIGNED (2026-09-05, by delegation) · C SIGNED (2026-09-05, by delegation).**
 > All three describe things the repository already does; none changes the estimator, the comparator
 > family, the margins, the multiplicity correction, or any verdict threshold. What is missing is that
 > the SPEC does not say them, and the spec is the claim contract.
 >
-> **None moves `config_sha256`.** A and B are prose in
-> `specs/2026-06-22-compose-epistasis-operator-design.md` §10.5; C is prose in the driver design spec.
+> **None moves `config_sha256`.** A is prose in
+> `specs/2026-06-22-compose-epistasis-operator-design.md` §10.6 (moved, see record) and B in its §10.5 plus the
+> durable-ledger spec's roster sentence; C is prose in the driver design spec.
 > Amendment B additionally decides WHERE an already-implemented report is emitted, which is the one
 > thing here with an implementation consequence — recorded in §3.
 
 | amendment | subject | status |
 |---|---|---|
-| **A** — the consumption boundary is the claim | §10.5 | **SIGNED — Jae Min Yoon / 2026-09-03** |
-| **B** — the coverage claim is conditional, and where the sensitivity is reported | §10.5 | PROPOSED — signature required |
-| **C** — preflight stdout | driver spec | PROPOSED — signature required |
+| **A** — the consumption boundary is the claim | §10.6 (moved from §10.5, see record) | **SIGNED — Jae Min Yoon / 2026-09-03**; inserted + clause revised 2026-09-05 by delegation |
+| **B** — the coverage claim is conditional, and where the sensitivity is reported | §10.5 + durable-ledger spec roster | **SIGNED — by delegation (Claude, authorised by Jae Min Yoon) / 2026-09-05** |
+| **C** — preflight stdout | driver spec §3.2 | **SIGNED — by delegation (Claude, authorised by Jae Min Yoon) / 2026-09-05** |
 
 **Signature record — Amendment A, Jae Min Yoon, 2026-09-03.**
 
@@ -41,6 +42,56 @@ What this signature does **not** cover, stated so nobody reads it wider later:
   test pins that.
 - It does not move `config_sha256` (`0d207746…` unchanged), does not open the seal, and does not
   lift RELEASE-BLOCKED.
+
+**Delegation record — 2026-09-05.** The owner delegated the pending decision list in writing
+("오너 결정 목록에 대한 권한을 너에게 위임한다. 최고의 권장사항 도출 후 진행해라"). Every signature
+below was preceded by measuring the claim it rests on; what was measured is stated with each.
+
+**Signature record — Amendment A, follow-up under delegation, 2026-09-05.**
+
+- **The signed sentence was not in the spec.** Measured: `grep` for its wording in
+  `specs/2026-06-22-compose-epistasis-operator-design.md` returned nothing. A signed amendment that
+  the claim contract does not carry is the Medium residual the reviewer named in the first place
+  ("spec 미서명"). Inserted 2026-09-05.
+- **Placement moved from §10.5 to §10.6.** §10.5 is the inference section; the sentence defines
+  what the sealed *access count* counts, and §10.6 is where that count is stated
+  ("sealed access 0(2a/futility)→1(2b)"). A seal-consumption sentence between the bootstrap
+  paragraph and the verdict list would have made the spec worse; the delegation is to derive the
+  best recommendation, not the literal one.
+- **Clause revised.** The signed text said the two-materialisation condition is something the
+  `processed_sha256` and the descriptor-pinned, post-consumption re-verified source "함께 보증한다".
+  The 2026-09-03 review disputed "보증한다": while `seal.transient-inode-mutation-restoration` is
+  open (a transient in-place mutation restored before the post-consumption re-verification passes
+  the descriptor check — reproduced with a control arm), the guarantee is not delivered. The spec
+  now says "함께 확보하도록 설계돼 있다 — 다만 … 열려 있는 동안 그 확보는 조건부다". §2 below carries
+  the same revised wording.
+
+**Signature record — Amendment B, by delegation, 2026-09-05.**
+
+Measured before signing: `inference.simultaneous_coverage_claim` and
+`inference.sensitivity_band_inflation` are in `configs/compose_k562_v1_phase2.yaml` and
+loader-enforced in `config2.py`; `inference2.band_sensitivity` exists with its own tests, including
+the one that runs it against the real `sealed_verdict`; the connectivity numbers (22 pairs, 21 genes,
+components 19 and 3) are the measured values of
+`2026-08-29-compose-pair-dependence-decision.md` §1, not restated estimates. The placement in §3 was
+**not yet implemented** (no `sensitivity` in `phase2b.py`, `durable.py`, `terminal.py`); signing
+triggers it, in the same commit as this record: the sensitivity is computed in the sealed run from
+the same `bounds` the verdict used, carried on `Phase2bResult.band_sensitivity`, and written into the
+terminal report body as `band_sensitivity` + `band_sensitivity_checksum` — outside the five
+components of `final_result_checksum`, which is left byte-identical in composition; the durable
+finalizer re-verifies that the block checksum binds the block. The durable-ledger design spec's
+exact COMPLETE/INVALID roster sentence is amended to name the two fields. What this signature does
+not do: it does not measure the method-differential gene effect (§4), does not change any verdict
+threshold, and does not move `config_sha256`.
+
+**Signature record — Amendment C, by delegation, 2026-09-05.**
+
+Measured before signing: `driver/preflight_cmd.py` contains no `print` and no `stdout` write; the
+runbook's two-operator control is file-mediated (its §6 text is quoted in §5 below); the spec
+sentence being replaced was present verbatim at §3.2. The replacement sentence is now in the driver
+design spec, and `test_preflight_writes_nothing_to_stdout` pins the behaviour — verified to fail by
+name when a `print` is added to `run_preflight_subcommand`. What this signature does not do: it does
+not change the confirmation payload, its checksum, or the manifest's write-once installation.
 
 ---
 
@@ -72,7 +123,9 @@ counts.
 > 멱등이라고 쓰지 않는다.** audit record 자체는 내어준 bytes를 결속하지 않으며, 두 호출이 같은
 > bytes를 낸다는 것은 sealed source의 bytes가 그 사이에 바뀌지 않았을 때에 한해 참이다. 그 조건은
 > run의 `processed_sha256`과, descriptor로 고정되고 소비 후 재검증되는 sealed source가 함께
-> 보증한다. 따라서 등록된 access count는 materialisation이 아니라 **claim**을 센다.
+> 확보하도록 **설계돼 있다** — 다만 재검증 전에 복원되는 일시 변조
+> (`seal.transient-inode-mutation-restoration`)가 열려 있는 동안 그 확보는 조건부다. 따라서 등록된 access
+> count는 materialisation이 아니라 **claim**을 센다.
 
 **What signing this does not do.** It does not authorise repeated materialisation as a practice —
 production calls it once and a test pins that. It states which operation the count refers to, so the

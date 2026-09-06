@@ -5,7 +5,7 @@
 > **이 문서는 아무것도 정의하지 않는다** — 세부(task)는 plan, claim은 spec, exact param은 config,
 > 시간순 audit는 git이 authoritative다([sources of truth](../../CLAUDE.md#sources)). 상태 행이 authoritative
 > 문서와 어긋나면 **authoritative 문서가 옳다**; 이 인덱스를 갱신한다.
-> **Updated:** 2026-09-05 @ `73cb60d` (branch `compose-factor-bank-normalization`)
+> **Updated:** 2026-09-05 @ `072fc1c` (branch `compose-factor-bank-normalization`)
 > `scripts/bump-readiness-stamp.sh` / the pre-commit hook from `HEAD` at commit time, so it names the
 > **parent** of the commit that carries it and can never name itself. Reading it as "one commit stale" is a
 > misreading; git is authoritative for when this file actually changed.
@@ -2376,6 +2376,53 @@ and "leaves the committed lock untouched" about code that did neither, and the r
 
 `config_sha256` remains `0d207746…`; seal **UNOPENED**; execution **RELEASE-BLOCKED**. Full suite
 per commit: the review wave is three commits (`a5a258e` C1·I1~I8, `73cb60d` C2, then the provenance boundary), each validated by one run of the tree it commits — `a5a258e` 2991 passed / 3 skipped / 0 failed (18m15s); `73cb60d` 2996 passed / 3 skipped / 0 failed (18m17s); boundary 3006 passed / 3 skipped / 0 failed (18m18s); the numbers on this line were filled in after each run and are the only bytes that differ from it.
+
+**2026-09-05 (late) — the pending owner-decision list, decided under delegation, each on a
+measurement.**
+
+The owner delegated the five pending decisions in writing ("오너 결정 목록에 대한 권한을 너에게
+위임한다. 최고의 권장사항 도출 후 진행해라"). What was decided, what was measured first, and what
+each does not do:
+
+- **§10.5 Amendment A — inserted and clause-revised.** Signed 2026-09-03, but the sentence was
+  not in the spec (`grep` returned nothing): the claim contract still did not say what the
+  access count counts. Inserted into §10.6, beside "sealed access 0→1", not §10.5 — the
+  delegation is to derive the best placement, and the record says why. The disputed clause
+  "함께 보증한다" became "함께 확보하도록 설계돼 있다 — … 열려 있는 동안 조건부" because
+  `seal.transient-inode-mutation-restoration` is open and a guarantee is not delivered while it is.
+- **§10.5 Amendment B — signed and implemented.** Measured: the config fields exist and are
+  loader-enforced; `band_sensitivity` exists with tests; the connectivity numbers come from the
+  08-29 decision's measurement. The placement was **not implemented** — nothing in `phase2b.py`,
+  `durable.py` or `terminal.py` mentioned sensitivity. Now: computed in the sealed run from the
+  same `bounds` the verdict used, carried on `Phase2bResult.band_sensitivity`, written into the
+  terminal body as `band_sensitivity` + `band_sensitivity_checksum`, **outside** the five
+  components of `final_result_checksum` (composition unchanged, still pinned), and the durable
+  finalizer refuses a block whose checksum does not bind it. The durable-ledger spec's exact
+  COMPLETE/INVALID roster names the two new fields. Mutations: sensitivity from the single-unseen
+  bounds, a checksum over a different dict, the block folded into `final_result_checksum`, and
+  the finalizer's check removed — each killed by the test whose name makes the claim (two of them
+  also refused the fixture run itself, because the finalizer caught the writer).
+- **Amendment C — signed.** Measured: no `print`/stdout write in `preflight_cmd.py`; the runbook's
+  two-operator control is file-mediated; the spec sentence was present verbatim. Replaced, and
+  `test_preflight_writes_nothing_to_stdout` pins it (fails by name when a `print` is added).
+- **Seal guard 21 → 23** (`smoke_evidence.py` and its CLI; audit-log `048642b`): criterion (c),
+  what the evidence records; the CLI by the `driver/cli.py` precedent.
+- **Daily-review wrapper — audit identity and age gate** (audit-log `048642b`): measured, one
+  audit (09/02 15:38 EDT) was reviewed three times on three days. An already-reviewed stamp is
+  not reviewed again; if it is also older than 24h the state file records `DEGRADED_STALE_AUDIT`
+  without spending an agent run; a late but unreviewed audit is still reviewed. Eight executed
+  checks in the gate suite (six decisions, the age arithmetic, the wiring order).
+- **Guard fan-in ≥ 4 — adjudicate, not block** (audit-log `048642b`): the classifier marks such
+  paths ⚖ and the fix run leaves an `Owner-Adjudication:` trailer; the list is re-measured by the
+  gate suite each run. The first hand-copied list (four modules) was already stale — adding two
+  guards had pushed `fit_role.py` to four — and the measurement caught it before commit. Five now.
+
+**What this does NOT close:** `seal.transient-inode-mutation-restoration`; the true magnitude of the
+method-differential gene effect (§10.5 B reports at each λ *because* it is unmeasured); the
+attestation residuals of the smoke producer (exit code, sealed pair list, row-identity object
+content); and the wrapper's identity is the stamp string — a same-stamp content change is caught by
+the verbatim snapshot comparison, not by this gate. `config_sha256` remains `0d207746…`; seal
+**UNOPENED**; execution **RELEASE-BLOCKED**. Full suite on the committed tree: 3010 passed / 3 skipped / 0 failed (18m49s); this line's numbers were filled in after the run and are the only bytes that differ from it.
 
 ## 이 문서가 *아닌* 것 (중복 금지)
 

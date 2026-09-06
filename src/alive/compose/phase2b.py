@@ -53,6 +53,7 @@ import math
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 
@@ -71,6 +72,7 @@ from alive.compose.config2 import (
 from alive.compose.detectable_effect import REGISTERED_MIN_PAIRS
 from alive.compose.durable import finalize_phase2b_durable_outputs
 from alive.compose.freeze import FrozenPredictionBundle
+from alive.compose.inference2 import ComposeBandSensitivity, band_sensitivity
 from alive.compose.outcome_store import (
     _FIXTURE_CORPUS_ALLOWLIST,
     ComposeOutcomeStore,
@@ -256,6 +258,12 @@ class Phase2bResult:
     durable_commit_path : str or None
         The filesystem path of the published durable commit marker (companion to
         :attr:`durable_commit_checksum`); ``None`` until finalize succeeds.
+    band_sensitivity : ComposeBandSensitivity or None
+        Amendment B (signed 2026-09-05): the descriptive-only band-inflation
+        sensitivity, computed inside the sealed run from the SAME
+        ``regime_double.bounds`` the verdict was decided on. Never a verdict gate;
+        written into the terminal body outside :attr:`result_checksum`'s five
+        components. ``None`` only on a result that carries no sealed scoring.
     """
 
     run_id: str
@@ -269,6 +277,7 @@ class Phase2bResult:
     ledger: RunLedger
     durable_commit_checksum: str | None = None
     durable_commit_path: str | None = None
+    band_sensitivity: ComposeBandSensitivity | None = None
 
 
 # --------------------------------------------------------------------------- #
@@ -738,6 +747,53 @@ def _finite_or_sentinel(value: float) -> float | str:
     """
     number = float(value)
     return number if math.isfinite(number) else _NON_FINITE_SENTINEL
+
+
+#: Schema tag of the terminal's descriptive-only band-sensitivity block (Amendment B).
+BAND_SENSITIVITY_SCHEMA = "compose_band_sensitivity_v1"
+#: Flip-point labels for the two non-finite cases ``band_sensitivity`` can return: a
+#: zero-width band keeps its lambda = 1 state at every inflation, so the clause either
+#: never flips (``+inf``) or already fails at the registered band (``-inf``). Encoded
+#: as labels rather than the shared NON_FINITE sentinel so the two are distinguishable.
+_FLIP_NEVER = "NEVER_FLIPS"
+_FLIP_ALREADY_FAILED = "FAILS_AT_REGISTERED_BAND"
+
+
+def _flip_or_label(value: float) -> float | str:
+    number = float(value)
+    if math.isfinite(number):
+        return number
+    return _FLIP_NEVER if number > 0 else _FLIP_ALREADY_FAILED
+
+
+def _band_sensitivity_block(sensitivity: ComposeBandSensitivity) -> dict[str, Any]:
+    """Serialise the sensitivity for the terminal body: finite floats or labels only.
+
+    Ordered by the registered ladder so ``by_lambda[0]`` is the registered band
+    (``lambda = 1.0``) and equals the bounds the verdict used. Every float goes
+    through the same finiteness discipline as the registered summary so a
+    degenerate value can never abort a legitimate terminal write.
+    """
+    return {
+        "schema": BAND_SENSITIVITY_SCHEMA,
+        "descriptive_only": True,
+        "comparators": list(sensitivity.comparators),
+        "by_lambda": [
+            {
+                "lambda": float(lam),
+                "lower": {
+                    comparator: _finite_or_sentinel(value)
+                    for comparator, value in sensitivity.lower_by_lambda[lam].items()
+                },
+            }
+            for lam in sensitivity.band_inflation
+        ],
+        "flip_lambda": {
+            comparator: _flip_or_label(value)
+            for comparator, value in sensitivity.flip_lambda.items()
+        },
+        "verdict_holds_below_lambda": _flip_or_label(sensitivity.verdict_holds_below_lambda),
+    }
 
 
 #: The registered-summary key carrying the pre-registered approximation-bias fairness
@@ -1928,6 +1984,15 @@ def _evaluate_inside_boundary(
         integrity=integrity,
         method_axis=MethodAxis.METHOD_VALIDATED,
     )
+    # Amendment B (signed 2026-09-05): the descriptive-only band-inflation sensitivity,
+    # from the SAME bounds the verdict was just decided on. Never a verdict gate; it
+    # rides in the terminal body outside final_result_checksum's five components.
+    sensitivity = band_sensitivity(
+        bounds=bounds,
+        band_inflation=config.sensitivity_band_inflation,
+        additive_margin=config.material_margin_vs_additive,
+        learned_margin=config.learned_comparator_margin,
+    )
 
     # --- Step 11: COMPLETE composite provenance + post-access consistency. -----
     provenance = _build_provenance(
@@ -2080,6 +2145,7 @@ def _evaluate_inside_boundary(
     # The v2 COMPLETE / INVALID body: exactly the state-specific roster (spec §2.1).
     # The whole-body terminal_payload_checksum is computed by the terminal writer;
     # these are the inner content checksums over specific in-process dicts.
+    sensitivity_block = _band_sensitivity_block(sensitivity)
     body = {
         "registered_summary": summary,
         "registered_summary_checksum": registered_summary_checksum,
@@ -2088,6 +2154,9 @@ def _evaluate_inside_boundary(
         "provenance_checksum": expected_provenance_checksum,
         "evaluation_payload_checksum": evaluation_payload_checksum,
         "final_result_checksum": final_result_checksum,
+        # Amendment B: descriptive-only, with its own checksum, OUTSIDE the five above.
+        "band_sensitivity": sensitivity_block,
+        "band_sensitivity_checksum": sha256_json(sensitivity_block),
     }
 
     if terminal_state is TerminalState.COMPLETE:
@@ -2105,6 +2174,7 @@ def _evaluate_inside_boundary(
         provenance_checksum=expected_provenance_checksum,
         result_checksum=final_result_checksum,
         ledger=terminal.ledger,
+        band_sensitivity=sensitivity,
     )
 
 

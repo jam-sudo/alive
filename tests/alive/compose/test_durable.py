@@ -45,6 +45,7 @@ from alive.compose.terminal import (
     canonicalize_terminal_checksum_input,
 )
 from alive.provenance import EnvironmentInfo, RunLedger, sha256_json
+from tests.alive.compose._terminal_bodies import minimal_band_sensitivity_block
 
 _RUN_ID = "deadbeefdeadbeef"
 _PROTOCOL = "COMPOSE-K562-v1"
@@ -229,6 +230,7 @@ def _write_complete_terminal(
             "provenance_checksum": provenance_checksum,
         }
     )
+    sensitivity = minimal_band_sensitivity_block()
     body = {
         "registered_summary": summary,
         "registered_summary_checksum": registered_summary_checksum,
@@ -237,6 +239,8 @@ def _write_complete_terminal(
         "provenance_checksum": provenance_checksum,
         "evaluation_payload_checksum": "1" * 64,
         "final_result_checksum": final_result_checksum,
+        "band_sensitivity": sensitivity,
+        "band_sensitivity_checksum": sha256_json(sensitivity),
     }
 
     audit_path = tmp_path / "audit.jsonl"
@@ -358,6 +362,7 @@ def _install_doctored_terminal(
     *,
     summary: dict | None = None,
     final_result_checksum: str | None = None,
+    band_sensitivity_checksum: str | None = None,
 ) -> None:
     """Doctor an already-written terminal, re-deriving every checksum consistently.
 
@@ -386,6 +391,8 @@ def _install_doctored_terminal(
         )
     if final_result_checksum is not None:
         body["final_result_checksum"] = final_result_checksum
+    if band_sensitivity_checksum is not None:
+        body["band_sensitivity_checksum"] = band_sensitivity_checksum
     core = {k: v for k, v in body.items() if k != TERMINAL_PAYLOAD_CHECKSUM_FIELD}
     body[TERMINAL_PAYLOAD_CHECKSUM_FIELD] = sha256_json(canonicalize_terminal_checksum_input(core))
     terminal_path.write_text(
@@ -1265,3 +1272,18 @@ def test_recover_still_fails_closed_with_no_audit_and_no_terminal(tmp_path: Path
     # Fail closed: nothing synthesized, no durable marker.
     assert not (run_dir / Phase2bTerminal.ABORTED_ARTIFACT).exists()
     assert not (run_dir / DURABLE_COMMIT_FILENAME).exists()
+
+
+def test_a_sensitivity_block_whose_checksum_does_not_bind_it_fails_closed(tmp_path: Path) -> None:
+    """Amendment B (signed 2026-09-05): the block's own checksum is verified, not just carried.
+
+    The descriptive-only band sensitivity rides in the terminal body OUTSIDE the
+    five components of `final_result_checksum`, with its own `sha256_json`. The
+    whole-body checksum catches post-hoc tampering; a writer that emits a block
+    and a checksum that do not agree is caught only here -- the same
+    defense-in-depth the finalizer already applies to `final_result_checksum`.
+    """
+    scenario = _build_scenario(tmp_path)
+    _install_doctored_terminal(scenario["terminal_path"], band_sensitivity_checksum="0" * 64)
+    with pytest.raises(DurableLedgerError, match="band_sensitivity_checksum"):
+        _finalize(scenario)

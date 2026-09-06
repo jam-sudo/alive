@@ -450,6 +450,12 @@ _COMPLETE_INVALID_STATE_FIELDS = frozenset(
         "provenance_checksum",
         "evaluation_payload_checksum",
         "final_result_checksum",
+        # Amendment B (signed 2026-09-05): the descriptive-only band-inflation
+        # sensitivity block and its own sha256_json. OUTSIDE the five components of
+        # final_result_checksum -- a descriptive report never enters the run's
+        # registered identity (durable-ledger design spec, roster sentence).
+        "band_sensitivity",
+        "band_sensitivity_checksum",
     }
 )
 

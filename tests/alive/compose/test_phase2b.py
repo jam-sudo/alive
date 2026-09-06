@@ -1037,6 +1037,64 @@ def test_complete_terminal_embeds_summary_and_final_result_checksum(tmp_path):
     assert result.result_checksum == body["final_result_checksum"]
 
 
+def test_the_sealed_result_carries_the_band_sensitivity_computed_from_the_headline_bounds(
+    tmp_path,
+):
+    """Amendment B (signed 2026-09-05): one computation, from the bounds the verdict used.
+
+    The sensitivity is descriptive-only and never a verdict gate; what makes it
+    honest is that it is computed inside the sealed run from the SAME
+    `regime_double.bounds` the verdict was decided on, not re-derived later from
+    a report. `lower_by_lambda[1.0]` is therefore the registered bounds exactly.
+    """
+    from alive.compose.inference2 import band_sensitivity
+
+    kit = _make_run(tmp_path)
+    result = run_phase2b_fixture(**_fixture_kwargs(kit))
+    cfg = kit["cfg"]
+
+    expected = band_sensitivity(
+        bounds=result.regime_double.bounds,
+        band_inflation=cfg.sensitivity_band_inflation,
+        additive_margin=cfg.material_margin_vs_additive,
+        learned_margin=cfg.learned_comparator_margin,
+    )
+    assert result.band_sensitivity == expected
+    assert result.band_sensitivity.lower_by_lambda[1.0] == result.regime_double.bounds.lower
+
+
+def test_the_terminal_carries_the_sensitivity_outside_the_result_checksum_with_its_own_checksum(
+    tmp_path,
+):
+    """Amendment B: where the sensitivity is recorded, and what it is NOT part of.
+
+    It is written into the terminal report body as `band_sensitivity` with its own
+    `band_sensitivity_checksum`; `final_result_checksum` keeps its exact five-field
+    composition, so a descriptive report never enters the run's registered
+    identity (the opposite of what the pair-dependence decision says).
+    """
+    kit = _make_run(tmp_path)
+    result = run_phase2b_fixture(**_fixture_kwargs(kit))
+    body = _read_terminal(kit["run_dir"], "complete")
+
+    block = body["band_sensitivity"]
+    assert block["schema"] == "compose_band_sensitivity_v1"
+    assert block["descriptive_only"] is True
+    ladder = [entry["lambda"] for entry in block["by_lambda"]]
+    assert ladder == [float(x) for x in kit["cfg"].sensitivity_band_inflation]
+    assert block["by_lambda"][0]["lower"] == pytest.approx(result.regime_double.bounds.lower)
+    assert body["band_sensitivity_checksum"] == sha256_json(block)
+    assert body["final_result_checksum"] == sha256_json(
+        {
+            "terminal_state": body["terminal_state"],
+            "final_verdict_checksum": body["final_verdict_checksum"],
+            "registered_summary_checksum": body["registered_summary_checksum"],
+            "evaluation_payload_checksum": body["evaluation_payload_checksum"],
+            "provenance_checksum": body["provenance_checksum"],
+        }
+    )
+
+
 def test_per_method_aggregate_mse_reports_both_regimes_unpooled(tmp_path):
     # §10 registered-secondary completeness: the summary must report the per-method
     # aggregate MSE for BOTH the double-unseen (headline / verdict-linked) AND the

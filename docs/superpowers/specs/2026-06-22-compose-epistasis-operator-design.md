@@ -674,6 +674,18 @@ resample에서 각 replicate의 두 mean error를 다시 계산하고, 그 resam
 - non-finite/missing pair prediction, roster 불완전, provenance/leakage 실패는 `INVALID`;
   해당 pair/method를 사후 제외하지 않는다.
 
+위 simultaneous coverage 주장은 등록된 resampling unit(`perturbation_pair`) 가정 **아래에서만**
+성립한다. headline `sealed_double_unseen`은 22 pairs를 21 genes에서 뽑으므로 유전자를 하나도 공유하지
+않는 pair가 없고, 연결성분이 둘(19, 3)이라 의존성을 흡수하는 재표본 단위가 존재하지 않는다. verdict는
+언제나 등록된 밴드($\lambda=1.0$)에서 판정하며, 등록된 `inference.sensitivity_band_inflation` 사다리의
+각 $\lambda$에서의 lower bound와 comparator별 뒤집힘 지점을 **descriptive-only**로 함께 보고한다. 이
+sensitivity는 어떤 경우에도 verdict gate가 아니다. sensitivity는 sealed run에서 verdict가 쓴 것과 같은
+`bounds`로 계산해 `Phase2bResult`에 싣고, terminal report body에 `band_sensitivity`와
+`band_sensitivity_checksum`(블록 자신의 `sha256_json`) 두 필드로 기록한다 — `final_result_checksum`의
+다섯 구성요소 **밖**이며 등록된 run identity에 들어가지 않는다.
+**[수정안 B — 2026-09-05 위임 아래 서명. 근거: `2026-08-29-compose-pair-dependence-decision.md`(측정값),
+`docs/superpowers/2026-08-30-compose-spec-10-5-amendments.md` §3.]**
+
 secondary = GI-explained fraction과 구조 복원이며 verdict gate로 사용하지 않고 effect size,
 simultaneous interval, chance/null definition과 함께 전부 보고한다.
 
@@ -696,3 +708,16 @@ seal·run-identity는 TG-K562와 **영구 독립**(§6.3): `artifacts/compose/<r
 config+Norman data-card(sha256)+sequence-mapping+raw sha256, sealed access 0(2a/futility)→1(2b),
 write-once. verdict 2축(method × sealed); "모든 무결성 검증 완료"로 표현하지 않는다(구조적 self-check
 한계 명시).
+
+sealed cohort의 *소비*는 `claim_sealed_access`가 수행한다. 이 호출은 어떤 row도 materialise하기 전에
+durable audit record를 먼저 기록하므로, materialisation 도중 crash가 나도 audit path는 소진된다.
+`materialize_claimed`는 하나의 claim에 대해 두 번 이상 호출될 수 있다 — **다만 이를 멱등이라고 쓰지
+않는다.** audit record 자체는 내어준 bytes를 결속하지 않으며, 두 호출이 같은 bytes를 낸다는 것은 sealed
+source의 bytes가 그 사이에 바뀌지 않았을 때에 한해 참이다. 그 조건은 run의 `processed_sha256`과,
+descriptor로 고정되고 소비 후 재검증되는 sealed source가 함께 확보하도록 **설계돼 있다** — 다만
+재검증 전에 복원되는 일시 변조(`seal.transient-inode-mutation-restoration`)가 열려 있는 동안 그 확보는
+조건부다. 따라서 등록된 access count는 materialisation이 아니라 **claim**을 센다.
+**[수정안 A — 2026-09-03 서명(Jae Min Yoon). 2026-09-05 위임 아래 삽입: 서명된 문장이 spec에 실려
+있지 않았다(실측). 배치는 서명문서의 §10.5가 아니라 access count를 정의하는 이 §10.6으로 옮겼고,
+"보증한다"는 transient 잔여가 열려 있는 동안 참이 아니어서 "설계돼 있다 … 조건부"로 정정했다.
+근거: `docs/superpowers/2026-08-30-compose-spec-10-5-amendments.md`.]**

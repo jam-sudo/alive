@@ -103,7 +103,10 @@ Phase2b는 terminal 전이 전에 최종 state와 최종 verdict를 먼저 결�
 
 COMPLETE/INVALID의 state-specific exact fields는 `registered_summary`,
 `registered_summary_checksum`, `final_verdict_checksum`, `terminal_embedded_provenance`,
-`provenance_checksum`, `evaluation_payload_checksum`, `final_result_checksum`이다.
+`provenance_checksum`, `evaluation_payload_checksum`, `final_result_checksum`이다. **[2026-09-05 수정안
+B(위임 서명): `band_sensitivity`와 `band_sensitivity_checksum`을 더한다 — descriptive-only band-inflation
+sensitivity 블록과 그 자신의 `sha256_json`. `final_result_checksum`의 다섯 구성요소 밖이며, durable
+finalizer는 블록 checksum이 블록을 결속하는지 재검증한다.]**
 `registered_summary`와 `terminal_embedded_provenance`는 checksum만이 아니라 canonical payload 자체를
 포함한다.
 
