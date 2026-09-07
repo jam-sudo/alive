@@ -151,7 +151,7 @@ def _bound_report(basis_sha: str) -> dict:
             "probe_a_evidence_manifest_sha256": "6" * 64,
             "probe_a_registration_sha256": "7" * 64,
             "probe_a_verification_sha256": "8" * 64,
-            "probe_a_output_representation": "raw_pseudobulk_approximation",
+            "probe_a_output_representation": REPRESENTATION,
             "sealed_pair_overlap_count": 0,
             "pod_instance": "unit-test-local",
         },
@@ -433,7 +433,7 @@ def test_a_not_admissible_report_never_reaches_the_config_leaf(tmp_path):
     )
     report_path = _write_report_json(tmp_path, report)
 
-    with pytest.raises(ApproximationBiasValidationError, match="admission_status must be"):
+    with pytest.raises(ApproximationBiasValidationError, match="must be 'admitted'"):
         _load_finalize_module().finalize_bias_config(
             basis_config_path=basis_path, report_path=report_path
         )
@@ -467,7 +467,7 @@ def test_a_log_probe_chain_cannot_clear_the_collective_bias_blocker(tmp_path):
     assert written["admission_status"] == NOT_ADMISSIBLE
     assert written["provenance"]["probe_a_output_representation"] == PROBE_A_REPRESENTATION
 
-    with pytest.raises(ApproximationBiasValidationError, match="admission_status must be"):
+    with pytest.raises(ApproximationBiasValidationError, match="must be 'admitted'"):
         _load_finalize_module().finalize_bias_config(
             basis_config_path=fixture["basis_config"], report_path=out
         )

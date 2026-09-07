@@ -2,10 +2,13 @@
 
 > **역할:** COMPOSE sealed A100 run까지 남은 작업의 단일 human-facing 인덱스.
 > **현재 상태:** lifecycle **ACTIVE** · execution **RELEASE-BLOCKED** · seal **UNOPENED**.
+> **kernel-isolation proof: STALE** — pending re-proof for `src/alive/compose/approximation_bias.py`
+> (R1, `aed26aa`); Linux kernel-isolation CI re-run required (POD-GATED). Enforced by
+> `tests/alive/compose/test_kernel_isolation_ci.py::_PENDING_REPROOF`.
 > **이 문서는 아무것도 정의하지 않는다** — 세부(task)는 plan, claim은 spec, exact param은 config,
 > 시간순 audit는 git이 authoritative다([sources of truth](../../CLAUDE.md#sources)). 상태 행이 authoritative
 > 문서와 어긋나면 **authoritative 문서가 옳다**; 이 인덱스를 갱신한다.
-> **Updated:** 2026-09-06 @ `ae8b8b0` (branch `compose-factor-bank-normalization`)
+> **Updated:** 2026-09-07 @ `aed26aa` (branch `compose-factor-bank-normalization`)
 > `scripts/bump-readiness-stamp.sh` / the pre-commit hook from `HEAD` at commit time, so it names the
 > **parent** of the commit that carries it and can never name itself. Reading it as "one commit stale" is a
 > misreading; git is authoritative for when this file actually changed.

@@ -2136,7 +2136,7 @@ def _write_bias_report(
             "probe_a_evidence_manifest_sha256": "6" * 64,
             "probe_a_registration_sha256": "7" * 64,
             "probe_a_verification_sha256": "8" * 64,
-            "probe_a_output_representation": "raw_pseudobulk_approximation",
+            "probe_a_output_representation": REPRESENTATION,
             "sealed_pair_overlap_count": 0,
             "pod_instance": "unit-test",
         },
@@ -2524,7 +2524,7 @@ def test_the_log_pass_report_this_fixture_really_produces_is_refused_by_the_fina
     finalize = _load_script_module(
         "scripts/compose/finalize_approximation_bias_config.py", "_finalize_bias_config_e2e_neg"
     )
-    with pytest.raises(ApproximationBiasValidationError, match="admission_status must be"):
+    with pytest.raises(ApproximationBiasValidationError, match="must be 'admitted'"):
         finalize.finalize_bias_config(basis_config_path=basis_yaml, report_path=report_path)
 
 

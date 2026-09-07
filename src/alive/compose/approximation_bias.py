@@ -894,9 +894,12 @@ def validate_approximation_bias_report(
     if obj["method"] != REPRESENTATION:
         _fail(f"report method must be {REPRESENTATION!r}")
     if obj["admission_status"] not in ADMISSION_STATUSES:
-        _fail(f"report admission_status must be one of {sorted(ADMISSION_STATUSES)}")
+        _fail(
+            f"report admission_status {obj['admission_status']!r} is not a registered admission "
+            f"status; expected one of {sorted(ADMISSION_STATUSES)}"
+        )
     if require_admitted and obj["admission_status"] != ADMITTED:
-        _fail("report admission_status must be 'admitted'")
+        _fail("report admission_status must be 'admitted' at a consuming boundary")
 
     strata = _exact_keys(
         obj["strata"], frozenset({"combo_calibration", "singles"}), field="report.strata"

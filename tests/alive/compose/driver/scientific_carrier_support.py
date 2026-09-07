@@ -175,7 +175,7 @@ def _write_activated_config(stage1: Path, *, approved_git_sha: str) -> tuple[Any
             "probe_a_evidence_manifest_sha256": "6" * 64,
             "probe_a_registration_sha256": "7" * 64,
             "probe_a_verification_sha256": "8" * 64,
-            "probe_a_output_representation": "raw_pseudobulk_approximation",
+            "probe_a_output_representation": REPRESENTATION,
             "sealed_pair_overlap_count": 0,
             "pod_instance": "synthetic-test",
         },

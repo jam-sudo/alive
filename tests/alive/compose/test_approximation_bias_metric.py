@@ -29,6 +29,7 @@ import pytest
 import yaml
 
 from alive.compose.approximation_bias import (
+    ADMISSION_STATUSES,
     ADMITTED,
     NOT_ADMISSIBLE,
     PROBE_A_ADAPTER_TRANSFORM,
@@ -1287,5 +1288,43 @@ def test_a_mismatched_bridge_is_legal_while_the_report_is_not_admitted(tmp_path)
     validate_approximation_bias_report(report, require_admitted=False)
 
     # ... and the consuming boundaries still refuse it, by default.
-    with pytest.raises(ApproximationBiasValidationError, match="admission_status must be"):
+    with pytest.raises(ApproximationBiasValidationError, match="must be 'admitted'"):
         validate_approximation_bias_report(report)
+
+
+def test_the_admission_status_roster_is_exactly_admitted_and_not_admissible():
+    """The roster is the whole vocabulary; widening it silently widens what a report may claim.
+
+    ``ADMITTED`` is the ONLY value a consuming boundary accepts, so a third status added
+    here would be a third thing the validator lets through the roster gate on its way to
+    the ``require_admitted`` check. Pin the exact set and both literals: the on-disk
+    ``"admitted"`` value is what every archived report and fixture already carries, and
+    ``"NOT_ADMISSIBLE"`` is the design spec's own token.
+    """
+    assert ADMITTED == "admitted"
+    assert NOT_ADMISSIBLE == "NOT_ADMISSIBLE"
+    assert ADMISSION_STATUSES == frozenset({ADMITTED, NOT_ADMISSIBLE})
+
+
+def test_an_unregistered_admission_status_is_refused_by_its_own_message(tmp_path):
+    """An invented status is refused as UNREGISTERED, not as merely not-admitted.
+
+    The two refusals are different findings -- "this file says something the schema has no
+    meaning for" versus "this is a valid refusal record you may not consume" -- so they
+    carry different messages and this test pins the first one specifically.
+    """
+    report = _admitted_report_fixture(tmp_path)
+    report["admission_status"] = "provisionally_admitted"
+    report["self_checksum"] = self_checksum(
+        {key: value for key, value in report.items() if key != "self_checksum"}
+    )
+
+    with pytest.raises(
+        ApproximationBiasValidationError, match="is not a registered admission status"
+    ):
+        validate_approximation_bias_report(report)
+    # ... and not even the producer's own lenient path accepts it.
+    with pytest.raises(
+        ApproximationBiasValidationError, match="is not a registered admission status"
+    ):
+        validate_approximation_bias_report(report, require_admitted=False)
