@@ -525,6 +525,8 @@ factor bank를 $\sqrt{\sigma_{\max}}$로 rescale하는 것과 1 ulp 이내로 **
 섞이고, runtime factor row를 checksum된 bank artifact에 byte 단위로 결속하는 provenance guard를
 다시 배선해야 하기 때문이다.
 
+<!-- /HISTORICAL -->
+
 > **적용 범위 (비주장).** selection은 headline operator만 적합하므로 이 상대 해석 아래 penalty가 선택된
 > 모델도 그것뿐이다. 최종 fit에서 `id_only` baseline은 **절대 $\lambda$를 유지한다**: 그 feature는 $z$에
 > 대해 linear(operator는 bilinear)여서 같은 scale로는 scale-invariant해지지 않으며, 근거 없이 baseline의
@@ -610,6 +612,8 @@ factor가 실효 조건수를 묶으므로 비정칙 조건수로 거부하면 �
 > > 실제 차이는 noise였다.
 > > 재현 실패의 원인은 내가 fix wave 이전의 noiseless exhibit으로 측정한 것이다. 기각을 철회하고
 > > 리뷰어의 측정을 채택한다. 이는 이 commit이 고쳤다고 주장한 misattribution과 **같은 유형**이다.
+
+<!-- /HISTORICAL -->
 
 이 arm이 바로잡는 것은 **일반적으로 승자 오염이 아니라 사유 오귀속**이다. 조건수는 **noise 증폭**을
 묶는 양이므로, noise가 있는 데이터에서 조건 악화는 held-out 오차를 키워 $\theta$를 낮추고 따라서 argmax를
@@ -743,11 +747,12 @@ descriptor로 고정되고 소비 후 재검증되는 sealed source가 함께 �
 ## 부록 H — historical 문단 색인 (2026-09-07)
 
 이 spec은 as-built 문서이므로 폐기된 분석을 지우지 않고 격리한다. 아래 문단은 **현행 계약이 아니다**.
-위치는 2026-09-07 기준이며 앞의 인용 문구가 정본 anchor다. 각 문단은 그 자리에서도 **HISTORICAL** 표시를
-달고 있으며, 이 색인은 표시를 대신하지 않고 모아 보여줄 뿐이다.
+위치는 2026-09-07 기준이며 앞의 인용 문구가 정본 anchor다. 두 normalization 문단은 그 자리에서
+**HISTORICAL** 표시로 격리했고(각 블록의 끝은 `<!-- /HISTORICAL -->`), metric 식은 수정안 E로 현행
+식으로 대체했다 — 격리와 대체는 서로 다른 처리다. 이 색인은 그 처리를 대신하지 않고 모아 보여줄 뿐이다.
 
 | 위치 | 무엇이 폐기됐나 | 대체한 것 |
 |---|---|---|
 | §10.4 "factor bank를 $\sqrt{\sigma_{\max}}$로 rescale" 문단(`:523-526`) | "bank를 정규화하면 bank artifact가 split에 의존" — penalty 쪽 적용 선택의 근거 | 결정 #7 `identification.factor_bank_normalization: sigma_max_z_unit`(§3.1의 2026-08-21 amendment) |
-| §10.4 "한계 (2026-08-07 독립 리뷰)" 인용블록(`:578-612`) | "그 scale은 어떤 config field도 묶지 않는다" | 같은 결정 |
+| §10.4 "한계 (2026-08-07 독립 리뷰)" 인용블록(`:580-614`) | "그 scale은 어떤 config field도 묶지 않는다" | 같은 결정 |
 | §10.5 metric 식 | $1-\overline e_M/\max(\overline e_C,\epsilon)$ | 수정안 E (2026-09-07, Task 3) |

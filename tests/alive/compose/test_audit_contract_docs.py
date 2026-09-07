@@ -46,9 +46,40 @@ def _flat(text: str) -> str:
     return "".join(text.replace(">", " ").split())
 
 
-_SUPERSEDED_BANK_SCALE_CLAIM = _flat("그 scale은 어떤 config field도 묶지 않는다")
-_HISTORICAL_LIMIT = "[HISTORICAL — 결정 #7(2026-08-21 재서명본) 이후 무효.]"
-_HISTORICAL_PENALTY_SIDE = "[HISTORICAL — 결정 #7 이전의 검토.]"
+_HISTORICAL_START = "[HISTORICAL"
+_HISTORICAL_END = "<!-- /HISTORICAL -->"
+
+# 결정 #7 이 뒤집은 두 진술. spec 은 as-built 이므로 지우지 않지만, HISTORICAL 로 격리된
+# 블록 **밖**의 현행 본문에서는 한 번도 나오면 안 된다.
+_WITHDRAWN = {
+    "bank scale 을 묶는 config field 가 없다": _flat("그 scale은 어떤 config field도 묶지 않는다"),
+    "bank 정규화는 split 의존을 만든다": _flat(
+        "bank를 정규화하면 bank artifact가 split에 의존하게 되어"
+    ),
+}
+
+
+def _partition_historical(current: str) -> tuple[list[str], str]:
+    """Split the pre-appendix body into its HISTORICAL blocks and the live prose.
+
+    A block starts at its ``[HISTORICAL …]`` marker and ends at the first
+    ``<!-- /HISTORICAL -->`` sentinel after it — an explicit end marker, so the
+    boundary does not depend on where a paragraph happens to wrap.
+    """
+    blocks: list[str] = []
+    live: list[str] = []
+    cursor = 0
+    while True:
+        start = current.find(_HISTORICAL_START, cursor)
+        if start < 0:
+            live.append(current[cursor:])
+            return blocks, "".join(live)
+        end = current.find(_HISTORICAL_END, start)
+        assert end > start, f"{_HISTORICAL_START} 표시에 짝이 되는 {_HISTORICAL_END} 가 없다"
+        end += len(_HISTORICAL_END)
+        live.append(current[cursor:start])
+        blocks.append(current[start:end])
+        cursor = end
 
 
 def test_the_current_normalization_contract_is_separate_from_its_history():
@@ -60,13 +91,17 @@ def test_the_current_normalization_contract_is_separate_from_its_history():
     assert "sigma_max_z_unit" in current
     assert "sigma_max_z_unit" in _section(current, "3. 모델", "4. 평가")
 
-    # spec 은 as-built 이므로 폐기된 문장을 지우지 않는다. 다만 HISTORICAL 표시보다
-    # 앞에서는 한 번도 나오지 않아야 한다 — 표시를 지우면 이 단언이 깨진다.
-    assert _SUPERSEDED_BANK_SCALE_CLAIM in _flat(current)
-    assert _SUPERSEDED_BANK_SCALE_CLAIM not in _flat(current.split(_HISTORICAL_LIMIT, 1)[0])
+    blocks, live = _partition_historical(current)
+    assert len(blocks) == 2, f"HISTORICAL 블록이 2개가 아니다: {len(blocks)}"
+    assert "결정 #7 이전의 검토" in blocks[0]
+    assert "한계 (2026-08-07 독립 리뷰)" in blocks[1]
 
-    # 결정 #7 이전의 penalty-side 근거 문단도 바로 앞에 표시를 달고 있다.
-    assert _HISTORICAL_PENALTY_SIDE in current
-    assert 0 < current.index("bank를 정규화하면") - current.index(_HISTORICAL_PENALTY_SIDE) < 500
+    # 폐기된 진술은 격리 블록 안에 as-built 로 남아 있고, appendix 이전 현행 본문의
+    # 나머지 전체(§10.5 를 포함해)에는 어디에도 없다.
+    flat_blocks = _flat("".join(blocks))
+    flat_live = _flat(live)
+    for name, claim in _WITHDRAWN.items():
+        assert claim in flat_blocks, name
+        assert claim not in flat_live, name
 
     assert "HISTORICAL" in history
