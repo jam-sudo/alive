@@ -20,8 +20,9 @@
 4. Exact split · threshold · seed · metric · roster → committed protocol/config/data card
 5. Runtime behavior → `src/alive/`
 6. Current release readiness → `docs/superpowers/COMPOSE-SEAL-READINESS.md`
-7. Vision/evidence/long-range → `virtual-cell-model-blueprint.md` · `virtual-cell-research-report.md` ·
-   `virtual-cell-project-plan.md`
+7. Vision/evidence/long-range → `virtual-cell-model-blueprint.md` ·
+   `virtual-cell-research-report.md` **(⚠ SUPERSEDED 2026-07-04)** · `virtual-cell-project-plan.md` **(⚠ SUPERSEDED 2026-07-04)** —
+   뒤 둘은 K562→RPE1 을 1차 MVP 로 제시하는 pre-pivot 기록이며 현재 protocol 상태는 §5 registry 가 authoritative 하다.
 
 Safety invariant와 claim/config가 충돌하면 safety가 우선한다. 충돌을 발견하면 (1) 충돌과 affected protocol/
 invariant를 보고하고, (2) scientific run을 시작·계속하지 않으며, (3) owner가 authoritative 문서를
@@ -144,7 +145,8 @@ noise ceiling, failed run을 보고한다. Prospective validation은 별도 mile
 src/alive/      maintained library and CLI
 configs/        immutable experiment configuration inputs
 tests/          unit, leakage, metric, provenance, integration tests
-scripts/        thin entry points; production logic remains in src/
+scripts/        entry points + pod-only worker/probe 실행체(`gears_worker`·`cpa_worker`·`gears_decision_probe`);
+                라이브러리에서 재사용되는 로직은 src/ 에 둔다. lint 는 scripts 를 포함한다
 docs/           specs, plans, runbooks, readiness, immutable evidence/audits
 artifacts/      gitignored run outputs
 ```
@@ -153,13 +155,14 @@ artifacts/      gitignored run outputs
 uv sync
 uv run pytest -q <target>
 uv run pytest -q
-uv run ruff check src tests
-uv run ruff format --check src tests
+uv run ruff check src tests scripts
+uv run ruff format --check src tests scripts
 ```
 
 Python version은 `pyproject.toml`, dependency는 committed `uv.lock`을 따른다. Public API는 type hint와
 NumPy-style docstring을 사용한다. Production source에 path·split·threshold·feature list·seed·hyperparameter를
-hardcode하지 않는다. Notebook은 library function만 호출한다. Scientific run 명령은 추측하지 말고 current
+hardcode하지 않는다 — 유일한 등록 예외는 `config2.py` 의 `_EXPECTED_*` 검증 미러(값을 정의하지 않고 committed config 와 등호 비교해
+fail-closed 하며 config field 변경 시 함께 움직인다). Notebook은 library function만 호출한다. Scientific run 명령은 추측하지 말고 current
 runbook/CLI help를 확인한다.
 
 **Compute.** {#compute} Local Mac은 setup·unit/mini/synthetic·bounded inspection용, A100/pod는 승인된 real-data
