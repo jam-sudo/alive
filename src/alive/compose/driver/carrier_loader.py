@@ -364,6 +364,21 @@ def load_run_spec_carrier(
         lockfile_path=Path(spec.scientific["dependency_manifest"]["path"]),
         registered_seeds=config.registered_seeds,
     )
+    # The runtime context hashed the dependency manifest by pathname (capture_environment)
+    # and that digest is serialised into the pre-access ledger as environment.lockfile_sha256.
+    # It is the third consumer of the dependency-manifest lane: the run spec verified the
+    # declared digest at load and the provenance builder verifies it again below, but a
+    # file replaced during this capture and restored before provenance assembly would leave
+    # the ledger describing bytes nobody declared while both checks pass (reproduced with a
+    # control arm, 2026-09-06). A record may carry only the declared digest.
+    declared_lockfile_sha256 = spec.scientific["dependency_manifest"]["sha256"]
+    if context.environment.lockfile_sha256 != declared_lockfile_sha256:
+        raise RunSpecError(
+            "environment lockfile_sha256 "
+            f"{context.environment.lockfile_sha256} != declared scientific.dependency_manifest "
+            f"sha256 {declared_lockfile_sha256}; the dependency manifest changed between run-spec "
+            "verification and environment capture"
+        )
     # §5.4: config + ActivationRecord (re-validated through assert_scientific_mode_allowed).
     activation_record = _assemble_activation_record(spec, config, git_is_clean=context.git_is_clean)
     # §5.5-6: reuse deserializers + typed provenance.

@@ -370,3 +370,71 @@ def test_an_untouched_carrier_still_loads(tmp_path):
         trusted_repo_root=bundle.repo_root,
     )
     assert carrier is not None
+
+
+def _swap_then_restore_during_environment_capture(monkeypatch, spec, *, swap: bool):
+    """Swap the dependency manifest during `capture_environment`; restore before provenance."""
+    import alive.compose.driver.carrier_loader as carrier_loader
+
+    lock = Path(spec.scientific["dependency_manifest"]["path"])
+    original = lock.read_bytes()
+    real = carrier_loader.resolve_scientific_runtime_context
+
+    def swapping(**kwargs):
+        if swap:
+            lock.write_bytes(original + b"\n# replaced while the environment was captured\n")
+        try:
+            return real(**kwargs)
+        finally:
+            lock.write_bytes(original)
+
+    monkeypatch.setattr(carrier_loader, "resolve_scientific_runtime_context", swapping)
+
+
+def test_the_recorded_environment_lockfile_digest_must_be_the_declared_dependency_manifest(
+    tmp_path, monkeypatch
+):
+    """The 2026-09-06 review asked whether another consumer re-reads a provenance path.
+
+    One does: `resolve_scientific_runtime_context` calls `capture_environment`, which
+    hashes the dependency manifest by pathname and stores the digest in
+    `EnvironmentInfo.lockfile_sha256` -- which the RunLedger serialises into the
+    pre-access ledger. `072fc1c` verified the five lanes at the provenance builder,
+    but this read happens BEFORE it and was compared with nothing. A replacement
+    present during the capture and restored before provenance assembly left the
+    ledger describing bytes the run spec never declared while the load succeeded
+    (probe with a control arm, 2026-09-06). The declared digest is the only one a
+    record may carry.
+    """
+    bundle = build_scientific_carrier_fixture(tmp_path / "a", repo_root=tmp_path / "r")
+    spec = load_resolved_run_spec(
+        bundle.spec_path,
+        approved_artifacts_root=bundle.approved_artifacts_root,
+        mode_expected="scientific",
+    )
+    _swap_then_restore_during_environment_capture(monkeypatch, spec, swap=True)
+
+    with pytest.raises(RunSpecError, match="lockfile_sha256"):
+        load_run_spec_carrier(
+            bundle.spec_path,
+            approved_artifacts_root=bundle.approved_artifacts_root,
+            trusted_repo_root=bundle.repo_root,
+        )
+
+
+def test_the_environment_lockfile_probe_is_not_vacuous(tmp_path, monkeypatch):
+    """Control arm: the same hook without the swap loads, and the digests agree."""
+    bundle = build_scientific_carrier_fixture(tmp_path / "a", repo_root=tmp_path / "r")
+    spec = load_resolved_run_spec(
+        bundle.spec_path,
+        approved_artifacts_root=bundle.approved_artifacts_root,
+        mode_expected="scientific",
+    )
+    _swap_then_restore_during_environment_capture(monkeypatch, spec, swap=False)
+
+    carrier = load_run_spec_carrier(
+        bundle.spec_path,
+        approved_artifacts_root=bundle.approved_artifacts_root,
+        trusted_repo_root=bundle.repo_root,
+    )
+    assert carrier.environment.lockfile_sha256 == spec.scientific["dependency_manifest"]["sha256"]

@@ -5,7 +5,7 @@
 > **이 문서는 아무것도 정의하지 않는다** — 세부(task)는 plan, claim은 spec, exact param은 config,
 > 시간순 audit는 git이 authoritative다([sources of truth](../../CLAUDE.md#sources)). 상태 행이 authoritative
 > 문서와 어긋나면 **authoritative 문서가 옳다**; 이 인덱스를 갱신한다.
-> **Updated:** 2026-09-05 @ `072fc1c` (branch `compose-factor-bank-normalization`)
+> **Updated:** 2026-09-06 @ `ae8b8b0` (branch `compose-factor-bank-normalization`)
 > `scripts/bump-readiness-stamp.sh` / the pre-commit hook from `HEAD` at commit time, so it names the
 > **parent** of the commit that carries it and can never name itself. Reading it as "one commit stale" is a
 > misreading; git is authoritative for when this file actually changed.
@@ -2423,6 +2423,36 @@ attestation residuals of the smoke producer (exit code, sealed pair list, row-id
 content); and the wrapper's identity is the stamp string — a same-stamp content change is caught by
 the verbatim snapshot comparison, not by this gate. `config_sha256` remains `0d207746…`; seal
 **UNOPENED**; execution **RELEASE-BLOCKED**. Full suite on the committed tree: 3010 passed / 3 skipped / 0 failed (18m49s); this line's numbers were filled in after the run and are the only bytes that differ from it.
+
+**2026-09-06 — the 09/06 review's three REFUTE requests, answered by execution; one more consumer
+closed.**
+
+The 09/06 review (`d980595`, first cross-audit in three days) reproduced none of the five 09/05 commits'
+defects at the pin and filed no fix request. It asked three things of this side, and each was measured:
+
+- **"Is there another consumer that re-reads a provenance path after the builder verified it?"**
+  Yes, one. The cited `worker_identity.py:348-352` does not exist, and `identity_lock.py:312`
+  re-hashes but compares with the declaration. `resolve_scientific_runtime_context` →
+  `capture_environment(lockfile_path)`, however, hashes the dependency manifest by pathname before
+  provenance assembly and the RunLedger serialises that digest into the pre-access ledger as
+  `environment.lockfile_sha256`, compared with nothing. Probe with a control arm: swap during the
+  capture, restore before provenance → load succeeds, provenance passes, ledger digest ≠ declared.
+  Closed (fourth commit of this wave): `load_run_spec_carrier` refuses when the captured digest is not
+  the declared `scientific.dependency_manifest.sha256`; the removal mutant is killed by name. Not
+  claimed: that lane 3 now has no other consumer — the review's method is the way to find one.
+- **"Any path that binds `sealed_pair_ids` outside the bundle?"** None (grep, confirmed). The material
+  is the split manifest, whose digest the fit-role artifact's provenance carries as
+  `pair_manifest_sha256` and the verified reader re-binds — the next binding, on seal-guard paths.
+- **"A meaningful mutation the three roster tests survive?"** Byte-order → code-point order is an
+  equivalent mutant (UTF-8 preserves code-point order; 0 disagreements in 200k random pairs).
+  Ignoring `combo_sep` survived, because every test used the default; `ae8b8b0` adds an artifact
+  written with `"+"` and the test that requires both rosters spelled with it.
+
+Still with the owner (the review's DISPUTED and design items): whether B·C's delegated signatures and
+A's post-signature correction are to be re-signed in the owner's hand (§6.1; Codex M1 recommends it);
+whether crash-left unbound sidecars stay fail-closed with manual cleanup or move to an atomic
+directory publish with failure injection (§6.3); and the go-ahead for deriving the sealed roster from
+the split manifest (seal-guard paths). Full suite on the committed tree: 3013 passed / 3 skipped / 0 failed (18m30s); this line's numbers were filled in after the run and are the only bytes that differ from it.
 
 ## 이 문서가 *아닌* 것 (중복 금지)
 
