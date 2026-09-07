@@ -131,8 +131,9 @@ def test_theta_at_and_below_the_comparator_epsilon_floor_is_the_stabilized_diffe
     mse, expected
 ):
     """Known answers where the registered formula (mean_C - mean_M)/max(mean_C, 1e-12) and the
-    withdrawn spec sentence 1 - mean_M/max(mean_C, 1e-12) differ: a perfect method against a
-    comparator at or below the floor. The withdrawn form returns 1.0 in every row."""
+    withdrawn spec sentence 1 - mean_M/max(mean_C, 1e-12) differ below the floor and agree at the
+    boundary (mse=1e-12 -> 1.0 in both): a perfect method against a comparator at or below the
+    floor. The withdrawn form returns 1.0 in every row."""
     truth = np.zeros((2, 1))
     comparator = np.full((2, 1), np.sqrt(mse))
     ids = ["a", "b"]

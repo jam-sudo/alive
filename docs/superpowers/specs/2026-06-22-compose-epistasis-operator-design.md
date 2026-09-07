@@ -665,7 +665,8 @@ $e_{M,i}=p^{-1}\|\hat\delta_{M,i}-\delta_i\|_2^2$이다. comparator $C$ 대비 p
 improvement는 $\theta_{M,C}=(\overline e_C-\overline e_M)/\max(\overline e_C,10^{-12})$로 고정한다 — config `metric.formula`
 `(mean(error_comparator) - mean(error_l1)) / max(mean(error_comparator), 1e-12)` 와 `metric2.paired_relative_error_reduction` 이
 계산하는 바로 그 식이다. $\overline e_C\ge10^{-12}$ 에서 두 형태는 같지만 epsilon-floor 아래에서는 다르며 등록된 것은 이 형태다
-(comparator 도 완벽하면 무승부 0.0 이고 완승 1.0 이 아니다; $\overline e_C=5\times10^{-13}$ 이면 0.5).
+(method 가 완벽해 $\overline e_M=0$ 인 경우: comparator 도 완벽하면 무승부 0.0 이고 완승 1.0 이 아니며,
+$\overline e_C=5\times10^{-13}$ 이면 0.5, $\overline e_C=10^{-12}$ 이면 1.0 — 마지막 점에서 두 형태가 일치한다).
 **[수정안 E — 2026-09-07, SIGNED by owner instruction "모두 권장사항으로 진행" — EFFECTIVE Task 3. 근거: 09/06 감사 토론 R5/D-4, 양쪽 수치 재현.]**
 headline primary estimand은 $\theta_{L1,additive}$이며 material margin은 0.05다. 동일 sealed pair
 resample에서 각 replicate의 두 mean error를 다시 계산하고, 그 resample을 모든 contrast에 공유하는
