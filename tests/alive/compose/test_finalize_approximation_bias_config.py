@@ -3,7 +3,7 @@
 ``docs/superpowers/specs/2026-07-13-compose-approximation-bias-metric-design.md``):
 the LOCAL one-way tool
 (``scripts/compose/finalize_approximation_bias_config.py``) that binds a
-completed ``compose_approximation_bias_report_v3`` report's content SHA into
+completed ``compose_approximation_bias_report_v4`` report's content SHA into
 the bias-NULL Phase-2 config, while MECHANICALLY proving it changed exactly
 one leaf (``baselines.gears.approximation_bias_report_sha256``) and nothing
 else, and that the resulting finalized config's own SHA never leaks back into
@@ -29,10 +29,14 @@ import yaml
 
 from alive.compose import config2
 from alive.compose.approximation_bias import (
+    ADMITTED,
     APPROXIMATION_BIAS_SCHEMA,
     NON_FINITE,
+    NOT_ADMISSIBLE,
+    PROBE_A_REPRESENTATION,
     PROTOCOL,
     REPRESENTATION,
+    ApproximationBiasValidationError,
     measurement_contract_sha256,
     self_checksum,
 )
@@ -147,6 +151,7 @@ def _bound_report(basis_sha: str) -> dict:
             "probe_a_evidence_manifest_sha256": "6" * 64,
             "probe_a_registration_sha256": "7" * 64,
             "probe_a_verification_sha256": "8" * 64,
+            "probe_a_output_representation": "raw_pseudobulk_approximation",
             "sealed_pair_overlap_count": 0,
             "pod_instance": "unit-test-local",
         },
@@ -371,3 +376,102 @@ def test_main_cli_writes_finalized_config(tmp_path):
     expected_report_sha = _expected_report_sha(report_path)
     assert written["baselines"]["gears"]["approximation_bias_report_sha256"] == expected_report_sha
     assert written["baselines"]["cpa"] == basis["baselines"]["cpa"]
+
+
+# ---------------------------------------------------------------------------
+# R1 (2026-09-07 audit debate): admission is what this tool converts into a config
+# leaf, so the two ways a report can fail the Probe-A bridge contract must both die
+# HERE as well as inside the producer -- redundant enforcement, one shared function.
+# ---------------------------------------------------------------------------
+
+
+def _bound_report_with(basis_sha: str, **overrides) -> dict:
+    """``_bound_report`` with top-level/provenance overrides and a REBUILT self_checksum."""
+    report = _bound_report(basis_sha)
+    provenance_overrides = overrides.pop("provenance", {})
+    report.update(overrides)
+    report["provenance"].update(provenance_overrides)
+    return {
+        **{key: value for key, value in report.items() if key != "self_checksum"},
+        "self_checksum": self_checksum(
+            {key: value for key, value in report.items() if key != "self_checksum"}
+        ),
+    }
+
+
+def _round_tripped_basis(tmp_path: Path) -> tuple[Path, str]:
+    """Write the basis config and return it with the SHA the tool will recompute."""
+    basis_path = _write_basis_yaml(tmp_path, _basis_dict())
+    basis_sha = sha256_json(yaml.safe_load(basis_path.read_text(encoding="utf-8")))
+    return basis_path, basis_sha
+
+
+def test_a_report_whose_bridge_representation_differs_is_refused_by_the_finalizer(tmp_path):
+    """The finalizer revalidates: an ADMITTED report whose Probe-A bridge validated another
+    representation cannot reach ``baselines.gears.approximation_bias_report_sha256``."""
+    basis_path, basis_sha = _round_tripped_basis(tmp_path)
+    report = _bound_report_with(
+        basis_sha,
+        admission_status=ADMITTED,
+        provenance={"probe_a_output_representation": PROBE_A_REPRESENTATION},
+    )
+    report_path = _write_report_json(tmp_path, report)
+
+    with pytest.raises(ApproximationBiasValidationError, match="representation mismatch"):
+        _load_finalize_module().finalize_bias_config(
+            basis_config_path=basis_path, report_path=report_path
+        )
+
+
+def test_a_not_admissible_report_never_reaches_the_config_leaf(tmp_path):
+    """The honest refusal record the producer writes today must not be finalizable either."""
+    basis_path, basis_sha = _round_tripped_basis(tmp_path)
+    report = _bound_report_with(
+        basis_sha,
+        admission_status=NOT_ADMISSIBLE,
+        provenance={"probe_a_output_representation": PROBE_A_REPRESENTATION},
+    )
+    report_path = _write_report_json(tmp_path, report)
+
+    with pytest.raises(ApproximationBiasValidationError, match="admission_status must be"):
+        _load_finalize_module().finalize_bias_config(
+            basis_config_path=basis_path, report_path=report_path
+        )
+
+
+def test_a_log_probe_chain_cannot_clear_the_collective_bias_blocker(tmp_path):
+    """End to end, through the REAL producer CLI and the REAL committed config.
+
+    A log-normalized Probe-A PASS still measures and still writes a report, but that report
+    is ``NOT_ADMISSIBLE``, so the finalizer has nothing to admit and the committed config
+    keeps its collective approximation-bias activation blocker (6 blockers, not 5).
+    """
+    from alive.compose.config2 import load_compose_phase2_config_from_text
+    from tests.alive.compose import test_approximation_bias_metric as metric_tests
+
+    basis_text = (_REPO / "configs" / "compose_k562_v1_phase2.yaml").read_text(encoding="utf-8")
+    fixture = metric_tests._write_main_cli_fixture(tmp_path)
+    Path(fixture["basis_config"]).write_text(basis_text, encoding="utf-8")
+    evidence = metric_tests._write_probe_a_evidence(
+        tmp_path, "pass", git_commit=fixture["git_commit"]
+    )
+    out = tmp_path / "report.json"
+
+    exit_code = metric_tests._load_metric_module().main(
+        metric_tests._main_cli_argv(fixture, evidence, out)
+    )
+
+    assert exit_code == 0
+    assert out.exists()
+    written = json.loads(out.read_text(encoding="utf-8"))
+    assert written["admission_status"] == NOT_ADMISSIBLE
+    assert written["provenance"]["probe_a_output_representation"] == PROBE_A_REPRESENTATION
+
+    with pytest.raises(ApproximationBiasValidationError, match="admission_status must be"):
+        _load_finalize_module().finalize_bias_config(
+            basis_config_path=fixture["basis_config"], report_path=out
+        )
+    assert (
+        "baselines.approximation_bias_report_sha256"
+        in load_compose_phase2_config_from_text(basis_text).activation_blockers
+    )

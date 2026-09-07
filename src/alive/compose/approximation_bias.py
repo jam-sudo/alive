@@ -20,7 +20,7 @@ import yaml
 
 from alive.provenance import sha256_bytes, sha256_file, sha256_json
 
-APPROXIMATION_BIAS_SCHEMA = "compose_approximation_bias_report_v3"
+APPROXIMATION_BIAS_SCHEMA = "compose_approximation_bias_report_v4"
 PROBE_A_SCHEMA = "compose_gears_probe_a_admission_v3"
 PROBE_A_REGISTRATION_SCHEMA = "compose_gears_probe_a_registration_v2"
 PROBE_A_OWNER_POLICY_SCHEMA = "compose_gears_probe_a_owner_policy_v1"
@@ -36,6 +36,14 @@ PROBE_A_DETERMINISM_TOLERANCE = 0.0
 PROBE_A_NUMERICAL_TOLERANCE = 1e-5
 R_STAR = 0.5
 NON_FINITE = "NON_FINITE"
+#: ``admission_status`` vocabulary. ``ADMITTED`` is the ONLY status a consuming
+#: boundary accepts: it is what the finalizer turns into a config leaf and one
+#: fewer activation blocker. ``NOT_ADMISSIBLE`` is the design spec's own token
+#: (approximation-bias design spec, "Admission prerequisite") for a measurement
+#: that was performed but may not be promoted.
+ADMITTED = "admitted"
+NOT_ADMISSIBLE = "NOT_ADMISSIBLE"
+ADMISSION_STATUSES = frozenset({ADMITTED, NOT_ADMISSIBLE})
 FAIRNESS_FLAGS = frozenset({"clear", "representation_confounded", "indeterminate"})
 
 _HEX64 = re.compile(r"^[0-9a-f]{64}$")
@@ -84,6 +92,7 @@ _PROVENANCE_KEYS = frozenset(
         "probe_a_evidence_manifest_sha256",
         "probe_a_registration_sha256",
         "probe_a_verification_sha256",
+        "probe_a_output_representation",
         "sealed_pair_overlap_count",
         "pod_instance",
     }
@@ -243,6 +252,67 @@ def canonical_file_bytes(obj: object) -> bytes:
 def self_checksum(payload_without_checksum: Mapping[str, Any]) -> str:
     """Hash canonical JSON excluding the evidence object's own checksum field."""
     return sha256_bytes(canonical_json(payload_without_checksum).encode("utf-8"))
+
+
+def bridge_admits(*, method: str, probe_representation: str) -> bool:
+    """Return whether a Probe-A output bridge admits a report measured on ``method``.
+
+    The ONE definition of the R1 relation. The producer calls it to decide
+    ``admission_status``; :func:`validate_bias_method_bridge` calls it to refuse a
+    report that claims an admission the bridge does not support. Keeping both sides on
+    this function is what makes the two sides unable to drift apart.
+
+    Parameters
+    ----------
+    method : str
+        The representation the report actually measured (``report["method"]``).
+    probe_representation : str
+        The representation the Probe-A output bridge validated
+        (``report["provenance"]["probe_a_output_representation"]``).
+
+    Returns
+    -------
+    bool
+        ``True`` only when the two are the same representation.
+    """
+    return probe_representation == method
+
+
+def validate_bias_method_bridge(
+    *, method: str, probe_representation: str, admission_status: str
+) -> None:
+    """The R1 contract: only a Probe-A PASS on THIS representation admits THIS report.
+
+    A ``log_normalized_pseudobulk`` PASS does not validate the raw-count Jensen-floor
+    formula (approximation-bias design spec, "Probe-A candidate correction"): such a
+    measurement may still be performed and recorded, but it may not be ``admitted``,
+    because admission is what the finalizer converts into a config leaf. A mismatch
+    carried by a non-admitted report is therefore legal -- it is the honest refusal
+    record the producer writes today.
+
+    Parameters
+    ----------
+    method : str
+        The representation the report measured.
+    probe_representation : str
+        The representation the Probe-A output bridge validated.
+    admission_status : str
+        The report's ``admission_status``.
+
+    Raises
+    ------
+    ApproximationBiasValidationError
+        If the report claims :data:`ADMITTED` while the bridge validated a different
+        representation.
+    """
+    if admission_status == ADMITTED and not bridge_admits(
+        method=method, probe_representation=probe_representation
+    ):
+        raise ApproximationBiasValidationError(
+            "representation mismatch: the Probe-A output bridge validated "
+            f"{probe_representation!r} but this report measures {method!r}; a PASS on a "
+            "different scale does not admit this report"
+        )
 
 
 def measurement_contract_path() -> Path:
@@ -803,8 +873,15 @@ def validate_approximation_bias_report(
     expected_measurement_contract_sha256: str | None = None,
     expected_git_commit: str | None = None,
     expected_provenance: Mapping[str, Any] | None = None,
+    require_admitted: bool = True,
 ) -> None:
-    """Validate the complete v3 report, including scientific interpretation coherence."""
+    """Validate the complete v4 report, including scientific interpretation coherence.
+
+    ``require_admitted`` defaults to ``True``, so every CONSUMING boundary
+    (:func:`report_from_evidence`, :func:`load_approximation_bias_report`, the one-way
+    config finalizer) refuses a non-admitted report without needing its own check. Only
+    the producer, which writes the refusal record itself, passes ``False``.
+    """
     obj = _exact_keys(report, _TOP_KEYS, field="approximation-bias report")
     if obj["schema"] != APPROXIMATION_BIAS_SCHEMA:
         _fail(f"report schema must be {APPROXIMATION_BIAS_SCHEMA!r}")
@@ -816,7 +893,9 @@ def validate_approximation_bias_report(
         _fail("report seal_status must be 'unopened'")
     if obj["method"] != REPRESENTATION:
         _fail(f"report method must be {REPRESENTATION!r}")
-    if obj["admission_status"] != "admitted":
+    if obj["admission_status"] not in ADMISSION_STATUSES:
+        _fail(f"report admission_status must be one of {sorted(ADMISSION_STATUSES)}")
+    if require_admitted and obj["admission_status"] != ADMITTED:
         _fail("report admission_status must be 'admitted'")
 
     strata = _exact_keys(
@@ -991,6 +1070,11 @@ def validate_approximation_bias_report(
         _fail("report bootstrap intervals must all be finite when finite replicates exist")
 
     provenance = _exact_keys(obj["provenance"], _PROVENANCE_KEYS, field="report.provenance")
+    validate_bias_method_bridge(
+        method=str(obj["method"]),
+        probe_representation=str(provenance["probe_a_output_representation"]),
+        admission_status=str(obj["admission_status"]),
+    )
     for field in (
         "measurement_contract_sha256",
         "basis_config_sha256",

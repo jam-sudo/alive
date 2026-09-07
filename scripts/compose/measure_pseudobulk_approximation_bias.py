@@ -93,10 +93,14 @@ import yaml
 from scipy import sparse
 
 from alive.compose.approximation_bias import (
+    ADMITTED,
     APPROXIMATION_BIAS_SCHEMA,
     NON_FINITE,
+    NOT_ADMISSIBLE,
     R_STAR,
+    REPRESENTATION,
     ProbeAEvidence,
+    bridge_admits,
     canonical_json,
     load_probe_a_evidence,
     measurement_contract_sha256,
@@ -123,8 +127,9 @@ _R_STAR = R_STAR
 #: but must NEVER be presented as a *measured* pair to this metric.
 _ARTIFACT_ROLES: frozenset[str] = frozenset({"control", "singles", "combo_calibration"})
 
-#: The v3 report's ``schema`` literal (design spec §4).
-_SCHEMA_V3 = APPROXIMATION_BIAS_SCHEMA
+#: The v4 report's ``schema`` literal (design spec §4; v4 adds the R1
+#: ``provenance.probe_a_output_representation`` leaf).
+_SCHEMA_V4 = APPROXIMATION_BIAS_SCHEMA
 
 
 def _finite_or_sentinel(value: float) -> float | str:
@@ -589,7 +594,7 @@ def _bootstrap_intervals(
 
 
 def _canonical_json(obj: Mapping) -> str:
-    """The v3 report's one canonical serialisation recipe (design spec §4).
+    """The v4 report's one canonical serialisation recipe (design spec §4).
 
     ``sort_keys=True`` (dict key order never affects the bytes),
     ``separators=(",", ":")`` (no incidental whitespace), and
@@ -607,7 +612,7 @@ def _self_checksum(report_without_checksum: Mapping) -> str:
     Parameters
     ----------
     report_without_checksum : Mapping
-        The full v3 report object MINUS its own ``self_checksum`` key (design
+        The full v4 report object MINUS its own ``self_checksum`` key (design
         spec §4: "SHA-256 of the canonical JSON of every field above except
         ``self_checksum``"). Passing a dict that still contains
         ``self_checksum`` would make the digest depend on itself; callers
@@ -638,7 +643,7 @@ def measure_approximation_bias_v3(
     probe_a_registration_sha256: str | None = None,
     probe_a_verification_sha256: str | None = None,
 ) -> dict:
-    """Assemble the FULL ``compose_approximation_bias_report_v3`` object.
+    """Assemble the FULL ``compose_approximation_bias_report_v4`` object.
 
     Task 4 of the COMPOSE approximation-bias v1 implementation plan
     (``docs/superpowers/plans/2026-07-13-compose-approximation-bias-implementation.md``):
@@ -657,7 +662,7 @@ def measure_approximation_bias_v3(
         ``git_commit``, ``norman_source_sha256``, ``pod_instance``) must be an
         explicitly-resolved, non-empty value — none of them defaults to a
         placeholder like ``"UNKNOWN"``; a missing one raises here rather than
-        silently embedding a fake value in a binding v3 report (CLAUDE.md
+        silently embedding a fake value in a binding v4 report (CLAUDE.md
         §data-eval, §invariants #1 "Protocol first"). This intentionally runs
         AFTER the seal-safety guards so a bad roster/gene-order/role always
         raises its own dedicated message first, never masked by a
@@ -734,7 +739,7 @@ def measure_approximation_bias_v3(
     Returns
     -------
     dict
-        The full ``compose_approximation_bias_report_v3`` object (see "The v3
+        The full ``compose_approximation_bias_report_v4`` object (see "The v4
         report object" in the implementation plan): ``schema``,
         ``deliverable``, ``protocol``, ``seal_status``, ``method``,
         ``admission_status``, ``strata`` (``combo_calibration`` + ``singles``),
@@ -775,6 +780,19 @@ def measure_approximation_bias_v3(
         )
     except ValueError as exc:
         raise ValueError(f"approximation-bias: {exc}") from exc
+
+    # R1 (design spec, "Probe-A candidate correction"): the measurement below computes the
+    # RAW-count Jensen floor. A Probe-A PASS on some other native scale does not validate
+    # that formula, so it cannot ADMIT this report -- the measurement still runs and is
+    # still written, but only as a non-promotable record. `bridge_admits` is the same
+    # predicate `validate_approximation_bias_report` re-checks at every consuming boundary,
+    # so producer and validator cannot drift apart.
+    bridge_representation = str(probe_a["output_bridge"]["representation"])
+    admission_status = (
+        ADMITTED
+        if bridge_admits(method=REPRESENTATION, probe_representation=bridge_representation)
+        else NOT_ADMISSIBLE
+    )
 
     block = response_projection
     adata = ad.read_h5ad(fit_role_artifact)
@@ -857,17 +875,18 @@ def measure_approximation_bias_v3(
         "probe_a_evidence_manifest_sha256": str(probe_a["evidence_manifest_sha256"]),
         "probe_a_registration_sha256": probe_a_evidence.registration_sha256,
         "probe_a_verification_sha256": probe_a_evidence.verification_sha256,
+        "probe_a_output_representation": bridge_representation,
         "sealed_pair_overlap_count": sealed_pair_overlap_count,
         "pod_instance": str(pod_instance),
     }
 
     report_without_checksum = {
-        "schema": _SCHEMA_V3,
+        "schema": _SCHEMA_V4,
         "deliverable": "gears_pseudobulk_approximation_bias_report",
         "protocol": "COMPOSE-K562-v1",
         "seal_status": "unopened",
-        "method": "raw_pseudobulk_approximation",
-        "admission_status": "admitted",
+        "method": REPRESENTATION,
+        "admission_status": admission_status,
         "strata": strata,
         "gi_and_fairness": gi_and_fairness,
         "provenance": provenance,
@@ -876,6 +895,9 @@ def measure_approximation_bias_v3(
     report["self_checksum"] = _self_checksum(report_without_checksum)
     validate_approximation_bias_report(
         report,
+        # The producer is the ONE boundary that may see a non-admitted report: it is the
+        # author of the refusal record. Every consumer keeps the strict default.
+        require_admitted=False,
         expected_basis_config_sha256=str(basis_config_sha256),
         expected_measurement_contract_sha256=measurement_contract_sha256(),
         expected_git_commit=str(git_commit),
@@ -890,13 +912,14 @@ def measure_approximation_bias_v3(
             "probe_a_evidence_manifest_sha256": str(probe_a["evidence_manifest_sha256"]),
             "probe_a_registration_sha256": probe_a_evidence.registration_sha256,
             "probe_a_verification_sha256": probe_a_evidence.verification_sha256,
+            "probe_a_output_representation": bridge_representation,
         },
     )
     return report
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Gate on Probe-A evidence, then load inputs and write the v3 report.
+    """Gate on Probe-A evidence, then load inputs and write the v4 report.
 
     The FIRST thing this function does after parsing arguments is read and
     validate the immutable admission, registration, and verification snapshots
@@ -908,6 +931,12 @@ def main(argv: list[str] | None = None) -> int:
     ``--out`` file is written, and the process exits non-zero. Only a conforming
     v3 pass admission and v1 verification receipt let execution continue past
     the gate.
+
+    A conforming PASS is necessary but NOT sufficient for ADMISSION (R1): the report's
+    ``admission_status`` is ``ADMITTED`` only if the Probe-A output bridge validated the
+    very representation this report measures. Otherwise the measurement is still performed
+    and still written, as a ``NOT_ADMISSIBLE`` record that every consuming boundary --
+    including the one-way config finalizer -- refuses.
 
     ``--basis-config`` is the bias-NULL YAML config (design spec §4): its
     ``sha256_json`` becomes ``provenance.basis_config_sha256`` and its
@@ -1002,7 +1031,8 @@ def main(argv: list[str] | None = None) -> int:
     args.out.write_text(_canonical_json(report) + "\n", encoding="utf-8")
     gi = report["gi_and_fairness"]
     print(
-        f"wrote {args.out}: fairness_flag={gi['fairness_flag']} "
+        f"wrote {args.out}: admission_status={report['admission_status']} "
+        f"fairness_flag={gi['fairness_flag']} "
         f"bias_to_signal_ratio_R={gi['bias_to_signal_ratio_R']}"
     )
     return 0

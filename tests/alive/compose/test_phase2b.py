@@ -40,7 +40,9 @@ import numpy as np
 import pytest
 
 from alive.compose.approximation_bias import (
+    ADMITTED,
     APPROXIMATION_BIAS_SCHEMA,
+    NOT_ADMISSIBLE,
     PROBE_A_ADAPTER_TRANSFORM,
     PROBE_A_NEGATIVE_OUTPUT_POLICY,
     PROBE_A_REGISTRATION_SCHEMA,
@@ -50,6 +52,7 @@ from alive.compose.approximation_bias import (
     PROTOCOL,
     REPRESENTATION,
     ApproximationBiasEvidence,
+    ApproximationBiasValidationError,
     ProbeAEvidence,
     canonical_json,
     load_approximation_bias_report,
@@ -2059,7 +2062,7 @@ def _write_bias_report(
     bootstrap_95_interval=(0.4, 0.9),
     R_star=0.5,
 ):
-    """Write a REAL-shaped ``compose_approximation_bias_report_v3`` report and return
+    """Write a REAL-shaped ``compose_approximation_bias_report_v4`` report and return
     its ``sha256_file`` content SHA.
 
     Faithful to the true on-disk contract that ``measure_approximation_bias_v3`` /
@@ -2133,6 +2136,7 @@ def _write_bias_report(
             "probe_a_evidence_manifest_sha256": "6" * 64,
             "probe_a_registration_sha256": "7" * 64,
             "probe_a_verification_sha256": "8" * 64,
+            "probe_a_output_representation": "raw_pseudobulk_approximation",
             "sealed_pair_overlap_count": 0,
             "pod_instance": "unit-test",
         },
@@ -2239,7 +2243,7 @@ def test_null_config_field_yields_unavailable_block(tmp_path):
 # ---------------------------------------------------------------------------
 # END-TO-END: metric ↔ finalize ↔ phase2b agree on BOTH schema nesting AND the
 # on-disk-bytes hashing recipe. This is the integration seam the per-task stubs
-# papered over: it builds a REAL compose_approximation_bias_report_v3 via the
+# papered over: it builds a REAL compose_approximation_bias_report_v4 via the
 # metric, writes it EXACTLY as production does (canonical JSON + trailing '\n'),
 # finalizes the config leaf SHA via the real finalize tool (which now pins
 # sha256_file of those bytes), and feeds that SHA + report path into the phase2b
@@ -2337,8 +2341,8 @@ def _probe_a_evidence_snapshot() -> ProbeAEvidence:
     )
 
 
-def _build_real_bias_report(tmp_path):
-    """Build a REAL v2 report via ``measure_approximation_bias_v3`` on a small
+def _build_real_bias_report(tmp_path, *, admitted: bool = True):
+    """Build a REAL v4 report via ``measure_approximation_bias_v3`` on a small
     synthetic control-free fit-role artifact + identity projection block, bound to a
     bias-NULL basis config. Writes the report EXACTLY as the metric CLI does
     (canonical JSON + trailing newline). Returns ``(report, basis_yaml, report_path)``.
@@ -2429,6 +2433,20 @@ def _build_real_bias_report(tmp_path):
         probe_a_registration_sha256=probe_a_evidence.registration_sha256,
         probe_a_verification_sha256=probe_a_evidence.verification_sha256,
     )
+    # R1: the frozen Probe-A owner policy validates ``log_normalized_pseudobulk``, so the
+    # producer marks this raw-count measurement NOT_ADMISSIBLE and no consuming boundary
+    # will take it. ``admitted=True`` therefore hands the chain a SYNTHETIC DOCUMENT SHAPE:
+    # the numbers are the producer's real ones, and only the two admission fields are the
+    # ones the owner amendment (Task 2 amendment D) would produce. The current owner policy
+    # cannot produce an admitted raw report at all -- that is the point of R1, and
+    # ``admitted=False`` is the arm that proves it.
+    assert report["admission_status"] == NOT_ADMISSIBLE
+    if admitted:
+        report["admission_status"] = ADMITTED
+        report["provenance"]["probe_a_output_representation"] = REPRESENTATION
+        report["self_checksum"] = self_checksum(
+            {key: value for key, value in report.items() if key != "self_checksum"}
+        )
     report_path = tmp_path / "approximation_bias_report.json"
     # EXACTLY as measure_pseudobulk_approximation_bias.py::main writes it.
     canonical = json.dumps(report, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
@@ -2437,6 +2455,13 @@ def _build_real_bias_report(tmp_path):
 
 
 def test_metric_finalize_phase2b_roundtrip(tmp_path):
+    """metric -> finalize -> phase2b, on the real numbers.
+
+    The admission fields are a SYNTHETIC DOCUMENT SHAPE: the current owner policy cannot
+    produce an admitted raw-count report (R1), so the arm that proves what the producer
+    really emits today is
+    ``test_the_log_pass_report_this_fixture_really_produces_is_refused_by_the_finalizer``.
+    """
     # Build the REAL report + finalize the config leaf via the real tool.
     report, basis_yaml, report_path = _build_real_bias_report(tmp_path)
     gi = report["gi_and_fairness"]
@@ -2485,6 +2510,24 @@ def test_metric_finalize_phase2b_roundtrip(tmp_path):
     assert block["R_star"] == gi["R_star"]
 
 
+def test_the_log_pass_report_this_fixture_really_produces_is_refused_by_the_finalizer(tmp_path):
+    """R1 negative arm of the round-trip above.
+
+    Under the frozen Probe-A owner policy the producer writes a NOT_ADMISSIBLE report, and
+    the finalizer refuses it -- so the admitted document shape the round-trip uses is not
+    quietly standing in for something reachable today.
+    """
+    report, basis_yaml, report_path = _build_real_bias_report(tmp_path, admitted=False)
+
+    assert report["admission_status"] == NOT_ADMISSIBLE
+    assert report["provenance"]["probe_a_output_representation"] == PROBE_A_REPRESENTATION
+    finalize = _load_script_module(
+        "scripts/compose/finalize_approximation_bias_config.py", "_finalize_bias_config_e2e_neg"
+    )
+    with pytest.raises(ApproximationBiasValidationError, match="admission_status must be"):
+        finalize.finalize_bias_config(basis_config_path=basis_yaml, report_path=report_path)
+
+
 # Fail-closed unit coverage for the seal-critical loader's numeric/interval helpers +
 # loader-level branches (final-review Minor: these leak-barrier branches were only
 # reached by the round-trip happy path). The KEY assertion is that every malformed
@@ -2522,7 +2565,7 @@ def test_loader_fail_closed_branches(tmp_path):
     with pytest.raises(ApproximationBiasReportError, match="no immutable report"):
         _load_approximation_bias_fairness(report_sha256="a" * 64, report_evidence=None)
     # A report whose content SHA matches the pin but lacks the nested gi_and_fairness block.
-    nogi_bytes = b'{"schema":"compose_approximation_bias_report_v3"}\n'
+    nogi_bytes = b'{"schema":"compose_approximation_bias_report_v4"}\n'
     nogi_sha = sha256_bytes(nogi_bytes)
     with pytest.raises(ApproximationBiasReportError):
         _load_approximation_bias_fairness(

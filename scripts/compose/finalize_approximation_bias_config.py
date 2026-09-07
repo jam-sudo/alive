@@ -6,7 +6,7 @@ Task 6 of the COMPOSE approximation-bias v1 implementation plan
 design spec ``docs/superpowers/specs/2026-07-13-compose-approximation-bias-metric-design.md``
 §4 "one-way provenance"). Tasks 1-5 (``measure_pseudobulk_approximation_bias.py``) MEASURE
 the pseudobulk-approximation bias and write a
-``compose_approximation_bias_report_v3`` report bound to a bias-NULL basis
+``compose_approximation_bias_report_v4`` report bound to a bias-NULL basis
 config (``report["provenance"]["basis_config_sha256"]``). This tool does the
 opposite direction, exactly once: it binds that completed report's OWN
 content SHA into a copy of the basis config
@@ -58,6 +58,7 @@ from typing import Any
 import yaml
 
 from alive.compose.approximation_bias import (
+    REPRESENTATION,
     measurement_contract_sha256,
     validate_approximation_bias_report,
 )
@@ -172,7 +173,7 @@ def finalize_bias_config(*, basis_config_path: str | Path, report_path: str | Pa
     """Bind a completed approximation-bias report's content SHA into its basis config.
 
     Reads the bias-NULL YAML config at ``basis_config_path`` and the
-    ``compose_approximation_bias_report_v3`` JSON report at ``report_path``,
+    ``compose_approximation_bias_report_v4`` JSON report at ``report_path``,
     validates the report is genuinely bound to (and the basis is eligible
     for) this finalization, and returns a deep copy of the basis config with
     ONLY ``baselines.gears.approximation_bias_report_sha256`` set to the
@@ -210,7 +211,7 @@ def finalize_bias_config(*, basis_config_path: str | Path, report_path: str | Pa
     basis_config_path : str or Path
         Path to the bias-NULL Phase-2 YAML config.
     report_path : str or Path
-        Path to the completed ``compose_approximation_bias_report_v3`` JSON
+        Path to the completed ``compose_approximation_bias_report_v4`` JSON
         report.
 
     Returns
@@ -265,7 +266,10 @@ def finalize_bias_config(*, basis_config_path: str | Path, report_path: str | Pa
         expected_basis_config_sha256=basis_sha,
         expected_measurement_contract_sha256=measurement_contract_sha256(),
         expected_provenance={
-            "registered_seeds": list(basis.get("seeds", {}).get("registered_seeds", []))
+            "registered_seeds": list(basis.get("seeds", {}).get("registered_seeds", [])),
+            # R1: only a report whose Probe-A bridge validated THIS representation may be
+            # turned into a config leaf (design spec, "Probe-A candidate correction").
+            "probe_a_output_representation": REPRESENTATION,
         },
     )
 
@@ -302,7 +306,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--basis-config", required=True, type=Path, help="bias-NULL YAML config")
     parser.add_argument(
-        "--report", required=True, type=Path, help="completed approximation_bias_report_v3 JSON"
+        "--report", required=True, type=Path, help="completed approximation_bias_report_v4 JSON"
     )
     parser.add_argument("--out", required=True, type=Path, help="finalized config YAML output")
     args = parser.parse_args(argv)

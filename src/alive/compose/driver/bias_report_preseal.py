@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from alive.compose.approximation_bias import (
+    REPRESENTATION,
     ApproximationBiasEvidence,
     ApproximationBiasValidationError,
     basis_config_sha256_from_final_config,
@@ -172,5 +173,9 @@ def resolve_pinned_approximation_bias_evidence(
             "gene_order_sha256": projection["gene_order_sha256"],
             "pca_dim": len(projection["control_mean"]),
             "registered_seeds": list(config.registered_seeds),
+            # R1: an admitted report must declare that Probe A validated the very
+            # representation it measured. Redundant with the validator's own bridge
+            # check, deliberately: this boundary is the one that feeds the seal.
+            "probe_a_output_representation": REPRESENTATION,
         },
     )
