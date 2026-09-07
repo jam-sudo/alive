@@ -46,7 +46,12 @@
   `inference.simultaneous_coverage_claim` 과 `inference.sensitivity_band_inflation` 두 값이
   등록됐다(결정문 `docs/superpowers/2026-08-29-compose-pair-dependence-decision.md`).
   **하한이 `5fea3b9e…`에서 `0d207746…`로 올라갔을 뿐 여전히 하한이다** — blocker 여섯이
-  그대로라 task #14 의 재생성 지점은 아니다. 아래 2026-08-23 정정의 논리가 그대로 적용된다.
+  그대로라 task #14 의 재생성 지점은 아니다.
+  **[2026-09-07]** 이 digest 는 `a9dc9410…` 로 이동했다 — futility floor 등록(2026-09-07, F-A3,
+  오너 승인). `futility.measurability_ceiling_floor: 0.2` 가 config 에 등록되면서
+  `0d207746…` → `a9dc9410d1b7fe1580e179b1fa5f9f3756688e059247a6d63322edf642b44767` 로 옮겨졌다.
+  blocker 는 여전히 **여섯**이고 seal 은 UNOPENED 다 — 여전히 하한이지 목표가 아니다.
+  아래 2026-08-23 정정의 논리가 그대로 적용된다.
   CPA 의 bias null 은 blocker 가 **아니다**: 표현이 exact(`cell_raw_counts`)이고 로더는 exact
   `cell_*` 표현을 집합 키에 세지 않는다. readiness step 4의 순서가 그 null을
   채운 **뒤에** evidence를 재생성하도록 정한다. null을 채우면 digest가 또 움직인다.

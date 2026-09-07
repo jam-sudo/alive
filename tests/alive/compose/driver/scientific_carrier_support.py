@@ -318,15 +318,23 @@ def _build_activation_evidence(
                 block["rank"] = block["sym_dim"]
                 block["is_full_rank"] = True
         else:
-            from alive.compose.detectable_effect import DETECTABLE_EFFECT_ACTIVATION_SCHEMA
+            from alive.compose.detectable_effect import (
+                DETECTABLE_EFFECT_ACTIVATION_SCHEMA,
+                REGISTERED_PHASE1_CONFIG_SHA256,
+            )
 
             payload["schema"] = DETECTABLE_EFFECT_ACTIVATION_SCHEMA
             payload["split_seed"] = cfg.split_seed
             payload["calibration_fraction"] = 0.6
             payload["regime_pair_counts"] = pair_counts
             payload["regime_cells_per_pair"] = cells_per_pair
+            # The committed template predates the registered measurability floor and
+            # the Phase-1 digest move it caused (F-A3, 2026-09-07); synthetic READY
+            # evidence is re-pinned to the current lineage here.
+            payload["phase1_config_sha256"] = REGISTERED_PHASE1_CONFIG_SHA256
             report = payload["report"]
             report["measurability"]["n_calibration_pairs"] = pair_counts["combo_calibration"]
+            report["measurability"]["ceiling_floor"] = cfg.futility_measurability_ceiling_floor
             for role in ("sealed_double_unseen", "sealed_single_unseen"):
                 powered = pair_counts[role] >= 20 and cells_per_pair[role] >= 50
                 report["regimes"][role] = {

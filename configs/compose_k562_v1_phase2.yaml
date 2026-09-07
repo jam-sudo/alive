@@ -191,6 +191,7 @@ futility:                             # development-stage stop (§10); seal stay
   conditions: [dev_oof_delta_below_threshold, rank_condition_fail, measurability_fail]
   dev_oof_metric: paired_relative_error_reduction_vs_additive
   dev_oof_threshold: 0.0
+  measurability_ceiling_floor: 0.2      # split-half GI ceiling must exceed this or the run is futility-stopped (registered 2026-06-23 in plan, moved here 2026-09-07)
 
 seal:                                 # independent of TG-K562 (§6.3)
   artifacts_root: artifacts/compose

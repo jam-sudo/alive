@@ -118,9 +118,21 @@ def _activation_record_for_config(
         payload["git_sha"] = approved_git_sha
         payload["activation"] = "READY — synthetic unit-test evidence"
         if requirement == "regime_specific_detectable_effect_analysis":
-            from alive.compose.detectable_effect import DETECTABLE_EFFECT_ACTIVATION_SCHEMA
+            from alive.compose.detectable_effect import (
+                DETECTABLE_EFFECT_ACTIVATION_SCHEMA,
+                REGISTERED_PHASE1_CONFIG_SHA256,
+            )
 
             payload["schema"] = DETECTABLE_EFFECT_ACTIVATION_SCHEMA
+            # The committed report is a HISTORICAL snapshot (its own `activation`
+            # reads BLOCKED); it predates the registered measurability floor and the
+            # Phase-1 config digest move it caused (F-A3, 2026-09-07). Synthetic READY
+            # evidence is re-pinned to the current lineage here rather than by
+            # re-committing evidence, which the evidence README forbids.
+            payload["phase1_config_sha256"] = REGISTERED_PHASE1_CONFIG_SHA256
+            payload["report"]["measurability"]["ceiling_floor"] = (
+                cfg.futility_measurability_ceiling_floor
+            )
             payload["report"]["regimes"]["sealed_double_unseen"]["recommendation"] = (
                 "sealed_double_unseen adequately powered as headline"
             )
@@ -1257,3 +1269,35 @@ def test_default_call_is_scientific_mode_and_blocked():
     cfg = load_compose_phase2_config(CANON)
     with pytest.raises(ScientificModeError):
         assert_scientific_mode_allowed(cfg)
+
+
+def test_the_registered_measurability_ceiling_floor_is_loaded_from_the_config():
+    cfg = load_compose_phase2_config(CANON)
+    assert cfg.futility_measurability_ceiling_floor == 0.2
+
+
+@pytest.mark.parametrize(
+    ("bad", "expected"),
+    [
+        (True, "must be a finite number"),
+        ("0.2", "must be a finite number"),
+        (None, "must be a finite number"),
+        (float("nan"), "must be a finite number"),
+        (0.3, "must be 0.2"),
+    ],
+)
+def test_an_unregistered_measurability_ceiling_floor_is_refused(bad, expected):
+    # The message fragment is asserted, not just the key name: a bare
+    # ``match="measurability_ceiling_floor"`` also matches the closed-schema
+    # "unknown key" error and so passed BEFORE the key existed at all.
+    raw = _raw()
+    raw["futility"]["measurability_ceiling_floor"] = bad
+    with pytest.raises(Phase2ConfigError, match=f"measurability_ceiling_floor {expected}"):
+        load_compose_phase2_config_from_text(yaml.safe_dump(raw))
+
+
+def test_a_futility_block_without_the_measurability_floor_is_refused():
+    raw = _raw()
+    del raw["futility"]["measurability_ceiling_floor"]
+    with pytest.raises(Phase2ConfigError, match="measurability_ceiling_floor"):
+        load_compose_phase2_config_from_text(yaml.safe_dump(raw))

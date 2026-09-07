@@ -46,8 +46,17 @@ _HEADLINE_REGIME = SEALED_DOUBLE_UNSEEN_ROLE_NAME
 REGISTERED_MIN_PAIRS = 20
 REGISTERED_MIN_CELLS = 50
 REGISTERED_CALIBRATION_FRACTION = 0.6
-REGISTERED_PHASE1_CONFIG_SHA256 = "2e044e75d993f20cd693607d5778ef16621de1bb6e5347515dcb7120ae757b63"
-DETECTABLE_EFFECT_ACTIVATION_SCHEMA = "compose_regime_detectable_effect_report_v1"
+# Moved 2026-09-07 (F-A3): the Phase-1 config gained the registered
+# ``measurability_ceiling_floor``, so its canonical-JSON digest moved
+# ``2e044e75…`` -> ``732f43fe…``. Historical evidence generated under the old
+# Phase-1 config no longer validates, by design: the floor is part of the lineage.
+REGISTERED_PHASE1_CONFIG_SHA256 = "732f43fe0a51d50b66867d39d0f1512d7307f0126a3806e4353b8651219416c8"
+#: Bumped v1 -> v2 on 2026-09-07 (F-A3). The ``measurability`` block gained a
+#: required ``ceiling_floor``, so a v1 report is NOT a v2 report: the key set is
+#: closed and a v1 producer never wrote it. The lineage digests moved with it, so
+#: no v1 artifact could have validated anyway -- the version bump is what makes
+#: that visible on the artifact's own face instead of only in a digest mismatch.
+DETECTABLE_EFFECT_ACTIVATION_SCHEMA = "compose_regime_detectable_effect_report_v2"
 
 _ENVELOPE_KEYS = frozenset(
     {
@@ -77,7 +86,9 @@ _REPORT_KEYS = frozenset(
         "regimes",
     }
 )
-_MEASURABILITY_KEYS = frozenset({"ceiling", "passed", "recommendation", "n_calibration_pairs"})
+_MEASURABILITY_KEYS = frozenset(
+    {"ceiling", "ceiling_floor", "passed", "recommendation", "n_calibration_pairs"}
+)
 _EFFECT_SIZE_KEYS = frozenset(
     {"mean_pair_eps_l2", "median_pair_eps_l2", "split_half_noise_l2", "signal_to_noise"}
 )
@@ -130,6 +141,7 @@ def validate_regime_detectable_effect_activation_report(
     expected_split_seed: int,
     expected_data_sha256: str,
     expected_pair_counts: Mapping[str, int],
+    ceiling_floor: float,
 ) -> None:
     """Validate a READY detectable-effect artifact at the scientific boundary.
 
@@ -138,6 +150,13 @@ def validate_regime_detectable_effect_activation_report(
     that its statistical conclusion is internally consistent. Outcome-independent
     split counts are cross-checked against the independent rank report supplied
     by the caller.
+
+    ``ceiling_floor`` is the registered futility floor read from the config
+    (``futility.measurability_ceiling_floor``). It is keyword-only and has no
+    default: the boundary re-computes the measurability verdict against the
+    REGISTERED floor, and additionally requires the producer to have recorded the
+    same floor in the report, so a report generated under a different threshold is
+    refused rather than silently accepted (F-A3).
     """
     top = _require_exact_keys(envelope, _ENVELOPE_KEYS, "detectable-effect envelope")
     activation = top["activation"]
@@ -203,6 +222,14 @@ def validate_regime_detectable_effect_activation_report(
     ceiling = _finite_number(
         measurability["ceiling"], "measurability.ceiling", minimum=-1.0, maximum=1.0
     )
+    reported_floor = _finite_number(
+        measurability["ceiling_floor"], "measurability.ceiling_floor", minimum=-1.0, maximum=1.0
+    )
+    if reported_floor != float(ceiling_floor):
+        raise ValueError(
+            f"measurability.ceiling_floor {reported_floor} was generated under a floor "
+            f"other than the registered {float(ceiling_floor)}"
+        )
     n_calibration = _nonnegative_int(
         measurability["n_calibration_pairs"], "measurability.n_calibration_pairs"
     )
@@ -210,7 +237,7 @@ def validate_regime_detectable_effect_activation_report(
         raise ValueError("measurability calibration count does not match the split count")
     if type(measurability["passed"]) is not bool:  # noqa: E721 - reject int-as-bool
         raise ValueError("measurability.passed must be a boolean")
-    expected_measurable = ceiling > 0.2
+    expected_measurable = ceiling > ceiling_floor
     if measurability["passed"] is not expected_measurable:
         raise ValueError("measurability.passed is inconsistent with the registered floor")
     if not expected_measurable:
@@ -280,6 +307,7 @@ def compute_regime_detectable_effect_report(
     regime_cells_per_pair: Mapping[str, float],
     min_pairs: int,
     min_cells: int,
+    ceiling_floor: float,
 ) -> dict:
     """Assemble the measurability + per-regime power detectable-effect report.
 
@@ -299,6 +327,9 @@ def compute_regime_detectable_effect_report(
         (outcome-independent metadata; never an outcome).
     min_pairs, min_cells : int
         Pre-registered power-gate floors.
+    ceiling_floor : float
+        Registered split-half measurability floor (config
+        ``futility.measurability_ceiling_floor``). Keyword-only, no default.
 
     Returns
     -------
@@ -310,6 +341,7 @@ def compute_regime_detectable_effect_report(
         eps_split_a,
         eps_split_b,
         _role=CALIBRATION_ROLE_NAME,
+        ceiling_floor=ceiling_floor,
     )
 
     eps = np.asarray(eps_calibration, dtype=np.float64)
@@ -337,6 +369,7 @@ def compute_regime_detectable_effect_report(
         "deliverable": "regime_specific_detectable_effect_analysis",
         "measurability": {
             "ceiling": float(meas.detail["ceiling"]),
+            "ceiling_floor": float(meas.detail["ceiling_floor"]),
             "passed": bool(meas.passed),
             "recommendation": meas.recommendation,
             "n_calibration_pairs": int(eps.shape[0]) if eps.ndim == 2 else 0,

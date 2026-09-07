@@ -7,6 +7,7 @@ the registered calibration role.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 import numpy as np
@@ -61,6 +62,7 @@ def measurability_gate(
     eps_split_b: np.ndarray,
     *,
     _role: str,
+    ceiling_floor: float,
 ) -> GateResult:
     """Noise-ceiling via split-half agreement on calibration pairs only.
 
@@ -69,6 +71,13 @@ def measurability_gate(
     is defense in depth; the caller must still obtain the arrays through the
     typed development-only data boundary because an array has no intrinsic
     provenance that this numerical function could infer.
+
+    ``ceiling_floor`` is the pre-registered futility floor
+    (``futility.measurability_ceiling_floor`` in the Phase-2 config,
+    ``measurability_ceiling_floor`` in the Phase-1 config). It is keyword-only and
+    has NO default on purpose: a caller that fails to thread the registered value
+    must fail with ``TypeError`` rather than silently re-introduce a source
+    constant that no config could move (CLAUDE.md#invariants 1, #repo).
     """
     # This is a development-only operation, so an allowlist is safer than a
     # blacklist: legacy names, typos and future roles all fail closed.
@@ -77,12 +86,25 @@ def measurability_gate(
             "measurability gate accepts only the registered development role "
             f"{CALIBRATION_ROLE_NAME!r}; got {_role!r}"
         )
+    if (
+        isinstance(ceiling_floor, bool)
+        or not isinstance(ceiling_floor, (int, float))
+        or not math.isfinite(float(ceiling_floor))
+    ):
+        raise ValueError(f"ceiling_floor must be a finite number, got {ceiling_floor!r}")
+    if not -1.0 <= float(ceiling_floor) <= 1.0:
+        raise ValueError(
+            "ceiling_floor must lie in [-1, 1] (it is compared to a correlation), "
+            f"got {ceiling_floor!r}"
+        )
     a = np.asarray(eps_split_a, dtype=np.float64).ravel()
     b = np.asarray(eps_split_b, dtype=np.float64).ravel()
     a0, b0 = a - a.mean(), b - b.mean()
     denom = float(np.linalg.norm(a0) * np.linalg.norm(b0))
     ceiling = float(a0 @ b0 / denom) if denom > 1e-12 else 0.0
-    passed = ceiling > 0.2  # pre-registered floor: GI must rise above noise
+    # Registered floor (config ``futility.measurability_ceiling_floor``): GI must
+    # rise above noise. The threshold is an ARGUMENT, never a literal here.
+    passed = ceiling > ceiling_floor
     rec = (
         "GI signal measurable above noise floor"
         if passed
@@ -91,7 +113,7 @@ def measurability_gate(
     return GateResult(
         name="measurability",
         passed=passed,
-        detail={"ceiling": ceiling},
+        detail={"ceiling": ceiling, "ceiling_floor": float(ceiling_floor)},
         recommendation=rec,
     )
 

@@ -2,6 +2,8 @@
 # Ridge-lambda selection and an absolute false-GI tolerance are Phase-2 concerns:
 # Phase-1 identification hardcodes lam and the false-GI guard is a scale-relative
 # ratio margin (_FALSE_GI_RATIO_MARGIN in phase1.py), so no grid/tol is consumed here.
+# The measurability ceiling floor is NOT a source constant: it is registered below as
+# measurability_ceiling_floor and the gate reads it from here (F-A3, 2026-09-07).
 k_grid: [4, 8, 12]
 response_dim: 50
 synthetic_n_genes: 60
@@ -9,6 +11,7 @@ synthetic_rank: 3
 synthetic_noise_sd: [0.0, 0.05, 0.1, 0.2]
 min_double_unseen_pairs: 20      # power-gate floor (pre-registered)
 min_cells_per_pair: 50
+measurability_ceiling_floor: 0.2   # split-half ceiling floor; mirrors the Phase-2 registration
 calibration_fraction: 0.6
 recovery_rel_err_tol: 0.15       # noisy synthetic recovery acceptance
 registered_seeds: [11, 23, 37]

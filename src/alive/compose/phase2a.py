@@ -1509,6 +1509,7 @@ def _run_phase2a_core(
         eps_split_b=np.asarray(inputs.eps_split_b, dtype=float),
         dev_oof_threshold=cfg.dev_oof_threshold,
         measurability_role=CALIBRATION_ROLE_NAME,
+        measurability_ceiling_floor=cfg.futility_measurability_ceiling_floor,
         unregularized_oof_rank_policy=cfg.unregularized_oof_rank_policy,
         rank_tolerance_rule=cfg.rank_tolerance_rule,
         lambda_scaling=cfg.lambda_scaling,

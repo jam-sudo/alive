@@ -120,6 +120,10 @@ _EXPECTED_SHARED_RESAMPLES_ACROSS_CONTRASTS = True
 _EXPECTED_FAMILY_CONFIDENCE = 0.95
 _EXPECTED_BOOTSTRAP_REPLICATES = 10000
 _EXPECTED_ESM_MODEL = "esm2_t33_650M_UR50D_mean_pool"
+#: Registered split-half measurability floor (``futility.measurability_ceiling_floor``).
+#: The gate that consumes it lives in ``alive.compose.gates.measurability_gate``; this
+#: constant only pins the registered VALUE, it is never the gate's own threshold.
+_EXPECTED_MEASURABILITY_CEILING_FLOOR: float = 0.2
 _EXPECTED_INCLUDE_ESM: bool = True
 _EXPECTED_ESTABLISHED_POWER_STATUS = "established_from_registered_report"
 _BLOCKED_POWER_STATUS = "unestablished_activation_blocker"
@@ -353,7 +357,9 @@ _KNOWN_LEAKAGE_CONTROL = frozenset(
     {"baseline_training_roles", "sealed_outcomes_touched_before_freeze"}
 )
 _KNOWN_PHASING = frozenset({"phase_2a", "phase_2b"})
-_KNOWN_FUTILITY = frozenset({"conditions", "dev_oof_metric", "dev_oof_threshold"})
+_KNOWN_FUTILITY = frozenset(
+    {"conditions", "dev_oof_metric", "dev_oof_threshold", "measurability_ceiling_floor"}
+)
 _KNOWN_SEAL = frozenset(
     {"artifacts_root", "run_id_inputs", "sealed_access_max", "minimum_sealed_n", "write_once"}
 )
@@ -506,6 +512,7 @@ class ComposePhase2Config:
     futility_conditions: tuple[str, ...]
     dev_oof_metric: str
     dev_oof_threshold: float
+    futility_measurability_ceiling_floor: float
     config_sha256: str
 
     @property
@@ -762,9 +769,12 @@ def load_compose_phase2_config_from_text(text: str) -> ComposePhase2Config:
     ) = _validate_identification(_require(raw, "identification", "top-level"))
     split_seed, registered_seeds = _validate_seeds(_require(raw, "seeds", "top-level"))
     sealed_minimum_n = _validate_seal(_require(raw, "seal", "top-level"))
-    futility_conditions, dev_oof_metric, dev_oof_threshold = _validate_futility(
-        _require(raw, "futility", "top-level")
-    )
+    (
+        futility_conditions,
+        dev_oof_metric,
+        dev_oof_threshold,
+        measurability_ceiling_floor,
+    ) = _validate_futility(_require(raw, "futility", "top-level"))
     method_roster, baseline_representations, baseline_activation_statuses = _validate_baselines(
         _require(raw, "baselines", "top-level")
     )
@@ -841,6 +851,7 @@ def load_compose_phase2_config_from_text(text: str) -> ComposePhase2Config:
         futility_conditions=futility_conditions,
         dev_oof_metric=dev_oof_metric,
         dev_oof_threshold=dev_oof_threshold,
+        futility_measurability_ceiling_floor=measurability_ceiling_floor,
         config_sha256=sha256_json(raw),
     )
 
@@ -1158,8 +1169,16 @@ def _validate_seal(block: dict[str, Any]) -> int:
     return minimum_sealed_n
 
 
-def _validate_futility(block: dict[str, Any]) -> tuple[tuple[str, ...], str, float]:
-    """Validate and return the complete preregistered development futility rule."""
+def _validate_futility(block: dict[str, Any]) -> tuple[tuple[str, ...], str, float, float]:
+    """Validate and return the complete preregistered development futility rule.
+
+    Returns
+    -------
+    tuple
+        ``(conditions, dev_oof_metric, dev_oof_threshold, measurability_ceiling_floor)``.
+        The measurability floor is the registered threshold the ``measurability_fail``
+        condition is decided against; it lives here rather than in source (F-A3).
+    """
     _close_schema(block, _KNOWN_FUTILITY, "futility")
     raw_conditions = _require(block, "conditions", "futility")
     if not isinstance(raw_conditions, list) or not all(
@@ -1185,7 +1204,22 @@ def _validate_futility(block: dict[str, Any]) -> tuple[tuple[str, ...], str, flo
         raise Phase2ConfigError(
             f"futility.dev_oof_threshold must be {_EXPECTED_DEV_OOF_THRESHOLD}, got {threshold}"
         )
-    return conditions, metric, threshold
+    floor_raw = _require(block, "measurability_ceiling_floor", "futility")
+    if (
+        isinstance(floor_raw, bool)
+        or not isinstance(floor_raw, (int, float))
+        or not math.isfinite(float(floor_raw))
+    ):
+        raise Phase2ConfigError(
+            f"futility.measurability_ceiling_floor must be a finite number, got {floor_raw!r}"
+        )
+    measurability_ceiling_floor = float(floor_raw)
+    if measurability_ceiling_floor != _EXPECTED_MEASURABILITY_CEILING_FLOOR:
+        raise Phase2ConfigError(
+            "futility.measurability_ceiling_floor must be "
+            f"{_EXPECTED_MEASURABILITY_CEILING_FLOOR}, got {measurability_ceiling_floor}"
+        )
+    return conditions, metric, threshold, measurability_ceiling_floor
 
 
 def _validate_baselines(
@@ -1696,6 +1730,7 @@ def assert_scientific_mode_allowed(
                 expected_split_seed=config.split_seed,
                 expected_data_sha256=data_sha256,
                 expected_pair_counts=independent_pair_counts,
+                ceiling_floor=config.futility_measurability_ceiling_floor,
             )
         except ValueError as exc:
             raise ScientificModeError(

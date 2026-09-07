@@ -45,7 +45,7 @@ def test_measurability_gate_signal_vs_noise():
     base = rng.normal(size=(40, 5))
     a = base + 0.05 * rng.normal(size=(40, 5))
     b = base + 0.05 * rng.normal(size=(40, 5))
-    res = measurability_gate(a, b, _role=CALIBRATION_ROLE_NAME)
+    res = measurability_gate(a, b, _role=CALIBRATION_ROLE_NAME, ceiling_floor=0.2)
     assert res.passed and res.detail["ceiling"] > 0.5
 
 
@@ -55,7 +55,7 @@ def test_measurability_gate_refuses_sealed_array():
     # The guard is an honest-caller `_role` contract: it fires on the `_role` STRING
     # alone (not on any array property), refusing data the caller marks as sealed.
     with pytest.raises(LeakageError):
-        measurability_gate(sealed, sealed, _role="sealed_double_unseen")
+        measurability_gate(sealed, sealed, _role="sealed_double_unseen", ceiling_floor=0.2)
 
 
 @pytest.mark.parametrize(
@@ -74,13 +74,13 @@ def test_measurability_gate_refuses_every_non_calibration_role(role):
     rng = np.random.default_rng(2)
     sealed = rng.normal(size=(10, 5))
     with pytest.raises(LeakageError):
-        measurability_gate(sealed, sealed, _role=role)
+        measurability_gate(sealed, sealed, _role=role, ceiling_floor=0.2)
 
 
 def test_measurability_gate_requires_explicit_role():
     values = np.arange(5.0)
     with pytest.raises(TypeError):
-        measurability_gate(values, values)
+        measurability_gate(values, values, ceiling_floor=0.2)
 
 
 def test_sealed_role_constants_are_consistent_across_modules():
@@ -102,3 +102,28 @@ def test_sealed_role_constants_are_consistent_across_modules():
     )
     assert tuple(outcome_store._SEALED_ROLES) == SEALED_ROLE_NAMES
     assert CALIBRATION_ROLE_NAME not in outcome_store._SEALED_ROLES
+
+
+def test_the_measurability_floor_comes_from_the_config_not_from_the_source():
+    """F-A3: the registered floor must be an argument, so a config change moves it."""
+    rng = np.random.default_rng(0)
+    a = rng.normal(size=(40, 3))
+    b = a + 0.9 * rng.normal(size=(40, 3))  # split-half ceiling lands strictly between 0.2 and 0.9
+    lenient = measurability_gate(a, b, _role=CALIBRATION_ROLE_NAME, ceiling_floor=0.2)
+    strict = measurability_gate(a, b, _role=CALIBRATION_ROLE_NAME, ceiling_floor=0.9)
+    assert lenient.passed is True
+    assert strict.passed is False
+    assert lenient.detail["ceiling"] == strict.detail["ceiling"]
+
+
+def test_the_measurability_gate_refuses_to_run_without_a_registered_floor():
+    values = np.arange(12.0).reshape(4, 3)
+    with pytest.raises(TypeError):
+        measurability_gate(values, values, _role=CALIBRATION_ROLE_NAME)
+
+
+@pytest.mark.parametrize("bad", [True, "0.2", float("nan"), float("inf"), 1.5, -1.5])
+def test_the_measurability_floor_must_be_a_finite_number_in_the_correlation_range(bad):
+    values = np.arange(12.0).reshape(4, 3)
+    with pytest.raises(ValueError, match="ceiling_floor"):
+        measurability_gate(values, values, _role=CALIBRATION_ROLE_NAME, ceiling_floor=bad)

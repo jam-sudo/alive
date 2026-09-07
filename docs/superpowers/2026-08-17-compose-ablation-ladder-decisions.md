@@ -7,7 +7,8 @@
 >
 > **`config_sha256` HAS moved since this was drafted** — `3faacaff…` → `c25734d5…` (#6) →
 > `5fea3b9e…` (#7) → `0d207746…` (2026-08-29 pair-dependence decision; see
-> `2026-08-29-compose-pair-dependence-decision.md`). The unchanged-digest sentence in the original
+> `2026-08-29-compose-pair-dependence-decision.md`). 이 digest 는 `a9dc9410…` 로 이동했다 — futility
+> floor 등록(2026-09-07, F-A3, 오너 승인). The unchanged-digest sentence in the original
 > banner describes the document at drafting time, not the repository now. The banner as originally
 > written follows.
 >

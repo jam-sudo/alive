@@ -82,3 +82,13 @@ release: NO-GO (구현 대기 — Task 14)
 | D3 | ☑ a ☐ b ☐ c | 오너 (지시: "모두 권장사항으로 진행") | 2026-09-07 |
 | D4 | ☑ a ☐ b | 오너 (지시: "모두 권장사항으로 진행") | 2026-09-07 |
 | Amendment D / E / F / G | ☑ ☑ ☑ ☑ | 오너 (지시: "모두 권장사항으로 진행") | 2026-09-07 |
+
+## Task 5 digest 이동
+
+`config_sha256` `0d207746…` → `a9dc9410d1b7fe1580e179b1fa5f9f3756688e059247a6d63322edf642b44767` (Task 5, 2026-09-07, 오너 승인: "모두 권장사항으로 진행").
+
+futility measurability floor `0.2` 를 `futility.measurability_ceiling_floor` 로 등록한 결과다(F-A3).
+새 run identity이며 activation blocker 는 여전히 **여섯**, seal 은 **UNOPENED**, execution 은
+**RELEASE-BLOCKED** 다. Phase-1 config 에도 같은 값을 등록했기 때문에 source 에 고정돼 있던
+`REGISTERED_PHASE1_CONFIG_SHA256` 도 함께 `2e044e75…` → `732f43fe…` 로 이동했다 — 이 두 번째
+이동은 첫 번째의 기계적 결과이며 별도 선택이 아니다.

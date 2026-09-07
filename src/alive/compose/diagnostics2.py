@@ -180,6 +180,7 @@ def real_calibration_diagnostics(
     eps_split_b: np.ndarray,
     dev_oof_threshold: float = 0.0,
     measurability_role: str,
+    measurability_ceiling_floor: float,
     unregularized_oof_rank_policy: str,
     rank_tolerance_rule: str,
     lambda_scaling: str,
@@ -214,6 +215,12 @@ def real_calibration_diagnostics(
     measurability_role
         Explicit development role forwarded to the measurability gate. A sealed
         role raises :class:`~alive.compose.gates.LeakageError` (no sealed read).
+    measurability_ceiling_floor
+        Registered split-half measurability floor (config
+        ``futility.measurability_ceiling_floor``), forwarded unchanged to
+        :func:`~alive.compose.gates.measurability_gate`. Keyword-only with no
+        default so a caller that does not thread the registered value fails with
+        ``TypeError`` instead of falling back to a source constant (F-A3).
     unregularized_oof_rank_policy, rank_tolerance_rule
         Exact config-bound OOF estimator-domain policy forwarded to selection.
     condition_ceiling
@@ -244,7 +251,12 @@ def real_calibration_diagnostics(
     # 3 (run first so a sealed-role request fails fast before any compute):
     # split-half measurability with an EXPLICIT development role. The gate refuses
     # sealed roles, so a leakage attempt raises here (no sealed outcome is read).
-    measurability = measurability_gate(eps_split_a, eps_split_b, _role=measurability_role)
+    measurability = measurability_gate(
+        eps_split_a,
+        eps_split_b,
+        _role=measurability_role,
+        ceiling_floor=measurability_ceiling_floor,
+    )
 
     # 1: gene-disjoint OOF selection -> selected (k_total, lambda) + OOF theta.
     selection = select_hyperparams(

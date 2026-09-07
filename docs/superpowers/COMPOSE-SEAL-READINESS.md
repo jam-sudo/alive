@@ -8,7 +8,7 @@
 > **이 문서는 아무것도 정의하지 않는다** — 세부(task)는 plan, claim은 spec, exact param은 config,
 > 시간순 audit는 git이 authoritative다([sources of truth](../../CLAUDE.md#sources)). 상태 행이 authoritative
 > 문서와 어긋나면 **authoritative 문서가 옳다**; 이 인덱스를 갱신한다.
-> **Updated:** 2026-09-07 @ `13ba250` (branch `compose-factor-bank-normalization`)
+> **Updated:** 2026-09-07 @ `9442dbd` (branch `compose-factor-bank-normalization`)
 > `scripts/bump-readiness-stamp.sh` / the pre-commit hook from `HEAD` at commit time, so it names the
 > **parent** of the commit that carries it and can never name itself. Reading it as "one commit stale" is a
 > misreading; git is authoritative for when this file actually changed.
@@ -2456,6 +2456,43 @@ A's post-signature correction are to be re-signed in the owner's hand (§6.1; Co
 whether crash-left unbound sidecars stay fail-closed with manual cleanup or move to an atomic
 directory publish with failure injection (§6.3); and the go-ahead for deriving the sealed roster from
 the split manifest (seal-guard paths). Full suite on the committed tree: 3013 passed / 3 skipped / 0 failed (18m30s); this line's numbers were filled in after the run and are the only bytes that differ from it.
+
+**2026-09-07 — the futility measurability floor is registered in the config; `config_sha256` moves
+(F-A3, owner-approved).**
+
+The `measurability_fail` futility condition was pre-registered, but the threshold it is decided
+against — `0.2` — existed only in production source (`gates.py`, and a second, independent copy in
+`detectable_effect.py`'s activation-report recomputation). CLAUDE.md#invariants 1 and #repo forbid
+that: a registered threshold no config can move is not registered. It is now
+`futility.measurability_ceiling_floor: 0.2` in the Phase-2 config and `measurability_ceiling_floor:
+0.2` in the Phase-1 config, threaded to every consumer as a keyword-only argument with **no
+default**, so a caller that fails to pass the registered value raises `TypeError` rather than falling
+back to a literal.
+
+이 digest 는 `a9dc9410…` 로 이동했다 — futility floor 등록(2026-09-07, F-A3, 오너 승인).
+`config_sha256` `0d207746…` → `a9dc9410d1b7fe1580e179b1fa5f9f3756688e059247a6d63322edf642b44767`
+— a **new run identity**, re-derived by the loader. The config still carries **six** activation
+blockers (unchanged, re-measured by `test_activation_blocker_doc_contract`), so this remains a floor,
+not the target. Seal **UNOPENED**; sealed access count **0**; execution **RELEASE-BLOCKED**.
+
+**A second digest moved with it, and it is not the Phase-2 one.** The Phase-1 config's canonical-JSON
+digest is pinned in source as `REGISTERED_PHASE1_CONFIG_SHA256`, and registering the floor there moved
+it `2e044e75…` → `732f43fe…`. The committed historical evidence
+(`docs/activation-evidence/compose/real_norman_detectable_effect_report.json`, whose own `activation`
+reads BLOCKED) was already outside the current lineage and is **not** re-committed — the evidence
+README forbids post-generation evidence commits. Synthetic READY evidence in tests is re-pinned to the
+current lineage instead.
+
+**The activation-report schema moved with it.** The detectable-effect report's `measurability` block
+now carries the `ceiling_floor` it was generated under, and the boundary refuses a report whose floor
+is not the registered one — so a producer that used a different threshold is caught even when the
+pass/fail flag happens to agree. The key set is closed, so this is a contract change and the schema is
+`compose_regime_detectable_effect_report_v2`.
+
+**Duplicate enforcement, mutated separately.** `0.2` was enforced in two places. Each was mutated back
+to the literal in a sandbox copy, and each is killed by a test that makes the claim in its own name:
+`test_the_measurability_floor_comes_from_the_config_not_from_the_source` (gates) and
+`test_the_activation_validator_recomputes_against_the_registered_floor` (detectable-effect).
 
 ## 이 문서가 *아닌* 것 (중복 금지)
 

@@ -193,6 +193,7 @@ def run_phase1(config: ComposePhase1Config, *, gate_inputs: dict) -> Phase1Repor
         gate_inputs["eps_split_a"],
         gate_inputs["eps_split_b"],
         _role=CALIBRATION_ROLE_NAME,
+        ceiling_floor=config.measurability_ceiling_floor,
     )
     # The rank gate's RankReport is a SYNTHETIC PROXY, not a real Norman Phi rank:
     # Phase 1 has no Norman calibration design, so we forward only the boolean
