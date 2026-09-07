@@ -83,6 +83,21 @@ therefore does **not** validate the raw-count Jensen-floor formula below and doe
 The committed GEARS scientific config remains activation-blocked until a separate pre-seal amendment either
 adopts the candidate and revises this metric or supplies evidence for the existing raw representation.
 
+**Amendment D — the bridge representation is an enforced contract, not prose (2026-09-07, PROPOSED).**
+The correction above was prose only: nothing in the code compared `PROBE_A_REPRESENTATION` to the
+report's `method`, so a `log_normalized_pseudobulk` PASS produced an `admitted`
+`raw_pseudobulk_approximation` report whose SHA cleared the finalizer and removed one activation
+blocker. Reproduced independently by both audit harnesses and the coordinator on 2026-09-06.
+The report schema is therefore `compose_approximation_bias_report_v4` and carries
+`provenance.probe_a_output_representation`; `validate_bias_method_bridge` requires it to equal
+`method`, and both the producer (before any computation) and `validate_approximation_bias_report`
+call that one function, so every consumer inherits the check. **Until the owner adopts one
+representation on both sides — a separately signed raw bridge/equivalence evidence, or adoption of
+the log-normalized candidate with a revised metric, response projection and new known-answers —
+no raw-count report can be ADMITTED (and therefore finalized) at all — the producer still measures,
+but the report it writes is `NOT_ADMISSIBLE`**, which is the state `:82-84` already requires.
+v3 reports are not reused for activation.
+
 ---
 
 ## 2. The bias — representation floor (model-free) {#bias}
@@ -168,9 +183,15 @@ not a second post-hoc decision rule. Degenerate replicates with zero GI denomina
 
 ---
 
-## 4. Report schema `compose_approximation_bias_report_v3` {#report}
+## 4. Report schema `compose_approximation_bias_report_v4` {#report}
 
 A single JSON object whose SHA-256 fills `baselines.gears.approximation_bias_report_sha256`.
+
+**`admission_status` (top-level, exact on-disk casing is a contract).** The roster
+`ADMISSION_STATUSES = {"admitted", "NOT_ADMISSIBLE"}` (lower-case `admitted`; upper-case-with-underscore
+`NOT_ADMISSIBLE`, the design's own token from "Admission prerequisite" above) is the complete vocabulary;
+no other spelling or casing validates. Only `"admitted"` may fill
+`baselines.gears.approximation_bias_report_sha256` (Amendment D).
 
 **Per stratum** (`combo_calibration`, `singles`):
 - `n_pairs`
@@ -203,6 +224,9 @@ A single JSON object whose SHA-256 fills `baselines.gears.approximation_bias_rep
   `probe_a_evidence_manifest_sha256` (the independently reviewed manifest named inside Probe-A),
   `probe_a_registration_sha256` (exact owner-frozen registration bytes),
   `probe_a_verification_sha256` (exact independently anchored verifier-receipt bytes),
+  `probe_a_output_representation` (the validated Probe-A evidence's `output_bridge.representation`;
+  `validate_bias_method_bridge` requires this leaf to equal `method` whenever `admission_status` is
+  `admitted`),
   `sealed_pair_overlap_count` (must be `0`), `pod_instance`.
 - `self_checksum`: SHA-256 of the canonical JSON of every field above except `self_checksum`.
 
@@ -327,7 +351,7 @@ a synthetic frozen projection block (no `gears`, no Norman):
 - **MODIFY/REPLACE** the existing legacy
   `scripts/compose/measure_pseudobulk_approximation_bias.py` contract — it currently emits an earlier
   aggregate-only report and is **not** an implementation of this v1 schema. The upgraded pod measurement
-  reads non-sealed role cells + frozen projection block, emits `compose_approximation_bias_report_v3`, and
+  reads non-sealed role cells + frozen projection block, emits `compose_approximation_bias_report_v4`, and
   uses `cell_raw_counts` for the exact path. Pure library calls
   (`fit_role.apply_response_projection`); import-light so its contract is unit-tested locally.
 - **PUBLISH externally**
