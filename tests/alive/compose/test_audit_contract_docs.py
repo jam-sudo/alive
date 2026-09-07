@@ -28,3 +28,9 @@ def test_every_pending_decision_is_marked_no_go(head, next_head):
     assert "status:" in sec and "release:" in sec
     if "status: PENDING" in sec or "status: DEFER" in sec:
         assert "release: NO-GO" in sec
+
+
+def test_the_spec_primary_formula_is_the_registered_config_string():
+    text = _MAIN_SPEC.read_text(encoding="utf-8")
+    assert "(mean(error_comparator) - mean(error_l1)) / max(mean(error_comparator), 1e-12)" in text
+    assert r"1-\overline e_M/\max(\overline e_C,10^{-12})" not in text.replace(" ", "")
