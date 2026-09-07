@@ -120,6 +120,7 @@ _EXPECTED_SHARED_RESAMPLES_ACROSS_CONTRASTS = True
 _EXPECTED_FAMILY_CONFIDENCE = 0.95
 _EXPECTED_BOOTSTRAP_REPLICATES = 10000
 _EXPECTED_ESM_MODEL = "esm2_t33_650M_UR50D_mean_pool"
+_EXPECTED_INCLUDE_ESM: bool = True
 _EXPECTED_ESTABLISHED_POWER_STATUS = "established_from_registered_report"
 _BLOCKED_POWER_STATUS = "unestablished_activation_blocker"
 _EXPECTED_ROLE_NAMES: tuple[str, ...] = ROLE_NAMES
@@ -948,6 +949,13 @@ def _validate_factor_z(
     expression_dims = tuple(
         _strict_int(x, "factor_z.expression_dims entry") for x in expression_raw
     )
+    include_esm = _require(block, "include_esm", "factor_z")
+    if include_esm is not _EXPECTED_INCLUDE_ESM:
+        raise Phase2ConfigError(
+            f"factor_z.include_esm must be the registered boolean {_EXPECTED_INCLUDE_ESM}; "
+            f"got {include_esm!r}. No ESM-off arm is registered, so flipping this flag would "
+            "move the config digest without constructing an ablation"
+        )
     esm_model = _require(block, "esm_model", "factor_z")
     if esm_model != _EXPECTED_ESM_MODEL:
         raise Phase2ConfigError(

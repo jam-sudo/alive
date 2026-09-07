@@ -26,6 +26,7 @@ from alive.compose.config2 import (
     SecondaryMetricSpec,
     assert_scientific_mode_allowed,
     load_compose_phase2_config,
+    load_compose_phase2_config_from_text,
 )
 from alive.compose.identify import REGULARIZED_SOLVER
 from alive.compose.split import ROLE_NAMES
@@ -214,6 +215,18 @@ def test_unregistered_esm_model_is_rejected(tmp_path):
     raw["factor_z"]["esm_model"] = "esm2_t6_8M_UR50D_mean_pool"
     with pytest.raises(Phase2ConfigError, match="esm_model"):
         load_compose_phase2_config(_write(tmp_path, raw))
+
+
+@pytest.mark.parametrize("flag", [False, "not-a-boolean", 0, 1, None])
+def test_an_unregistered_include_esm_value_is_refused_instead_of_only_moving_the_digest(flag):
+    """C01: the flag was schema-known but value-unchecked; any value loaded and only the SHA moved.
+
+    No ESM-off arm is registered (decision D2), so only the registered value may load.
+    """
+    raw = _raw()
+    raw["factor_z"]["include_esm"] = flag
+    with pytest.raises(Phase2ConfigError, match="include_esm"):
+        load_compose_phase2_config_from_text(yaml.safe_dump(raw))
 
 
 def test_runtime_contract_values_are_exposed_and_hashed():
