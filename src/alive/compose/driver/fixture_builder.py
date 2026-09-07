@@ -628,7 +628,8 @@ def build_compose_fixture(tmp_root: Path) -> FixtureBundle:
         "raw_data_checksum": raw_or_source_digest,
         "sequence_mapping_checksum": sequence_mapping_digest,
     }
-    assert set(checksums) == set(EXPECTED_HASHES_KEYS)
+    if set(checksums) != set(EXPECTED_HASHES_KEYS):
+        raise ValueError("fixture key roster: expected hashes mismatch")
 
     # --- 4. Phase2aInputs (in memory) + serialized payload --------------------
     phase2a_inputs = _build_phase2a_inputs(
@@ -766,7 +767,8 @@ def build_compose_fixture(tmp_root: Path) -> FixtureBundle:
         "pair_index_manifest": pair_index_manifest_path,
         "approved_sealed_input_attestation": attestation_path,
     }
-    assert set(pre_seal_paths) == set(PRE_SEAL_PATH_FIELDS)
+    if set(pre_seal_paths) != set(PRE_SEAL_PATH_FIELDS):
+        raise ValueError("fixture key roster: pre-seal paths mismatch")
 
     # --- 8. worker files (stub bytes) -----------------------------------------
     workers_dir.mkdir(parents=True, exist_ok=True)

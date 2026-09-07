@@ -906,7 +906,10 @@ class ComposeOutcomeStore:
         return records
 
     def _write_audit_record(self, run_id: str, canon: list[PairID]) -> dict:
-        """Append an immutable audit record to the durable JSONL audit file.
+        """Publish an immutable audit record to the durable JSONL audit file.
+
+        Not an append: io.atomic_write_once publishes by os.link, which refuses an
+        existing destination (F-A6).
 
         Called by :meth:`claim_sealed_access` BEFORE materialisation so that a
         crash during data loading still consumes the access (fail-safe toward
