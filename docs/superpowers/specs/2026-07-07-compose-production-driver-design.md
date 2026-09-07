@@ -1,7 +1,7 @@
 # COMPOSE 단일 production driver (sub-project C) Design
 
 > **문서 역할:** dev-stage 구현·검증 계약 (scientific claim contract 아님)
-> **개정일:** 2026-07-19 (status sanitization; design unchanged)
+> **개정일:** 2026-09-07 (§5 adapter manifest 계약 개정; 그 외 design unchanged)
 > **상태:** IMPLEMENTED + MERGED (fixture orchestration and scientific PREPARE carrier). 이 문서의
 > NEEDS-IMPLEMENTATION/TODO 서술은 설계 당시 snapshot이며 current remaining blocker는 readiness row C가
 > 추적한다. Production sealed run은 계속 RELEASE-BLOCKED다.
@@ -479,8 +479,18 @@ value일 뿐 ground truth 자체가 아니다. Worker self-report가 이 lock에
 | `config_sha256` | 실제 worker-config bytes를 driver가 stream-hash | 로컬/pod |
 | `resource_sha256` | 실제 resource-manifest bytes를 driver가 stream-hash | 로컬/pod |
 
-현재 dependency manifest에는 `adapter_version`이 없으므로 sub-project B가 versioned adapter manifest를
-추가하기 전 scientific assembler는 fail-closed한다. `adapter_sha256`은 **launched `worker_script`가 아니라
+**adapter manifest 계약 (2026-09-07 개정).** `adapter_version`의 committed source는 phase-2 config와
+**분리된** 파일 `configs/compose_adapter_versions_v1.json`이다: exact schema `compose_adapter_versions_v1`,
+top-level key는 정확히 `{schema, methods}`, `methods` roster는 정확히 `{gears, cpa}`, 값은 non-empty string
+version이다. Assembler는 저장소 루트를 자기 모듈 위치에서 잡아(절대경로 hardcode 금지) 이 파일을
+node-kind 정책으로 stream-hash한 뒤 그 digest에 묶어 파싱한다(`preseal_read.read_verified_json` —
+hash와 parse 사이의 swap은 fail-closed). Unknown method·roster 불일치·schema 불일치·empty version·
+non-regular node·부재는 모두 `AssemblerError`다. Declared lock의 `adapter_version`은 **expectation**일 뿐이며
+manifest 값과 다르면 fail-closed한다 — worker self-report는 결코 source가 아니다. 이 manifest는 adapter의
+**API semantic identity**를 고정하며 model hyperparameter가 아니다. 별도 파일이므로 wiring이
+`config_sha256`을 움직이지 않는다. **여전히 열린 것:** 실제 pod-built `.pyz` worker의 self-reported
+`_ADAPTER_VERSION`이 manifest 값과 일치하는지는 **POD-GATED** parity 항목이며, synthetic fixture로 주장할 수
+없다(현재 scientific CLI는 이 비교에서 fail-closed한다). `adapter_sha256`은 **launched `worker_script`가 아니라
 별도 `adapter_artifact` bytes를 해시**한다: committed runtime(`baseline_subprocess.py`)은 lock의
 `adapter_sha256`을 worker self-report의 adapter identity(`stub_worker.py`의 `_ADAPTER_SHA256`)와 대조하고,
 launched `worker_script` 파일은 **별개 field `worker_sha256`으로** 재해시·검증한다 — 둘은 서로 다른 identity다.
@@ -647,9 +657,10 @@ release blocker는 상단의 readiness index가 추적한다.
    `run_id` mismatch가 fail-closed하는 negative test가 green이어야 한다.
 5. Fixture e2e와 별도로 scientific no-seal assembly test가 activation/provenance/D2 report wiring을 검증함.
 6. C의 로컬 gate에서는 **stub worker/config/resource/lock bytes**가 assembled lock과 일치하고, adapter
-   manifest 부재 시 scientific assembler가 fail-closed함을 검증한다. 실제 GEARS/CPA
-   worker/config/resource/requirements/adapter-manifest bytes와 lock 일치는 sub-project B가 versioned
-   adapter manifest를 ship한 뒤 pod에서 확립하는 항목이며 C의 로컬 완료 조건이 아니다.
+   manifest가 부재·malformed일 때 scientific assembler가 fail-closed함을 검증한다(2026-09-07: manifest가
+   committed되어 로컬 resolution은 green이며, 부재/malformed는 명시 negative로 보존된다). 실제 GEARS/CPA
+   worker/config/resource/requirements bytes와 lock 일치, 그리고 real `.pyz` worker의 self-reported
+   `_ADAPTER_VERSION`↔manifest parity는 pod에서 확립하는 항목이며 C의 로컬 완료 조건이 아니다.
 7. Exact 9-method roster는 freeze/scoring/descriptive summary까지 유지되고, verdict comparator family는 등록된
    5개와 정확히 일치함.
 8. 전체 pytest, Ruff check, Ruff format check, worker locked-env integration, science-dev/spec-review gate green.

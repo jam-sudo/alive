@@ -35,10 +35,19 @@ compares the lock's ``adapter_sha256`` against the worker's self-reported
 real worker. ``worker_script`` is still re-hashed here for its node-kind policy
 and declared-digest cross-check, but it feeds no lock field.
 
-``adapter_version`` has no committed versioned source yet (sub-project B ships
-it pod-side), so the **scientific** assembler fails closed. The **fixture**
-assembler uses the fixture-trusted value declared in the worker block (which
-mirrors the committed stub worker's ``_ADAPTER_VERSION``).
+``adapter_version`` is resolved from the committed, method-keyed manifest
+``configs/compose_adapter_versions_v1.json`` (schema
+``compose_adapter_versions_v1``, roster exactly ``{gears, cpa}``): the
+**scientific** assembler reads it out of the repository, requires the declared
+lock's ``adapter_version`` to equal the manifest's value for the method, and
+fails closed on an unknown method or a malformed / absent manifest. It is a
+separate committed file from the phase-2 config, so wiring it moves no
+``config_sha256``. The **fixture** assembler still uses the fixture-trusted
+value declared in the worker block (which mirrors the committed stub worker's
+``_ADAPTER_VERSION``). The manifest pins the adapter **API semantic identity**,
+not a model hyperparameter; agreement between it and a real pod-built ``.pyz``
+worker's self-reported ``_ADAPTER_VERSION`` remains a pod-side parity check
+performed by ``baseline_subprocess._verify_execution_manifest`` at predict time.
 
 Node-kind trust boundary (carry-forward from the Task-1 review): Task 1's loader
 applies only *lexical* containment to worker paths. This assembler is the sole
@@ -59,13 +68,14 @@ import hashlib
 import os
 import stat
 from pathlib import Path
-from typing import Mapping
+from typing import Any, Mapping
 
 from alive.compose.baseline_subprocess import (
     PREDICTION_REPRESENTATIONS,
     ExecutionIdentityLock,
     SubprocessBaselineBackend,
 )
+from alive.compose.driver.preseal_read import read_verified_json
 from alive.compose.driver.run_spec import (
     EXECUTION_IDENTITY_LOCK_KEYS,
     ResolvedRunSpec,
@@ -86,11 +96,21 @@ __all__ = [
 #: constant fixed by the ``COMPOSE-K562-v1`` protocol).
 DEEP_BASELINE_METHODS: frozenset[str] = frozenset({"gears", "cpa"})
 
-#: The committed, versioned adapter manifest that would pin each method's
-#: ``adapter_version``. Sub-project B ships it pod-side; until then it is
-#: ``None`` and the scientific assembler fails closed — there is no trusted
-#: committed source for the version (spec §5).
-_COMMITTED_ADAPTER_MANIFEST: Path | None = None
+#: Repository root, resolved from this module's own location (the pattern
+#: ``driver/fixture_builder.py`` already uses for ``scripts/baselines/``); never a
+#: caller-supplied or hardcoded absolute path.
+_REPO_ROOT = Path(__file__).resolve().parents[4]
+
+#: The committed, versioned adapter manifest that pins each method's
+#: ``adapter_version``. A SEPARATE committed file from the phase-2 config, so it
+#: carries its own identity and moves no ``config_sha256`` (spec §5).
+_COMMITTED_ADAPTER_MANIFEST: Path = _REPO_ROOT / "configs" / "compose_adapter_versions_v1.json"
+
+#: The exact schema string the committed adapter manifest must declare.
+_ADAPTER_MANIFEST_SCHEMA = "compose_adapter_versions_v1"
+
+#: The exact top-level key set the committed adapter manifest must carry.
+_ADAPTER_MANIFEST_KEYS = frozenset({"schema", "methods"})
 
 _HASH_CHUNK = 1 << 20
 
@@ -101,8 +121,9 @@ class AssemblerError(ValueError):
     Subclasses :class:`ValueError`. Raised for an unregistered / mismatched
     prediction representation, a declared digest that diverges from the actual
     re-hashed worker bytes, a worker file that violates the node-kind policy, an
-    absent committed adapter manifest in scientific mode, or a subprocess method
-    roster that is not exactly ``{'gears', 'cpa'}``.
+    absent / malformed committed adapter manifest (or a declared
+    ``adapter_version`` that diverges from it) in scientific mode, or a
+    subprocess method roster that is not exactly ``{'gears', 'cpa'}``.
     """
 
 
@@ -111,7 +132,7 @@ class AssemblerError(ValueError):
 # --------------------------------------------------------------------------- #
 
 
-def _hash_regular_file(path: str, *, field: str) -> str:
+def _hash_regular_file(path: str, *, field: str, noun: str = "worker file") -> str:
     """Stream the SHA-256 of a *regular* file, failing closed on non-regular nodes.
 
     The Task-1 loader validated only lexical containment of worker paths, so this
@@ -129,6 +150,10 @@ def _hash_regular_file(path: str, *, field: str) -> str:
         Absolute path to the worker file to hash.
     field : str
         Human-readable field name (for diagnostics).
+    noun : str, optional
+        What the file is, for diagnostics only. Defaults to ``"worker file"``;
+        the committed adapter-manifest lane passes its own noun so its
+        fail-closed messages name what actually failed.
 
     Returns
     -------
@@ -142,29 +167,27 @@ def _hash_regular_file(path: str, *, field: str) -> str:
         symlink / device / FIFO / non-regular node, or cannot be read.
     """
     if not isinstance(path, str) or not os.path.isabs(path):
-        raise AssemblerError(f"{field}: worker file path must be absolute: {path!r}")
+        raise AssemblerError(f"{field}: {noun} path must be absolute: {path!r}")
     if ".." in Path(path).parts:
-        raise AssemblerError(f"{field}: worker file path must not contain '..': {path}")
+        raise AssemblerError(f"{field}: {noun} path must not contain '..': {path}")
     try:
         pre = os.lstat(path)
     except OSError as exc:
-        raise AssemblerError(f"{field}: cannot stat worker file {path}: {exc}") from exc
+        raise AssemblerError(f"{field}: cannot stat {noun} {path}: {exc}") from exc
     if stat.S_ISLNK(pre.st_mode):
-        raise AssemblerError(f"{field}: worker file is a symlink (node-kind policy): {path}")
+        raise AssemblerError(f"{field}: {noun} is a symlink (node-kind policy): {path}")
     if not stat.S_ISREG(pre.st_mode):
-        raise AssemblerError(
-            f"{field}: worker file is not a regular file (node-kind policy): {path}"
-        )
+        raise AssemblerError(f"{field}: {noun} is not a regular file (node-kind policy): {path}")
     flags = os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0)
     try:
         fd = os.open(path, flags)
     except OSError as exc:
-        raise AssemblerError(f"{field}: cannot open worker file {path}: {exc}") from exc
+        raise AssemblerError(f"{field}: cannot open {noun} {path}: {exc}") from exc
     try:
         post = os.fstat(fd)
         if not stat.S_ISREG(post.st_mode):
             raise AssemblerError(
-                f"{field}: worker file is not a regular file (node-kind policy): {path}"
+                f"{field}: {noun} is not a regular file (node-kind policy): {path}"
             )
         digest = hashlib.sha256()
         while True:
@@ -177,11 +200,25 @@ def _hash_regular_file(path: str, *, field: str) -> str:
     return digest.hexdigest()
 
 
-def _require_equal(declared: str, actual: str, *, field: str) -> None:
-    """Fail closed unless a declared (expected) digest equals the actual re-hash."""
+def _require_equal(
+    declared: str,
+    actual: str,
+    *,
+    field: str,
+    subject: str = "digest",
+    source: str = "actual worker bytes",
+) -> None:
+    """Fail closed unless a declared (expected) value equals the controller-resolved one.
+
+    The defaults reproduce the digest lane's message verbatim. The
+    ``adapter_version`` lane compares a semantic version string against the
+    committed manifest rather than against a re-hash, so it overrides both nouns:
+    an accurate message is part of failing closed legibly, and a second near-copy
+    of this helper is exactly the duplication this repository keeps paying for.
+    """
     if declared != actual:
         raise AssemblerError(
-            f"{field}: declared digest diverges from actual worker bytes "
+            f"{field}: declared {subject} diverges from {source} "
             f"(declared={declared!r} actual={actual!r})"
         )
 
@@ -205,24 +242,106 @@ def _fixture_adapter_version(declared_lock: Mapping[str, str]) -> str:
     return version
 
 
-def _scientific_adapter_version() -> str:
-    """Fail closed: no committed versioned adapter manifest exists yet (§5).
+def _read_committed_adapter_manifest() -> dict[str, Any]:
+    """Read the committed adapter manifest, binding the parsed bytes to their digest.
 
-    Sub-project B must ship a committed versioned adapter manifest before a
-    scientific ExecutionIdentityLock can be assembled. Until
-    :data:`_COMMITTED_ADAPTER_MANIFEST` is wired, ``adapter_version`` has no
-    trusted committed source and the scientific assembler refuses to proceed.
+    The file is hashed with this module's node-kind-safe streamer (so a symlink /
+    device / FIFO / absent manifest fails closed exactly as a worker file does),
+    and the parse then goes through
+    :func:`~alive.compose.driver.preseal_read.read_verified_json` against that
+    digest. That is deliberate rather than ceremonial: a plain re-open would let a
+    swap between the hash and the parse go unnoticed, which is the defect shape
+    ``preseal_read`` exists to close. Here it means the object returned is parsed
+    from the same bytes that were hashed, or nothing is returned at all.
+
+    Returns
+    -------
+    dict
+        The parsed manifest object (not yet validated).
+
+    Raises
+    ------
+    AssemblerError
+        If the manifest is absent, a non-regular node, unreadable, changed between
+        the hash and the parse, or is not a JSON object.
     """
-    if _COMMITTED_ADAPTER_MANIFEST is None:
-        raise AssemblerError(
-            "scientific ExecutionIdentityLock cannot be assembled: no committed "
-            "versioned adapter manifest exists yet (sub-project B must ship it); "
-            "adapter_version has no trusted committed source"
-        )
-    # When sub-project B ships the manifest, resolve + verify the version here.
-    raise AssemblerError(  # pragma: no cover - unreachable until the manifest is wired
-        "scientific adapter_version resolution is not implemented"
+    path = _COMMITTED_ADAPTER_MANIFEST
+    digest = _hash_regular_file(
+        str(path), field="adapter_manifest", noun="committed adapter manifest"
     )
+    try:
+        return read_verified_json(path, digest, field="adapter_manifest")
+    except ValueError as exc:  # PresealBytesError (swap / non-object) or a JSON error
+        raise AssemblerError(
+            f"adapter_manifest: committed adapter manifest {path} is unusable: {exc}"
+        ) from exc
+
+
+def _scientific_adapter_version(method: str) -> str:
+    """Resolve a method's ``adapter_version`` from the committed adapter manifest (§5).
+
+    The scientific ``adapter_version`` has exactly one trusted source: the
+    committed, method-keyed manifest at :data:`_COMMITTED_ADAPTER_MANIFEST`. The
+    worker's own self-report is never that source — it is the thing being checked
+    (module docstring; the runtime compares it to this lock at predict time).
+
+    The manifest must declare schema ``compose_adapter_versions_v1``, carry
+    exactly the top-level keys ``{schema, methods}``, and key its ``methods``
+    roster to exactly :data:`DEEP_BASELINE_METHODS` with non-empty string values.
+    The roster is required *exactly* — an extra method would let an unregistered
+    worker acquire a committed identity, and a missing one would let a method run
+    with no pinned adapter API at all.
+
+    Parameters
+    ----------
+    method : str
+        The registered deep-baseline method name (``"gears"`` / ``"cpa"``).
+
+    Returns
+    -------
+    str
+        The manifest's ``adapter_version`` for ``method``.
+
+    Raises
+    ------
+    AssemblerError
+        If ``method`` is not a non-empty string or is not a method the manifest
+        registers, or if the manifest is absent / malformed in any way.
+    """
+    if not isinstance(method, str) or not method:
+        raise AssemblerError("adapter_manifest: a scientific lock must name its method")
+    manifest = _read_committed_adapter_manifest()
+    if set(manifest) != set(_ADAPTER_MANIFEST_KEYS):
+        raise AssemblerError(
+            "adapter_manifest: committed adapter manifest must carry exactly "
+            f"{{'methods', 'schema'}}; got {sorted(manifest)}"
+        )
+    if manifest["schema"] != _ADAPTER_MANIFEST_SCHEMA:
+        raise AssemblerError(
+            f"adapter_manifest: schema must be {_ADAPTER_MANIFEST_SCHEMA!r}; "
+            f"got {manifest['schema']!r}"
+        )
+    methods = manifest["methods"]
+    if not isinstance(methods, dict):
+        raise AssemblerError("adapter_manifest: 'methods' must be a JSON object")
+    if set(methods) != set(DEEP_BASELINE_METHODS):
+        raise AssemblerError(
+            "adapter_manifest: the manifest method roster must be exactly "
+            f"{{'cpa', 'gears'}}; got {sorted(methods)}"
+        )
+    for name in sorted(methods):
+        version = methods[name]
+        if not isinstance(version, str) or not version:
+            raise AssemblerError(
+                f"adapter_manifest: adapter_version for method {name!r} must be a "
+                f"non-empty string; got {version!r}"
+            )
+    if method not in methods:
+        raise AssemblerError(
+            f"adapter_manifest: the committed adapter manifest registers no method "
+            f"{method!r} (registered: {sorted(methods)})"
+        )
+    return str(methods[method])
 
 
 # --------------------------------------------------------------------------- #
@@ -256,12 +375,12 @@ def assemble_execution_identity_lock(
         must equal the block's declared ``prediction_representation``.
     fixture : bool
         ``True`` for the fixture path (``adapter_version`` from the fixture-trusted
-        worker block); ``False`` for the scientific path (fails closed — no
-        committed versioned adapter manifest).
+        worker block); ``False`` for the scientific path (``adapter_version`` from
+        the committed method manifest, cross-checked against the declaration).
     expected_worker_method : str, optional
         Registered method name used to validate a scientific execution bundle's
-        internal manifest. Required for scientific mode; ignored for a direct
-        fixture ``.py`` worker.
+        internal manifest and to key the committed adapter manifest. Required for
+        scientific mode; ignored for a direct fixture ``.py`` worker.
 
     Returns
     -------
@@ -273,7 +392,9 @@ def assemble_execution_identity_lock(
     AssemblerError
         On an unregistered / mismatched representation, a declared-vs-actual
         digest divergence, a node-kind violation on any worker file, or (in
-        scientific mode) the absent committed adapter manifest.
+        scientific mode) an absent / malformed committed adapter manifest, an
+        unregistered method, or a declared ``adapter_version`` that diverges from
+        the manifest.
     """
     if not isinstance(worker_block, WorkerBlock):
         raise AssemblerError("worker_block must be a WorkerBlock instance")
@@ -354,10 +475,21 @@ def assemble_execution_identity_lock(
     _require_equal(declared["environment_lock_sha256"], actual_env, field="environment_lock_sha256")
 
     # 5. adapter_version -----------------------------------------------------
+    # Scientific mode has already required ``expected_worker_method`` to be a
+    # member of DEEP_BASELINE_METHODS above, so the manifest lookup is always
+    # keyed by a named method; the declared value is an *expectation* that must
+    # agree with the committed manifest, never the source of it.
     if fixture:
         adapter_version = _fixture_adapter_version(declared)
     else:
-        adapter_version = _scientific_adapter_version()
+        adapter_version = _scientific_adapter_version(expected_worker_method)
+        _require_equal(
+            declared["adapter_version"],
+            adapter_version,
+            field="adapter_version",
+            subject="version",
+            source="the committed adapter manifest",
+        )
 
     return ExecutionIdentityLock(
         prediction_representation=config_representation,

@@ -14,6 +14,7 @@ Real files + real objects, no mocks (RED -> GREEN).
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import sys
 from dataclasses import replace
@@ -25,6 +26,7 @@ from alive.compose.baseline_subprocess import (
     ExecutionIdentityLock,
     SubprocessBaselineBackend,
 )
+from alive.compose.driver import identity_lock as identity_lock_module
 from alive.compose.driver.identity_lock import (
     DEEP_BASELINE_METHODS,
     AssemblerError,
@@ -56,6 +58,9 @@ _CONFIG_BYTES = b"stub-config"
 _RESOURCE_BYTES = b"stub-resource"
 _ENV_BYTES = b"stub-environment"
 _ADAPTER_VERSION = "stub-2"
+# The versions the COMMITTED manifest registers (configs/compose_adapter_versions_v1.json).
+_GEARS_ADAPTER_VERSION = "compose-gears-adapter-v1"
+_CPA_ADAPTER_VERSION = "compose-cpa-adapter-v1"
 _GEARS_REPRESENTATION = "raw_pseudobulk_approximation"
 _CPA_REPRESENTATION = "cell_raw_counts"
 
@@ -308,8 +313,19 @@ def test_scientific_fails_closed_on_adapter_version(tmp_path: Path) -> None:
         )
 
 
-def _scientific_bundle_block(tmp_path: Path, *, bundle_method: str) -> WorkerBlock:
-    block = _worker_block(tmp_path)
+def _scientific_bundle_block(
+    tmp_path: Path,
+    *,
+    bundle_method: str,
+    adapter_version: str = _GEARS_ADAPTER_VERSION,
+) -> WorkerBlock:
+    """A scientific worker block: a real ``.pyz`` bundle + a declared adapter_version.
+
+    The declared version defaults to the value the COMMITTED manifest registers
+    for ``gears`` — a scientific lock only assembles when the declaration agrees
+    with the manifest.
+    """
+    block = _worker_block(tmp_path, adapter_version=adapter_version)
     repo = Path(__file__).resolve().parents[4]
     bundle = build_worker_bundle(
         source_root=repo,
@@ -323,15 +339,178 @@ def _scientific_bundle_block(tmp_path: Path, *, bundle_method: str) -> WorkerBlo
     )
 
 
-def test_scientific_bundle_reaches_missing_adapter_manifest_gate(tmp_path: Path) -> None:
+def _write_manifest(tmp: Path, payload: object, *, name: str = "adapter_versions.json") -> Path:
+    """Write a candidate adapter manifest; a ``str`` payload is written verbatim."""
+    path = tmp / name
+    text = payload if isinstance(payload, str) else json.dumps(payload)
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+def test_the_committed_adapter_manifest_is_the_repository_configs_file() -> None:
+    """The manifest is located from the module, never from a hardcoded absolute path."""
+    repo = Path(__file__).resolve().parents[4]
+    assert identity_lock_module._COMMITTED_ADAPTER_MANIFEST == (
+        repo / "configs" / "compose_adapter_versions_v1.json"
+    )
+    assert identity_lock_module._COMMITTED_ADAPTER_MANIFEST.is_file()
+
+
+def test_adapter_manifest_roster_must_be_exactly_gears_and_cpa(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An extra OR a missing method fails closed even when the asked-for method resolves.
+
+    Both manifests below would happily answer ``"gears"`` if the roster were not
+    required exactly, so this test measures the roster check and nothing else.
+    """
+    for payload in (
+        {
+            "schema": "compose_adapter_versions_v1",
+            "methods": {
+                "gears": _GEARS_ADAPTER_VERSION,
+                "cpa": _CPA_ADAPTER_VERSION,
+                "stub": "stub-2",
+            },
+        },
+        {
+            "schema": "compose_adapter_versions_v1",
+            "methods": {"gears": _GEARS_ADAPTER_VERSION},
+        },
+    ):
+        manifest = _write_manifest(tmp_path, payload, name=f"{len(payload['methods'])}.json")
+        monkeypatch.setattr(
+            identity_lock_module, "_COMMITTED_ADAPTER_MANIFEST", manifest, raising=True
+        )
+        with pytest.raises(AssemblerError, match="roster must be exactly"):
+            identity_lock_module._scientific_adapter_version("gears")
+
+
+@pytest.mark.parametrize(
+    ("case", "payload"),
+    [
+        (
+            "wrong_schema",
+            {
+                "schema": "compose_adapter_versions_v2",
+                "methods": {"gears": _GEARS_ADAPTER_VERSION, "cpa": _CPA_ADAPTER_VERSION},
+            },
+        ),
+        (
+            "extra_top_level_key",
+            {
+                "schema": "compose_adapter_versions_v1",
+                "methods": {"gears": _GEARS_ADAPTER_VERSION, "cpa": _CPA_ADAPTER_VERSION},
+                "note": "not part of the schema",
+            },
+        ),
+        (
+            "missing_top_level_key",
+            {"methods": {"gears": _GEARS_ADAPTER_VERSION, "cpa": _CPA_ADAPTER_VERSION}},
+        ),
+        (
+            "empty_version",
+            {
+                "schema": "compose_adapter_versions_v1",
+                "methods": {"gears": "", "cpa": _CPA_ADAPTER_VERSION},
+            },
+        ),
+        (
+            "non_string_version",
+            {
+                "schema": "compose_adapter_versions_v1",
+                "methods": {"gears": 1, "cpa": _CPA_ADAPTER_VERSION},
+            },
+        ),
+        (
+            "methods_not_an_object",
+            {"schema": "compose_adapter_versions_v1", "methods": ["gears", "cpa"]},
+        ),
+        ("not_a_json_object", "[1, 2, 3]"),
+        ("not_json_at_all", "{schema: compose_adapter_versions_v1"),
+    ],
+)
+def test_malformed_adapter_manifest_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str, payload: object
+) -> None:
+    manifest = _write_manifest(tmp_path, payload, name=f"{case}.json")
+    monkeypatch.setattr(identity_lock_module, "_COMMITTED_ADAPTER_MANIFEST", manifest, raising=True)
+    with pytest.raises(AssemblerError):
+        identity_lock_module._scientific_adapter_version("gears")
+
+
+def test_scientific_assembly_fails_closed_when_the_committed_manifest_is_absent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The pre-manifest fail-closed behaviour is preserved as an explicit negative."""
     block = _scientific_bundle_block(tmp_path, bundle_method="gears")
-    with pytest.raises(AssemblerError, match="committed versioned adapter manifest"):
+    monkeypatch.setattr(
+        identity_lock_module,
+        "_COMMITTED_ADAPTER_MANIFEST",
+        tmp_path / "no-such-adapter-manifest.json",
+        raising=True,
+    )
+    with pytest.raises(AssemblerError, match="committed adapter manifest"):
         assemble_execution_identity_lock(
             block,
             config_representation=_GEARS_REPRESENTATION,
             fixture=False,
             expected_worker_method="gears",
         )
+
+
+def test_non_regular_adapter_manifest_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A symlinked manifest fails the same node-kind policy the worker files face."""
+    real = _write_manifest(
+        tmp_path,
+        {
+            "schema": "compose_adapter_versions_v1",
+            "methods": {"gears": _GEARS_ADAPTER_VERSION, "cpa": _CPA_ADAPTER_VERSION},
+        },
+    )
+    link = tmp_path / "linked_manifest.json"
+    link.symlink_to(real)
+    monkeypatch.setattr(identity_lock_module, "_COMMITTED_ADAPTER_MANIFEST", link, raising=True)
+    with pytest.raises(AssemblerError, match="node-kind policy"):
+        identity_lock_module._scientific_adapter_version("gears")
+
+
+def test_scientific_bundle_assembles_adapter_version_from_the_committed_manifest(
+    tmp_path: Path,
+) -> None:
+    """The scientific lock now ASSEMBLES: the code-level adapter blocker is closed."""
+    block = _scientific_bundle_block(tmp_path, bundle_method="gears")
+    lock = assemble_execution_identity_lock(
+        block,
+        config_representation=_GEARS_REPRESENTATION,
+        fixture=False,
+        expected_worker_method="gears",
+    )
+    assert lock.adapter_version == _GEARS_ADAPTER_VERSION
+    assert lock.adapter_sha256 == _h(_ADAPTER_BYTES)
+
+
+def test_scientific_declared_adapter_version_mismatch_fails_closed(tmp_path: Path) -> None:
+    """The manifest is the source; the declaration is only an expectation."""
+    block = _scientific_bundle_block(tmp_path, bundle_method="gears", adapter_version="stub-2")
+    with pytest.raises(AssemblerError, match="adapter_version: declared version diverges"):
+        assemble_execution_identity_lock(
+            block,
+            config_representation=_GEARS_REPRESENTATION,
+            fixture=False,
+            expected_worker_method="gears",
+        )
+
+
+def test_the_scientific_adapter_version_comes_from_the_committed_method_manifest() -> None:
+    from alive.compose.driver.identity_lock import _scientific_adapter_version
+
+    assert _scientific_adapter_version("gears") == "compose-gears-adapter-v1"
+    assert _scientific_adapter_version("cpa") == "compose-cpa-adapter-v1"
+    with pytest.raises(AssemblerError, match="method"):
+        _scientific_adapter_version("stub")
 
 
 def test_scientific_bundle_method_mismatch_fails_closed(tmp_path: Path) -> None:

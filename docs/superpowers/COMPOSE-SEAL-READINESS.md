@@ -8,7 +8,7 @@
 > **이 문서는 아무것도 정의하지 않는다** — 세부(task)는 plan, claim은 spec, exact param은 config,
 > 시간순 audit는 git이 authoritative다([sources of truth](../../CLAUDE.md#sources)). 상태 행이 authoritative
 > 문서와 어긋나면 **authoritative 문서가 옳다**; 이 인덱스를 갱신한다.
-> **Updated:** 2026-09-07 @ `9442dbd` (branch `compose-factor-bank-normalization`)
+> **Updated:** 2026-09-07 @ `f1172e8` (branch `compose-factor-bank-normalization`)
 > `scripts/bump-readiness-stamp.sh` / the pre-commit hook from `HEAD` at commit time, so it names the
 > **parent** of the commit that carries it and can never name itself. Reading it as "one commit stale" is a
 > misreading; git is authoritative for when this file actually changed.
@@ -37,7 +37,7 @@
 | D1 | durable-publish + non-circular provenance | ✅ merged | `specs/2026-07-05-compose-durable-ledger-design.md`; `plans/2026-07-06-compose-durable-ledger-d1.md` |
 | D2 | development seed-variability (Task 1–6) | ✅ merged | `plans/2026-07-06-compose-durable-ledger-d2.md` |
 | C0 | seal-critical library fixes (7) | ✅ merged (via C merge `1c46708`) | `plans/2026-07-07-compose-c0-library-fixes.md` |
-| C | 단일 production driver | ✅ **fixture orchestration merged** (merge commit `1c46708`, 2026-07-09) — T1–T14 완료; whole-branch 2-lens 리뷰(seal-safety + correctness) → Important 2건 fix(phase2b step-5 post-seal raise → exit 30 `6761428`; 미연결 pre-seal pair-index/attestation validator를 preflight에 연결 `4deee1a`); driver 211 / compose 1106 green. **Scientific PREPARE carrier = ✅ 구현 완료 + 리뷰 통과 → main 병합** (branch `compose-scientific-prepare-carrier` @ `a777ea2`): `load_run_spec_carrier`의 `mode="scientific"` 경로를 sub-project-B 경계까지 구현 — discriminated `RunSpecCarrier`(mode+6 scientific fields, `__post_init__` 검증), trusted-repo-root git identity(`resolve_scientific_runtime_context`, no caller-asserted clean; 정확한 HEAD==`approved_git_sha` + clean tree + config 사전등록 seed roster를 `EnvironmentInfo`에 기록), lexical sealed-input attestation equality(source 미개봉), typed `ActivationProvenanceInputs`. **B 경계 fail-closed**: 전체 CLI 조립이 `assemble_execution_identity_lock`의 미커밋 scientific `adapter_version`에서 정지(run 산출물 0·store 0·seal 0). 리뷰 = 10-task subagent-driven(per-task spec+quality + 최종 opus whole-branch Ready-to-merge=YES) + owner 증분(registered_seeds provenance) 세션 리뷰(0 Critical/0 Important; Minor 1건 §5 assembly-order doc-fix 반영). full `tests/alive/compose` **1347 green**, ruff clean. **B-blocked, seal-ready 아님** — §7 release blocker 잔존(B versioned `adapter_version`+real worker; pod PREPARE real Norman evidence; GU roster `full_var_order_sha256`↔response `gene_order_sha256`를 ResolvedRunSpec/execution-identity에 bind; clean-SHA 독립리뷰 + evidence 재생성). **seal 안 열림** | `specs/2026-07-11-compose-scientific-prepare-carrier-design.md`; `plans/2026-07-12-compose-scientific-prepare-carrier.md`; `specs/2026-07-07-compose-production-driver-design.md` |
+| C | 단일 production driver | ✅ **fixture orchestration merged** (merge commit `1c46708`, 2026-07-09) — T1–T14 완료; whole-branch 2-lens 리뷰(seal-safety + correctness) → Important 2건 fix(phase2b step-5 post-seal raise → exit 30 `6761428`; 미연결 pre-seal pair-index/attestation validator를 preflight에 연결 `4deee1a`); driver 211 / compose 1106 green. **Scientific PREPARE carrier = ✅ 구현 완료 + 리뷰 통과 → main 병합** (branch `compose-scientific-prepare-carrier` @ `a777ea2`): `load_run_spec_carrier`의 `mode="scientific"` 경로를 sub-project-B 경계까지 구현 — discriminated `RunSpecCarrier`(mode+6 scientific fields, `__post_init__` 검증), trusted-repo-root git identity(`resolve_scientific_runtime_context`, no caller-asserted clean; 정확한 HEAD==`approved_git_sha` + clean tree + config 사전등록 seed roster를 `EnvironmentInfo`에 기록), lexical sealed-input attestation equality(source 미개봉), typed `ActivationProvenanceInputs`. **B 경계 fail-closed**: 전체 CLI 조립이 `assemble_execution_identity_lock`의 scientific `adapter_version`에서 정지(run 산출물 0·store 0·seal 0). **2026-09-07 — 이 경계의 로컬 절반이 닫혔다**: `adapter_version`은 committed method manifest `configs/compose_adapter_versions_v1.json`에서 해석되고(schema/roster/non-empty 강제, digest-bound read), declared 값과 다르면 fail-closed한다. 남은 절반은 real pod-built `.pyz` worker의 self-reported `_ADAPTER_VERSION`↔manifest parity로 **POD-GATED**이며, scientific CLI는 지금 정확히 그 비교에서 정지한다(exit 10, 산출물 0·seal 0). 리뷰 = 10-task subagent-driven(per-task spec+quality + 최종 opus whole-branch Ready-to-merge=YES) + owner 증분(registered_seeds provenance) 세션 리뷰(0 Critical/0 Important; Minor 1건 §5 assembly-order doc-fix 반영). full `tests/alive/compose` **1347 green**, ruff clean. **B-blocked, seal-ready 아님** — §7 release blocker 잔존(B real `.pyz` worker parity — committed manifest는 landed(2026-09-07), real-worker parity는 POD-GATED; pod PREPARE real Norman evidence; GU roster `full_var_order_sha256`↔response `gene_order_sha256`를 ResolvedRunSpec/execution-identity에 bind; clean-SHA 독립리뷰 + evidence 재생성). **seal 안 열림** | `specs/2026-07-11-compose-scientific-prepare-carrier-design.md`; `plans/2026-07-12-compose-scientific-prepare-carrier.md`; `specs/2026-07-07-compose-production-driver-design.md` |
 | GU | outcome-free GEARS gene-roster generator (full response universe 보존 · M-first · exact `N_target` · alias · fail-closed) | ✅ **PASS — exact-committed-SHA 독립 리뷰 통과 → main 병합** — 커밋된 SHA `7f6595f`(branch `compose-gene-universe`, 4 commits off `68001fc`)를 **3개 독립 adversarial lens**(seal-safety/leakage/governance · correctness/logic · spec/test-adequacy)로 리뷰 → **0 Critical / 0 Important**. 유일한 non-APPROVE는 Minor 5건(전부 방어 분기의 test-adequacy이며 런타임 동작은 세 리뷰어가 확인); 4건은 guard별 negative test 추가로 종결(구현 `src/`·`scripts/`는 리뷰 SHA와 byte-identical, test 파일만 추가), 5번째(identity-alias)는 `:144` chain/cycle guard에 subsumed된 unreachable로 문서화. full compose suite green. verifier output(3개 리뷰 보고서 verbatim)+승격 근거는 committed audit `audits/2026-07-11-compose-gu-exact-sha-independent-review.md`; 이전 3회 working-tree 리뷰(`audits/2026-07-11-compose-gu-local-adversarial-review.md`, INVALIDATED)를 대체. **seal 안 열림.** | `specs/2026-07-11-compose-gene-universe-design.md`; `audits/2026-07-11-compose-gu-exact-sha-independent-review.md`; `runbooks/2026-07-11-compose-gears-decision-probe-rerun.md` |
 | — | **pod sealed confirmatory run (opens seal once)** | ⛔ blocked — **development pod 선행 필요**(§2.2 real worker + §4 evidence 재생성 + §2.5 gate). C/C0/A/D 완료 | `runbooks/2026-07-02-compose-k562-pod-sealed-run.md` |
 
@@ -2493,6 +2493,42 @@ pass/fail flag happens to agree. The key set is closed, so this is a contract ch
 to the literal in a sandbox copy, and each is killed by a test that makes the claim in its own name:
 `test_the_measurability_floor_comes_from_the_config_not_from_the_source` (gates) and
 `test_the_activation_validator_recomputes_against_the_registered_floor` (detectable-effect).
+
+**2026-09-07 — the scientific `adapter_version` is assembled from a committed method manifest; the
+code-level (7th) release blocker's local half is closed.**
+
+`driver/identity_lock.py:_scientific_adapter_version()` took no argument and ended in
+`raise AssemblerError(  # pragma: no cover - unreachable until the manifest is wired`. That was a
+**code-level** blocker distinct from the six config blockers: no scientific `ExecutionIdentityLock`
+could be assembled at all, whatever the config said. It now resolves the version from the committed,
+method-keyed manifest `configs/compose_adapter_versions_v1.json` (schema `compose_adapter_versions_v1`,
+top-level keys exactly `{schema, methods}`, roster exactly `{gears, cpa}`, non-empty string versions).
+The manifest path is derived from the module's own location, hashed under the same node-kind policy the
+worker files face, and parsed **bound to that digest** (`preseal_read.read_verified_json`), so a swap
+between the hash and the parse fails closed rather than being parsed unnoticed. The declared lock's
+`adapter_version` is an expectation only: it must equal the manifest value or assembly fails closed.
+The manifest is a SEPARATE committed file from the phase-2 config, so `config_sha256` did not move —
+measured `a9dc9410…` before and after. Owner approval for the version strings
+(`compose-gears-adapter-v1` / `compose-cpa-adapter-v1`, adapter **API semantic identity**, not model
+hyperparameters) was granted 2026-09-07 ("모두 권장사항으로 진행").
+
+**The boundary moved; it did not open.** The full scientific CLI still exits 10 with zero run
+artifacts, zero store, zero seal — one step later than before. It now stops on the declared-vs-manifest
+`adapter_version` comparison, because the synthetic carrier fixture declares the stub worker's
+`stub-2`. Closing that last step requires a **real pod-built `.pyz` worker** whose self-reported
+`_ADAPTER_VERSION` matches the manifest, which no local fixture can assert: **POD-GATED**.
+`tests/alive/compose/driver/test_scientific_cli_b_boundary.py` was rewritten to assert the new stopping
+point rather than the old message. This task unlocks no other release gate.
+
+**Two mutations, each killed by the test whose own name makes the claim.** In a sandbox copy
+(`$SB/src` + `$SB/configs`, `PYTHONPATH=$SB/src`; the control run showed exactly one expected failure,
+`test_the_committed_adapter_manifest_is_the_repository_configs_file`, which is itself the evidence that
+the path is module-relative and not hardcoded): (1) returning the *declared* value instead of the
+manifest value → `test_scientific_declared_adapter_version_mismatch_fails_closed` DID NOT RAISE (and
+`test_scientific_assembly_fails_closed_when_the_committed_manifest_is_absent` with it, since the mutant
+never reads the manifest); (2) dropping the roster-exactness check → only
+`test_adapter_manifest_roster_must_be_exactly_gears_and_cpa` newly failed, so that check is the sole
+enforcer of the roster claim.
 
 ## 이 문서가 *아닌* 것 (중복 금지)
 
