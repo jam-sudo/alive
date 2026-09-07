@@ -263,7 +263,10 @@ def _read_committed_adapter_manifest() -> dict[str, Any]:
     ------
     AssemblerError
         If the manifest is absent, a non-regular node, unreadable, changed between
-        the hash and the parse, or is not a JSON object.
+        the hash and the parse, or is not a JSON object. Both opens are covered:
+        the hash raises ``AssemblerError`` directly, and the digest-bound re-read's
+        ``OSError``/``ValueError`` are converted, so no other exception type leaves
+        this function.
     """
     path = _COMMITTED_ADAPTER_MANIFEST
     digest = _hash_regular_file(
@@ -271,7 +274,12 @@ def _read_committed_adapter_manifest() -> dict[str, Any]:
     )
     try:
         return read_verified_json(path, digest, field="adapter_manifest")
-    except ValueError as exc:  # PresealBytesError (swap / non-object) or a JSON error
+    except (OSError, ValueError) as exc:
+        # ValueError: PresealBytesError (the bytes changed / not a JSON object) or a
+        # JSONDecodeError. OSError: the digest-bound read is a SECOND open
+        # (``Path(path).read_bytes()``), so the manifest can vanish or become
+        # unreadable in the window after the hash — that must not escape this
+        # module's single fail-closed error type either.
         raise AssemblerError(
             f"adapter_manifest: committed adapter manifest {path} is unusable: {exc}"
         ) from exc

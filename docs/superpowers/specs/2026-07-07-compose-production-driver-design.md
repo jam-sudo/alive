@@ -488,9 +488,13 @@ hash와 parse 사이의 swap은 fail-closed). Unknown method·roster 불일치·
 non-regular node·부재는 모두 `AssemblerError`다. Declared lock의 `adapter_version`은 **expectation**일 뿐이며
 manifest 값과 다르면 fail-closed한다 — worker self-report는 결코 source가 아니다. 이 manifest는 adapter의
 **API semantic identity**를 고정하며 model hyperparameter가 아니다. 별도 파일이므로 wiring이
-`config_sha256`을 움직이지 않는다. **여전히 열린 것:** 실제 pod-built `.pyz` worker의 self-reported
-`_ADAPTER_VERSION`이 manifest 값과 일치하는지는 **POD-GATED** parity 항목이며, synthetic fixture로 주장할 수
-없다(현재 scientific CLI는 이 비교에서 fail-closed한다). `adapter_sha256`은 **launched `worker_script`가 아니라
+`config_sha256`을 움직이지 않는다. **정지점은 두 단계다 — 섞지 않는다.** (1) **지금(assembly)**: synthetic
+scientific CLI는 assembler의 declared↔manifest 비교에서 정지한다 — carrier fixture가 선언한 stub worker의
+`stub-2`가 manifest 값과 다르기 때문이며, exit 10·run 산출물 0·store 0·seal UNOPENED다. 로컬 테스트가
+증명하는 것은 이 **declared** 불일치뿐이다. (2) **POD-GATED(runtime)**: real pod-built `.pyz` worker의
+**self-reported** `_ADAPTER_VERSION`이 manifest 값과 일치하는지는 predict 시점에
+`baseline_subprocess._verify_execution_manifest`가 수행하는 **더 나중 검사**이며 **아직 도달하지 않았다**;
+synthetic fixture로 주장할 수 없다. `adapter_sha256`은 **launched `worker_script`가 아니라
 별도 `adapter_artifact` bytes를 해시**한다: committed runtime(`baseline_subprocess.py`)은 lock의
 `adapter_sha256`을 worker self-report의 adapter identity(`stub_worker.py`의 `_ADAPTER_SHA256`)와 대조하고,
 launched `worker_script` 파일은 **별개 field `worker_sha256`으로** 재해시·검증한다 — 둘은 서로 다른 identity다.

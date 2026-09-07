@@ -439,6 +439,27 @@ def test_malformed_adapter_manifest_fails_closed(
         identity_lock_module._scientific_adapter_version("gears")
 
 
+@pytest.mark.parametrize("error", [FileNotFoundError(2, "gone"), PermissionError(13, "denied")])
+def test_an_os_error_on_the_manifest_re_read_is_an_assembler_error(
+    monkeypatch: pytest.MonkeyPatch, error: OSError
+) -> None:
+    """The digest-bound re-read is a SECOND open, and it can fail on its own.
+
+    ``_hash_regular_file`` wraps the first open's OS errors, but
+    ``read_verified_json`` calls ``Path(path).read_bytes()`` — if the manifest
+    disappears or becomes unreadable between the hash and the re-read, a raw
+    ``OSError`` would escape the assembler's single fail-closed error type. The
+    window is real precisely because there are two opens.
+    """
+
+    def _boom(*_args: object, **_kwargs: object) -> dict[str, object]:
+        raise error
+
+    monkeypatch.setattr(identity_lock_module, "read_verified_json", _boom, raising=True)
+    with pytest.raises(AssemblerError, match="is unusable"):
+        identity_lock_module._scientific_adapter_version("gears")
+
+
 def test_scientific_assembly_fails_closed_when_the_committed_manifest_is_absent(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
