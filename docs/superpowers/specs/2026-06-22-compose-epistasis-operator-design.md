@@ -514,6 +514,12 @@ $\sigma_{\max}$는 새 통계량이 아니다 — 이미 등록된 rank toleranc
 비교 불가능해진다. `lambda = 0.0`은 정확히 `0.0`으로 남으므로 등록된 unregularized rank policy와 조건수
 ceiling은 영향을 받지 않으며, $\mathrm{cond}$와 rank도 불변이므로 등록된 ceiling의 의미도 그대로다.
 
+**[HISTORICAL — 결정 #7 이전의 검토.]** 아래는 bank를 정규화하지 않고 penalty 쪽에 적용한 이유의 기록이다. 현행
+등록은 config `identification.factor_bank_normalization: sigma_max_z_unit`
+(`configs/compose_k562_v1_phase2.yaml:102`)이며 §3.1의 2026-08-21 amendment(결정 #7 재서명본) 문단이 현재
+계약이다 — bank는 split에 의존하지 않는 $\sigma_{\max}(Z)$로 정규화된다. penalty 쪽 scaling
+(`identification.lambda_scaling`)은 그대로 등록돼 있다.
+
 factor bank를 $\sqrt{\sigma_{\max}}$로 rescale하는 것과 1 ulp 이내로 **동치**임을 측정했으나, penalty
 쪽에 적용한다. bank를 정규화하면 bank artifact가 split에 의존하게 되어 encoder lineage와 split lineage가
 섞이고, runtime factor row를 checksum된 bank artifact에 byte 단위로 결속하는 provenance guard를
@@ -569,7 +575,12 @@ $(3.03\times10^{12},\ 5.17,\ 7.13)$으로 fold 0만 11.7 order 떨어져 있다.
 factor가 실효 조건수를 묶으므로 비정칙 조건수로 거부하면 실제 solve가 멀쩡한 후보를 버리게 된다. 등록된
 `unregularized_oof_rank_policy`가 `lam == 0.0`에만 적용되는 것과 같은 경계다.
 
-> **한계 (2026-08-07 독립 리뷰).** 이 보호의 크기는 factor bank의 scale에 의존하며, 그 scale은 어떤 config
+> **[HISTORICAL — 결정 #7(2026-08-21 재서명본) 이후 무효.] 한계 (2026-08-07 독립 리뷰).** 이 문단이 기술하는
+> 상태(bank scale을 어떤 config field도 묶지 않음)는 결정 #7이 채택한
+> `identification.factor_bank_normalization: sigma_max_z_unit`으로 **종료됐다**. 아래 측정치는 그 결정의
+> 근거로 보존한다.
+>
+> 이 보호의 크기는 factor bank의 scale에 의존하며, 그 scale은 어떤 config
 > field도 묶지 않는다. $\Phi$는 $z$에 대해 bilinear이므로 $z\to cz$이면 $\Phi\to c^{2}\Phi$이고,
 > `solve_ridge_svd`는 penalty를 raw $\Phi$에 걸므로 실효 penalty는 $\lambda/c^{4}$가 된다. 반면
 > $\mathrm{cond}(\Phi)$는 uniform rescale에 불변이고(이 문서가 위에서 detector 성질로 등록한 바로 그
@@ -726,3 +737,17 @@ descriptor로 고정되고 소비 후 재검증되는 sealed source가 함께 �
 있지 않았다(실측). 배치는 서명문서의 §10.5가 아니라 access count를 정의하는 이 §10.6으로 옮겼고,
 "보증한다"는 transient 잔여가 열려 있는 동안 참이 아니어서 "설계돼 있다 … 조건부"로 정정했다.
 근거: `docs/superpowers/2026-08-30-compose-spec-10-5-amendments.md`.]**
+
+---
+
+## 부록 H — historical 문단 색인 (2026-09-07)
+
+이 spec은 as-built 문서이므로 폐기된 분석을 지우지 않고 격리한다. 아래 문단은 **현행 계약이 아니다**.
+위치는 2026-09-07 기준이며 앞의 인용 문구가 정본 anchor다. 각 문단은 그 자리에서도 **HISTORICAL** 표시를
+달고 있으며, 이 색인은 표시를 대신하지 않고 모아 보여줄 뿐이다.
+
+| 위치 | 무엇이 폐기됐나 | 대체한 것 |
+|---|---|---|
+| §10.4 "factor bank를 $\sqrt{\sigma_{\max}}$로 rescale" 문단(`:523-526`) | "bank를 정규화하면 bank artifact가 split에 의존" — penalty 쪽 적용 선택의 근거 | 결정 #7 `identification.factor_bank_normalization: sigma_max_z_unit`(§3.1의 2026-08-21 amendment) |
+| §10.4 "한계 (2026-08-07 독립 리뷰)" 인용블록(`:578-612`) | "그 scale은 어떤 config field도 묶지 않는다" | 같은 결정 |
+| §10.5 metric 식 | $1-\overline e_M/\max(\overline e_C,\epsilon)$ | 수정안 E (2026-09-07, Task 3) |
