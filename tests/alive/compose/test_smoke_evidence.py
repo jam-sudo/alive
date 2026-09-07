@@ -91,6 +91,31 @@ def test_sealed_pairs_are_canonicalised_to_the_artifact_s_token_form(tmp_path):
     assert roster["sealed_pair_ids"] == ["AAA_BBB"]
 
 
+def test_the_sealed_token_form_follows_the_artifact_s_combo_separator(tmp_path):
+    """`combo_sep` is not decoration: both rosters must be spelled with the artifact's own.
+
+    The 2026-09-06 review asked for a mutation the three roster tests survive and
+    named two. Byte-order vs code-point order is an equivalent mutant (UTF-8
+    preserves code-point order; 0 disagreements over 200k random pairs). Ignoring
+    `combo_sep` is not: with the default `"_"` in every test, a builder that
+    hard-coded the underscore passed all of them. An artifact written with `"+"`
+    must yield `AAA+BBB` on the sealed side and `CEBPE+KLF1` on the training side,
+    or the two rosters are in different alphabets and their intersection is empty
+    for the wrong reason.
+    """
+    artifact = write_tiny_fit_role_artifact(tmp_path / "fit_role_artifact.h5ad", combo_sep="+")
+    roster, record = build_smoke_pair_roster(
+        backend="gears",
+        fit_role_artifact=artifact.to_payload_block(),
+        approved_root=tmp_path,
+        sealed_pair_ids=TINY_SEALED_PAIRS,
+        combo_sep="+",
+    )
+    assert roster["sealed_pair_ids"] == ["AAA+BBB"]
+    assert "CEBPE+KLF1" in roster["training_pair_ids"]
+    assert record["sealed_pair_overlap_count"] == 0
+
+
 def test_a_sealed_combo_row_in_the_artifact_is_reported_not_laundered(tmp_path):
     """Task 0.1's named acceptance condition: one sealed pair in training refuses.
 

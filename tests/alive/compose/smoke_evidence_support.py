@@ -56,7 +56,11 @@ _ARTIFACT_NAMES = (
 
 
 def write_tiny_fit_role_artifact(
-    path: Path, *, with_sealed_row: bool = False, without_combo_rows: bool = False
+    path: Path,
+    *,
+    with_sealed_row: bool = False,
+    without_combo_rows: bool = False,
+    combo_sep: str = "_",
 ) -> FitRoleArtifactSpec:
     """Write a real (tiny) fit-role ``.h5ad`` at ``path`` and return its spec.
 
@@ -70,15 +74,27 @@ def write_tiny_fit_role_artifact(
         extractor = _extractor(
             obs_source_row_id=[f"r{i}" for i in range(6)],
             obs_perturbation=["control", "KLF1", "CEBPE", "AAA", "BBB", "KLF1"],
+            combo_sep=combo_sep,
         )
     else:
-        extractor = _extractor()
+        extractor = _extractor(
+            obs_perturbation=[
+                "control",
+                "KLF1",
+                "CEBPE",
+                f"CEBPE{combo_sep}KLF1",
+                "AAA",
+                "BBB",
+                f"AAA{combo_sep}BBB",
+            ],
+            combo_sep=combo_sep,
+        )
     extraction = extract_fit_roles(extractor=extractor)
     if with_sealed_row:
         import numpy as np
         from scipy import sparse
 
-        leaked = ("r9", "combo_calibration", "AAA_BBB")
+        leaked = ("r9", "combo_calibration", f"AAA{combo_sep}BBB")
         extra = sparse.csr_matrix(np.ones((1, extraction.X.shape[1])))
         counts = dict(extraction.role_counts)
         counts["combo_calibration"] += 1
