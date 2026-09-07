@@ -21,6 +21,11 @@ release: GO-LOCAL (Task 11, 2026-09-07 — spec §3.3 수정안 F)
 spec `:522-528` "적용 범위(비주장)" 과 `test_lambda_scaling.py::test_the_final_fit_scales_the_headline_operator_and_leaves_the_baseline_alone` 가
 고정한다. 새로 측정된 것은 그 **크기가 spec §3.3 질문의 부호를 정한다**는 점이다. 순수 architecture 효과로 해석하지 않는다.
 
+**[2026-09-07 Task 11 정정 — 수치는 그대로, 구성 라벨만 정확히.]** 위 40/40 ↔ 0/40 은 **gene-disjoint** 구성(z-universe 73 genes · calibration 44 genes · 41 cal pairs · sealed 22 pairs over 21 genes; σmax(Φ)²=0.0145,
+유효 penalty 비 ≈69×)의 값이며 출처는 `artifacts/audit-debate-2026-09-06/response-A.md` §1.1 이다 — Task 11 은 이것을
+재측정하지 않았다. Task 11 이 재측정한 것은 감사 A `audit-A-claude.md` §5.2 의 **비-gene-disjoint** 37 genes / 41 cal /
+22 held-out 구성(σmax(Φ)²=0.0452, ≈22×)이고, 거기서도 λ=0.1 의 부호는 40/40 ↔ 0/40 으로 뒤집힌다.
+
 ## D2 — ESM ID-null
 status: SIGNED: b — 오너 지시 2026-09-07 "모두 권장사항으로 진행"
 release: NO-GO (구현 대기 — Task 12)

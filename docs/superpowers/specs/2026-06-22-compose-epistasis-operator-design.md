@@ -261,8 +261,9 @@ known-answer recovery(§3.4)를 함께 보고한다.
 
 **[수정안 F — 2026-09-07, SIGNED by owner instruction "모두 권장사항으로 진행" — EFFECTIVE Task 11, claim 상한.]** L1↔L0(additive) 대비는 **confirmatory** 로 남는다. L1↔L2 와 L1↔L3 는 **exploratory** 다: arm 별 유효
 penalty 가 같은 단위가 아니고(결정 #7 §5.1), 합성 실측에서 그 비대칭이 λ=0.1 에서 θ(L1,L2) 의 부호를 40/40 ↔ 0/40 으로 뒤집는다. 따라서
-"식별가능 구조가 비-bilinear 함수족을 이긴다"는 등록된 confirmatory 주장이 아니다. verdict `GI_LEARNABLE_WIN` 의 learned-family 조건에서
-L2·L3 를 제외하지 않되(등록 불변), 그 조건의 통과를 architecture attribution 으로 보고하지 않는다 — 순수 architecture 효과로 해석하지 않는다.
+"식별가능 구조가 비-bilinear 함수족을 이긴다"는 등록된 confirmatory 주장이 아니다. 등록된 comparator family({GEARS, CPA, ID-only, L3})와
+`GI_LEARNABLE_WIN` 의 learned-comparator 조건은 그대로다(config 불변). L2 는 원래 family 밖의 ablation arm 이고 L3 는 family 안에 있다;
+바뀌는 것은 해석만이다 — L1↔L2·L1↔L3 의 architecture attribution 을 confirmatory 로 보고하지 않는다(순수 architecture 효과로 해석하지 않는다).
 
 ### 3.4 합성 recovery 프로토콜 (claim 1 입증, real과 독립)
 

@@ -362,9 +362,11 @@ moved, no new run identity, and nothing here authorizes a run.
 
 **무엇이 새로 측정됐나.** 2026-09-06/07 적대적 감사(감사자 A, finding F-A1)가 §5.1 이 "**What this does not
 do**" 로 등록해 둔 잔여 — arm 별 유효 penalty 가 같은 단위가 아니라는 것 — 의 **크기**를 처음으로 쟀다.
-구성: gene-disjoint 합성 40 seed, `k=6`, `p=8`, 37 genes / 41 calibration pairs / 22 held-out pairs, 저랭크
-대칭 참 operator + 30% noise, `identification.lambda_grid` 의 최대값 λ=0.1, 저장소 함수만 사용
-(`calibration_lambda_scale`, `L1Model`, `L2Model`). 2026-09-07 재측정 결과:
+구성: **비-gene-disjoint**(test genes 가 calibration genes 와 겹친다) 합성 40 seed, `k=6`, `p=8`,
+37 genes / 41 calibration pairs / 22 held-out pairs — 세 roster 가 같은 37-gene universe 에서 뽑힌다 —,
+저랭크 대칭 참 operator + 30% noise, `identification.lambda_grid` 의 최대값 λ=0.1, 저장소 함수만 사용
+(`calibration_lambda_scale`, `L1Model`, `L2Model`). 이것이 감사 A `audit-A-claude.md` §5.2 의 구성이며,
+2026-09-07 재측정 결과:
 
 ```
 raw    mean +0.4286  median +0.4332  40/40 > 0
@@ -378,6 +380,13 @@ comparator 는 λ 로 적합되므로 이 구성에서 headline 의 penalty 가 
 따로 구성한 bank 표는 같은 자리에서 0.0383–0.0435, 즉 23–26× 를 보고했다. 상수는 구성에 따라 움직이고,
 자리수와 방향은 두 구성에서 같다.)
 
+**진짜 gene-disjoint 구성은 이 커밋이 재측정하지 않았다.** 감사 A 가 라운드 2 에서 커밋된 실제 구조
+(z-universe 73 genes · calibration 44 genes · `combo_calibration` 41 pairs · `sealed_double_unseen`
+22 pairs over 21 genes, 유전자 교집합 0)를 세워 40 seed 로 다시 돌린 것이 있고
+(`artifacts/audit-debate-2026-09-06/response-A.md` §1.1), 거기서는 σmax(Φ)² = 0.0145 — 유효 penalty 비
+**약 69×** — 이며 λ=0.1 의 40/40 ↔ 0/40 반전이 그대로 유지된다고 보고한다. **그 수치는 감사 A 의 보고이고
+이 커밋에서 재현하지 않았다.** 위 코드 블록의 세 줄만 2026-09-07 에 이 저장소에서 실행한 값이다.
+
 **등록된 잔여이지 은폐가 아니다.** 비대칭 자체는 `src/alive/compose/phase2a.py:1554-1567` 의 주석이
 "open residual" 로 적어 두었고, `tests/alive/compose/test_lambda_scaling.py::test_the_final_fit_scales_the_headline_operator_and_leaves_the_baseline_alone`
 가 그 동작을 이름으로 고정하며, 이 문서 §5.1 의 "What this does not do" 문단이 비주장으로 등록했다.
@@ -387,9 +396,11 @@ comparator 는 λ 로 적합되므로 이 구성에서 headline 의 penalty 가 
 fallback **option D**("restrict the L1↔L2/L3 comparison to exploratory; no code, digest unchanged")를
 채택한다. 구현은 main spec `docs/superpowers/specs/2026-06-22-compose-epistasis-operator-design.md`
 §3.3 끝의 **수정안 F** 다: L1↔L0(additive) 는 **confirmatory** 로 남고, L1↔L2·L1↔L3 의 architecture
-attribution 은 **exploratory** 로 강등된다. verdict `GI_LEARNABLE_WIN` 의 learned-family 조건은
-**바뀌지 않는다**(L2·L3 는 comparator family 에 그대로 있다) — 바뀐 것은 그 조건의 통과를 무엇으로
-보고할 수 있는가이며, 순수 architecture 효과로 해석하지 않는다. 결정문은
+attribution 은 **exploratory** 로 강등된다. 등록된 comparator family({GEARS, CPA, ID-only, L3};
+`configs/compose_k562_v1_phase2.yaml:135` 의 `comparator_family` 에서 `additive` 를 뺀 것)와
+`GI_LEARNABLE_WIN` 의 learned-comparator 조건은 그대로다(config 불변). **L2 는 원래 family 밖의
+ablation arm 이고 L3 는 family 안에 있다** — 바뀌는 것은 해석만이다: L1↔L2·L1↔L3 의 architecture
+attribution 을 confirmatory 로 보고하지 않는다(순수 architecture 효과로 해석하지 않는다). 결정문은
 `docs/superpowers/2026-09-07-compose-audit-release-decisions.md` D1 이다.
 
 **바뀌지 않는 것.** 코드 0 줄, config 0 줄. `config_sha256` 은 이 addendum 으로 **이동하지 않는다**.

@@ -6,6 +6,7 @@ sentence), never the owner's choice. A pending decision is a valid state, not a 
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -13,6 +14,7 @@ import pytest
 _DECISIONS = Path("docs/superpowers/2026-09-07-compose-audit-release-decisions.md")
 _MAIN_SPEC = Path("docs/superpowers/specs/2026-06-22-compose-epistasis-operator-design.md")
 _READINESS = Path("docs/superpowers/COMPOSE-SEAL-READINESS.md")
+_PHASE2_CONFIG = Path("configs/compose_k562_v1_phase2.yaml")
 
 
 def _section(text: str, head: str, next_head: str | None) -> str:
@@ -140,3 +142,38 @@ def test_the_ladder_claim_ceiling_amendment_lives_inside_spec_section_3_3():
     assert "수정안 F" in section
     assert "exploratory" in section
     assert "순수 architecture 효과로 해석하지 않는다" in section
+
+
+def _registered_comparator_family() -> list[str]:
+    """Members of the registered ``inference.comparator_family``, read from the config.
+
+    Read as text rather than through the loader: the committed config still carries
+    activation blockers, so loading it is a different (and failing) contract from
+    reading the one registered list this doc-contract is about.
+    """
+    hits = re.findall(
+        r"^\s*comparator_family:\s*\[([^\]]*)\]\s*$",
+        _PHASE2_CONFIG.read_text(encoding="utf-8"),
+        flags=re.MULTILINE,
+    )
+    assert len(hits) == 1, f"comparator_family 줄이 정확히 하나가 아니다: {len(hits)}"
+    return [m.strip() for m in hits[0].split(",") if m.strip()]
+
+
+def test_the_ladder_amendment_describes_the_family_the_config_registers():
+    """수정안 F 의 family 문장은 등록된 ``comparator_family`` 와 어긋나면 안 된다.
+
+    수정안 F 초안은 "learned-family 조건에서 L2·L3 를 제외하지 않되"라고 적었는데, 등록된
+    family 에 **L2 는 원래 없다**(ladder arm 일 뿐이다). claim 상한을 등록하면서 등록 사실을
+    틀리게 서술하면 상한 자체를 신뢰할 수 없으므로, 문장이 config 와 어긋나면 실패시킨다.
+    """
+    members = _registered_comparator_family()
+    section = _spec_section_3_3(_MAIN_SPEC.read_text(encoding="utf-8"))
+
+    # config 가 말하는 것: L2 는 family 밖, L3 는 family 안.
+    assert not [m for m in members if m.startswith("l2") or "saturation" in m]
+    assert "l3_symmetric_mlp" in members
+
+    # spec 이 그렇게 말하는가.
+    assert "L2 는 원래 family 밖의 ablation arm 이고 L3 는 family 안에 있다" in section
+    assert "L2·L3 를 제외하지 않되" not in section
