@@ -259,6 +259,11 @@ known-answer recovery(§3.4)를 함께 보고한다.
 > 이름은 `comparator_family`와 `ablation_ladder` 양쪽에서 바뀌었고 `config_sha256`이
 > `3faacaff…` → `c25734d5…`로 이동했다 — **새 run identity**이며 이 결정이 만들도록 승인된 것이다.
 
+**[수정안 F — 2026-09-07, SIGNED by owner instruction "모두 권장사항으로 진행" — EFFECTIVE Task 11, claim 상한.]** L1↔L0(additive) 대비는 **confirmatory** 로 남는다. L1↔L2 와 L1↔L3 는 **exploratory** 다: arm 별 유효
+penalty 가 같은 단위가 아니고(결정 #7 §5.1), 합성 실측에서 그 비대칭이 λ=0.1 에서 θ(L1,L2) 의 부호를 40/40 ↔ 0/40 으로 뒤집는다. 따라서
+"식별가능 구조가 비-bilinear 함수족을 이긴다"는 등록된 confirmatory 주장이 아니다. verdict `GI_LEARNABLE_WIN` 의 learned-family 조건에서
+L2·L3 를 제외하지 않되(등록 불변), 그 조건의 통과를 architecture attribution 으로 보고하지 않는다 — 순수 architecture 효과로 해석하지 않는다.
+
 ### 3.4 합성 recovery 프로토콜 (claim 1 입증, real과 독립)
 
 랜덤 $z_g$·랜덤 저랭크 대칭 $B^\ast$ → $\varepsilon^\ast_{gh}$ 생성 → 무잡음 rank-condition 확인 →

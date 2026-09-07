@@ -105,3 +105,38 @@ def test_the_current_normalization_contract_is_separate_from_its_history():
         assert claim not in flat_live, name
 
     assert "HISTORICAL" in history
+
+
+def test_a_signed_ladder_decision_carries_its_claim_sentence():
+    d1 = _section(_DECISIONS.read_text(encoding="utf-8"), "D1", "D2")
+    if "status: SIGNED" not in d1:
+        assert "release: NO-GO" in d1
+        return
+    assert "순수 architecture 효과로 해석하지 않는다" in d1
+
+
+def _spec_section_3_3(text: str) -> str:
+    """Return §3.3's body — from its heading to the next ``##``/``###`` heading.
+
+    The end is found by the next heading of either level rather than by naming
+    ``### 3.4``, so a renumbering elsewhere in the spec cannot silently widen the
+    window this test measures.
+    """
+    parts = text.split("### 3.3 Ablation ladder")
+    assert len(parts) == 2, f"spec §3.3 제목이 정확히 하나가 아니다: {len(parts) - 1}"
+    body = parts[1]
+    ends = [i for i in (body.find("\n### "), body.find("\n## ")) if i >= 0]
+    assert ends, "spec §3.3 뒤에 다음 제목이 없다"
+    return body[: min(ends)]
+
+
+def test_the_ladder_claim_ceiling_amendment_lives_inside_spec_section_3_3():
+    """수정안 F 는 ladder 를 정의하는 절 안에 있어야 한다.
+
+    claim 상한이 ladder 정의에서 떨어져 나가면(다른 절로 이동하거나 사라지면) ladder 를
+    읽는 사람이 상한을 보지 못한다. 표식·강등 단어·닫는 문장을 §3.3 범위 안에서 요구한다.
+    """
+    section = _spec_section_3_3(_MAIN_SPEC.read_text(encoding="utf-8"))
+    assert "수정안 F" in section
+    assert "exploratory" in section
+    assert "순수 architecture 효과로 해석하지 않는다" in section

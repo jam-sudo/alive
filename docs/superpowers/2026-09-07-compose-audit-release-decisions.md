@@ -8,7 +8,7 @@
 
 ## D1 — F-A1(ladder penalty 비대칭)의 성격
 status: SIGNED: a — 오너 지시 2026-09-07 "모두 권장사항으로 진행"
-release: NO-GO (구현 대기 — Task 11)
+release: GO-LOCAL (Task 11, 2026-09-07 — spec §3.3 수정안 F)
 
 | | 선택지 | claim 결과 | digest | task |
 |---|---|---|---|---|
@@ -71,7 +71,7 @@ release: NO-GO (구현 대기 — Task 14)
 |---|---|---|---|---|---|
 | **D** | bias spec §1 — bridge representation 을 강제 계약으로, report v4 | Task 2 | `3a8919076eedcb205df7be7c890a46e8da6cc927f8c18e3821ad44c8e8d6c364` | `54bed129d412e1169ff3113e526ff67da1bb24c7692b27aa7e18a028775082cb` | SIGNED (오너 지시 2026-09-07) — EFFECTIVE (Task 2, 2026-09-07) |
 | **E** | main spec §10.5 — primary metric 식을 등록된 형태로 | Task 3 | — | — | SIGNED (오너 지시 2026-09-07) — EFFECTIVE (Task 3, 2026-09-07) |
-| **F** | main spec §3.3 — ladder attribution claim 상한 | Task 11 | — | — | SIGNED (오너 지시 2026-09-07) — PROPOSED text, effective when its task lands (D1 종속) |
+| **F** | main spec §3.3 — ladder attribution claim 상한 | Task 11 | — | — | SIGNED (오너 지시 2026-09-07) — EFFECTIVE (Task 11, 2026-09-07) |
 | **G** | CLAUDE.md `:23-24,147,156-157,161-162` (+ D2-b 시 `:132` 처분) | Task 8 · 12 | — | — | SIGNED (오너 지시 2026-09-07) — EFFECTIVE (Task 8, 2026-09-07); `:132` 처분(D2-b)은 Task 12 대기 |
 
 ## 서명

@@ -355,3 +355,48 @@ M13 redundancy was found. The mutation that tests the claim removes it at both s
 
 **`config_sha256` is unchanged at `5fea3b9e…`.** This is a code-only change: no registered value
 moved, no new run identity, and nothing here authorizes a run.
+
+## Addendum — 2026-09-07 (D1-a): the residual this document registered now bounds a claim
+
+이 절은 **추가**다. 위의 어떤 절도 고치지 않는다 — #6·#7 의 결정, 측정값, sign-off 는 as-built 로 그대로 둔다.
+
+**무엇이 새로 측정됐나.** 2026-09-06/07 적대적 감사(감사자 A, finding F-A1)가 §5.1 이 "**What this does not
+do**" 로 등록해 둔 잔여 — arm 별 유효 penalty 가 같은 단위가 아니라는 것 — 의 **크기**를 처음으로 쟀다.
+구성: gene-disjoint 합성 40 seed, `k=6`, `p=8`, 37 genes / 41 calibration pairs / 22 held-out pairs, 저랭크
+대칭 참 operator + 30% noise, `identification.lambda_grid` 의 최대값 λ=0.1, 저장소 함수만 사용
+(`calibration_lambda_scale`, `L1Model`, `L2Model`). 2026-09-07 재측정 결과:
+
+```
+raw    mean +0.4286  median +0.4332  40/40 > 0
+scaled mean -0.3348  median -0.3097  0/40 > 0
+sigma_max(Phi)^2 mean 0.0452  -> effective penalty ratio 22.1x
+```
+
+`raw` 는 현행 구현(L2 는 raw λ), `scaled` 는 L2 에도 headline 과 같은 scale 을 준 반사실이다. θ(L1,L2) 의
+**부호가 40/40 ↔ 0/40 으로 완전히 뒤집힌다.** 세 번째 줄은 그 원인의 크기다: headline 은 λ·σmax(Φ)² 로,
+comparator 는 λ 로 적합되므로 이 구성에서 headline 의 penalty 가 약 **22× 약하다**. (감사자 A 가 §4.1 에서
+따로 구성한 bank 표는 같은 자리에서 0.0383–0.0435, 즉 23–26× 를 보고했다. 상수는 구성에 따라 움직이고,
+자리수와 방향은 두 구성에서 같다.)
+
+**등록된 잔여이지 은폐가 아니다.** 비대칭 자체는 `src/alive/compose/phase2a.py:1554-1567` 의 주석이
+"open residual" 로 적어 두었고, `tests/alive/compose/test_lambda_scaling.py::test_the_final_fit_scales_the_headline_operator_and_leaves_the_baseline_alone`
+가 그 동작을 이름으로 고정하며, 이 문서 §5.1 의 "What this does not do" 문단이 비주장으로 등록했다.
+새로 알게 된 것은 존재가 아니라 **크기 — 그리고 그 크기가 spec §3.3 질문의 부호를 정한다**는 점이다.
+
+**오너 결정(2026-09-07, 지시 "모두 권장사항으로 진행") = D1-a.** 2026-08-20 sign-off note 가 적어 둔
+fallback **option D**("restrict the L1↔L2/L3 comparison to exploratory; no code, digest unchanged")를
+채택한다. 구현은 main spec `docs/superpowers/specs/2026-06-22-compose-epistasis-operator-design.md`
+§3.3 끝의 **수정안 F** 다: L1↔L0(additive) 는 **confirmatory** 로 남고, L1↔L2·L1↔L3 의 architecture
+attribution 은 **exploratory** 로 강등된다. verdict `GI_LEARNABLE_WIN` 의 learned-family 조건은
+**바뀌지 않는다**(L2·L3 는 comparator family 에 그대로 있다) — 바뀐 것은 그 조건의 통과를 무엇으로
+보고할 수 있는가이며, 순수 architecture 효과로 해석하지 않는다. 결정문은
+`docs/superpowers/2026-09-07-compose-audit-release-decisions.md` D1 이다.
+
+**바뀌지 않는 것.** 코드 0 줄, config 0 줄. `config_sha256` 은 이 addendum 으로 **이동하지 않는다**.
+COMPOSE 는 여전히 **RELEASE-BLOCKED**, seal 은 **UNOPENED**, 이 문서의 어떤 문장도 run 을 승인하지 않는다.
+
+**열린 것.** real Norman bank 에서 OOF selection 이 고른 λ\* 에서 이 부호가 어떻게 되는지는 **측정되지
+않았다** — 합성 1 계열이고 real bank 는 POD-GATED 다. λ=0.01 에서는 부호가 유지되나 효과크기가 24× 줄고
+λ=0.001 에서는 반대로 뒤집힌다는 것이 감사자 A 의 보고이며(§4.1), 어느 쪽도 real 의 측정이 아니다. D1-c
+(승인된 nonsealed gene-disjoint OOF 에서 λ\*, cond(Φ), 두 penalty 아래 held-out θ; sealed 22 pairs 는
+읽지 않음)는 이 결정으로 닫히지 않았고 pod 단계에 남는다.
