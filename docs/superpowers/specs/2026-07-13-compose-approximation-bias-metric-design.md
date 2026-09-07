@@ -83,15 +83,23 @@ therefore does **not** validate the raw-count Jensen-floor formula below and doe
 The committed GEARS scientific config remains activation-blocked until a separate pre-seal amendment either
 adopts the candidate and revises this metric or supplies evidence for the existing raw representation.
 
-**Amendment D — the bridge representation is an enforced contract, not prose (2026-09-07, PROPOSED).**
+**Amendment D — the bridge representation is an enforced contract, not prose (2026-09-07, SIGNED by
+owner instruction "모두 권장사항으로 진행" — EFFECTIVE Task 2).**
 The correction above was prose only: nothing in the code compared `PROBE_A_REPRESENTATION` to the
 report's `method`, so a `log_normalized_pseudobulk` PASS produced an `admitted`
 `raw_pseudobulk_approximation` report whose SHA cleared the finalizer and removed one activation
 blocker. Reproduced independently by both audit harnesses and the coordinator on 2026-09-06.
 The report schema is therefore `compose_approximation_bias_report_v4` and carries
-`provenance.probe_a_output_representation`; `validate_bias_method_bridge` requires it to equal
-`method`, and both the producer (before any computation) and `validate_approximation_bias_report`
-call that one function, so every consumer inherits the check. **Until the owner adopts one
+`provenance.probe_a_output_representation`. The single shared predicate
+`bridge_admits(*, method, probe_representation)` (equality) is the ONE definition of the R1 relation
+(the module's own docstring): the producer calls it directly, before any bias computation, to set
+`admission_status`. `validate_bias_method_bridge(*, method, probe_representation, admission_status)`
+is built on that same predicate and rejects an `admitted` report whose leaf disagrees with `method`;
+`validate_approximation_bias_report` runs that check at every consuming boundary — phase2b's
+`report_from_evidence`, preseal's `load_approximation_bias_report`, and the one-way config finalizer.
+The producer also runs `validate_approximation_bias_report`, but only as a post-hoc self-check with
+`require_admitted=False` after the report is already assembled, since it is the one boundary allowed
+to see a non-admitted record. **Until the owner adopts one
 representation on both sides — a separately signed raw bridge/equivalence evidence, or adoption of
 the log-normalized candidate with a revised metric, response projection and new known-answers —
 no raw-count report can be ADMITTED (and therefore finalized) at all — the producer still measures,

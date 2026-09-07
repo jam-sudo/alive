@@ -69,7 +69,7 @@ release: NO-GO (구현 대기 — Task 14)
 
 | amendment | subject | vehicle | before digest | after digest | status |
 |---|---|---|---|---|---|
-| **D** | bias spec §1 — bridge representation 을 강제 계약으로, report v4 | Task 2 | `3a8919076eedcb205df7be7c890a46e8da6cc927f8c18e3821ad44c8e8d6c364` | `ce483a360b68e765243f0f0bda45bf5c18d32b9bd396ecd4bb9339882bc78396` | SIGNED (오너 지시 2026-09-07) — EFFECTIVE (Task 2, 2026-09-07) |
+| **D** | bias spec §1 — bridge representation 을 강제 계약으로, report v4 | Task 2 | `3a8919076eedcb205df7be7c890a46e8da6cc927f8c18e3821ad44c8e8d6c364` | `54bed129d412e1169ff3113e526ff67da1bb24c7692b27aa7e18a028775082cb` | SIGNED (오너 지시 2026-09-07) — EFFECTIVE (Task 2, 2026-09-07) |
 | **E** | main spec §10.5 — primary metric 식을 등록된 형태로 | Task 3 | — | — | SIGNED (오너 지시 2026-09-07) — PROPOSED text, effective when its task lands |
 | **F** | main spec §3.3 — ladder attribution claim 상한 | Task 11 | — | — | SIGNED (오너 지시 2026-09-07) — PROPOSED text, effective when its task lands (D1 종속) |
 | **G** | CLAUDE.md `:23-24,147,156-157,161-162` (+ D2-b 시 `:132` 처분) | Task 8 · 12 | — | — | SIGNED (오너 지시 2026-09-07) — PROPOSED text, effective when its task lands |
