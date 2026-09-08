@@ -53,7 +53,7 @@ import math
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 
@@ -764,6 +764,84 @@ def _flip_or_label(value: float) -> float | str:
     if math.isfinite(number):
         return number
     return _FLIP_NEVER if number > 0 else _FLIP_ALREADY_FAILED
+
+
+def preregistered_headline_branch(
+    *, band_passes: bool, flip: float | str, ladder_max: float
+) -> Literal["i", "ii", "iii"]:
+    """Which pre-registered headline sentence a result selects (D4 §8).
+
+    The decision document pre-registers four sentences so nobody can pick the
+    wording after seeing the result. Its first three were written against the two
+    NON-FINITE flip labels only, which a zero-width band (``q == 0``) produces --
+    and a normal ``q > 0`` run produces a FINITE flip. PR #15 finding I3 measured
+    two such results that no sentence claimed: ``flip = 2.5`` with a passing band
+    (outside the registered ladder, so it never flips inside it) and
+    ``flip = 0.5`` with a failing band. The branch therefore lives here, in code,
+    and §8 cites it; the document no longer owns a partition it cannot enumerate.
+
+    Parameters
+    ----------
+    band_passes : bool
+        Did the headline additive contrast clear its registered material margin
+        at the REGISTERED band ``lambda = 1.0``? This is the verdict's own
+        question and is authoritative for sentence (iii).
+    flip : float or str
+        ``ComposeBandSensitivity.flip_lambda['additive']``, either as the serialised
+        label (:data:`_FLIP_NEVER` / :data:`_FLIP_ALREADY_FAILED`) or as the raw
+        float, ``+-inf`` included.
+    ladder_max : float
+        The largest registered ``sensitivity_band_inflation`` (currently ``1.25``).
+        Passed by the caller from the committed config -- never hardcoded here,
+        because the ladder is a registered value and this module is production
+        source.
+
+    Returns
+    -------
+    {"i", "ii", "iii"}
+        ``"i"``  -- the margin holds across the WHOLE registered ladder
+        (``NEVER_FLIPS``, or a finite flip beyond ``ladder_max``);
+        ``"ii"`` -- won at the registered band, flips at a registered higher
+        ``lambda`` (finite ``1.0 < flip <= ladder_max``);
+        ``"iii"`` -- the registered band itself was not cleared.
+
+    Raises
+    ------
+    ValueError
+        If ``band_passes`` is true while the flip says the clause fails at or
+        below the registered band (finite ``flip <= 1.0`` or
+        ``FAILS_AT_REGISTERED_BAND``). Clearing the band means the lower bound is
+        above the threshold at ``lambda = 1``, which forces ``flip > 1.0`` or
+        ``+inf``; the pair is unreachable by construction, so it is a bug rather
+        than a fourth outcome to name.
+    """
+    if not band_passes:
+        # The verdict is decided at lambda = 1.0 and it did not clear. Whatever the
+        # flip encodes (the -inf label, or a finite value at or below 1.0), the
+        # sentence is the same one.
+        return "iii"
+
+    if isinstance(flip, str):
+        if flip == _FLIP_NEVER:
+            return "i"
+        if flip == _FLIP_ALREADY_FAILED:
+            raise ValueError(
+                "inconsistent band verdict and flip: the band was cleared at "
+                f"lambda = 1.0 but the flip says {_FLIP_ALREADY_FAILED}"
+            )
+        raise ValueError(f"unknown flip label {flip!r}")
+
+    value = float(flip)
+    if math.isnan(value):
+        raise ValueError("inconsistent band verdict and flip: flip is NaN")
+    if value == math.inf:
+        return "i"
+    if value == -math.inf or value <= 1.0:
+        raise ValueError(
+            "inconsistent band verdict and flip: the band was cleared at "
+            f"lambda = 1.0 but the flip is {value!r} (<= 1.0)"
+        )
+    return "ii" if value <= float(ladder_max) else "i"
 
 
 def _band_sensitivity_block(sensitivity: ComposeBandSensitivity) -> dict[str, Any]:

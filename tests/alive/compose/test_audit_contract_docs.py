@@ -334,12 +334,31 @@ def test_a_signed_pair_headline_is_preregistered_and_conditional():
 
 
 def test_the_preregistered_headline_uses_the_codes_own_flip_vocabulary():
-    """§8 이 부르는 flip/사다리 토큰은 코드에 실재해야 한다 — 문장이 코드에서 떠내려가지 않도록."""
+    """§8 이 부르는 flip/사다리 토큰과 **분기 함수**가 코드에 실재해야 한다.
+
+    토큰 존재만 확인하던 검사는 PR #15 finding I3 이 실측한 구멍을 못 봤다: 두 sentinel 은
+    zero-width band 의 ``±inf`` 만 encoding 하는데 일반적인 ``q > 0`` 은 **유한** flip 을 내고,
+    유한 2.5(사다리 밖)·0.5(밴드 미통과)는 §8 의 어느 조건에도 배정되지 않았다(**1 passed** 였다).
+    그래서 이제 §8 이 **분기 함수 이름과 세 경계**를 부르고, 그 함수가 소스에 실재할 것을 요구한다 —
+    분기를 문서가 아니라 코드가 소유한다는 것이 정정의 내용이기 때문이다.
+    """
     section = _headline_section()
     source = _PHASE2B_SOURCE.read_text(encoding="utf-8")
     for token in ("NEVER_FLIPS", "FAILS_AT_REGISTERED_BAND", "sensitivity_band_inflation"):
         assert token in section, f"§8 이 `{token}` 를 부르지 않는다"
         assert token in source, f"`{token}` 가 {_PHASE2B_SOURCE} 에 없다 — 문장이 코드와 어긋난다"
+
+    # 분기를 소유하는 함수: §8 이 이름으로 부르고, 그 이름이 소스에 정의되어 있어야 한다.
+    assert "preregistered_headline_branch" in section, (
+        "§8 이 결과군 분기를 소유하는 함수를 이름으로 부르지 않는다"
+    )
+    assert "def preregistered_headline_branch(" in source, (
+        f"`preregistered_headline_branch` 가 {_PHASE2B_SOURCE} 에 정의돼 있지 않다"
+    )
+    # 세 경계 — 이것들이 없으면 (i)/(ii)/(iii) 의 적용 구간이 다시 미정이 된다.
+    flat_section = " ".join(section.split())
+    for boundary in ("1.0", "ladder_max", "1.25"):
+        assert boundary in flat_section, f"§8 이 경계 `{boundary}` 를 적지 않는다"
 
 
 def test_the_preregistered_headline_never_asserts_a_prohibited_claim():

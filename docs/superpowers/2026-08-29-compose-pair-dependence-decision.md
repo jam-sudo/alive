@@ -133,6 +133,8 @@ The reporting implementation — computing and emitting the verdict at each regi
 flip point per comparator — is **not** in this change. This decision registers and freezes the
 contract; the report that consumes it is the next increment.
 
+`[2026-09-08 정정: Amendment B 보고 구현은 eb8d707 로 완료; §8 분기 함수는 이 정정으로 추가]`
+
 **headline wording 은 더 이상 열려 있지 않다.** 결과군별 headline 문장은 D4(2026-09-07, "모두 권장사항으로
 진행")로 아래 §8 에 사전 확정되었다. 이 §7 에 남는 열린 항목은 위의 보고 구현뿐이다.
 
@@ -162,6 +164,27 @@ sensitivity 사다리의 다른 λ 를 verdict gate 로 승격하지 않는다."
 
 이 문장은 (i)·(ii) 를 대체하지 않고 더한다: 밴드/flip 표기는 여전히 (i)·(ii) 가 정하고, (iv) 는 learned-family 다리에만 적용된다. arm 별 유효 penalty 가
 같은 단위가 아니라는 것(결정 #7 §5.1, 수정안 F)이 이 문장의 근거이며, D1-c 잔여(real λ\* 에서의 θ 부호, POD)는 그대로 열려 있다.
+
+**[2026-09-08 정정 — 결과군 완전성 (Codex PR 리뷰 I3)]** (i)~(iii) 의 적용 조건이 **두 sentinel 만** 다뤘다.
+그 둘은 zero-width band(`q == 0`)의 `±inf` 만 encoding 하며, 일반적인 `q > 0` 에서 flip 은 **유한**하다:
+실측 두 예 — q=0.1, learned θ=0.3 에서 additive θ=0.30 → `GI_LEARNABLE_WIN`, flip **2.5**(등록 사다리 최대
+1.25 **밖**); additive θ=0.10 → `NO_DISTINCT_WIN`, flip **0.5** — 는 위 세 문장의 어느 조건에도 배정되지
+않았고, 그만큼 결과를 본 뒤 문구를 고를 자유가 남아 있었다. **분기는 이제 코드가 소유하고 이 문서가 인용한다:**
+`alive.compose.phase2b.preregistered_headline_branch(band_passes=, flip=, ladder_max=)` 가
+`"i"`/`"ii"`/`"iii"` 를 돌려주며, 그 분할은 전역적이고 배타적이다.
+
+- **(i)** `band_passes=True` 이고 (`flip == NEVER_FLIPS` **또는** 유한 flip > `ladder_max`). 등록 사다리
+  전 구간에서 margin 이 유지된다. flip 이 유한하면 `λ=<flip>` 외삽점을 **병기**하되, claim 은 등록 사다리
+  구간(λ ≤ `ladder_max`)에 한정한다 — 사다리 밖 λ 는 보고값이지 주장이 아니다.
+- **(ii)** `band_passes=True` 이고 유한 `1.0 < flip ≤ ladder_max`. 문장의 `λ=<flip>` 은 이 구간의 값이다.
+- **(iii)** `band_passes=False` — 등록 밴드 미통과 **전체**. flip 이 `FAILS_AT_REGISTERED_BAND` 이든
+  유한 ≤1.0 이든 같은 문장이다.
+- `band_passes=True` + 유한 flip ≤ 1.0 은 구성상 도달 불가(밴드 통과 = λ=1 에서 lower bound 가 threshold
+  위 → flip 은 1.0 초과 또는 `+inf`)이므로 함수가 `ValueError("inconsistent band verdict and flip")` 를 낸다.
+- `ladder_max` 는 등록 config 의 `sensitivity_band_inflation` 최대값(현재 **1.25**)이며 **호출자가 넘긴다** —
+  production source 에 사다리를 hardcode 하지 않는다.
+
+네 문장의 본문과 (iv) 는 그대로다. 이 정정은 어느 문장이 언제 적용되는지만 완전하게 만든다.
 
 네 문장 어디에도 "mechanistic" · "causal" · "context transfer" · "unconditional 95%" 를 **긍정 claim 으로** 쓰지 않는다(명시적 비주장 절에서만 등장한다).
 calibration in-sample ICC 의 double-unseen 이식과 λ=1.15 를 새 nominal gate 로 쓰는 것은 금지(결정문 §2, 불변식 7).
