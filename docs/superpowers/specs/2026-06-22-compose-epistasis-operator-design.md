@@ -268,6 +268,8 @@ penalty 가 같은 단위가 아니고(결정 #7 §5.1), 합성 실측에서 그
 "식별가능 구조가 비-bilinear 함수족을 이긴다"는 등록된 confirmatory 주장이 아니다. 등록된 comparator family({GEARS, CPA, ID-only, L3})와
 `GI_LEARNABLE_WIN` 의 learned-comparator 조건은 그대로다(config 불변). L2 는 원래 family 밖의 ablation arm 이고 L3 는 family 안에 있다;
 바뀌는 것은 해석만이다 — L1↔L2·L1↔L3 의 architecture attribution 을 confirmatory 로 보고하지 않는다(순수 architecture 효과로 해석하지 않는다).
+verdict 문장은 pair-dependence decision §8 (iv) — `docs/superpowers/2026-08-29-compose-pair-dependence-decision.md` — 에 사전등록되어 있다: `GI_LEARNABLE_WIN` 의 learned-family 조건 통과를
+어떤 문장으로 보고할지는 결과를 보기 전에 확정되었고, 그 문장은 통과를 architecture attribution 으로 쓰지 않는다.
 
 ### 3.4 합성 recovery 프로토콜 (claim 1 입증, real과 독립)
 

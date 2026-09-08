@@ -8,7 +8,7 @@
 > **이 문서는 아무것도 정의하지 않는다** — 세부(task)는 plan, claim은 spec, exact param은 config,
 > 시간순 audit는 git이 authoritative다([sources of truth](../../CLAUDE.md#sources)). 상태 행이 authoritative
 > 문서와 어긋나면 **authoritative 문서가 옳다**; 이 인덱스를 갱신한다.
-> **Updated:** 2026-09-07 @ `b3bb712` (branch `compose-factor-bank-normalization`)
+> **Updated:** 2026-09-08 @ `882d726` (branch `compose-factor-bank-normalization`)
 > `scripts/bump-readiness-stamp.sh` / the pre-commit hook from `HEAD` at commit time, so it names the
 > **parent** of the commit that carries it and can never name itself. Reading it as "one commit stale" is a
 > misreading; git is authoritative for when this file actually changed.
@@ -113,7 +113,7 @@ sub-project id 다.
 **판정: RELEASE-BLOCKED / seal UNOPENED.** 이유 다섯, 전부 로컬에서 닫을 수 없다 — (1) 위
 critical-path 표의 config activation blocker 여섯, (2) real pod-built `.pyz` 의 `adapter_resolution`
 parity, (3) `kernel_isolation_reproof`, (4) `source_consumption` 의 runtime 증거, (5) representation
-결정. `D2`·`D4` 는 서명됐지만 서명은 릴리스가 아니다.
+결정. `D1`~`D4` 네 절 모두 서명됐지만 서명은 릴리스가 아니다.
 
 로컬에서 닫힌 것(2026-09-07): 이번 웨이브가 바꾼 강제 지점 17개가 각각 **자기 이름이 그 주장을 하는**
 named test 의 **자기 assertion** 으로 죽는다(17 killed / 0 survived / 0 harness-failed) —

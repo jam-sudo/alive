@@ -138,7 +138,7 @@ contract; the report that consumes it is the next increment.
 
 ## 8. seal 전에 확정된 headline 문장 (2026-09-07, D4)
 
-verdict 는 등록된 밴드(λ=1.0)에서만 내려진다. 아래 세 문장은 **결과를 보기 전에** 확정한다. 사다리는 등록된
+verdict 는 등록된 밴드(λ=1.0)에서만 내려진다. 아래 네 문장은 **결과를 보기 전에** 확정한다. 사다리는 등록된
 `sensitivity_band_inflation` 이고 flip 표기는 `phase2b.py` 의 `NEVER_FLIPS`·`FAILS_AT_REGISTERED_BAND` 를
 그대로 쓴다 — 문장이 코드 어휘에서 떠내려가지 않게 하기 위해서다.
 
@@ -153,5 +153,15 @@ verdict 는 등록된 밴드(λ=1.0)에서만 내려진다. 아래 세 문장은
 **(iii) `FAILS_AT_REGISTERED_BAND`.** "등록된 밴드에서 material margin 미달 — `NO_DISTINCT_WIN`. 불변식 14 에 따라 이는 결과이며 threshold 를 사후 변경하거나
 sensitivity 사다리의 다른 λ 를 verdict gate 로 승격하지 않는다."
 
-세 문장 어디에도 "mechanistic" · "causal" · "context transfer" · "unconditional 95%" 를 **긍정 claim 으로** 쓰지 않는다(명시적 비주장 절에서만 등장한다).
+**(iv) `GI_LEARNABLE_WIN` — learned-family 다리 (2026-09-08 추가, spec §3.3 수정안 F 정합).** (i)~(iii) 은 headline additive contrast 의 결과군만 덮었다.
+`GI_LEARNABLE_WIN` 은 그 위에 learned comparator 조건을 하나 더 요구하는데, 그 조건이 통과했을 때 쓸 문장이 사전등록되어 있지 않았다 — 수정안 F 가
+강등한 바로 그 문장("식별가능 구조가 비-bilinear 함수족을 이긴다")을 결과를 본 뒤에 고를 자유가 남아 있었다. 그 자유를 여기서 닫는다:
+
+> "등록된 learned comparator family({GEARS, CPA, ID-only, L3}) 각각에 대한 simultaneous lower bound 이 0 을 넘었다 —
+> 이는 등록된 verdict 조건의 통과이지 architecture attribution 이 아니며(수정안 F), L1↔L2·L1↔L3 의 구조 기여는 exploratory 로만 보고한다. unconditional efficacy 를 주장하지 않는다."
+
+이 문장은 (i)·(ii) 를 대체하지 않고 더한다: 밴드/flip 표기는 여전히 (i)·(ii) 가 정하고, (iv) 는 learned-family 다리에만 적용된다. arm 별 유효 penalty 가
+같은 단위가 아니라는 것(결정 #7 §5.1, 수정안 F)이 이 문장의 근거이며, D1-c 잔여(real λ\* 에서의 θ 부호, POD)는 그대로 열려 있다.
+
+네 문장 어디에도 "mechanistic" · "causal" · "context transfer" · "unconditional 95%" 를 **긍정 claim 으로** 쓰지 않는다(명시적 비주장 절에서만 등장한다).
 calibration in-sample ICC 의 double-unseen 이식과 λ=1.15 를 새 nominal gate 로 쓰는 것은 금지(결정문 §2, 불변식 7).

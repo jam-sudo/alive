@@ -2,6 +2,12 @@
 
 These pin STRUCTURE (a pending decision must carry NO-GO; a signed decision must carry its
 sentence), never the owner's choice. A pending decision is a valid state, not a failing test.
+
+A signed decision whose implementing task has LANDED must additionally carry the record that
+task left — otherwise the contract measures the template Task 0 shipped rather than the
+implementation, which is how four of these assertions were found vacuous (D2/D3/D4 in Task 12,
+D1 in the final review). Re-opening such a decision means moving ``status:`` back, not only
+``release:``.
 """
 
 from __future__ import annotations
@@ -10,6 +16,8 @@ import re
 from pathlib import Path
 
 import pytest
+
+from alive.compose.config2 import load_compose_phase2_config
 
 _DECISIONS = Path("docs/superpowers/2026-09-07-compose-audit-release-decisions.md")
 _MAIN_SPEC = Path("docs/superpowers/specs/2026-06-22-compose-epistasis-operator-design.md")
@@ -32,12 +40,6 @@ def test_every_pending_decision_is_marked_no_go(head, next_head):
         assert "release: NO-GO" in sec
 
 
-def test_the_spec_primary_formula_is_the_registered_config_string():
-    text = _MAIN_SPEC.read_text(encoding="utf-8")
-    assert "(mean(error_comparator) - mean(error_l1)) / max(mean(error_comparator), 1e-12)" in text
-    assert r"1-\overline e_M/\max(\overline e_C,10^{-12})" not in text.replace(" ", "")
-
-
 def _flat(text: str) -> str:
     """Drop every whitespace character and blockquote marker.
 
@@ -46,6 +48,21 @@ def _flat(text: str) -> str:
     haystack and needle makes the assertion measure the sentence, not the layout.
     """
     return "".join(text.replace(">", " ").split())
+
+
+def test_the_spec_primary_formula_is_the_registered_config_string():
+    r"""등록된 식은 본문에 있고 철회된 형태는 없다 — needle 을 haystack 과 같게 평탄화한다.
+
+    정정 전에는 negative needle 만 공백을 품은 채 ``text.replace(" ", "")`` 를 뒤졌다. 그래서
+    철회된 식이 **실제로 들어 있던** base ``2eef47a`` 에서도 ``needle in old.replace(" ","")``
+    는 False 였다(실측) — 이 줄은 어떤 spec 에 대해서도 참이라 R5 를 잡은 적이 없고(그 RED 는
+    positive assertion 이 냈다) 재발도 잡지 못한다. 부록 H 의 ``\max(\overline e_C,\epsilon)``
+    형태는 이 needle 과 충돌하지 않는다(실측: 평탄화 후에도 불일치).
+    """
+    text = _flat(_MAIN_SPEC.read_text(encoding="utf-8"))
+    registered = "(mean(error_comparator) - mean(error_l1)) / max(mean(error_comparator), 1e-12)"
+    assert _flat(registered) in text
+    assert _flat(r"1-\overline e_M/\max(\overline e_C,10^{-12})") not in text
 
 
 _HISTORICAL_START = "[HISTORICAL"
@@ -110,11 +127,43 @@ def test_the_current_normalization_contract_is_separate_from_its_history():
 
 
 def test_a_signed_ladder_decision_carries_its_claim_sentence():
+    """D1 이 SIGNED 면 **구현 기록**까지 담아야 한다 — claim 문장만으로는 아무것도 재지 않는다.
+
+    claim 문장 "순수 architecture 효과로 해석하지 않는다" 는 Task 0 이 심은 "측정된 사실" 문단에
+    이미 있었다: ``29d9e70`` 의 D1 절은 ``status: SIGNED`` 이면서 그 문장을 담고 있었다(실측).
+    즉 이 검사는 Task 11 구현 여부와 무관하게 같은 답을 냈다 — D2·D3·D4 에서 이미 좁힌 것과 같은
+    공허 계열이다. 그래서 구현이 남긴 두 흔적을 함께 요구한다: 상한을 싣는 amendment 이름
+    (``수정안 F``)과 release 기록(``release: GO-LOCAL``). 둘 다 ``29d9e70`` 에 없었다(실측).
+    D1 을 다시 여는 올바른 방법은 ``release:`` 를 되돌리는 것이 아니라 ``status:`` 를 되돌리는
+    것이고, 그 상태는 위 parametrized 검사가 덮는다.
+    """
     d1 = _section(_DECISIONS.read_text(encoding="utf-8"), "D1", "D2")
     if "status: SIGNED" not in d1:
         assert "release: NO-GO" in d1
         return
     assert "순수 architecture 효과로 해석하지 않는다" in d1
+    assert "수정안 F" in d1
+    assert "release: GO-LOCAL" in d1
+
+
+def test_the_decisions_doc_names_the_current_config_digest():
+    """결정문이 "현재값" 이라고 부르는 digest 는 loader 가 계산한 현재 digest 여야 한다.
+
+    STATUS blockquote 는 Task 5 의 digest 이동(``0d207746…`` → ``a9dc9410…``) 뒤에도 옛 값을
+    "현재" 로 부르고 있었고, 같은 문서의 ``## Task 5 digest 이동`` 절과 D2 의 "digest 불변" 이
+    새 값을 적고 있었다 — 서명된 결정 기록이 run identity 를 두고 자기모순이었다. 기대값을
+    hardcode 하지 않고 committed config 를 **읽어서** 만들므로, digest 가 다시 움직이면 이
+    검사가 먼저 실패한다.
+    """
+    digest = load_compose_phase2_config(str(_PHASE2_CONFIG)).config_sha256
+    flat = _flat(_DECISIONS.read_text(encoding="utf-8"))
+    assert digest[:8] in flat, (
+        f"결정문이 현재 `config_sha256` `{digest[:8]}…` 를 어디에서도 부르지 않는다"
+    )
+    assert _flat(f"현재값은 `{digest}`") in flat, (
+        "결정문의 '현재값' 문장이 loader 가 계산한 digest 와 다르다 — "
+        f"현재 config_sha256 은 `{digest}` 다"
+    )
 
 
 def _spec_section_3_3(text: str) -> str:
@@ -147,9 +196,11 @@ def test_the_ladder_claim_ceiling_amendment_lives_inside_spec_section_3_3():
 def _registered_comparator_family() -> list[str]:
     """Members of the registered ``inference.comparator_family``, read from the config.
 
-    Read as text rather than through the loader: the committed config still carries
-    activation blockers, so loading it is a different (and failing) contract from
-    reading the one registered list this doc-contract is about.
+    Read as text rather than through the loader: this doc-contract is about the one
+    registered list, not about activation. ``load_compose_phase2_config`` does load the
+    committed config (it *reports* six activation blockers rather than raising); it is
+    ``assert_scientific_mode_allowed`` that refuses while a blocker stands. Reading the
+    YAML keeps the needle on the registered line itself.
     """
     hits = re.findall(
         r"^\s*comparator_family:\s*\[([^\]]*)\]\s*$",
@@ -206,7 +257,10 @@ def test_a_signed_esm_decision_names_its_governance_disposition():
         return
     body = _prose(d2)
     assert "ESM의 marginal signal을 검증했다고 주장하지 않는다" in body or "ESM-off arm" in body
-    assert "CLAUDE.md:132" in body
+    # 줄번호가 아니라 anchor 를 요구한다: ``CLAUDE.md:132`` 는 CLAUDE.md 가 한 줄만 자라도
+    # 가리키는 곳이 달라지는 반면 ``#data-eval`` 은 의무 문장을 담은 절 자체를 가리킨다.
+    # 좁히기 전과 같은 비-공허성을 유지한다 — ``29d9e70`` 의 D2 산문에는 둘 다 없었다(실측).
+    assert "#data-eval" in body
 
 
 def test_a_signed_source_threat_model_names_the_consumption_residual():
@@ -239,10 +293,17 @@ _PROHIBITED_HEADLINE_TOKENS = ("mechanistic", "causal", "context transfer", "unc
 #: 있다. 문장 분할 휴리스틱은 쓰지 않는다 — 뒤에 오는 부정이 앞의 토큰을 사면하기 때문이다:
 #: 정정 전 검사에 `mechanistic 해석을 지지함.` 을 (ii) 앞에 독립 문장으로 끼워 넣으면 다음
 #: 문장의 비주장 절 때문에 **통과했다**(실측). 절을 먼저 걷어내고 잔여를 보면 그 구멍이 없다.
+#: (iv) 는 금지 토큰을 담지 않지만 여기 등록한다 — 등록의 두 번째 효과가 ``count == 1`` 이기
+#: 때문이다: 사전등록 문장의 비주장 절이 사라지거나 두 번 복제되면 이 검사가 먼저 실패한다.
+#: haystack 은 ``>`` 를 지우지 않으므로 등록 절은 blockquote **한 줄 안**에 있어야 한다 —
+#: 줄을 걸치면 ``> `` 가 needle 을 끊어 count 가 0 이 된다(실측; (iv) 를 그래서 rewrap 했다).
 _HEADLINE_NON_CLAIM_CLAUSES = (
     '"mechanistic" · "causal" · "context transfer" · "unconditional 95%" 를 '
     "**긍정 claim 으로** 쓰지 않는다(명시적 비주장 절에서만 등장한다)",
     "unconditional efficacy 또는 unconditional 95% coverage 를 주장하지 않는다",
+    "이는 등록된 verdict 조건의 통과이지 architecture attribution 이 아니며(수정안 F), "
+    "L1↔L2·L1↔L3 의 구조 기여는 exploratory 로만 보고한다. "
+    "unconditional efficacy 를 주장하지 않는다",
 )
 
 
@@ -298,6 +359,28 @@ def test_the_preregistered_headline_never_asserts_a_prohibited_claim():
         assert token not in residue, (
             f"`{token}` 가 등록된 비주장 절 **밖**에 나온다 — 긍정 claim 이다"
         )
+
+
+def test_the_preregistered_headline_covers_the_learned_family_leg():
+    """`GI_LEARNABLE_WIN` 의 learned-family 다리도 문장이 사전등록되어 있어야 한다.
+
+    §8 의 (i)~(iii) 은 headline additive contrast 의 결과군만 덮었다. 그런데
+    `GI_LEARNABLE_WIN` 은 learned comparator 조건을 하나 더 요구하고, 그 조건이 통과했을 때
+    쓸 문장은 **수정안 F 가 강등한 바로 그 문장**("식별가능 구조가 비-bilinear 함수족을
+    이긴다")이다. 문장이 없으면 결과를 본 뒤에 고르게 되는데, 그 자유를 없애려고 D4 가
+    만들어졌다. 그래서 (iv) 의 존재와, spec §3.3 수정안 F 에서 그리로 가는 역참조를 함께
+    요구한다 — 둘 중 하나만 있으면 ladder 를 읽는 사람이 상한을 못 본다.
+    """
+    section = _headline_section()
+    assert "**(iv) `GI_LEARNABLE_WIN`" in section, "§8 이 learned-family 다리를 사전등록하지 않았다"
+    assert "{GEARS, CPA, ID-only, L3}" in section
+    assert "architecture attribution 이 아니며(수정안 F)" in section
+    assert "네 문장" in section, "§8 머리말이 아직 세 문장만 사전등록한다고 말한다"
+
+    amendment = _spec_section_3_3(_MAIN_SPEC.read_text(encoding="utf-8"))
+    assert "pair-dependence decision §8 (iv)" in amendment, (
+        "수정안 F 가 verdict 문장의 사전등록 위치를 가리키지 않는다"
+    )
 
 
 def test_readiness_names_every_release_gate_and_stays_an_index():

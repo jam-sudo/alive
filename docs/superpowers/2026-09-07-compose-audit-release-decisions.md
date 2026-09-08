@@ -4,7 +4,11 @@
 > 못한 4건에 대해 오너가 각 절의 권장 선택지(D1-a · D2-b · D3-a · D4-a)와 amendment D·E·F·G 를 서명했다.
 > 서명은 선택이지 구현이 아니다 — `status: SIGNED` 절도 그 구현 task(Task 11·12·13·14)가 착지하기 전에는
 > `release: NO-GO` 다. (일반 규칙은 그대로 유지한다: `status: PENDING` 이나 `DEFER` 인 절은 `release: NO-GO` 다.)
-> 현재 `config_sha256` `0d20774637775eda79cb682a5d28bf7df40bf5b0a3f5768ef109ba7fa37c6c99` — 선택지마다 이동 여부가 다르다.
+> 서명 시점(2026-09-07, Task 5 착지 전)의 `config_sha256` 은
+> `0d20774637775eda79cb682a5d28bf7df40bf5b0a3f5768ef109ba7fa37c6c99` 였다; Task 5 이후
+> 현재값은 `a9dc9410d1b7fe1580e179b1fa5f9f3756688e059247a6d63322edf642b44767` 다
+> (아래 `## Task 5 digest 이동` 절 참조) — 선택지마다 이동 여부가 다르다. 옛 값은 서명 시점의
+> dated snapshot 으로만 남긴다.
 
 ## D1 — F-A1(ladder penalty 비대칭)의 성격
 status: SIGNED: a — 오너 지시 2026-09-07 "모두 권장사항으로 진행"
@@ -127,6 +131,12 @@ release: GO-LOCAL (Task 14, 2026-09-07 — pair-dependence decision §8)
 그 절을 역참조한다. 승리 문장은 등록된 resampling 단위 가정에 **조건부**이며 unconditional efficacy 를
 주장하지 않는다 — 0.9240~0.9373 은 특정 생성모형의 simulation 값이지 Norman 에서 측정한 coverage 가 아니다.
 verdict 는 그대로 λ=1.0 에서만 판정하며 사다리의 다른 λ 는 verdict gate 가 되지 않는다. digest 불변.
+
+**[2026-09-08 — 사전등록 문장 하나 추가, digest 불변.]** 최종 whole-branch 리뷰가 남은 구멍을 잡았다: (i)~(iii) 은
+headline additive contrast 의 결과군만 덮는데 `GI_LEARNABLE_WIN` 은 learned comparator 조건을 하나 더 요구하고,
+그 조건이 통과했을 때 쓸 문장이 없었다 — 수정안 F 가 강등한 문장을 결과를 본 뒤에 고를 자유가 남아 있었다.
+§8 에 **(iv)** 를 더해 그 자유를 닫았다(사전등록 문장은 이제 넷). spec §3.3 수정안 F 가 그 위치를 역참조하고,
+`test_the_preregistered_headline_covers_the_learned_family_leg` 가 둘의 존재를 함께 고정한다.
 
 ## 열린 것 (이 문서가 결정하지 않는 것)
 
