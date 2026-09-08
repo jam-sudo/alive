@@ -1,10 +1,14 @@
-# COMPOSE readiness — 시간순 서술 아카이브 (2026-06 ~ 2026-09-06)
+# COMPOSE readiness — 시간순 서술 아카이브 (2026-06 ~ 2026-09-07)
 
 > **이 문서는 authoritative 하지 않다.** 2026-09-07 에 `COMPOSE-SEAL-READINESS.md` 의 `## Critical path to seal` 아래에서 그대로 옮겨온
 > 시간순 서술이다. 현재 상태는 readiness 인덱스가, 시간순 audit 는 git log 가 authoritative 하다. 여기 digest·commit·수치는 **작성 당시** 값이다.
-> 원본은 `git show 2eef47a:docs/superpowers/COMPOSE-SEAL-READINESS.md`.
-> 본문은 verbatim 이나, 한 디렉터리 깊어졌으므로 relative link 3개(`../../CLAUDE.md#enforcement` ×2,
-> `evidence/2026-08-26-…/README.md`)의 **경로 접두사만** 같은 대상을 가리키도록 다시 계산했다.
+>
+> **출처(실측).** source = `7f3afdf` (`docs/superpowers/COMPOSE-SEAL-READINESS.md` **49–2532행**), 기간 = **2026-06 ~ 2026-09-07**.
+> 원본은 `git show 7f3afdf:docs/superpowers/COMPOSE-SEAL-READINESS.md`.
+> 본문은 그 2,484 줄과 verbatim 이나, 한 디렉터리 깊어졌으므로 아래 relative link **3개**의
+> **경로 접두사만** 같은 대상을 가리키도록 다시 계산했다:
+> 1. `](../../CLAUDE.md#enforcement)` → `](../../../CLAUDE.md#enforcement)` (2회)
+> 2. `](evidence/2026-08-26-pair-gene-dependence-coverage/README.md)` → `](../evidence/2026-08-26-pair-gene-dependence-coverage/README.md)`
 
 ## Critical path to seal
 
