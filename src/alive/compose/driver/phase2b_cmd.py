@@ -645,6 +645,24 @@ def _build_sealed_store(
             # here is exactly the COMPLETE-terminal / exit-code contradiction C1
             # measured. Skipped when the consumption-boundary check already refused
             # (its message is the accurate one).
+            #
+            # NOTHING in this branch may raise (PR #15 re-review R1, 2026-09-08,
+            # reproduced): `recheck()` re-streams the digest with `os.lseek`/`os.read`,
+            # so a storage-level `OSError` (EIO) is possible here independently of any
+            # writer D3-a's premises exclude, and `SealedSourceHandle.recheck` converts
+            # only `PresealDescriptorError`. An exception raised HERE leaves the `with
+            # store_context` exit, skips step 5's post-seal handler, and lands as a
+            # pre-seal exit while a durable COMPLETE terminal sits on disk with
+            # `recover` returning 0 -- the same contradiction, arriving by an I/O error
+            # instead of a digest mismatch. `Exception`, not `BaseException`:
+            # KeyboardInterrupt/SystemExit stay the operator's to see.
+            #
+            # This does NOT weaken the consumption boundary. An `OSError` inside
+            # `materialize_claimed`'s `post_materialization_check` is still wrapped by
+            # the store into `ComposeSealingError` (it catches `Exception`), so failing
+            # to PROVE integrity while consumption is still open fails closed:
+            # ABORTED_AFTER_SEAL, exit 30, `recover` 30. Both arms are pinned in
+            # `test_sealed_source_integrity_e2e.py`.
             if not consumption_check_failed:
                 try:
                     verified_source.recheck()
@@ -653,6 +671,14 @@ def _build_sealed_store(
                         "phase2b: sealed source changed AFTER consumption; the consumed "
                         f"bytes were verified at materialization against {expected_source_sha}; "
                         f"terminal state unaffected ({exc})",
+                        file=sys.stderr,
+                    )
+                except Exception as exc:  # noqa: BLE001 - diagnostic must never raise
+                    print(
+                        "phase2b: post-consumption diagnostic re-hash could not run "
+                        f"({type(exc).__name__}: {exc}); the consumed bytes were verified "
+                        f"at materialization against {expected_source_sha}; terminal state "
+                        "unaffected",
                         file=sys.stderr,
                     )
         finally:

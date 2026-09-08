@@ -26,6 +26,7 @@ declared behaviour and not a silent swallow.
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
@@ -34,6 +35,7 @@ from pathlib import Path
 import pytest
 
 import alive.compose.driver.phase2b_cmd as phase2b_mod
+import alive.compose.driver.preseal_read as preseal_mod
 from alive.compose.driver.phase2b_cmd import (
     PHASE2B_COMPLETE_EXIT,
     PHASE2B_NONCOMPLETE_EXIT,
@@ -180,6 +182,144 @@ def test_mutation_after_consumption_leaves_the_complete_terminal_and_prints_a_di
     assert "changed AFTER consumption" in err
     assert "terminal state unaffected" in err
     assert fx.sealed_outcome["source_file_sha256"] in err
+
+
+# --------------------------------------------------------------------------- #
+# (c2) the diagnostic re-hash cannot RUN → still COMPLETE; the same failure
+#      inside the consumption boundary → ABORTED_AFTER_SEAL
+#
+# PR #15 re-review R1 (Codex, 2026-09-08), reproduced: the ruling in (c) is
+# "post-consumption divergence is a stderr diagnostic, never an exception", but
+# the branch caught only `Phase2bSubcommandError`. `recheck()` re-streams the
+# digest with `os.lseek`/`os.read`, so a storage-level `OSError` escaped the
+# `with store_context` exit, skipped step 5's post-seal handler, and left
+# `RESULT OSError / TERMINAL COMPLETE / RECOVER 0 / STDERR ''` --- the same
+# contradiction C1 named, arriving by an I/O error instead of a digest mismatch.
+#
+# The two arms below are the SAME injected failure at the two positions, and they
+# must decide differently: failing to prove integrity while consumption is still
+# open fails CLOSED (30); failing to run a diagnostic after consumption ended
+# cannot contradict a terminal that is already durable (0 + one stderr line).
+# --------------------------------------------------------------------------- #
+_INJECTED_IO_MESSAGE = "review-injected I/O error on the sealed descriptor"
+
+
+def _fail_the_nth_recheck(monkeypatch: pytest.MonkeyPatch, nth: int) -> dict[str, int]:
+    """Arm a real ``os.read`` I/O error for the *nth* ``recheck()`` and no other.
+
+    The counter counts RE-CHECKS, not raw reads: one ``recheck()`` streams a
+    0.70 GB digest through many ``os.read`` calls, so counting reads would arm the
+    failure at an arbitrary point of an arbitrary pass. Wrapping
+    :meth:`VerifiedDescriptor.recheck` makes "which re-check" the unit, and the
+    patched ``os.read`` is installed only for the duration of that one call.
+
+    Returns
+    -------
+    dict
+        ``{"rechecks": n}``, live, so a test can assert HOW MANY re-checks ran.
+    """
+    state = {"rechecks": 0}
+    real_recheck = preseal_mod.VerifiedDescriptor.recheck
+    real_os_read = preseal_mod.os.read
+
+    def failing_read(fd, length):  # noqa: ARG001 - signature parity with os.read
+        raise OSError(errno.EIO, _INJECTED_IO_MESSAGE)
+
+    def counting_recheck(self):
+        state["rechecks"] += 1
+        if state["rechecks"] != nth:
+            return real_recheck(self)
+        preseal_mod.os.read = failing_read
+        try:
+            return real_recheck(self)
+        finally:
+            preseal_mod.os.read = real_os_read
+
+    monkeypatch.setattr(preseal_mod.VerifiedDescriptor, "recheck", counting_recheck)
+    monkeypatch.setattr(preseal_mod.os, "read", real_os_read)  # restored by monkeypatch
+    return state
+
+
+def test_an_io_error_in_the_diagnostic_rehash_is_reported_not_raised(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    """Arm 1: the SECOND re-check (the exit diagnostic) cannot read the descriptor.
+
+    Consumption already ended and was already proven: the first re-check ran on
+    the real bytes and accepted them, and the terminal records that. A diagnostic
+    that cannot RUN is not evidence that the consumed bytes were wrong, so it must
+    not overturn a durable COMPLETE --- it names itself on stderr and exits 0.
+    """
+    fx = _run_preseal(tmp_path)
+    token = _confirmation_token(fx.run_dir)
+    state = _fail_the_nth_recheck(monkeypatch, nth=2)
+
+    # CAPTURE the escape rather than letting it end the test body: the claim in this
+    # test's own name is "not raised", so removing the guard must fail HERE, as an
+    # AssertionError from this test, not as an OSError erroring out of pytest.
+    rc: int | None = None
+    escaped = ""
+    try:
+        rc = run_phase2b_subcommand(
+            fx, approved_artifacts_root=tmp_path, run_dir=fx.run_dir, confirm_seal_token=token
+        )
+    except Exception as exc:  # noqa: BLE001 - the escape is the thing being measured
+        escaped = f"{type(exc).__name__}: {exc}"
+
+    assert escaped == "", (
+        "the exit-time diagnostic re-hash must never raise; it escaped "
+        f"`run_phase2b_subcommand` as {escaped}"
+    )
+    assert rc == PHASE2B_COMPLETE_EXIT, "a diagnostic that could not run must not change the exit"
+    assert state["rechecks"] == 2, (
+        "the arm requires exactly two re-checks (materialization, then diagnostic); "
+        f"got {state['rechecks']}"
+    )
+    assert _terminal_states(fx.run_dir) == ["COMPLETE"]
+    assert run_recover_subcommand(run_dir=fx.run_dir) == RECOVER_COMPLETE_EXIT
+    err = capsys.readouterr().err
+    assert "post-consumption diagnostic re-hash could not run" in err, (
+        f"the failure must name itself on stderr, not vanish; stderr was {err!r}"
+    )
+    assert "OSError" in err and "I/O error" in err and f"[Errno {errno.EIO}]" in err, (
+        f"the diagnostic must name the failure class and message; stderr was {err!r}"
+    )
+    assert fx.sealed_outcome["source_file_sha256"] in err
+
+
+def test_an_io_error_in_the_materialization_recheck_still_aborts_after_seal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    """Arm 2: the FIRST re-check (the consumption boundary) cannot read the descriptor.
+
+    Here the run cannot PROVE that what it consumed is what it verified, and it is
+    still inside the terminal protection boundary. Fail closed: the store wraps any
+    ``Exception`` from ``post_materialization_check`` into ``ComposeSealingError``,
+    so this becomes ``ABORTED_AFTER_SEAL`` / exit 30 and ``recover`` agrees. Widening
+    the diagnostic branch to ``except Exception`` must not reach this position ---
+    that is what this arm measures.
+    """
+    fx = _run_preseal(tmp_path)
+    token = _confirmation_token(fx.run_dir)
+    state = _fail_the_nth_recheck(monkeypatch, nth=1)
+
+    rc = run_phase2b_subcommand(
+        fx, approved_artifacts_root=tmp_path, run_dir=fx.run_dir, confirm_seal_token=token
+    )
+
+    assert rc == PHASE2B_NONCOMPLETE_EXIT, "an unprovable consumption must fail closed, not exit 0"
+    assert state["rechecks"] == 1, (
+        "the failure must end the run at the consumption boundary, before any "
+        f"diagnostic re-check; got {state['rechecks']} re-checks"
+    )
+    err = capsys.readouterr().err
+    assert "sealed source integrity check failed after materialization" in err
+    assert "OSError" in err and "I/O error" in err
+    assert len(_audit_lines(fx.run_dir)) == 1
+    assert _terminal_states(fx.run_dir) == ["ABORTED_AFTER_SEAL"]
+    assert not (fx.run_dir / Phase2bTerminal.COMPLETE_ARTIFACT).exists()
+    assert (fx.run_dir / DURABLE_COMMIT_FILENAME).is_file()
+    assert run_recover_subcommand(run_dir=fx.run_dir) == RECOVER_NONCOMPLETE_EXIT
 
 
 # --------------------------------------------------------------------------- #
