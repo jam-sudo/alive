@@ -800,3 +800,124 @@ def test_fixture_store_behaves_like_the_sealed_store(tmp_path: Path) -> None:
     release = store.evaluate_sealed_once("run-fixture", union)
     assert set(release.keys()) == set(union)
     assert store.sealed_access_count == 1
+
+
+# ---------------------------------------------------------------------------
+# post_materialization_check --- the consumption boundary (PR #15 finding C1)
+#
+# The driver hands the store a re-hash of the open sealed-source descriptor. It
+# must run where consumption ENDS: after the last claimed row has been densified
+# and before any pair is handed back. Running it later (the driver's `with` exit,
+# which is what C1 measured) is after a COMPLETE terminal is already durable.
+# ---------------------------------------------------------------------------
+class _RecordingMatrix:
+    """``.X`` stand-in that records every slice, in order, into a shared list."""
+
+    def __init__(self, inner: np.ndarray, events: list[str]) -> None:
+        self._inner = inner
+        self._events = events
+        self.shape = inner.shape
+
+    def __getitem__(self, key):
+        self._events.append("read")
+        return self._inner[key]
+
+
+class _RecordingSource:
+    def __init__(self, inner: _InMemorySource, events: list[str]) -> None:
+        self.X = _RecordingMatrix(inner.X, events)
+
+
+def _recording_store(tmp_path: Path, check, events: list[str]) -> tuple[ComposeOutcomeStore, dict]:
+    """A store whose row reads and integrity check append to the SAME list."""
+    manifest = _build_manifest()
+    source, pair_index = _build_pair_index(manifest)
+    store = ComposeOutcomeStore(
+        pair_index=pair_index,
+        source=_RecordingSource(source, events),
+        manifest=manifest,
+        audit_path=tmp_path / "compose_audit.jsonl",
+        post_materialization_check=check,
+    )
+    return store, manifest
+
+
+def test_the_post_materialization_check_runs_once_after_every_claimed_row(
+    tmp_path: Path,
+) -> None:
+    """Order is the claim: every read, THEN exactly one check, THEN the return."""
+    events: list[str] = []
+
+    def check() -> None:
+        events.append("check")
+
+    store, manifest = _recording_store(tmp_path, check, events)
+    union = _sealed_union(manifest)
+    claim = store.claim_sealed_access("run-post-check", union)
+
+    release = store.materialize_claimed(claim)
+
+    assert set(release) == set(union)
+    assert events.count("check") == 1, "the integrity check must run exactly once"
+    assert events[-1] == "check", "it must run AFTER the last row is materialised"
+    assert events[: len(union)] == ["read"] * len(union)
+
+
+def test_a_refused_post_materialization_check_returns_no_pair(tmp_path: Path) -> None:
+    """A refusal is fail-closed: ComposeSealingError, and the mapping never returns."""
+
+    def check() -> None:
+        raise RuntimeError("sealed source ... was modified IN PLACE while it was open")
+
+    store, manifest = _recording_store(tmp_path, check, [])
+    claim = store.claim_sealed_access("run-refused", _sealed_union(manifest))
+
+    returned: list[object] = []
+    refusal = ""
+    cause = None
+    try:
+        returned.append(store.materialize_claimed(claim))
+    except ComposeSealingError as exc:
+        refusal = str(exc)
+        cause = exc.__cause__
+
+    assert returned == [], "a refused check must return no pair at all"
+    assert "sealed source integrity check failed after materialization" in refusal
+    # The original message is carried through so the driver's own matchers still work.
+    assert "modified IN PLACE" in refusal
+    assert isinstance(cause, RuntimeError)
+
+
+def test_the_post_materialization_check_is_optional(tmp_path: Path) -> None:
+    """Control: without the hook the store materialises exactly as before."""
+    store, manifest = _build_store(tmp_path)
+    union = _sealed_union(manifest)
+    claim = store.claim_sealed_access("run-none", union)
+    released: set = set()
+    refusal = ""
+    try:
+        released = set(store.materialize_claimed(claim))
+    except ComposeSealingError as exc:
+        refusal = str(exc)
+    assert refusal == "", f"a store without the hook must not be refused: {refusal!r}"
+    assert released == set(union)
+
+
+def test_build_fixture_outcome_store_forwards_the_post_materialization_check(
+    tmp_path: Path,
+) -> None:
+    """The fixture minting site must pass the hook through, not drop it."""
+    calls: list[str] = []
+    inputs = _fixture_store_inputs(tmp_path)
+    manifest = inputs["manifest"]
+    store = build_fixture_outcome_store(
+        **inputs,
+        corpus_id=FIXTURE_CORPUS_V1.corpus_id,
+        source_sha256=FIXTURE_CORPUS_V1.source_sha256,
+        builder_code_sha256=FIXTURE_CORPUS_V1.builder_code_sha256,
+        post_materialization_check=lambda: calls.append("check"),
+    )
+    union = _sealed_union(manifest)
+    release = store.materialize_claimed(store.claim_sealed_access("run-fixture-hook", union))
+    assert set(release) == set(union)
+    assert calls == ["check"]

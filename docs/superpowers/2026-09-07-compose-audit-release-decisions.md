@@ -114,6 +114,25 @@ access-policy·actor roster·증거 위치를 검토해 서명하는 것이 필�
 `src/alive/compose/driver/preseal_read.py` post-hash 주석의 예외 문장이 이 절을 역참조한다. 변형 b(claim
 이후 sealed snapshot 에서 소비)는 여기서 채택하지 않았고 **별도 plan**(부록 B)으로 남는다.
 
+**[2026-09-08 PR 리뷰 정정 — C1]** 위 "측정된 사실" 은 재검사가 **소비 종료 시점**에 돈다고 전제했지만,
+2026-09-08 두 독립 PR 리뷰가 실제 배치를 실측했다: 재검사는 `verified_descriptor` 의 context 종료에서
+돌았고 driver 는 그 context 로 library 호출 전체를 감쌌으므로, 검사는 COMPLETE terminal 과 durable marker
+가 이미 기록된 **뒤에** 돌았다. 실패 예외는 `with` 문 자체의 exit 에서 나와 post-seal 처리(exit 30)를
+지나쳤고 CLI 는 pre-seal exit 10 으로 분류했으며 `recover` 는 그 COMPLETE 를 읽어 **0** 을 돌려줬다 —
+탐지된 무결성 실패가 durable witness 없이 사라졌다. 정정 사항은 셋이다.
+(1) **탐지 위치 = materialization 경계.** 재해시는 이제 `ComposeOutcomeStore.materialize_claimed` 가
+claim 된 모든 pair 를 numpy 로 물질화한 직후, 반환 직전에 `post_materialization_check` 로 정확히 한 번
+돈다(`outcome_store.py`, `phase2b_cmd._build_sealed_store`). 이 지점은 terminal 보호 경계 안이다.
+(2) **durable witness = `ABORTED_AFTER_SEAL`.** 소비 중 in-place 변조는 이제 `ComposeSealingError` 로
+전파되어 `ABORTED_AFTER_SEAL` terminal 을 남기고 phase2b·`recover` 모두 **30** 을 돌려준다
+(`tests/alive/compose/driver/test_sealed_source_integrity_e2e.py`, 변이 harness M18).
+(3) **소비 *후* 변조 = stderr 진단만.** 소비가 끝난 뒤의 파일 상태는 "소비한 바이트 = 검증한 바이트"
+계약의 대상이 아니며(terminal 이 소비 시점의 검증을 기록한다), 거기서 예외를 내면 durable COMPLETE 와
+exit code 가 다시 모순된다. 그래서 한 줄 진단만 stderr 에 쓰고 terminal 은 건드리지 않는다 —
+조용한 swallow 가 아니라 테스트로 고정된 선언 동작이다. 이 창의 writer 자체는 위 (i)·(ii) 전제가 배제하며
+D3-a 의 처분이 그대로 덮는다. **수용된 잔여(`seal.transient-inode-mutation-restoration`)와 D3-a 서명 문장은
+바뀌지 않는다** — 바뀐 것은 재검사가 *언제* 도는가와 실패가 *무엇을 남기는가* 뿐이고, config·digest 는 불변이다.
+
 ## D4 — pair dependence 아래 headline 문장
 status: SIGNED: a — 오너 지시 2026-09-07 "모두 권장사항으로 진행"
 release: GO-LOCAL (Task 14, 2026-09-07 — pair-dependence decision §8)

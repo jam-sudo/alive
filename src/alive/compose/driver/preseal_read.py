@@ -38,9 +38,11 @@ _HASH_CHUNK = 1 << 20
 __all__ = [
     "PresealBytesError",
     "PresealDescriptorError",
+    "VerifiedDescriptor",
     "read_verified_bytes",
     "read_verified_json",
     "verified_descriptor",
+    "verified_descriptor_handle",
 ]
 
 
@@ -98,17 +100,134 @@ def read_verified_json(path: str | Path, expected_sha256: str, *, field: str) ->
     return obj
 
 
+class VerifiedDescriptor:
+    """A live, digest-verified read handle on one pre-seal artifact.
+
+    Holds the open descriptor whose bytes were hashed and matched the declared
+    digest. :attr:`path` is the ``/proc/self/fd`` or ``/dev/fd`` pathname backed
+    by that exact descriptor, so every consumer reads the inode that was
+    verified, not whatever the source pathname resolves to later.
+
+    :meth:`recheck` re-streams the digest through the SAME descriptor. It is a
+    method rather than a context-manager exit because **only the consumer knows
+    when consumption ends** (2026-09-08, PR #15 review C1): the driver's
+    ``store_context`` wraps the whole library call, so an exit-time re-check ran
+    after the COMPLETE terminal was already durable and its failure could not be
+    routed through the post-seal handler. The consumption boundary is
+    :meth:`~alive.compose.outcome_store.ComposeOutcomeStore.materialize_claimed`,
+    which calls this via ``post_materialization_check`` while a failure can still
+    become an ``ABORTED_AFTER_SEAL`` terminal.
+
+    Attributes
+    ----------
+    path : pathlib.Path
+        Descriptor-backed pathname to read the verified bytes through.
+    source_path : pathlib.Path
+        The original pathname (error messages only).
+    expected_sha : str
+        The declared digest the bytes hashed to at open time.
+    """
+
+    __slots__ = ("_fd", "_identity", "expected_sha", "path", "source_path")
+
+    def __init__(
+        self,
+        *,
+        fd: int,
+        path: Path,
+        source_path: Path,
+        expected_sha: str,
+        identity: tuple[int, int, int, int],
+    ) -> None:
+        self._fd = fd
+        self._identity = identity
+        self.path = path
+        self.source_path = source_path
+        self.expected_sha = expected_sha
+
+    def recheck(self) -> None:
+        """Prove the bytes did not change under us, through the SAME descriptor.
+
+        Raises
+        ------
+        PresealDescriptorError
+            If the descriptor's bytes no longer hash to the declared digest (an
+            IN-PLACE write to the held inode), or if the inode identity changed
+            even though the bytes still match.
+        """
+        # 2026-08-30, `seal.verified-fd-posthash-mutation`, reproduced independently
+        # on both sides of the audit loop: descriptor pinning defeats a *pathname*
+        # swap, but not an IN-PLACE write to the inode we hold open. Measured on the
+        # real function: `same_inode=True`, verified digest != the digest of the
+        # bytes actually read through the descriptor.
+        #
+        # Prevention is not available at this layer -- a local writer with write
+        # permission can modify a file we hold read-only, and nothing here can stop
+        # it. What IS available is making the divergence impossible to go unnoticed,
+        # which is the property the seal's evidence actually rests on: "the bytes we
+        # recorded as verified are the bytes we consumed" must be true or the run
+        # must fail.
+        # Exception (registered residual seal.transient-inode-mutation-restoration): a
+        # modify-then-RESTORE that completes before this re-hash is not noticed here;
+        # D3-a (2026-09-07) accepts it under the approved-runtime premises (no
+        # concurrent writer, immutable mount).
+        #
+        # Cost measured on the real sealed source (0.70 GB): 0.2 s. Once per run.
+        os.lseek(self._fd, 0, os.SEEK_SET)
+        post = hashlib.sha256()
+        while True:
+            chunk = os.read(self._fd, _HASH_CHUNK)
+            if not chunk:
+                break
+            post.update(chunk)
+        post_stat = os.fstat(self._fd)
+        identity_final = (
+            post_stat.st_dev,
+            post_stat.st_ino,
+            post_stat.st_size,
+            post_stat.st_mtime_ns,
+        )
+        post_sha = post.hexdigest()
+        identity_after = self._identity
+        source_path = self.source_path
+        expected_sha = self.expected_sha
+        if post_sha != expected_sha:
+            raise PresealDescriptorError(
+                f"sealed source {str(source_path)!r} was modified IN PLACE while it was open: "
+                f"the bytes verified before consumption hash to {expected_sha!r} but the same "
+                f"descriptor now hashes to {post_sha!r}. The inode is unchanged "
+                f"(identity before={identity_after!r} after={identity_final!r}), so a pathname "
+                "check could not have seen this. Fail closed: what was consumed is not what was "
+                "verified."
+            )
+        if identity_final != identity_after:
+            raise PresealDescriptorError(
+                f"sealed source {str(source_path)!r} changed identity while it was open "
+                f"(before={identity_after!r} after={identity_final!r}) even though its bytes still "
+                "hash to the declared digest. Fail closed rather than reason about how."
+            )
+
+
 @contextlib.contextmanager
-def verified_descriptor(source_path: str | Path, expected_sha: str) -> Iterator[Path]:
-    """Yield an fd-backed path to the integrity-checked sealed source.
+def verified_descriptor_handle(
+    source_path: str | Path, expected_sha: str
+) -> Iterator[VerifiedDescriptor]:
+    """Yield a :class:`VerifiedDescriptor` for the integrity-checked source.
 
     Opens the source with ``O_NOFOLLOW`` (rejecting a symlink final component),
     fstat-verifies it is a regular file, captures its
     ``(device, inode, size, mtime_ns)`` identity, streams the SHA-256, then
     re-captures the identity and requires it unchanged (a mutation during
     hashing fails closed). The streamed digest must equal ``expected_sha``.
-    The original descriptor remains open while the yielded ``/proc/self/fd`` or
-    ``/dev/fd`` path is used, closing the hash-then-reopen pathname race.
+    The original descriptor remains open for the whole ``with`` body, closing the
+    hash-then-reopen pathname race, and is closed on exit.
+
+    This context manager does **not** re-check on exit: the consumer decides when
+    consumption ends and calls :meth:`VerifiedDescriptor.recheck` there. Wrapping
+    a whole library call in an exit-time re-check is what PR #15's C1 finding
+    measured as too late -- the COMPLETE terminal was already durable.
+    :func:`verified_descriptor` keeps the exit-time behaviour for the lanes whose
+    consumption really does end with the ``with`` block.
 
     Raises
     ------
@@ -187,60 +306,39 @@ def verified_descriptor(source_path: str | Path, expected_sha: str) -> Iterator[
                 "cannot obtain an identity-matched descriptor path for sealed source "
                 f"{str(source_path)!r}; refusing a pathname reopen"
             )
-        yield descriptor_path
-
-        # --- post-hash window: prove the bytes did not change under us ---------
-        # 2026-08-30, `seal.verified-fd-posthash-mutation`, reproduced independently
-        # on both sides of the audit loop: descriptor pinning defeats a *pathname*
-        # swap, but not an IN-PLACE write to the inode we hold open. Measured on the
-        # real function: `same_inode=True`, verified digest != the digest of the
-        # bytes actually read through the descriptor.
-        #
-        # Prevention is not available at this layer -- a local writer with write
-        # permission can modify a file we hold read-only, and nothing here can stop
-        # it. What IS available is making the divergence impossible to go unnoticed,
-        # which is the property the seal's evidence actually rests on: "the bytes we
-        # recorded as verified are the bytes we consumed" must be true or the run
-        # must fail. So the digest is re-streamed through the SAME descriptor after
-        # consumption and must still equal the declared one.
-        # Exception (registered residual seal.transient-inode-mutation-restoration): a
-        # modify-then-RESTORE that completes before the post-consumption re-hash is not
-        # noticed here; D3-a (2026-09-07) accepts it under the approved-runtime premises
-        # (no concurrent writer, immutable mount).
-        #
-        # This runs only on the normal path, never in `finally`: on an exception the
-        # original failure is the one that matters and must not be masked.
-        #
-        # Cost measured on the real sealed source (0.70 GB): 0.2 s. Once per run.
-        os.lseek(fd, 0, os.SEEK_SET)
-        post = hashlib.sha256()
-        while True:
-            chunk = os.read(fd, _HASH_CHUNK)
-            if not chunk:
-                break
-            post.update(chunk)
-        post_stat = os.fstat(fd)
-        identity_final = (
-            post_stat.st_dev,
-            post_stat.st_ino,
-            post_stat.st_size,
-            post_stat.st_mtime_ns,
+        yield VerifiedDescriptor(
+            fd=fd,
+            path=descriptor_path,
+            source_path=source_path,
+            expected_sha=expected_sha,
+            identity=identity_after,
         )
-        post_sha = post.hexdigest()
-        if post_sha != expected_sha:
-            raise PresealDescriptorError(
-                f"sealed source {str(source_path)!r} was modified IN PLACE while it was open: "
-                f"the bytes verified before consumption hash to {expected_sha!r} but the same "
-                f"descriptor now hashes to {post_sha!r}. The inode is unchanged "
-                f"(identity before={identity_after!r} after={identity_final!r}), so a pathname "
-                "check could not have seen this. Fail closed: what was consumed is not what was "
-                "verified."
-            )
-        if identity_final != identity_after:
-            raise PresealDescriptorError(
-                f"sealed source {str(source_path)!r} changed identity while it was open "
-                f"(before={identity_after!r} after={identity_final!r}) even though its bytes still "
-                "hash to the declared digest. Fail closed rather than reason about how."
-            )
     finally:
         os.close(fd)
+
+
+@contextlib.contextmanager
+def verified_descriptor(source_path: str | Path, expected_sha: str) -> Iterator[Path]:
+    """Yield an fd-backed path to the integrity-checked sealed source.
+
+    Behaviourally unchanged since 2026-08-30 and re-implemented on
+    :func:`verified_descriptor_handle` on 2026-09-08: the descriptor path is
+    yielded, and on the NORMAL path (never in ``finally``) the digest is
+    re-streamed through the same descriptor at context exit. On an exception the
+    original failure is the one that matters and must not be masked.
+
+    Use this where the ``with`` block IS the consumption (the pre-seal bias lane
+    parses the config inside it). Where consumption ends somewhere else, take the
+    handle from :func:`verified_descriptor_handle` and call
+    :meth:`VerifiedDescriptor.recheck` at that boundary instead.
+
+    Raises
+    ------
+    PresealDescriptorError
+        On a symlink / non-regular node, an identity change during hashing, an
+        unreadable file, a digest mismatch, an unavailable/mismatched
+        descriptor-backed path, or an IN-PLACE mutation seen at context exit.
+    """
+    with verified_descriptor_handle(source_path, expected_sha) as handle:
+        yield handle.path
+        handle.recheck()

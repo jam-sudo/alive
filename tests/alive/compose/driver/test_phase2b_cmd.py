@@ -54,6 +54,7 @@ from alive.compose.driver.phase2b_cmd import (
     run_phase2b_subcommand,
 )
 from alive.compose.driver.preflight_cmd import run_preflight_subcommand
+from alive.compose.driver.preseal_read import PresealDescriptorError, verified_descriptor
 from alive.compose.driver.run_dir_state import RunDirStateError
 from alive.compose.durable import (
     COMMIT_CHECKSUM_FIELD,
@@ -95,6 +96,22 @@ def _terminal_artifacts(run_dir: Path) -> list[Path]:
         )
         if p.exists()
     ]
+
+
+def _recheck_refusal(verified) -> str:
+    """``"<ExcName>: <message>"`` for the driver's re-check, or ``""`` if it accepts.
+
+    Every exception is captured, and the TYPE is part of the returned string, so a
+    guard that stops refusing AND a guard that refuses with the wrong error type
+    (which would escape a `pytest.raises(Phase2bSubcommandError)` uncaught, killing
+    nothing) are both killed by an ``AssertionError`` from the test whose own name
+    makes the claim.
+    """
+    try:
+        verified.recheck()
+    except BaseException as exc:  # noqa: BLE001 - the type IS part of the contract
+        return f"{type(exc).__name__}: {exc}"
+    return ""
 
 
 def _no_seal_side_effects(run_dir: Path) -> None:
@@ -246,10 +263,10 @@ def test_verified_descriptor_survives_source_path_replacement(tmp_path: Path) ->
     replacement_path.write_bytes(replacement)
 
     expected_sha = hashlib.sha256(original).hexdigest()
-    with phase2b_mod._open_verified_sealed_source(source_path, expected_sha) as descriptor_path:
+    with phase2b_mod._open_verified_sealed_source(source_path, expected_sha) as handle:
         replacement_path.replace(source_path)
         assert source_path.read_bytes() == replacement
-        assert descriptor_path.read_bytes() == original
+        assert handle.path.read_bytes() == original
 
 
 # --------------------------------------------------------------------------- #
@@ -263,6 +280,15 @@ def test_verified_descriptor_survives_source_path_replacement(tmp_path: Path) ->
 # Prevention is not available here -- nothing in this process can stop a local
 # writer with write permission. What the fix buys is that the divergence cannot
 # pass unnoticed, which is the property the seal's evidence rests on.
+#
+# 2026-09-08 (PR #15 finding C1): the re-check is no longer performed by this
+# context manager's exit -- it ran after the library had published a COMPLETE
+# terminal, so it could not decide the terminal state. The opener now yields a
+# handle and the re-check is the call `handle.recheck()`, made by the store at the
+# moment consumption ends. The messages and the converted error type are unchanged,
+# so these reproductions assert exactly what they asserted before; only the point
+# at which the guard is invoked moved (`test_sealed_source_integrity_e2e.py` pins
+# that the driver really makes that call, end to end).
 # --------------------------------------------------------------------------- #
 def test_in_place_mutation_of_the_open_inode_is_refused(tmp_path: Path) -> None:
     """The exact reproduction, pinned: same inode, different bytes, must fail."""
@@ -272,16 +298,18 @@ def test_in_place_mutation_of_the_open_inode_is_refused(tmp_path: Path) -> None:
     expected_sha = hashlib.sha256(original).hexdigest()
     before_ino = source_path.stat().st_ino
 
-    with pytest.raises(phase2b_mod.Phase2bSubcommandError, match="modified IN PLACE"):
-        with phase2b_mod._open_verified_sealed_source(source_path, expected_sha) as descriptor_path:
-            with open(source_path, "r+b") as handle:
-                handle.seek(0)
-                handle.write(b"tampered-sealed-source" * 64)
-                handle.flush()
-                os.fsync(handle.fileno())
-            # the consumer reads the MUTATED bytes through the pinned descriptor
-            assert Path(descriptor_path).read_bytes() != original
+    with phase2b_mod._open_verified_sealed_source(source_path, expected_sha) as verified:
+        with open(source_path, "r+b") as handle:
+            handle.seek(0)
+            handle.write(b"tampered-sealed-source" * 64)
+            handle.flush()
+            os.fsync(handle.fileno())
+        # the consumer reads the MUTATED bytes through the pinned descriptor
+        assert verified.path.read_bytes() != original
+        refusal = _recheck_refusal(verified)
     assert source_path.stat().st_ino == before_ino, "the reproduction requires the same inode"
+    assert refusal.startswith("Phase2bSubcommandError: "), f"wrong error type: {refusal!r}"
+    assert "modified IN PLACE" in refusal, f"a mutated inode must be refused, got {refusal!r}"
 
 
 def test_in_place_mutation_is_caught_even_when_mtime_is_restored(tmp_path: Path) -> None:
@@ -298,16 +326,18 @@ def test_in_place_mutation_is_caught_even_when_mtime_is_restored(tmp_path: Path)
     expected_sha = hashlib.sha256(original).hexdigest()
     stat_before = source_path.stat()
 
-    with pytest.raises(phase2b_mod.Phase2bSubcommandError, match="modified IN PLACE"):
-        with phase2b_mod._open_verified_sealed_source(source_path, expected_sha):
-            with open(source_path, "r+b") as handle:
-                handle.seek(0)
-                handle.write(b"X" * 4096)  # same LENGTH, so st_size is unchanged
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.utime(source_path, ns=(stat_before.st_atime_ns, stat_before.st_mtime_ns))
-            assert source_path.stat().st_mtime_ns == stat_before.st_mtime_ns
-            assert source_path.stat().st_size == stat_before.st_size
+    with phase2b_mod._open_verified_sealed_source(source_path, expected_sha) as verified:
+        with open(source_path, "r+b") as handle:
+            handle.seek(0)
+            handle.write(b"X" * 4096)  # same LENGTH, so st_size is unchanged
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.utime(source_path, ns=(stat_before.st_atime_ns, stat_before.st_mtime_ns))
+        assert source_path.stat().st_mtime_ns == stat_before.st_mtime_ns
+        assert source_path.stat().st_size == stat_before.st_size
+        refusal = _recheck_refusal(verified)
+    assert refusal.startswith("Phase2bSubcommandError: "), f"wrong error type: {refusal!r}"
+    assert "modified IN PLACE" in refusal, f"a mutated inode must be refused, got {refusal!r}"
 
 
 def test_an_untouched_sealed_source_still_passes(tmp_path: Path) -> None:
@@ -317,8 +347,10 @@ def test_an_untouched_sealed_source_still_passes(tmp_path: Path) -> None:
     source_path.write_bytes(original)
     expected_sha = hashlib.sha256(original).hexdigest()
 
-    with phase2b_mod._open_verified_sealed_source(source_path, expected_sha) as descriptor_path:
-        assert Path(descriptor_path).read_bytes() == original
+    with phase2b_mod._open_verified_sealed_source(source_path, expected_sha) as verified:
+        assert verified.path.read_bytes() == original
+        refusal = _recheck_refusal(verified)
+    assert refusal == "", f"an untouched source must not be refused: {refusal!r}"
 
 
 def test_a_failure_inside_the_window_is_not_masked_by_the_recheck(tmp_path: Path) -> None:
@@ -327,6 +359,11 @@ def test_a_failure_inside_the_window_is_not_masked_by_the_recheck(tmp_path: Path
     If the consumer raises, that exception is the one that matters. Putting the
     re-verification in a `finally` would replace a real failure with a digest
     complaint and send whoever reads the terminal after the wrong thing.
+
+    This pins the lane that still re-checks at context exit -- `verified_descriptor`,
+    used by the pre-seal bias lane, where the `with` block IS the consumption. The
+    sealed-source lane moved the call to the consumption boundary on 2026-09-08 and
+    is covered by `test_sealed_source_integrity_e2e.py`.
     """
     source_path = tmp_path / "source.h5ad"
     original = b"Z" * 4096
@@ -336,14 +373,47 @@ def test_a_failure_inside_the_window_is_not_masked_by_the_recheck(tmp_path: Path
     class _ConsumerFailure(RuntimeError):
         pass
 
-    with pytest.raises(_ConsumerFailure):
-        with phase2b_mod._open_verified_sealed_source(source_path, expected_sha):
+    escaped: list[str] = []
+    try:
+        with verified_descriptor(source_path, expected_sha):
             # mutate as well, so the re-check WOULD have something to complain about
             with open(source_path, "r+b") as handle:
                 handle.seek(0)
                 handle.write(b"Y" * 4096)
                 handle.flush()
             raise _ConsumerFailure("the consumer's own failure")
+    except BaseException as exc:  # noqa: BLE001 - the identity of the escapee IS the claim
+        escaped.append(type(exc).__name__)
+
+    assert escaped == ["_ConsumerFailure"], (
+        f"the consumer's own failure must be the one that escapes, got {escaped}"
+    )
+
+
+def test_the_exit_time_lane_still_refuses_an_in_place_mutation(tmp_path: Path) -> None:
+    """Control for the test above: `verified_descriptor`'s exit re-check still fires.
+
+    Without this, "the re-check is not in `finally`" could be satisfied by a
+    context manager that never re-checks at all.
+    """
+    source_path = tmp_path / "source.h5ad"
+    original = b"Z" * 4096
+    source_path.write_bytes(original)
+    expected_sha = hashlib.sha256(original).hexdigest()
+
+    refusal = ""
+    try:
+        with verified_descriptor(source_path, expected_sha):
+            with open(source_path, "r+b") as handle:
+                handle.seek(0)
+                handle.write(b"Y" * 4096)
+                handle.flush()
+    except PresealDescriptorError as exc:
+        refusal = str(exc)
+
+    assert "modified IN PLACE" in refusal, (
+        f"the exit-time lane must still refuse a mutated inode, got {refusal!r}"
+    )
 
 
 # --------------------------------------------------------------------------- #

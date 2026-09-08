@@ -418,6 +418,12 @@ seal 직전(runbook §6/§7) 순서로 재검증한다.
    Fixture면 §4 전용 factory를, scientific이면 일반 store를 사용한다.
    **`ComposeOutcomeStore`가 import·생성되는 유일한 함수이며 phase2b에서만 도달 가능하다(§4).** fixture
    builder는 store 객체가 아니라 sealed-outcome DATA만 만든다(§6).
+   **[2026-09-08 정정 — PR #15 C1]** 이 descriptor의 digest 재검사는 store의
+   `post_materialization_check`로 전달되어 `materialize_claimed`가 claim된 모든 pair를 물질화한 직후,
+   반환 직전에 정확히 한 번 돈다 — terminal 보호 경계 **안**이므로 소비 중 in-place 변조는
+   `ABORTED_AFTER_SEAL`(exit 30, `recover`도 30)로 끝난다. 이전 배치(`with` 문 exit에서의 재검사)는
+   COMPLETE terminal이 durable해진 **뒤에** 돌아 실패가 pre-seal exit 10으로 잘못 분류됐다(두 독립 리뷰가
+   실측). 소비가 끝난 **뒤의** 변조는 stderr 진단 한 줄이며 terminal을 바꾸지 않는다.
 5. `run_phase2b[_fixture](run_dir=, outcome_store=, frozen_bundle=, pair_manifest=, response_artifact=,
    config=, ledger=, approximation_bias_report_evidence=<immutable pre-seal snapshot>, ...)`를 호출한다.
    Scientific config SHA가 non-null인데 이 path가 전달되지 않는 상태는 금지한다. 내부에서 D1/D2 §7 전체

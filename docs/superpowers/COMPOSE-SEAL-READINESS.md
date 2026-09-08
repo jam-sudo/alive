@@ -8,7 +8,7 @@
 > **이 문서는 아무것도 정의하지 않는다** — 세부(task)는 plan, claim은 spec, exact param은 config,
 > 시간순 audit는 git이 authoritative다([sources of truth](../../CLAUDE.md#sources)). 상태 행이 authoritative
 > 문서와 어긋나면 **authoritative 문서가 옳다**; 이 인덱스를 갱신한다.
-> **Updated:** 2026-09-08 @ `882d726` (branch `compose-factor-bank-normalization`)
+> **Updated:** 2026-09-08 @ `9a71dad` (branch `compose-factor-bank-normalization`)
 > `scripts/bump-readiness-stamp.sh` / the pre-commit hook from `HEAD` at commit time, so it names the
 > **parent** of the commit that carries it and can never name itself. Reading it as "one commit stale" is a
 > misreading; git is authoritative for when this file actually changed.
@@ -64,7 +64,7 @@ The committed config still carries **six** activation blockers, exactly as
 | `baselines.gears.revision` | BLOCKED (`a246389` 2026-06-23 이후 값 불변, 2026-09-06 감사 snapshot) | published upstream config·revision 고정 + pod-built `.pyz` 와의 일치 증명 | POD-GATED | baselines owner |
 | `regimes.power_status` | BLOCKED (`a246389` 2026-06-23 이후 값 불변, 2026-09-06 감사 snapshot) | real Norman 에서의 detectable-effect / power 분석 | POD-GATED | scientific owner |
 | `adapter_resolution` | 🟡 로컬 manifest 해석 **완료**(`a33d04a`, `b23e018`) — `adapter_version` 은 committed method manifest 에서 해석되고 declared 값과 다르면 assembly 에서 fail-closed | real pod-built `.pyz` worker 의 **self-reported** `_ADAPTER_VERSION`↔manifest parity(runtime predict 시점) | 로컬 완료 · parity POD-GATED | driver owner |
-| `source_consumption` | `D3` SIGNED: a → **`POLICY_SIGNED / RUNTIME_UNVERIFIED`** — `seal.transient-inode-mutation-restoration` 은 승인 runtime 전제 아래 수용된 잔여다 | 그 전제의 실제 storage / mount / actor 증거 | POD-GATED | runtime owner |
+| `source_consumption` | `D3` SIGNED: a → **`POLICY_SIGNED / RUNTIME_UNVERIFIED`** — `seal.transient-inode-mutation-restoration` 은 승인 runtime 전제 아래 수용된 잔여다. [2026-09-08 정정 — C1] 소비 중 변조의 탐지는 **materialization 경계**(`materialize_claimed` 의 `post_materialization_check`)에서 돌며 durable witness 는 `ABORTED_AFTER_SEAL`(phase2b·recover 모두 30); 소비 **후** 변조는 stderr 진단 한 줄뿐이고 durable witness 가 없다(D3-a 전제가 덮는다) | 그 전제의 실제 storage / mount / actor 증거 | POD-GATED | runtime owner |
 | `kernel_isolation_reproof` | ⚠ STALE — `src/alive/compose/approximation_bias.py` 가 R1(`aed26aa`)로 바뀌어 v2 커널 격리 증명(`2dd23d6`)이 더 이상 덮지 않음(`test_kernel_isolation_ci.py` 의 `_PENDING_REPROOF` 에 digest 로 등록) | Linux kernel-isolation CI 재실행 + 새 archive + pin 이동 | POD-GATED | runtime owner |
 | `D1` / `D2` / `D4` | SIGNED → **GO-LOCAL** (Task 11 / 12 / 14, 2026-09-07) — 서명은 선택이지 릴리스가 아니다 | 서명된 claim 결정문 `2026-09-07-compose-audit-release-decisions.md` (D1 λ\* 측정은 POD) | 로컬 완료 | scientific owner |
 | `owner_release` | ⛔ **NO-GO** | 위 모든 행 GREEN + finalized lineage + 유효 `ActivationRecord` + clean exact SHA 에 대한 owner 승인 | 별도 승인 | owner |

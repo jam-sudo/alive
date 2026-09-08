@@ -93,8 +93,9 @@ from alive.compose.driver.preflight_cmd import build_confirmation_inputs
 from alive.compose.driver.preseal_read import (
     PresealBytesError,
     PresealDescriptorError,
+    VerifiedDescriptor,
     read_verified_bytes,
-    verified_descriptor,
+    verified_descriptor_handle,
 )
 from alive.compose.driver.run_dir_state import (
     DRIVER_LOCK_FILE,
@@ -531,7 +532,12 @@ def _build_sealed_store(
     validation runs only after :meth:`ComposeOutcomeStore.claim_sealed_access`
     has durably consumed the seal.  The retained descriptor ensures validation
     and materialisation reopen the exact inode whose bytes were hashed, even if
-    the source pathname is replaced concurrently. Fixture mode mints a sanctioned
+    the source pathname is replaced concurrently, and the store re-hashes that
+    descriptor through ``post_materialization_check`` at the moment the last
+    claimed row has been read -- inside the terminal protection boundary, so an
+    IN-PLACE mutation of the consumed inode ends the run ``ABORTED_AFTER_SEAL``
+    (exit 30) instead of after a durable COMPLETE (PR #15 C1, 2026-09-08).
+    Fixture mode mints a sanctioned
     :class:`~alive.compose.outcome_store.FixtureOutcomeStore` via the allowlisted
     :func:`~alive.compose.outcome_store.build_fixture_outcome_store`; scientific
     mode builds a plain :class:`~alive.compose.outcome_store.ComposeOutcomeStore`.
@@ -563,11 +569,12 @@ def _build_sealed_store(
 
     with _open_verified_sealed_source(source_path, expected_source_sha) as verified_source:
         opened_source: Any | None = None
+        consumption_check_failed = False
 
         def _validate_source_obs_after_claim() -> Any:
             """Open once post-claim, validate, then retain this exact backed source."""
             nonlocal opened_source
-            source_obj = anndata.read_h5ad(verified_source, backed="r")
+            source_obj = anndata.read_h5ad(verified_source.path, backed="r")
             try:
                 validate_pair_index_against_source_obs(
                     source_obj,
@@ -582,54 +589,131 @@ def _build_sealed_store(
             opened_source = source_obj
             return source_obj
 
+        def _recheck_source_after_materialization() -> None:
+            """Prove the consumed bytes are the verified bytes, at consumption end.
+
+            Handed to the store as ``post_materialization_check``: it runs after the
+            last claimed row is densified and before any pair is returned, i.e. still
+            inside the terminal protection boundary, so a failure yields
+            ``ABORTED_AFTER_SEAL`` + exit 30 rather than an exception raised after a
+            COMPLETE terminal was already durable (PR #15 finding C1, 2026-09-08).
+            """
+            nonlocal consumption_check_failed
+            try:
+                verified_source.recheck()
+            except BaseException:
+                consumption_check_failed = True
+                raise
+
         if spec.mode == "fixture":
             # Fixture-vs-real-source byte comparison stays OFF (validated by index +
             # attestation, not raw source bytes): the allowlisted attestation triple
             # is passed through and checked against the committed allowlist only.
             outcome_store = build_fixture_outcome_store(
                 pair_index,
-                verified_source,
+                verified_source.path,
                 pair_manifest,
                 audit_path=audit_path,
                 corpus_id=sealed_outcome["corpus_id"],
                 source_sha256=sealed_outcome["source_sha256"],
                 builder_code_sha256=sealed_outcome["builder_code_sha256"],
                 materialization_validator=_validate_source_obs_after_claim,
+                post_materialization_check=_recheck_source_after_materialization,
             )
         else:
             outcome_store = ComposeOutcomeStore(
                 pair_index,
-                verified_source,
+                verified_source.path,
                 pair_manifest,
                 audit_path=audit_path,
                 materialization_validator=_validate_source_obs_after_claim,
+                post_materialization_check=_recheck_source_after_materialization,
             )
         try:
             yield outcome_store
+        except BaseException:
+            # An exception is in flight: it is the failure that matters. Re-checking
+            # here could only replace it with a digest complaint (the same principle
+            # the re-check has always been written under: never in `finally`).
+            raise
+        else:
+            # Normal path only, and DIAGNOSTIC only. Consumption already ended inside
+            # `materialize_claimed`, which re-checked the bytes it actually consumed;
+            # what the file does AFTER that is outside the "verified == consumed"
+            # contract and must not contradict a terminal state that is already
+            # durable. So report it on stderr and leave the terminal alone -- raising
+            # here is exactly the COMPLETE-terminal / exit-code contradiction C1
+            # measured. Skipped when the consumption-boundary check already refused
+            # (its message is the accurate one).
+            if not consumption_check_failed:
+                try:
+                    verified_source.recheck()
+                except Phase2bSubcommandError as exc:
+                    print(
+                        "phase2b: sealed source changed AFTER consumption; the consumed "
+                        f"bytes were verified at materialization against {expected_source_sha}; "
+                        f"terminal state unaffected ({exc})",
+                        file=sys.stderr,
+                    )
         finally:
             if opened_source is not None:
                 opened_source.file.close()
 
 
+class SealedSourceHandle:
+    """The driver's view of the open, digest-verified sealed source.
+
+    Wraps a :class:`~alive.compose.driver.preseal_read.VerifiedDescriptor` so
+    that BOTH the open-time failure and the re-check failure surface as this
+    module's :class:`Phase2bSubcommandError` -- the contract every existing
+    message match relies on -- while the re-check itself stays a call the
+    consumer makes at the moment consumption ends.
+    """
+
+    __slots__ = ("_handle", "expected_sha", "path")
+
+    def __init__(self, handle: VerifiedDescriptor) -> None:
+        self._handle = handle
+        self.path = handle.path
+        self.expected_sha = handle.expected_sha
+
+    def recheck(self) -> None:
+        """Re-stream the digest through the same descriptor; convert the error."""
+        try:
+            self._handle.recheck()
+        except PresealDescriptorError as exc:
+            raise Phase2bSubcommandError(str(exc)) from exc
+
+
 @contextlib.contextmanager
-def _open_verified_sealed_source(source_path: Path, expected_sha: str) -> Iterator[Path]:
+def _open_verified_sealed_source(
+    source_path: Path, expected_sha: str
+) -> Iterator[SealedSourceHandle]:
     """Descriptor-pinned read of the sealed source, delegating to the shared helper.
 
-    The implementation moved to :func:`alive.compose.driver.preseal_read.verified_descriptor`
-    on 2026-08-30 so the pre-seal bias lane could reuse it. That lane could not be
+    The implementation moved to :mod:`alive.compose.driver.preseal_read` on
+    2026-08-30 so the pre-seal bias lane could reuse it. That lane could not be
     closed the obvious way: its reconstruction helper lives in
     ``src/alive/compose/approximation_bias.py``, which is inside the FROZEN
     kernel-isolation closure, and editing it invalidates archived Linux CI evidence
     that only a fresh CI run can re-establish (`test_kernel_isolation_ci` caught
-    exactly that when the first attempt tried). Sharing this contextmanager closes
-    the lane without touching a single byte the proof covers.
+    exactly that when the first attempt tried). Sharing that helper closes the lane
+    without touching a single byte the proof covers.
+
+    On 2026-09-08 (PR #15 finding C1) this switched from
+    :func:`~alive.compose.driver.preseal_read.verified_descriptor` to
+    :func:`~alive.compose.driver.preseal_read.verified_descriptor_handle`: the
+    exit-time re-check ran after the library had already published a COMPLETE
+    terminal, so its failure could not decide the terminal state. The handle is
+    yielded instead and :meth:`SealedSourceHandle.recheck` is called at the real
+    consumption boundary (``materialize_claimed``).
 
     `PresealDescriptorError` is converted to this module's error, so the existing
     contract and every message it is matched on are unchanged.
     """
     try:
-        with verified_descriptor(source_path, expected_sha) as descriptor_path:
-            yield descriptor_path
+        with verified_descriptor_handle(source_path, expected_sha) as handle:
+            yield SealedSourceHandle(handle)
     except PresealDescriptorError as exc:
         raise Phase2bSubcommandError(str(exc)) from exc
 

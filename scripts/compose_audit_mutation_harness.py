@@ -398,6 +398,14 @@ CASES: tuple[Case, ...] = (
         "tests/alive/compose/test_kernel_isolation_ci.py"
         "::test_the_v2_kernel_proof_still_covers_the_shipped_isolation_closure",
     ),
+    Case(
+        "M18 the sealed source is not re-hashed when consumption ends",
+        "alive.compose.outcome_store",
+        "        if self._post_materialization_check is not None:\n            try:",
+        "        if False:\n            try:",
+        "tests/alive/compose/driver/test_sealed_source_integrity_e2e.py"
+        "::test_in_place_mutation_during_materialization_aborts_and_recover_agrees",
+    ),
 )
 
 

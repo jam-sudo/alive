@@ -760,6 +760,12 @@ descriptor로 고정되고 소비 후 재검증되는 sealed source가 함께 �
 
 **[D3-a — 2026-09-07, SIGNED by owner instruction "모두 권장사항으로 진행".]** 위 transient 잔여는 승인 runtime 전제(동시 writer 배제·mount 불변) 아래의 **수용된 잔여**로 확정한다 — 전제·위협 모델은 `2026-09-07-compose-audit-release-decisions.md` D3.
 
+**[2026-09-08 정정 — PR #15 C1.]** 위 "소비 후 재검증"의 시점을 못박는다: 재검증은 `materialize_claimed`가
+claim된 모든 pair를 물질화한 직후·반환 직전에 한 번 돈다(terminal 보호 경계 안 → 실패는
+`ABORTED_AFTER_SEAL`). 그 전까지의 배치는 driver의 `with` exit이었고, 그것은 COMPLETE terminal이 이미
+durable해진 뒤여서 실패가 durable witness를 남기지 못했다. 수용된 잔여와 access-count 정의는 불변이다 —
+`2026-09-07-compose-audit-release-decisions.md` D3의 정정 문단.
+
 ---
 
 ## 부록 H — historical 문단 색인 (2026-09-07)
