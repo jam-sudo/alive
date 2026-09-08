@@ -218,8 +218,15 @@ _HEADLINE_SECTION = "8. seal 전에 확정된 headline 문장"
 #: 등장 여부가 아니라 **주장으로 등장하는지**다.
 _PROHIBITED_HEADLINE_TOKENS = ("mechanistic", "causal", "context transfer", "unconditional 95%")
 
-_PROHIBITION_MARK = "쓰지 않는다"
-_NON_CLAIM_MARK = "주장하지 않는다"
+#: §8 이 **스스로 등록하는** 명시적 비주장 절. 금지 토큰은 오직 이 문자열들 안에서만 등장할 수
+#: 있다. 문장 분할 휴리스틱은 쓰지 않는다 — 뒤에 오는 부정이 앞의 토큰을 사면하기 때문이다:
+#: 정정 전 검사에 `mechanistic 해석을 지지함.` 을 (ii) 앞에 독립 문장으로 끼워 넣으면 다음
+#: 문장의 비주장 절 때문에 **통과했다**(실측). 절을 먼저 걷어내고 잔여를 보면 그 구멍이 없다.
+_HEADLINE_NON_CLAIM_CLAUSES = (
+    '"mechanistic" · "causal" · "context transfer" · "unconditional 95%" 를 '
+    "**긍정 claim 으로** 쓰지 않는다(명시적 비주장 절에서만 등장한다)",
+    "unconditional efficacy 또는 unconditional 95% coverage 를 주장하지 않는다",
+)
 
 
 def _headline_section() -> str:
@@ -229,17 +236,6 @@ def _headline_section() -> str:
         "headline 문장이 seal 전에 확정되지 않았다"
     )
     return _section(text, _HEADLINE_SECTION, None)
-
-
-def _sentences(section: str) -> list[str]:
-    """Split a Korean markdown section into sentences, unwrapping hard line breaks first.
-
-    Line-based checks measure where a paragraph happens to wrap, not what it says: the
-    non-claim clause in sentence (ii) and its subject sit on different source lines. Joining
-    the section and cutting after each ``다.`` makes the assertion measure the sentence.
-    """
-    flat = " ".join(section.split())
-    return [s for s in re.split(r"(?<=다[.])\s*", flat) if s.strip()]
 
 
 def test_a_signed_pair_headline_is_preregistered_and_conditional():
@@ -269,21 +265,19 @@ def test_the_preregistered_headline_uses_the_codes_own_flip_vocabulary():
 
 
 def test_the_preregistered_headline_never_asserts_a_prohibited_claim():
-    """네 금지 토큰은 금지 문장 안에서, 또는 명시적 비주장 절 안에서만 나타난다."""
-    section = _headline_section()
-    sentences = _sentences(section)
-    prohibition = [s for s in sentences if _PROHIBITION_MARK in s]
-    assert len(prohibition) == 1, f"금지 문장이 정확히 하나여야 한다 — {len(prohibition)} 개"
+    """금지 토큰은 §8 이 등록한 비주장 절 **안에서만** 나타난다.
+
+    등록된 절들을 §8 에서 정확히 한 번씩 걷어낸 뒤, 잔여 텍스트 어디에도 네 토큰이 남아 있으면
+    안 된다. 문장 경계를 추정하지 않으므로 "뒤에 부정이 오면 사면된다"는 구멍이 없다.
+    """
+    residue = " ".join(_headline_section().split())
+    for clause in _HEADLINE_NON_CLAIM_CLAUSES:
+        needle = " ".join(clause.split())
+        assert residue.count(needle) == 1, (
+            f"§8 이 등록한 비주장 절이 정확히 한 번 나와야 한다 — {needle!r}"
+        )
+        residue = residue.replace(needle, " ")
     for token in _PROHIBITED_HEADLINE_TOKENS:
-        assert token in prohibition[0], f"금지 문장이 `{token}` 를 이름으로 부르지 않는다"
-        for sentence in sentences:
-            if sentence is prohibition[0]:
-                continue
-            at = sentence.find(token)
-            while at != -1:
-                # 같은 문장에 비주장 표시가 있는 것으로는 부족하다 — 표시가 토큰 **뒤에**
-                # 와야 그 토큰이 부정되는 것이다. 앞에 있으면 다른 절을 부정하고 있을 뿐이다.
-                assert _NON_CLAIM_MARK in sentence[at:], (
-                    f"`{token}` 가 주장으로 나온다 — {sentence!r}"
-                )
-                at = sentence.find(token, at + 1)
+        assert token not in residue, (
+            f"`{token}` 가 등록된 비주장 절 **밖**에 나온다 — 긍정 claim 이다"
+        )

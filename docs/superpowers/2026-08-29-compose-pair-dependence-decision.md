@@ -153,5 +153,5 @@ verdict 는 등록된 밴드(λ=1.0)에서만 내려진다. 아래 세 문장은
 **(iii) `FAILS_AT_REGISTERED_BAND`.** "등록된 밴드에서 material margin 미달 — `NO_DISTINCT_WIN`. 불변식 14 에 따라 이는 결과이며 threshold 를 사후 변경하거나
 sensitivity 사다리의 다른 λ 를 verdict gate 로 승격하지 않는다."
 
-세 문장 어디에도 "mechanistic" · "causal" · "context transfer" · "unconditional 95%" 는 쓰지 않는다. calibration in-sample ICC 의 double-unseen 이식과
-λ=1.15 를 새 nominal gate 로 쓰는 것은 금지(결정문 §2, 불변식 7).
+세 문장 어디에도 "mechanistic" · "causal" · "context transfer" · "unconditional 95%" 를 **긍정 claim 으로** 쓰지 않는다(명시적 비주장 절에서만 등장한다).
+calibration in-sample ICC 의 double-unseen 이식과 λ=1.15 를 새 nominal gate 로 쓰는 것은 금지(결정문 §2, 불변식 7).
