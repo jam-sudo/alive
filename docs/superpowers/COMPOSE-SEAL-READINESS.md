@@ -8,7 +8,7 @@
 > **이 문서는 아무것도 정의하지 않는다** — 세부(task)는 plan, claim은 spec, exact param은 config,
 > 시간순 audit는 git이 authoritative다([sources of truth](../../CLAUDE.md#sources)). 상태 행이 authoritative
 > 문서와 어긋나면 **authoritative 문서가 옳다**; 이 인덱스를 갱신한다.
-> **Updated:** 2026-09-07 @ `7f3afdf` (branch `compose-factor-bank-normalization`)
+> **Updated:** 2026-09-07 @ `b487980` (branch `compose-factor-bank-normalization`)
 > `scripts/bump-readiness-stamp.sh` / the pre-commit hook from `HEAD` at commit time, so it names the
 > **parent** of the commit that carries it and can never name itself. Reading it as "one commit stale" is a
 > misreading; git is authoritative for when this file actually changed.
@@ -94,6 +94,31 @@ sub-project id 다.
 
 서명·처분·digest 이동의 authoritative 기록은 결정문 자신이다. 이 표는 인덱스일 뿐이며 어긋나면
 결정문이 옳다.
+
+## Go/No-Go (2026-09-07, 로컬 검증 결과)
+
+로컬 ladder 는 **닫힌 것**만 증명한다. 아래는 seal 을 열기 위한 인수조건이며, 한 행이라도
+미충족이면 판정은 `RELEASE-BLOCKED` / seal `UNOPENED` 다.
+
+| 묶음 | 인수조건 | 현재 |
+|---|---|---|
+| representation (R1 후속) | raw 유지: 별도 raw bridge/equivalence evidence. log 채택: signed config·projection·metric amendment + known-answer. 현 log PASS 만으로 어느 쪽도 자동 승인되지 않는다 | ⛔ 미결 |
+| analytical evidence | 최종 config 의 phi-rank/condition, regime detectable-effect, data card/source/feature hashes | ⏳ POD-GATED |
+| deep workers | method 별 revision, dependency/image/wheel hashes, row roster, fresh-sync smoke, `adapter_resolution` manifest parity | ⏳ POD-GATED |
+| `D1` 결판 | 승인된 nonsealed gene-disjoint OOF 의 k\*, λ\*, arm sensitivity | ⏳ 서명 GO-LOCAL · 측정 POD-GATED |
+| `D3` | `source_consumption` 의 실제 storage/actor/mount evidence 또는 kernel snapshot negative | ⏳ 서명 GO-LOCAL · 증거 POD-GATED |
+| one-way identity | 모든 과학 config field 확정 → bias-null basis + code/spec commit `C` 고정 → 외부 report → finalized YAML 의 report SHA leaf 만 변경 → activation evidence 재생성 | 🔴 미착수 |
+| 최종 `owner_release` gate | 위 모든 행 + 현재 `ActivationRecord` · finalized evidence/config identity · clean exact SHA · runbook READY | ⛔ NO-GO |
+
+**판정: RELEASE-BLOCKED / seal UNOPENED.** 이유 다섯, 전부 로컬에서 닫을 수 없다 — (1) 위
+critical-path 표의 config activation blocker 여섯, (2) real pod-built `.pyz` 의 `adapter_resolution`
+parity, (3) `kernel_isolation_reproof`, (4) `source_consumption` 의 runtime 증거, (5) representation
+결정. `D2`·`D4` 는 서명됐지만 서명은 릴리스가 아니다.
+
+로컬에서 닫힌 것(2026-09-07): 이번 웨이브가 바꾼 강제 지점 16개가 각각 **자기 이름이 그 주장을 하는**
+named test 로 죽는다(16 killed / 0 survived / 0 harness-failed / 1 not harnessed) —
+`scripts/compose_audit_mutation_harness.py`, ledger 는 결정문의 `## 검증 ledger (Task 15)`.
+unit green 을 READY 로 번역하지 않는다.
 
 ## 시간순 서술
 

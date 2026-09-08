@@ -160,3 +160,56 @@ futility measurability floor `0.2` 를 `futility.measurability_ceiling_floor` �
 **RELEASE-BLOCKED** 다. Phase-1 config 에도 같은 값을 등록했기 때문에 source 에 고정돼 있던
 `REGISTERED_PHASE1_CONFIG_SHA256` 도 함께 `2e044e75…` → `732f43fe…` 로 이동했다 — 이 두 번째
 이동은 첫 번째의 기계적 결과이며 별도 선택이 아니다.
+
+## 검증 ledger (Task 15)
+
+`scripts/compose_audit_mutation_harness.py` 를 clean worktree 에서 실행한 결과다(2026-09-07,
+`uv run python scripts/compose_audit_mutation_harness.py` → exit 0, 25.8s).
+**16 killed / 0 survived / 0 harness-failed / 1 not harnessed.**
+
+엔진은 추적 파일을 쓰지 않는다: subprocess 안에서 `importlib` 로 모듈을 올리고 `m.__file__` 의 소스를
+읽어 `count(old) == 1` 을 확인한 뒤 메모리 사본만 치환해 `m.__dict__` 에 `exec` 하고 그 nodeid 하나를
+돌린다. 이 방식이어야 pinned 파일(`src/alive/io.py`, `src/alive/compose/approximation_bias.py`)의 강제
+지점도 파일을 건드리지 않고 잴 수 있다. **kill 의 정의는 exit code 가 아니다** — 같은 machinery 로 돌린
+baseline 이 green 이고, 그다음 **그 nodeid 자신**이 `FAILED` 로 보고돼야 kill 이다. collection error,
+usage error, 모듈 재실행 중 예외, anchor 불일치, 다른 테스트의 실패는 전부 `HARNESS_FAILURE` 다
+(변이 규칙 4·6). 이 판정 규칙 자체는 `tests/alive/compose/test_audit_mutation_harness.py` 가 고정한다.
+
+| # | 변이 (module) | named killer (nodeid) | exit base→mutant | 판정 |
+|---|---|---|---|---|
+| M01 | `gates` role allowlist 제거 (`if _role != CALIBRATION_ROLE_NAME:` → `if False:`) | `test_gates.py::test_measurability_gate_refuses_sealed_array` | 0→1 | KILLED |
+| M02 | `gates` floor 를 source 상수로 (`> ceiling_floor` → `> 0.2`) | `test_gates.py::test_the_measurability_floor_comes_from_the_config_not_from_the_source` | 0→1 | KILLED |
+| M03 | `detectable_effect` floor 를 source 상수로 (`> ceiling_floor` → `> 0.2`) | `test_detectable_effect.py::test_the_activation_validator_recomputes_against_the_registered_floor` | 0→1 | KILLED |
+| M04 | `freeze` upstream checksum 비교 제거 | `test_freeze.py::test_verify_fails_when_upstream_checksum_mutated` | 0→1 | KILLED |
+| M05 | `outcome_store` exact sealed union 검사 제거 | `test_outcome_store.py::TestExactUnionEnforcement::test_unknown_id_refused` | 0→1 | KILLED |
+| M06 | `outcome_store` once-only precheck 조기 return | `test_outcome_store.py::TestOnceOnly::test_second_call_same_run_id_refused` | 0→1 | KILLED |
+| M07 | `io` write-once 를 `os.replace` 로 | `tests/alive/test_io.py::test_a_second_write_to_the_same_destination_is_refused` | 0→1 | KILLED |
+| M08 | `phase2a` headline-only scaling → 모든 arm (`if True:`) | `test_lambda_scaling.py::test_the_final_fit_scales_the_headline_operator_and_leaves_the_baseline_alone` | 0→1 | KILLED |
+| M09 | `approximation_bias` validator 의 `validate_bias_method_bridge(...)` 호출 제거 | `test_approximation_bias_metric.py::test_a_probe_a_bridge_of_a_different_representation_does_not_admit_this_report` | 0→1 | KILLED |
+| M10 | `approximation_bias` `ADMISSION_STATUSES` 에 세 번째 값 추가 | `test_approximation_bias_metric.py::test_the_admission_status_roster_is_exactly_admitted_and_not_admissible` | 0→1 | KILLED |
+| M11 | `config2` `include_esm` 값 검사 제거 (`if False:`) | `test_config2.py::test_an_unregistered_include_esm_value_is_refused_instead_of_only_moving_the_digest[False]` | 0→1 | KILLED |
+| M12 | `driver.fixture_builder` key-roster guard 제거 | `driver/test_fixture_builder.py::test_the_fixture_key_roster_guard_survives_python_optimize[EXPECTED_HASHES_KEYS]` | 0→1 | KILLED |
+| M13 | `driver.identity_lock` adapter_version 을 declared 값에서 (manifest 조회 제거) | `driver/test_identity_lock.py::test_scientific_declared_adapter_version_mismatch_fails_closed` | 0→1 | KILLED |
+| M14 | `driver.identity_lock` `except (OSError, ValueError)` → `except ValueError` | `driver/test_identity_lock.py::test_an_os_error_on_the_manifest_re_read_is_an_assembler_error[error0]` | 0→1 | KILLED |
+| M15 | `models` `IDOnlyModel` 이 마지막 2 factor 열을 무시 (`_design` + `predict_eps` 둘 다) | `test_models.py::test_the_id_only_comparator_consumes_the_same_factor_bank_as_the_operator` | 0→1 | KILLED |
+| M16 | `test_kernel_isolation_ci` 의 pinned `_PENDING_REPROOF` digest 를 오답으로 | `test_kernel_isolation_ci.py::test_the_v2_kernel_proof_still_covers_the_shipped_isolation_closure` | 0→1 | KILLED |
+| — | producer(`scripts/compose/measure_pseudobulk_approximation_bias.py`)의 조기 admission 거부 | `test_approximation_bias_metric.py::test_a_log_normalized_probe_a_pass_does_not_admit_a_raw_count_report` | — | **NOT_HARNESSED (script)** |
+
+`NOT_HARNESSED` 의 이유는 회피가 아니라 계측 한계다: producer 는 script 이고 그 테스트가
+`importlib.util.spec_from_file_location` 으로 **파일 경로에서 매번 다시 읽으므로** in-memory 모듈 변이가
+보이지 않는다. 도달하려면 추적 파일을 써야 하는데 이 엔진은 그것을 하지 않는다. 대신 Task 1 이
+sandbox 사본에서 이미 측정해 두었다(`admission_status` 를 무조건 `ADMITTED` 로 → 같은 named test 가
+FAILED, 그리고 **두 강제 지점을 모두 제거해도** 같은 테스트가 자기 assertion
+`assert 'admitted' == 'NOT_ADMISSIBLE'` 로 죽는다 — 변이 규칙 7 을 가정이 아니라 실측으로).
+
+**어느 줄이 raise 했는지**(규칙 7). M05 는 union 검사가 사라지면 `outcome_store.py:834` 의
+`KeyError: ('NOPE','ZZZZ')` 로 죽는다 — 즉 downstream 은 여전히 fail-closed 이고 exact-union 검사의 고유
+기여는 *계약된 타입*(`ComposeSealingError`)과 `sealed_access_count == 0` 이다. M06 은 precheck 이 빠져도
+durable concurrent-claim backstop 이 거부하지만 메시지에 run id 가 없어져 테스트가 자기 `match="run-1"`
+으로 죽는다 — 두 곳 모두 강제하고, precheck 의 고유 기여는 run-id 로 귀속된 거부다. M15 는 한 곳만
+바꾸면 shape 오류로(값이 아니라 형상으로) 죽으므로 `_design` 과 `predict_eps` 를 함께 바꿔야 하며,
+그렇게 하면 Δ 가 정확히 `0.0` 으로 붕괴해 `assert 0.0 > 1.0` 으로 죽는다.
+
+**이 ledger 는 readiness 신호가 아니다.** 로컬 강제 지점이 테스트로 잡혀 있다는 것만 말한다.
+`COMPOSE-K562-v1` 은 그대로 `RELEASE-BLOCKED`, seal 은 `UNOPENED` 이며 config digest 는 움직이지 않았다
+(`a9dc9410…`). 남은 인수조건은 readiness 의 `## Go/No-Go (2026-09-07, 로컬 검증 결과)` 표에 있다.
