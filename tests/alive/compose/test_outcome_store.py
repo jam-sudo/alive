@@ -331,6 +331,33 @@ class TestExactUnionEnforcement:
             store.evaluate_sealed_once("run-unknown", bad)
         assert store.sealed_access_count == 0
 
+    def test_an_unknown_pair_is_refused_by_the_contracted_error_not_a_downstream_crash(
+        self, tmp_path: Path
+    ) -> None:
+        """The guard's own contribution is the TYPE of the refusal, not merely that
+        something goes wrong.
+
+        Removing ``_assert_exact_sealed_union`` still fails closed -- but with a raw
+        ``KeyError`` from ``_materialise_pairs``. A sibling written as
+        ``pytest.raises(ComposeSealingError)`` then dies on that stray exception rather
+        than on its own assertion, which is a kill this project no longer accepts
+        (mutation rule 8). Asserting the type makes the mutant an assertion-level
+        failure, so the claim in this name is what actually gets measured.
+        """
+        store, manifest = _build_store(tmp_path)
+        union = _sealed_union(manifest)
+        bad = [*union[1:], ("NOPE", "ZZZZ")]
+        raised: BaseException | None = None
+        try:
+            store.evaluate_sealed_once("run-unknown-typed", bad)
+        except BaseException as exc:  # the TYPE is the thing under test
+            raised = exc
+        assert isinstance(raised, ComposeSealingError), (
+            "an unknown pair must be refused by the sealing error, not by a downstream "
+            f"crash; got {type(raised).__name__}: {raised!r}"
+        )
+        assert store.sealed_access_count == 0
+
     def test_unsealed_calibration_id_refused(self, tmp_path: Path) -> None:
         store, manifest = _build_store(tmp_path)
         union = _sealed_union(manifest)

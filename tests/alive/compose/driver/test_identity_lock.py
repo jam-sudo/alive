@@ -460,6 +460,35 @@ def test_an_os_error_on_the_manifest_re_read_is_an_assembler_error(
         identity_lock_module._scientific_adapter_version("gears")
 
 
+def test_an_os_error_on_the_manifest_re_read_is_converted_not_merely_re_raised(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The claim is CONVERSION to the single fail-closed type, so assert the type.
+
+    Its sibling above is written as ``pytest.raises(AssemblerError)``. Narrow the
+    ``except (OSError, ValueError)`` to ``except ValueError`` and the raw
+    ``FileNotFoundError`` escapes -- the sibling goes red, but on a stray exception
+    rather than on its own assertion, which no longer counts as a kill (mutation
+    rule 8). Catching everything and asserting ``isinstance`` makes the same mutant
+    an assertion-level failure of the test whose name makes the claim.
+    """
+
+    def _boom(*_args: object, **_kwargs: object) -> dict[str, object]:
+        raise FileNotFoundError(2, "gone")
+
+    monkeypatch.setattr(identity_lock_module, "read_verified_json", _boom, raising=True)
+    raised: BaseException | None = None
+    try:
+        identity_lock_module._scientific_adapter_version("gears")
+    except BaseException as exc:  # the TYPE is the thing under test
+        raised = exc
+    assert isinstance(raised, AssemblerError), (
+        "an OSError in the digest-bound re-read must be converted to the assembler's "
+        f"single fail-closed type; got {type(raised).__name__}: {raised!r}"
+    )
+    assert "is unusable" in str(raised)
+
+
 def test_scientific_assembly_fails_closed_when_the_committed_manifest_is_absent(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
