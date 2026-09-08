@@ -359,3 +359,20 @@ def test_id_only_positive_ridge_survives_feature_scale_that_erases_gram_penaltie
     model = IDOnlyModel().fit(Z, pairs, eps, lam=1e-3)
     assert model.weight_ is not None
     assert np.all(np.isfinite(model.weight_))
+
+
+def test_the_id_only_comparator_consumes_the_same_factor_bank_as_the_operator():
+    """R4. `IDOnlyModel` is NOT a biological-prior ID-null: permuting the ESM factor columns across
+    genes changes its predictions, so it cannot isolate the encoder's marginal signal."""
+    rng = np.random.default_rng(0)
+    Z = rng.normal(size=(8, 4))
+    pairs = [(g, h) for g in range(8) for h in range(g + 1, 8)]
+    y = rng.normal(size=(len(pairs), 2))
+    model = IDOnlyModel().fit(Z, pairs, y, lam=0.01)
+    Z_permuted = Z.copy()
+    Z_permuted[:, -2:] = Z_permuted[::-1, -2:]
+    delta = max(
+        float(np.max(np.abs(model.predict_eps(Z, g, h) - model.predict_eps(Z_permuted, g, h))))
+        for g, h in pairs
+    )
+    assert delta > 1.0

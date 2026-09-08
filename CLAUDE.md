@@ -131,7 +131,9 @@ privacy를 확인한다. External-feature eligibility와 ambiguous/missing ID �
 **Model / feature.** 요청 encoder 실패를 mock으로 조용히 대체하지 않는다(mock은 synthetic/CI 전용).
 revision·dimension·pooling·sequence/ontology release를 기록한다. 새 deep architecture/operator/decoder는 별도
 spec, strongest baseline, ablation이 필요하다. Biological prior encoder(gene/pathway/network)는 ID-only null
-baseline과 ablation해 marginal signal을 격리한다. Population sample 출력만으로 heterogeneity 학습을 주장하지
+baseline과 ablation해 marginal signal을 격리한다 (COMPOSE-K562-v1 한정: 2026-09-07 결정 D2-b 로 ESM
+marginal-signal claim 을 철회하고 이 ablation 의무를 deferred 로 처분 — 오너 지시 "모두 권장사항으로
+진행"; 별도 spec 없이 ablation 을 주장하지 않는다). Population sample 출력만으로 heterogeneity 학습을 주장하지
 않고 pseudobulk·self-distance/noise floor·mean-collapse diagnostic를 유지한다.
 
 **Evaluation.** Comparator roster와 protocol을 outcome 전에 freeze한다. Metric 방향·scientific event를

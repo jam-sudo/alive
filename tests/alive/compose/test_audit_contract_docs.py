@@ -177,3 +177,33 @@ def test_the_ladder_amendment_describes_the_family_the_config_registers():
     # spec 이 그렇게 말하는가.
     assert "L2 는 원래 family 밖의 ablation arm 이고 L3 는 family 안에 있다" in section
     assert "L2·L3 를 제외하지 않되" not in section
+
+
+def _prose(section: str) -> str:
+    """The section text with its option-menu table rows dropped.
+
+    A decision section carries BOTH a menu of options (markdown table rows, written before
+    the owner chose) and the record of what was actually done. Measured on this file before
+    the D2 disposition existed, every needle below was already present — in the ``D2-a``/
+    ``D2-b`` menu rows. A check that reads the menu therefore returns the same answer whether
+    or not the decision was implemented, so it grades nothing. Dropping table rows makes the
+    assertion measure the implementation record.
+    """
+    return "\n".join(ln for ln in section.splitlines() if not ln.lstrip().startswith("|"))
+
+
+def test_a_signed_esm_decision_names_its_governance_disposition():
+    """D2 는 spec 문장만으로 닫히지 않는다 — governance 의무 처분까지 적어야 한다.
+
+    CLAUDE.md 는 claim 과 무관하게 biological-prior encoder 의 ID-null ablation 을 요구한다. spec
+    에서 claim 만 낮추고 그 의무를 처분하지 않으면 governance 충돌이 남는다. 그래서 ``status:
+    SIGNED`` 인 D2 는 선택지 표가 아니라 **본문**에서 (1) 철회한 claim 문장과 (2) 그 처분이 사는
+    위치를 둘 다 명명해야 한다.
+    """
+    d2 = _section(_DECISIONS.read_text(encoding="utf-8"), "D2", "D3")
+    if "status: SIGNED" not in d2:
+        assert "release: NO-GO" in d2
+        return
+    body = _prose(d2)
+    assert "ESM의 marginal signal을 검증했다고 주장하지 않는다" in body or "ESM-off arm" in body
+    assert "CLAUDE.md:132" in body

@@ -28,7 +28,7 @@ spec `:522-528` "적용 범위(비주장)" 과 `test_lambda_scaling.py::test_the
 
 ## D2 — ESM ID-null
 status: SIGNED: b — 오너 지시 2026-09-07 "모두 권장사항으로 진행"
-release: NO-GO (구현 대기 — Task 12)
+release: GO-LOCAL (Task 12, 2026-09-07 — claim 제한 + CLAUDE.md #data-eval 처분)
 
 | | 선택지 | digest | task |
 |---|---|---|---|
@@ -39,6 +39,30 @@ release: NO-GO (구현 대기 — Task 12)
 **측정된 사실.** `models.py:216-309` `IDOnlyModel` 은 `[z_g + z_h, |z_g − z_h|]` + intercept — L1 과 같은 factor bank 를 소비한다.
 마지막 2 factor 열만 gene 간 permute 하면 prediction 최대 절대차 1.2829885330394641(양쪽 일치). `include_esm: false` 를 YAML 에 넣는 것만으로는
 ablation 이 구성되지 않는다(C01, Task 6).
+
+**결정(D2-b) 구현 — 2026-09-07, Task 12.** claim 을 제한하고 governance 의무를 함께 처분했다. 둘 중 하나만
+하면 D2 는 닫히지 않는다: CLAUDE.md 의 ablation 의무는 claim 과 무관하게 성립하므로, spec 문장만 낮추면
+governance 충돌이 남는다.
+
+1. **claim.** main spec §3.1 이 이제 "본 protocol 은 ESM의 marginal signal을 검증했다고 주장하지 않는다(결정
+   D2-b, 2026-09-07); ID-only 는 같은 factor bank 위의 non-bilinear comparator 로 bilinear 구조의 기여만
+   격리한다" 를 등록한다. 같은 자리에 있던 "이번엔 식별가능 구조 안에서 검증"은 삭제하지 않고 dated bracket
+   으로 superseded 격리했다(`:179-180`).
+2. **comparator 재등록.** §4.1 과 §10.5 의 roster 항목이 `ID-only(= symmetric non-bilinear factor ridge;
+   encoder ablation 아님)` 다. `src/alive/compose/models.py` `IDOnlyModel` docstring 도 같은 등록 역할
+   (STRUCTURE comparator, ESM 열 포함 동일 bank)을 적는다.
+3. **governance 처분.** biological-prior encoder 의 ID-null ablation 의무를 `CLAUDE.md:132-136 (#data-eval)`
+   에서 **COMPOSE-K562-v1 한정 deferred** 로 처분했다(수정안 G). 정본 참조는 anchor `#data-eval` 이며 줄번호는
+   2026-09-07 기준 snapshot 이다 — 의무 문장과 그 처분은 `:133-136`. CLAUDE.md 는 198 줄(상한 200) 이다.
+4. **regression.** `tests/alive/compose/test_models.py::test_the_id_only_comparator_consumes_the_same_factor_bank_as_the_operator`
+   가 위 측정치(Δ=1.2829885330394641 > 1.0)를 고정한다 — 현행 동작의 GREEN pin 이다.
+
+**digest 불변.** `a9dc9410d1b7fe1580e179b1fa5f9f3756688e059247a6d63322edf642b44767` 전후 동일(실측). config 는
+건드리지 않았다.
+
+**닫지 않은 것.** ESM-off arm 은 **여전히 미등록**이다. encoder ablation 을 실제로 수행하려면 matched
+total-$k$ 의 ESM-off arm 이 필요하고, 그것은 comparator roster·digest·POD 를 움직이므로 CLAUDE.md #data-eval
+의 "새 comparator" 요건에 따라 **별도 spec + plan**(부록 A)을 요구한다. 이 문서는 그 arm 을 등록하지 않는다.
 
 ## D3 — R2 위협 모델
 status: SIGNED: a — 오너 지시 2026-09-07 "모두 권장사항으로 진행"
@@ -77,7 +101,7 @@ release: NO-GO (구현 대기 — Task 14)
 | **D** | bias spec §1 — bridge representation 을 강제 계약으로, report v4 | Task 2 | `3a8919076eedcb205df7be7c890a46e8da6cc927f8c18e3821ad44c8e8d6c364` | `54bed129d412e1169ff3113e526ff67da1bb24c7692b27aa7e18a028775082cb` | SIGNED (오너 지시 2026-09-07) — EFFECTIVE (Task 2, 2026-09-07) |
 | **E** | main spec §10.5 — primary metric 식을 등록된 형태로 | Task 3 | — | — | SIGNED (오너 지시 2026-09-07) — EFFECTIVE (Task 3, 2026-09-07) |
 | **F** | main spec §3.3 — ladder attribution claim 상한 | Task 11 | — | — | SIGNED (오너 지시 2026-09-07) — EFFECTIVE (Task 11, 2026-09-07) |
-| **G** | CLAUDE.md `:23-24,147,156-157,161-162` (+ D2-b 시 `:132` 처분) | Task 8 · 12 | — | — | SIGNED (오너 지시 2026-09-07) — EFFECTIVE (Task 8, 2026-09-07); `:132` 처분(D2-b)은 Task 12 대기 |
+| **G** | CLAUDE.md `:23-24,147,156-157,161-162` (+ D2-b 의 `#data-eval` ablation-의무 처분) | Task 8 · 12 | — | — | SIGNED (오너 지시 2026-09-07) — EFFECTIVE (Task 8 + Task 12, 2026-09-07) |
 
 ## 서명
 | 항목 | 선택 | 서명 | 날짜 |

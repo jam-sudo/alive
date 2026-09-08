@@ -176,7 +176,11 @@ $$z_g=[\,\mathrm{PCA}_k(\delta_g)\;;\;\text{(optional) ESM 사영}\,]\in\mathbb{
 \text{singles에서 먼저 고정}.$$
 
 ESM는 bolt-on이 아니라 **고정 입력 factor**로 재도입한다(project-memory *cartographer-mvp-built-merged*의 OOF
-탐색적 가설 1: 서열 축이 신호를 가질 수 있음을, 이번엔 식별가능 구조 안에서 검증). $z_g$를 먼저
+탐색적 가설 1: 서열 축이 신호를 가질 수 있음). **[2026-09-07 수정안 G / 결정 D2-b — 이 자리에 있던
+"이번엔 식별가능 구조 안에서 검증"은 superseded. 근거: 등록된 어떤 arm 도 ESM 열을 끄지 않는다.]**
+본 protocol 은 ESM의 marginal signal을 검증했다고 주장하지 않는다(결정 D2-b, 2026-09-07); ID-only 는
+같은 factor bank 위의 non-bilinear comparator 로 bilinear 구조의 기여만 격리한다. encoder ablation 은
+ESM 열이 없는 arm(matched total-$k$)을 요구하며 등록돼 있지 않다 — 별도 spec+plan 사안이다. $z_g$를 먼저
 고정해야 Stage 2가 선형이 된다(end-to-end는 rotation ambiguity로 식별성을 잃음 → ablation L3).
 
 > **[2026-08-21 amendment — owner decision #7, 재서명본.]** factor bank는 이제 **등록된
@@ -293,7 +297,9 @@ cross-validation으로 선택하되, **OOF fold는 sealed와 동일한 gene-disj
 2. no-change / control, perturbation-mean — 하한.
 3. **GEARS** — published combo SOTA(강한 learned baseline; Phase 2).
 4. **CPA** — latent-*additive* baseline(비가산 항의 차별점 정조준; Phase 2).
-5. **linear / ID-only** — bilinear 구조 없는 선형.
+5. **linear / ID-only(= symmetric non-bilinear factor ridge; encoder ablation 아님)** —
+   bilinear 구조 없는 선형. L1 과 **같은 factor bank**(ESM 열 포함)를 소비하므로 격리하는 것은
+   bilinear 구조의 기여이지 encoder 의 marginal signal 이 아니다(결정 D2-b, 2026-09-07).
 6. ablation **L2·L3** — "구조 vs capacity" comparator.
 
 ### 4.2 Primary metric & 방향
@@ -678,7 +684,7 @@ screen하고 나머지로 진행하므로, 그것만으로 report 전체를 거�
 ### 10.5 Baselines, metric and inference
 
 family = {additive(null floor), GEARS(published SOTA, GO-graph 사용 — 우리 차별점), CPA(latent-
-additive), ID-only, L1(headline)/L2/L3}. **GEARS/CPA는 singles+combo_calibration에만 학습**(sealed
+additive), ID-only(= symmetric non-bilinear factor ridge; encoder ablation 아님), L1(headline)/L2/L3}. **GEARS/CPA는 singles+combo_calibration에만 학습**(sealed
 미노출, leakage 차단).
 
 pair $i$, method $M$의 response-space error는

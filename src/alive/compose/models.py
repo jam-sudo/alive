@@ -214,12 +214,15 @@ class L2Model:
 # ID-only — ridge on symmetric non-bilinear features
 # --------------------------------------------------------------------------- #
 class IDOnlyModel:
-    """Ridge regression on the symmetric non-bilinear pair feature (§baselines).
+    """Ridge on the symmetric non-bilinear pair feature — the STRUCTURE comparator (§baselines).
+
+    Registered role: it isolates the contribution of the *bilinear structure* by giving a
+    non-bilinear model the SAME factor bank (ESM columns included). It is deliberately NOT a
+    biological-prior ID-null: an encoder ablation needs an arm without the ESM columns, which is
+    not registered (decision D2, 2026-09-07). No claim about ESM added value rests on this arm.
 
     The feature is ``[z_g + z_h, |z_g - z_h|]`` plus an intercept; both blocks are
-    order-invariant, so the model is symmetric. It is the non-bilinear comparator:
-    it has access to the same gene factors as L1 but no multiplicative interaction
-    term, isolating the value of the bilinear structure.
+    order-invariant, so the model is symmetric.
 
     Attributes
     ----------
