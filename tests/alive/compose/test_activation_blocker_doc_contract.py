@@ -68,15 +68,17 @@ _PER_METHOD = (
 )
 
 
-@pytest.mark.parametrize(
-    ("relative", "count_token", "strict"), _DOCS, ids=[d[0].split("/")[-1] for d in _DOCS]
-)
-def test_documented_blockers_match_the_loader(
-    relative: str, count_token: str, strict: bool
+def _assert_document_enumerates_the_loader(
+    text: str, count_token: str, strict: bool, blockers, digest: str, relative: str
 ) -> None:
-    cfg = load_compose_phase2_config(_CANON)
-    text = (_ROOT / relative).read_text(encoding="utf-8")
+    """The whole contract, as a callable, so the non-vacuity test runs THIS code.
 
+    Sharing the body is the point (PR #15 finding I4): the previous non-vacuity
+    test re-implemented a weaker check -- a substring absence -- and therefore
+    passed against a document whose enumeration really did say "five". A
+    non-vacuity proof that does not execute the assertion it vouches for proves
+    nothing about that assertion.
+    """
     # 2026-08-29: this used to `pytest.skip` when the document did not carry the
     # committed digest -- and the standing audit finding
     # `tests.activation-blocker-contract-skips-on-config-change` said that turns
@@ -86,13 +88,12 @@ def test_documented_blockers_match_the_loader(
     # missing digest means stale, not exempt. If one ever becomes history, it moves
     # to an explicit archive roster pinned to its own digest -- it does not get to
     # opt out by drifting.
-    assert cfg.config_sha256[:8] in text, (
+    assert digest in text, (
         f"{relative} enumerates activation blockers but does not carry the committed "
-        f"config digest {cfg.config_sha256[:8]!r}; a current document must track the "
+        f"config digest {digest!r}; a current document must track the "
         "live config lineage"
     )
 
-    blockers = cfg.activation_blockers
     assert len(blockers) == 6, "fixture assumption: the loader measures six blockers today"
     for key in blockers:
         assert f"`{key}`" in text, f"measured blocker `{key}` is not enumerated verbatim"
@@ -110,13 +111,53 @@ def test_documented_blockers_match_the_loader(
             assert per_method not in text, f"{per_method} misstates the collective loader key"
 
 
-def test_the_contract_would_notice_a_wrong_count() -> None:
-    """Non-vacuity. If the loader's list and the documents could not disagree,
-    the assertions above would pass no matter what the prose said."""
+@pytest.mark.parametrize(
+    ("relative", "count_token", "strict"), _DOCS, ids=[d[0].split("/")[-1] for d in _DOCS]
+)
+def test_documented_blockers_match_the_loader(
+    relative: str, count_token: str, strict: bool
+) -> None:
     cfg = load_compose_phase2_config(_CANON)
-    text = (_ROOT / _DOCS[0][0]).read_text(encoding="utf-8")
-    assert "five explicit activation blockers" not in text, (
-        "the pre-correction wording is still present; the contract above would be asserting "
-        "against text that contradicts it"
+    _assert_document_enumerates_the_loader(
+        (_ROOT / relative).read_text(encoding="utf-8"),
+        count_token,
+        strict,
+        cfg.activation_blockers,
+        cfg.config_sha256[:8],
+        relative,
     )
-    assert any(f"`{k}`" in text for k in cfg.activation_blockers)
+
+
+def test_the_contract_would_notice_a_wrong_count() -> None:
+    """Non-vacuity, measured on the REAL document with only its count changed.
+
+    The previous version asserted that ``"five explicit activation blockers"`` was
+    absent. The committed enumeration reads ``**six** explicit\nactivation
+    blockers`` -- bold, and wrapped across a newline -- so an actual six->five edit
+    to the real document left that needle just as absent, and the test passed
+    against the exact defect it claimed to detect (measured: 1 passed).
+
+    So this drives the SAME helper the main check drives, twice: once on the real
+    bytes (must PASS), and once on a copy in which only the count token is
+    rewritten while every other byte -- including the bold markers and the line
+    break -- is preserved (must raise ``AssertionError``). Both arms are required:
+    the failing arm alone would be satisfied by a helper that refuses everything.
+    """
+    cfg = load_compose_phase2_config(_CANON)
+    relative, count_token, strict = _DOCS[0]
+    text = (_ROOT / relative).read_text(encoding="utf-8")
+    args = (count_token, strict, cfg.activation_blockers, cfg.config_sha256[:8], relative)
+
+    # Arm 1: the real document passes.
+    _assert_document_enumerates_the_loader(text, *args)
+
+    # Arm 2: rewrite ONLY the count word, using the same whitespace normalisation the
+    # helper uses, so the injected document is a genuine wrong-count document rather
+    # than a mangled one.
+    normalized = " ".join(text.split())
+    assert count_token in normalized, "fixture assumption: the real enumeration is present"
+    wrong = normalized.replace(count_token, count_token.replace("six", "five"), 1)
+    assert wrong != normalized, "the injection did not change anything"
+
+    with pytest.raises(AssertionError, match="the document does not state the measured count"):
+        _assert_document_enumerates_the_loader(wrong, *args)
