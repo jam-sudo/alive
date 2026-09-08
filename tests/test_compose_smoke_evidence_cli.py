@@ -237,6 +237,30 @@ def test_a_bundle_missing_a_field_is_a_usage_error_not_a_traceback(tmp_path):
     assert "Traceback" not in result.stderr
 
 
+def test_a_malformed_lock_is_a_refusal_not_an_inputs_bundle_usage_error(tmp_path):
+    """A `KeyError` from the LOCK must not be reported as a missing bundle key.
+
+    `promote_lock_to_complete` indexes `lock["run_gate"]["evidence_status"]`, and the
+    CLI used to map every `KeyError` to exit 2 with "inputs bundle is missing" -- so a
+    staged lock with no `run_gate` sent the operator to the wrong file (PR #15 fable
+    Minor 6). The bundle here is complete; only the lock is broken, so this must come
+    back as the refusal it is.
+    """
+    staged, inputs = _bundle(tmp_path)
+    lock_path = staged / LOCK_NAME
+    lock = json.loads(lock_path.read_text(encoding="utf-8"))
+    del lock["run_gate"]
+    lock_path.write_text(json.dumps(lock), encoding="utf-8")
+
+    result = _run(inputs, staged)
+
+    assert result.returncode == 1, result.stderr
+    assert "REFUSED" in result.stderr
+    assert LOCK_NAME in result.stderr
+    assert "inputs bundle is missing" not in result.stderr
+    assert "Traceback" not in result.stderr
+
+
 def test_a_harness_roster_in_the_bundle_that_disagrees_with_the_artifact_is_refused(tmp_path):
     """`training_pair_ids` in the bundle is optional; if present it must match the artifact."""
     staged, inputs = _bundle(tmp_path)

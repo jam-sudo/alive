@@ -104,18 +104,29 @@ def _promote(inputs_path: Path, evidence_dir: Path) -> int:
             for env_name, env in bundle["wheelhouse"].items()
         }
     )
-    promotion = promote_lock_to_complete(
-        lock=json.loads(lock_path.read_text(encoding="utf-8")),
-        backends=backends,
-        wheelhouse=wheelhouse,
-        container_image_digest=bundle["container_image_digest"],
-        git_sha=bundle["git_sha"],
-        generated_at_utc=bundle["generated_at_utc"],
-        host=bundle["host"],
-        activation=bundle["activation"],
-        summary=bundle["summary"],
-    )
-    validated = publish_promotion(promotion, evidence_dir=evidence_dir)
+    promotion_fields = {
+        "container_image_digest": bundle["container_image_digest"],
+        "git_sha": bundle["git_sha"],
+        "generated_at_utc": bundle["generated_at_utc"],
+        "host": bundle["host"],
+        "activation": bundle["activation"],
+        "summary": bundle["summary"],
+    }
+    # The inputs bundle has now been fully read. Past this line a `KeyError` comes from
+    # the LOCK or the evidence directory, not from the bundle -- `promote_lock_to_complete`
+    # indexes `lock["run_gate"]["evidence_status"]`, so a malformed lock used to be
+    # reported as "inputs bundle is missing 'run_gate'" and exit 2 (PR #15 fable Minor 6).
+    # A malformed lock is a REFUSAL (exit 1), which is what an operator reading `$?` needs.
+    try:
+        promotion = promote_lock_to_complete(
+            lock=json.loads(lock_path.read_text(encoding="utf-8")),
+            backends=backends,
+            wheelhouse=wheelhouse,
+            **promotion_fields,
+        )
+        validated = publish_promotion(promotion, evidence_dir=evidence_dir)
+    except KeyError as exc:
+        raise ValueError(f"the staged {LOCK_NAME} is malformed: missing key {exc}") from exc
     print(
         f"OK: {lock_path} validates COMPLETE "
         f"({validated['run_gate']['seal_safety_status']}); no seal was opened."
@@ -137,6 +148,8 @@ def main(argv: list[str]) -> int:
         print(f"REFUSED: {exc}", file=sys.stderr)
         return 1
     except KeyError as exc:
+        # Narrowed to the bundle-parsing stage: `_promote` converts a KeyError raised
+        # after the bundle is read into a refusal, so this can only be a bundle key.
         print(f"usage error: inputs bundle is missing {exc}", file=sys.stderr)
         return 2
     except OSError as exc:

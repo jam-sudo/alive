@@ -8,7 +8,7 @@
 > **이 문서는 아무것도 정의하지 않는다** — 세부(task)는 plan, claim은 spec, exact param은 config,
 > 시간순 audit는 git이 authoritative다([sources of truth](../../CLAUDE.md#sources)). 상태 행이 authoritative
 > 문서와 어긋나면 **authoritative 문서가 옳다**; 이 인덱스를 갱신한다.
-> **Updated:** 2026-09-08 @ `9a71dad` (branch `compose-factor-bank-normalization`)
+> **Updated:** 2026-09-08 @ `fd9a16d` (branch `compose-factor-bank-normalization`)
 > `scripts/bump-readiness-stamp.sh` / the pre-commit hook from `HEAD` at commit time, so it names the
 > **parent** of the commit that carries it and can never name itself. Reading it as "one commit stale" is a
 > misreading; git is authoritative for when this file actually changed.
@@ -94,6 +94,19 @@ sub-project id 다.
 
 서명·처분·digest 이동의 authoritative 기록은 결정문 자신이다. 이 표는 인덱스일 뿐이며 어긋나면
 결정문이 옳다.
+
+**닫힌 결정 — 2026-08-20 이후 (포인터만; 본문은 각 결정문이 authoritative).**
+
+| 닫힌 것 | 서명 | 문서 |
+|---|---|---|
+| dev-pod gate #1 · #3 · #4 · #5 | CONFIRMED 2026-08-29 | `2026-07-13-compose-dev-pod-gate-decisions.md` |
+| 결정 #6 (`l3_hypernetwork` 이름) · 결정 #7 (ladder λ 비교가능성) | APPROVED 2026-08-20/21 | `2026-08-17-compose-ablation-ladder-decisions.md` |
+| 수정안 A (main spec §10.6 access-count) · B (§10.5 band sensitivity) · C (driver stdout) | SIGNED 2026-09-03 / 09-05 | `2026-08-30-compose-spec-10-5-amendments.md` |
+
+**config digest 체인** — `3faacaff…`(#4 정규화) → `c25734d5…`(결정 #6) → `5fea3b9e…`(결정 #7) →
+`0d207746…`(pair dependence, `2026-08-29-compose-pair-dependence-decision.md`) → `a9dc9410…`(F-A3
+`measurability_ceiling_floor`, `2026-09-07-compose-audit-release-decisions.md`). 각 단계의 근거는
+그 결정문이며 현재 값은 위 표의 `a9dc9410…` 다.
 
 ## Go/No-Go (2026-09-07, 로컬 검증 결과)
 

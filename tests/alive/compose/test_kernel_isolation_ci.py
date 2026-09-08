@@ -666,9 +666,18 @@ def test_the_v2_kernel_proof_still_covers_the_shipped_isolation_closure():
         f"{drifted}. Re-run the Linux kernel-isolation CI at the changed code, archive a new "
         "receipt, and move this pin -- do not delete the check"
     )
-    # Not an escape hatch: every exception is one exact digest, so this list can only ever
-    # contain files whose bytes are STILL the ones a human declared and pinned.
-    assert set(pending) <= set(_PENDING_REPROOF)
+    # Not an escape hatch, and this assertion now measures that. ``pending`` is filled
+    # only from ``_PENDING_REPROOF`` hits, so ``pending <= _PENDING_REPROOF`` was true by
+    # construction and could not fail (PR #15 fable Minor 4). The property worth holding is
+    # the converse: every pinned exception must be a file that ACTUALLY drifted and still
+    # hashes to its declared digest. When the bytes come back, the entry stops being reached
+    # and this fails -- the exception has to be deleted rather than left standing.
+    assert pending == sorted(_PENDING_REPROOF), (
+        "every pinned kernel-reproof exception must name a file that is actually drifting "
+        f"from {_V2_SHA[:7]} with its declared digest; pending={pending}, "
+        f"pinned={sorted(_PENDING_REPROOF)}. An entry whose bytes match the archive again "
+        "is stale -- delete it instead of carrying an exception that exempts nothing"
+    )
 
 
 @pytest.mark.repo_history
