@@ -144,6 +144,10 @@ exit code 가 다시 모순된다. 그래서 한 줄 진단만 stderr 에 쓰고
 조용한 swallow 가 아니라 테스트로 고정된 선언 동작이다. 이 창의 writer 자체는 위 (i)·(ii) 전제가 배제하며
 D3-a 의 처분이 그대로 덮는다. **수용된 잔여(`seal.transient-inode-mutation-restoration`)와 D3-a 서명 문장은
 바뀌지 않는다** — 바뀐 것은 재검사가 *언제* 도는가와 실패가 *무엇을 남기는가* 뿐이고, config·digest 는 불변이다.
+덧붙여 **위치 인용만** 갱신한다: 위 "측정된 사실" 과 그 아래 괄호가 부르는 `driver/preseal_read.py:214-243` 의
+post-hash 본문은 2026-09-08 이후 **`VerifiedDescriptor.recheck`** 로 옮겨졌다(같은 파일, 이 정정 시점 실측
+`:148-213`; `:214-243` 은 이제 `verified_descriptor_handle` 의 선언·docstring 구간이다). 줄번호는 파일이 자라면
+또 움직이므로 **authoritative 한 것은 심볼 이름**이다. 서명 문장은 고치지 않고 이 정정 문단이 현재 위치를 가리킨다.
 
 ## D4 — pair dependence 아래 headline 문장
 status: SIGNED: a — 오너 지시 2026-09-07 "모두 권장사항으로 진행"

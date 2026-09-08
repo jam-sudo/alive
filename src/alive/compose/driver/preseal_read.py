@@ -172,7 +172,12 @@ class VerifiedDescriptor:
         # D3-a (2026-09-07) accepts it under the approved-runtime premises (no
         # concurrent writer, immutable mount).
         #
-        # Cost measured on the real sealed source (0.70 GB): 0.2 s. Once per run.
+        # Cost measured on the real sealed source (0.70 GB): 0.2 s per call. On the
+        # normal phase2b path the digest is streamed TWICE -- once at the consumption
+        # boundary (`materialize_claimed`, the call that can still decide the terminal)
+        # and once as `_build_sealed_store`'s exit-time DIAGNOSTIC -- so ~0.4 s per
+        # successful run, not 0.2 s. (`verified_descriptor`'s own lane still streams it
+        # once, at its context exit.)
         os.lseek(self._fd, 0, os.SEEK_SET)
         post = hashlib.sha256()
         while True:

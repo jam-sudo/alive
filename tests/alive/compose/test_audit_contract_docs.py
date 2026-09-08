@@ -12,12 +12,18 @@ D1 in the final review). Re-opening such a decision means moving ``status:`` bac
 
 from __future__ import annotations
 
+import math
 import re
 from pathlib import Path
 
 import pytest
 
 from alive.compose.config2 import load_compose_phase2_config
+from alive.compose.phase2b import (
+    _FLIP_ALREADY_FAILED,
+    _FLIP_NEVER,
+    preregistered_headline_branch,
+)
 
 _DECISIONS = Path("docs/superpowers/2026-09-07-compose-audit-release-decisions.md")
 _MAIN_SPEC = Path("docs/superpowers/specs/2026-06-22-compose-epistasis-operator-design.md")
@@ -359,6 +365,73 @@ def test_the_preregistered_headline_uses_the_codes_own_flip_vocabulary():
     flat_section = " ".join(section.split())
     for boundary in ("1.0", "ladder_max", "1.25"):
         assert boundary in flat_section, f"§8 이 경계 `{boundary}` 를 적지 않는다"
+
+
+#: §8 의 2026-09-08 정정 문단이 (i)/(ii)/(iii) 각각에 붙인 **적용 조건 절**, 공백 정규화 후.
+#: 토큰 존재 검사는 이 절들을 **뒤집어도** 통과한다: PR #15 재검토 R2 가 실측했다 — (ii) 의
+#: ``유한 `1.0 < flip ≤ ladder_max``` 를 ``유한 `1.0 > flip ≥ ladder_max``` 로 바꾼 §8 사본에서
+#: 기존 검사는 **1 passed** 였다. 부등호는 분기의 전부이므로, 절을 통째로 고정한다.
+_HEADLINE_BRANCH_CONDITIONS = {
+    "i": "`band_passes=True` 이고 (`flip == NEVER_FLIPS` **또는** 유한 flip > `ladder_max`)",
+    "ii": "`band_passes=True` 이고 유한 `1.0 < flip ≤ ladder_max`",
+    "iii": "`band_passes=False` — 등록 밴드 미통과 **전체**",
+}
+
+_HEADLINE_CORRECTION_MARK = "**[2026-09-08 정정 — 결과군 완전성 (Codex PR 리뷰 I3)]**"
+
+
+def _headline_branch_conditions() -> dict[str, str]:
+    """§8 정정 문단의 (i)/(ii)/(iii) 적용 조건 절만 뽑아 공백 정규화한다.
+
+    조건은 각 bullet 의 **첫 문장**이다(그 뒤는 그 분기에서 무엇을 쓰는지에 대한 설명이며
+    분기 자체가 아니다). ``". "`` 로만 자르므로 ``1.0`` 의 소수점은 문장 경계로 오인되지
+    않는다(뒤가 공백이 아니다 — 실측).
+    """
+    section = _headline_section()
+    assert _HEADLINE_CORRECTION_MARK in section, (
+        f"§8 에 결과군 완전성 정정 문단({_HEADLINE_CORRECTION_MARK})이 없다"
+    )
+    paragraph = section.split(_HEADLINE_CORRECTION_MARK, 1)[1]
+    conditions: dict[str, str] = {}
+    for match in re.finditer(
+        r"^- \*\*\((i{1,3})\)\*\*(.*?)(?=^- |\n\n|\Z)", paragraph, re.M | re.S
+    ):
+        flat = " ".join(match.group(2).split())
+        conditions[match.group(1)] = re.split(r"\.\s", flat, maxsplit=1)[0]
+    return conditions
+
+
+def test_the_headline_correction_states_the_same_partition_the_code_implements():
+    """§8 정정 문단의 세 조건 절이 `preregistered_headline_branch` 의 분할과 **같아야** 한다.
+
+    D4 가 닫으려는 자유는 "결과를 본 뒤 문구를 고르는 것"이다. 그 자유는 분기 함수가 아니라
+    **문서의 조건 절**이 흐릿할 때 열린다 — 그래서 여기서는 토큰이 아니라 절 자체를 고정하고,
+    같은 입력을 함수에도 먹여 문서가 서술하는 분할이 코드가 구현하는 분할과 일치함을 실행으로
+    확인한다. 어느 한쪽만 바뀌면 이 검사가 먼저 실패한다.
+    """
+    assert _headline_branch_conditions() == _HEADLINE_BRANCH_CONDITIONS, (
+        "§8 정정 문단의 (i)/(ii)/(iii) 적용 조건이 등록된 절과 다르다 — 부등호 하나만 뒤집혀도 "
+        "분기가 바뀐다"
+    )
+
+    ladder_max = 1.25
+    # (iii): 밴드 미통과 **전체** — flip 이 무엇이든 같은 문장.
+    for flip in (_FLIP_ALREADY_FAILED, 0.5, 1.0, 2.5, -math.inf):
+        assert (
+            preregistered_headline_branch(band_passes=False, flip=flip, ladder_max=ladder_max)
+            == "iii"
+        ), f"밴드 미통과인데 flip={flip!r} 가 (iii) 가 아니다"
+    # (i): NEVER_FLIPS, 또는 유한 flip > ladder_max.
+    for flip in (_FLIP_NEVER, math.inf, 2.5, 1.2500001):
+        assert (
+            preregistered_headline_branch(band_passes=True, flip=flip, ladder_max=ladder_max) == "i"
+        ), f"사다리 전 구간 유지인데 flip={flip!r} 가 (i) 가 아니다"
+    # (ii): 유한 1.0 < flip ≤ ladder_max — 상한은 **포함**이다.
+    for flip in (1.0000001, 1.1, ladder_max):
+        assert (
+            preregistered_headline_branch(band_passes=True, flip=flip, ladder_max=ladder_max)
+            == "ii"
+        ), f"등록 사다리 안에서 뒤집히는데 flip={flip!r} 가 (ii) 가 아니다"
 
 
 def test_the_preregistered_headline_never_asserts_a_prohibited_claim():
