@@ -66,7 +66,7 @@ total-$k$ 의 ESM-off arm 이 필요하고, 그것은 comparator roster·digest�
 
 ## D3 — R2 위협 모델
 status: SIGNED: a — 오너 지시 2026-09-07 "모두 권장사항으로 진행"
-release: NO-GO (구현 대기 — Task 13)
+release: GO-LOCAL (Task 13, 2026-09-07 — 위협 모델 문서 종결; runtime 증거 POD-GATED)
 
 | | 선택지 | digest | task |
 |---|---|---|---|
@@ -74,8 +74,41 @@ release: NO-GO (구현 대기 — Task 13)
 | D3-b | consumption 불변 경계 구현(claim 이후 sealed snapshot 에서 소비) | 불변(코드) | 별도 plan (부록 B), Task 13 변형 b 는 preflight 선언 검사까지 |
 | D3-c | 보류 | 불변 | Task 13 변형 c |
 
-**측정된 사실.** `driver/preseal_read.py:210-239` post-hash 는 소비 중 in-place 변경 **후 복원**을 탐지하지 못한다(복원 없는 대조군은
+**측정된 사실.** `driver/preseal_read.py:214-243` post-hash 는 소비 중 in-place 변경 **후 복원**을 탐지하지 못한다(복원 없는 대조군은
 `PresealDescriptorError`). `phase2b_cmd.py:567` post-claim 검사는 obs 라벨만 재검증하고 X 값은 보지 않는다(B 3-arm). 등록·공시된 잔여다.
+
+**결정(D3-a) 구현.** `seal.transient-inode-mutation-restoration` 은 **수용된 잔여**다. 코드로 막지 않고
+승인 runtime 의 전제 아래에서 수용한다. 전제는 셋이다: (i) sealed source 가 놓인 mount 는 run 기간 동안
+프로세스 그룹 **외부**에 write 권한을 주지 않는다; (ii) 같은 pod 안에서 sealed source 에 write 하는 프로세스는
+driver 자신뿐이며 driver 는 consumption 중 그 파일에 쓰지 않는다 — 즉 소비 구간에 **동시 writer 가 없다**;
+(iii) 두 전제가 성립함을 확인할 수 없는 runtime 에서는 sealed run 을 시작하지 않는다. post-hash 는 이 전제
+**아래에서만** "소비한 바이트 = 검증한 바이트" 를 보장한다. 검증 시점의 obs label 정합은 consumed X 불변 보증이 아니다 — `phase2b_cmd.py:567` 의
+post-claim 검사는 obs 라벨만 재검증하고 X 값은 보지 않으므로, 라벨이 그대로라는 사실은 X 가 그대로라는
+증거가 아니다.
+
+**위협 모델 — 전제가 배제하는 actor(따로 열거).**
+
+1. **같은 inode 에 in-place write 할 수 있는 actor.** descriptor pinning 은 *pathname* swap 을 막을 뿐
+   우리가 열어 둔 inode 로의 write 를 막지 못한다(`seal.verified-fd-posthash-mutation`, 2026-08-30 실측:
+   `same_inode=True`).
+2. **read-only mount 를 pod 밖에서 rw 로 보는 external host writer.** 컨테이너 안의 read-only mount 는
+   host 쪽 write 를 배제하지 않는다.
+3. **root 또는 동일 UID 프로세스.** 소유자로서 다시 열거나 권한 비트를 되돌릴 수 있다. 그래서 단순
+   chmod 0444 는 충분조건이 **아니다** — 이 actor 가 그것을 우회한다.
+4. **materialization 도중의 transient modify-restore.** 재검증 **전에** 원래 바이트로 되돌리면 post-hash 는
+   등호를 보고 통과한다(복원하지 않는 대조군만 `PresealDescriptorError` 를 낸다).
+
+이 넷은 (i)·(ii) 가 배제하는 대상이며, 배제의 근거는 코드가 아니라 runtime 구성이다.
+(위 `:214-243` 은 이번 task 가 같은 블록에 주석 4줄을 더한 뒤의 줄번호다 — 이전 인용 `:210-239` 와 같은 코드다.)
+
+**서명·상태·미확인.** runtime owner 는 **저장소 오너**다. 종결에는 오너가 object identity·mount
+access-policy·actor roster·증거 위치를 검토해 서명하는 것이 필요하다. 로컬 row 상태:
+`POLICY_SIGNED / RUNTIME_UNVERIFIED` — 정책 문장은 이 문서로 서명됐고, 실제 storage/mount/actor 증거
+확인은 **POD-GATED** 다(로컬에서 측정한 것이 없다). `COMPOSE-SEAL-READINESS.md` 의 `source_consumption`
+행에 이 상태를 싣는 것은 Task 7 의 재작성이 수행한다. **코드 잔여 자체는 바뀌지 않았다** — 동작·config
+무변경이고, 문서 계약만 닫힌다. main spec §10.6 수정안 A 블록 뒤의 D3-a 한 줄과
+`src/alive/compose/driver/preseal_read.py` post-hash 주석의 예외 문장이 이 절을 역참조한다. 변형 b(claim
+이후 sealed snapshot 에서 소비)는 여기서 채택하지 않았고 **별도 plan**(부록 B)으로 남는다.
 
 ## D4 — pair dependence 아래 headline 문장
 status: SIGNED: a — 오너 지시 2026-09-07 "모두 권장사항으로 진행"

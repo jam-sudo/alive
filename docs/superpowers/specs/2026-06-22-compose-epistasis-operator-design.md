@@ -756,6 +756,8 @@ descriptor로 고정되고 소비 후 재검증되는 sealed source가 함께 �
 "보증한다"는 transient 잔여가 열려 있는 동안 참이 아니어서 "설계돼 있다 … 조건부"로 정정했다.
 근거: `docs/superpowers/2026-08-30-compose-spec-10-5-amendments.md`.]**
 
+**[D3-a — 2026-09-07, SIGNED by owner instruction "모두 권장사항으로 진행".]** 위 transient 잔여는 승인 runtime 전제(동시 writer 배제·mount 불변) 아래의 **수용된 잔여**로 확정한다 — 전제·위협 모델은 `2026-09-07-compose-audit-release-decisions.md` D3.
+
 ---
 
 ## 부록 H — historical 문단 색인 (2026-09-07)

@@ -209,6 +209,23 @@ def test_a_signed_esm_decision_names_its_governance_disposition():
     assert "CLAUDE.md:132" in body
 
 
+def test_a_signed_source_threat_model_names_the_consumption_residual():
+    """D3 가 SIGNED 면 위협 모델은 **결정문 본문**에 적혀 있어야 한다.
+
+    ``seal.transient-inode-mutation-restoration`` 은 코드로 막지 않고 **승인 runtime 의 전제**로
+    수용한 잔여다. 전제를 적지 않으면 "수용"은 근거 없는 면제가 된다. haystack 이 D3 절의
+    **산문**인 이유는 D2·D4 와 같다: ``D3-a`` 선택지 행이 이미 "동시 writer"·"mount" 를 모두
+    담고 있어(실측), 표를 읽는 검사는 구현 여부와 무관하게 같은 답을 낸다.
+    """
+    d3 = _section(_DECISIONS.read_text(encoding="utf-8"), "D3", "D4")
+    if "status: SIGNED" not in d3:
+        assert "release: NO-GO" in d3
+        return
+    body = _prose(d3)
+    assert "검증 시점의 obs label 정합은 consumed X 불변 보증이 아니다" in body
+    assert "동시 writer" in body and "mount" in body
+
+
 _PAIR_DEPENDENCE = Path("docs/superpowers/2026-08-29-compose-pair-dependence-decision.md")
 _PHASE2B_SOURCE = Path("src/alive/compose/phase2b.py")
 _HEADLINE_SECTION = "8. seal 전에 확정된 headline 문장"

@@ -203,6 +203,10 @@ def verified_descriptor(source_path: str | Path, expected_sha: str) -> Iterator[
         # recorded as verified are the bytes we consumed" must be true or the run
         # must fail. So the digest is re-streamed through the SAME descriptor after
         # consumption and must still equal the declared one.
+        # Exception (registered residual seal.transient-inode-mutation-restoration): a
+        # modify-then-RESTORE that completes before the post-consumption re-hash is not
+        # noticed here; D3-a (2026-09-07) accepts it under the approved-runtime premises
+        # (no concurrent writer, immutable mount).
         #
         # This runs only on the normal path, never in `finally`: on an exception the
         # original failure is the one that matters and must not be masked.
