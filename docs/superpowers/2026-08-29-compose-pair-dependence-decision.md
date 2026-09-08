@@ -132,3 +132,26 @@ be a verdict gate.
 The reporting implementation — computing and emitting the verdict at each registered λ, and the
 flip point per comparator — is **not** in this change. This decision registers and freezes the
 contract; the report that consumes it is the next increment.
+
+**headline wording 은 더 이상 열려 있지 않다.** 결과군별 headline 문장은 D4(2026-09-07, "모두 권장사항으로
+진행")로 아래 §8 에 사전 확정되었다. 이 §7 에 남는 열린 항목은 위의 보고 구현뿐이다.
+
+## 8. seal 전에 확정된 headline 문장 (2026-09-07, D4)
+
+verdict 는 등록된 밴드(λ=1.0)에서만 내려진다. 아래 세 문장은 **결과를 보기 전에** 확정한다. 사다리는 등록된
+`sensitivity_band_inflation` 이고 flip 표기는 `phase2b.py` 의 `NEVER_FLIPS`·`FAILS_AT_REGISTERED_BAND` 를
+그대로 쓴다 — 문장이 코드 어휘에서 떠내려가지 않게 하기 위해서다.
+
+**(i) `flip_point == NEVER_FLIPS`.** "headline contrast 는 등록된 sensitivity 사다리 전 구간에서 material margin 을 유지한다. 이는 등록된 resampling 단위
+(`perturbation_pair`) 가정 아래의 결과이며, 22 pairs/21 genes 의 구성상 pair-i.i.d. 위배를 흡수할 재표본 단위가 이 설계에 없다는 제한과
+실제 method-specific dependence 의 크기가 미측정이라는 제한은 그대로다."
+
+**(ii) 등록 밴드에서는 승리, 상위 λ 에서 뒤집힘.** "등록 밴드에서는 승리했으나 등록된 상위 inflation λ=<flip> 에서 유지되지 않았다. 이는 pair resampling
+가정에 조건부인 결과이며 unconditional efficacy 또는 unconditional 95% coverage 를 주장하지 않는다. 저장소 simulation 의 method-differential coverage
+(명목 0.95 대비 0.9240~0.9373)는 특정 생성모형의 값이지 실제 Norman coverage 측정이 아니다."
+
+**(iii) `FAILS_AT_REGISTERED_BAND`.** "등록된 밴드에서 material margin 미달 — `NO_DISTINCT_WIN`. 불변식 14 에 따라 이는 결과이며 threshold 를 사후 변경하거나
+sensitivity 사다리의 다른 λ 를 verdict gate 로 승격하지 않는다."
+
+세 문장 어디에도 "mechanistic" · "causal" · "context transfer" · "unconditional 95%" 는 쓰지 않는다. calibration in-sample ICC 의 double-unseen 이식과
+λ=1.15 를 새 nominal gate 로 쓰는 것은 금지(결정문 §2, 불변식 7).

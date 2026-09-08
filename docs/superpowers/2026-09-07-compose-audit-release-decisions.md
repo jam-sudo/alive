@@ -79,7 +79,7 @@ release: NO-GO (구현 대기 — Task 13)
 
 ## D4 — pair dependence 아래 headline 문장
 status: SIGNED: a — 오너 지시 2026-09-07 "모두 권장사항으로 진행"
-release: NO-GO (구현 대기 — Task 14)
+release: GO-LOCAL (Task 14, 2026-09-07 — pair-dependence decision §8)
 
 | | 선택지 | digest | task |
 |---|---|---|---|
@@ -88,6 +88,12 @@ release: NO-GO (구현 대기 — Task 14)
 
 **사실상 합의.** A 의 P1(calibration design effect 로 밴드 팽창)은 `2026-08-29-compose-pair-dependence-decision.md:79-88` 이 불변식 7 위반을 포함한
 세 근거로 기각했고 A 가 전면 철회했다. 남는 것은 문장 사전 확정뿐이다.
+
+**결정(D4-a) 구현.** 세 결과군의 문구는 `docs/superpowers/2026-08-29-compose-pair-dependence-decision.md`
+§8 「seal 전에 확정된 headline 문장」에 결과를 보기 전에 고정했고, main spec §10.5 의 band-sensitivity 문단이
+그 절을 역참조한다. 승리 문장은 등록된 resampling 단위 가정에 **조건부**이며 unconditional efficacy 를
+주장하지 않는다 — 0.9240~0.9373 은 특정 생성모형의 simulation 값이지 Norman 에서 측정한 coverage 가 아니다.
+verdict 는 그대로 λ=1.0 에서만 판정하며 사다리의 다른 λ 는 verdict gate 가 되지 않는다. digest 불변.
 
 ## 열린 것 (이 문서가 결정하지 않는 것)
 

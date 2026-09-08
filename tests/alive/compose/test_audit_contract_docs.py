@@ -207,3 +207,83 @@ def test_a_signed_esm_decision_names_its_governance_disposition():
     body = _prose(d2)
     assert "ESM의 marginal signal을 검증했다고 주장하지 않는다" in body or "ESM-off arm" in body
     assert "CLAUDE.md:132" in body
+
+
+_PAIR_DEPENDENCE = Path("docs/superpowers/2026-08-29-compose-pair-dependence-decision.md")
+_PHASE2B_SOURCE = Path("src/alive/compose/phase2b.py")
+_HEADLINE_SECTION = "8. seal 전에 확정된 headline 문장"
+
+#: §8 이 claim 으로 써서는 안 되는 네 토큰. 결정문 §8 의 금지 문장이 이들을 이름으로 부르므로
+#: "§8 에 나오면 안 된다"는 검사는 자기 금지 문장 때문에 반드시 실패한다. 측정해야 하는 성질은
+#: 등장 여부가 아니라 **주장으로 등장하는지**다.
+_PROHIBITED_HEADLINE_TOKENS = ("mechanistic", "causal", "context transfer", "unconditional 95%")
+
+_PROHIBITION_MARK = "쓰지 않는다"
+_NON_CLAIM_MARK = "주장하지 않는다"
+
+
+def _headline_section() -> str:
+    text = _PAIR_DEPENDENCE.read_text(encoding="utf-8")
+    assert f"## {_HEADLINE_SECTION}" in text, (
+        f"{_PAIR_DEPENDENCE} 에 '## {_HEADLINE_SECTION}' 절이 없다 — "
+        "headline 문장이 seal 전에 확정되지 않았다"
+    )
+    return _section(text, _HEADLINE_SECTION, None)
+
+
+def _sentences(section: str) -> list[str]:
+    """Split a Korean markdown section into sentences, unwrapping hard line breaks first.
+
+    Line-based checks measure where a paragraph happens to wrap, not what it says: the
+    non-claim clause in sentence (ii) and its subject sit on different source lines. Joining
+    the section and cutting after each ``다.`` makes the assertion measure the sentence.
+    """
+    flat = " ".join(section.split())
+    return [s for s in re.split(r"(?<=다[.])\s*", flat) if s.strip()]
+
+
+def test_a_signed_pair_headline_is_preregistered_and_conditional():
+    """D4 가 SIGNED 면 headline 문장은 **결정문 본문**에 사전 확정되어 있어야 한다.
+
+    선택지 표(``D4-a``/``D4-b``)는 오너가 고르기 **전에** 쓰였으므로 표를 읽는 검사는 구현
+    여부와 무관하게 같은 답을 낸다(Task 12 실측). 그래서 haystack 은 D4 절의 **산문**이다.
+    """
+    d4 = _section(_DECISIONS.read_text(encoding="utf-8"), "D4", "Amendment")
+    if "status: SIGNED" not in d4:
+        assert "release: NO-GO" in d4
+        return
+    body = _prose(d4)
+    assert "unconditional efficacy" in body
+    assert "seal 전에 확정된 headline 문장" in body
+    text = _PAIR_DEPENDENCE.read_text(encoding="utf-8")
+    assert "unconditional efficacy" in text and "seal 전에 확정된 headline 문장" in text
+
+
+def test_the_preregistered_headline_uses_the_codes_own_flip_vocabulary():
+    """§8 이 부르는 flip/사다리 토큰은 코드에 실재해야 한다 — 문장이 코드에서 떠내려가지 않도록."""
+    section = _headline_section()
+    source = _PHASE2B_SOURCE.read_text(encoding="utf-8")
+    for token in ("NEVER_FLIPS", "FAILS_AT_REGISTERED_BAND", "sensitivity_band_inflation"):
+        assert token in section, f"§8 이 `{token}` 를 부르지 않는다"
+        assert token in source, f"`{token}` 가 {_PHASE2B_SOURCE} 에 없다 — 문장이 코드와 어긋난다"
+
+
+def test_the_preregistered_headline_never_asserts_a_prohibited_claim():
+    """네 금지 토큰은 금지 문장 안에서, 또는 명시적 비주장 절 안에서만 나타난다."""
+    section = _headline_section()
+    sentences = _sentences(section)
+    prohibition = [s for s in sentences if _PROHIBITION_MARK in s]
+    assert len(prohibition) == 1, f"금지 문장이 정확히 하나여야 한다 — {len(prohibition)} 개"
+    for token in _PROHIBITED_HEADLINE_TOKENS:
+        assert token in prohibition[0], f"금지 문장이 `{token}` 를 이름으로 부르지 않는다"
+        for sentence in sentences:
+            if sentence is prohibition[0]:
+                continue
+            at = sentence.find(token)
+            while at != -1:
+                # 같은 문장에 비주장 표시가 있는 것으로는 부족하다 — 표시가 토큰 **뒤에**
+                # 와야 그 토큰이 부정되는 것이다. 앞에 있으면 다른 절을 부정하고 있을 뿐이다.
+                assert _NON_CLAIM_MARK in sentence[at:], (
+                    f"`{token}` 가 주장으로 나온다 — {sentence!r}"
+                )
+                at = sentence.find(token, at + 1)

@@ -718,6 +718,8 @@ sensitivity는 어떤 경우에도 verdict gate가 아니다. sensitivity는 sea
 **[수정안 B — 2026-09-05 위임 아래 서명. 근거: `2026-08-29-compose-pair-dependence-decision.md`(측정값),
 `docs/superpowers/2026-08-30-compose-spec-10-5-amendments.md` §3.]**
 
+각 verdict 결과군의 headline 문장은 seal 전에 `docs/superpowers/2026-08-29-compose-pair-dependence-decision.md` §8(D4, 2026-09-07)에서 확정되었다 — 결과를 본 뒤 문구를 고르지 않는다.
+
 secondary = GI-explained fraction과 구조 복원이며 verdict gate로 사용하지 않고 effect size,
 simultaneous interval, chance/null definition과 함께 전부 보고한다.
 
