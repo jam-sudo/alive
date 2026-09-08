@@ -298,3 +298,34 @@ def test_the_preregistered_headline_never_asserts_a_prohibited_claim():
         assert token not in residue, (
             f"`{token}` 가 등록된 비주장 절 **밖**에 나온다 — 긍정 claim 이다"
         )
+
+
+def test_readiness_names_every_release_gate_and_stays_an_index():
+    """readiness 는 **모든** release gate 를 이름으로 부르는 인덱스여야 한다.
+
+    감사가 잡은 실패 모드는 두 개가 한 몸이다. (1) `## Critical path to seal` 아래가
+    시간순 서술 2,400여 줄로 자라 자기 maintainer note("index-only … 시간순 audit trail →
+    git log")를 위반했고, (2) 그렇게 자란 서술이 release 경계를 **열거하지 않아서** —
+    adapter 해석, source 소비, kernel 격리 재증명, 그리고 최종 owner gate 가 어디에도
+    한 목록으로 서 있지 않았다. 길이 상한만 걸면 서술을 지우는 것으로 통과할 수 있고,
+    토큰만 걸면 서술이 다시 자라도 통과한다. 둘을 한 검사에 둔다.
+    """
+    text = _READINESS.read_text(encoding="utf-8")
+    for token in (
+        "adapter_resolution",
+        "source_consumption",
+        "kernel_isolation_reproof",
+        "owner_release",
+        "D1",
+        "D2",
+        "D3",
+        "D4",
+    ):
+        assert f"`{token}`" in text, (
+            f"readiness 가 release gate `{token}` 를 이름으로 부르지 않는다"
+        )
+    lines = len(text.splitlines())
+    assert lines <= 250, (
+        f"readiness 가 {lines} 줄이다 — 자기 maintainer note 가 선언한 index-only 형태가 아니다; "
+        "시간순 서술은 journal 아카이브와 git log 가 authoritative 다"
+    )
