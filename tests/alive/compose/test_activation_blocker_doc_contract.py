@@ -18,10 +18,10 @@ over:
    representation lacks its bias report, not a per-method key.
 
 So the number is pinned to the measurement instead of to prose discipline. The
-approach and the CPA-exactness reasoning come from the fix pipeline's autonomous
-agent (``claude/audit-fixes-2026-08-23``, ``af2497b``), which pinned the decision
-document; this extends the same contract to every sibling that carries the
-enumeration, which is the half its version was missing.
+approach and the CPA-exactness reasoning come from an independent external fix of
+the same finding (2026-08-23), which pinned the decision document; this extends
+the same contract to every sibling that carries the enumeration, which is the
+half that fix was missing.
 """
 
 from __future__ import annotations

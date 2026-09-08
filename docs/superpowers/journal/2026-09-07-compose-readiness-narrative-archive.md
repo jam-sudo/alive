@@ -9,6 +9,11 @@
 > **경로 접두사만** 같은 대상을 가리키도록 다시 계산했다:
 > 1. `](../../CLAUDE.md#enforcement)` → `](../../../CLAUDE.md#enforcement)` (2회)
 > 2. `](evidence/2026-08-26-pair-gene-dependence-coverage/README.md)` → `](../evidence/2026-08-26-pair-gene-dependence-coverage/README.md)`
+>
+> **[2026-09-08 편차 4]** 위 3개 link 접두사 외에 **두 곳** 이 verbatim 이 아니다: 협력 workflow 서술
+> 2곳(파이프라인 이름·branch·SHA 1곳, 협력 측 작업 항목 서술 1곳)을 오너 규칙("협력 시스템은 git 에 올리지
+> 않는다")에 따라 허용 형태(출처 귀속 + 날짜)로 redaction 했다. 각 자리에 `[2026-09-08 redaction]` 표시를
+> 남겼고(본문에서 `grep` 으로 찾을 수 있다), 수치·유도·측정 결과는 전부 보존했다.
 
 ## Critical path to seal
 
@@ -1714,11 +1719,10 @@ in the generator and in the config; nothing on the consumption side made it true
 artifact deserialization, `phase2a._verify_factor_banks`, and carrier serialization. The
 byte-for-byte binding is **untouched**: this adds a refusal rather than re-plumbing the binding, so
 #7's seal-adjacent constraint still holds. Tolerance is **derived rather than sampled** — `5e-13·√(n·k)` plus an SVD
-backward-error floor, from Weyl's inequality — and the derivation came from the fix pipeline's
-**autonomous agent**, which fixed the same finding independently on `claude/audit-fixes-2026-08-22`
-(`d9f4452`). It is 15.6× tighter than the flat `1e-9` I first shipped and grows with the matrix.
-The two independent attempts were strong in different places — its tolerance, my three-door
-coverage — which is the argument for running both. **19/19 mutations killed**, each
+backward-error floor, from Weyl's inequality — and the derivation came from an **independent
+external fix of the same finding** (2026-08-22). `[2026-09-08 redaction]` It is 15.6× tighter than
+the flat `1e-9` I first shipped and grows with the matrix. The two independent attempts were strong
+in different places — its tolerance, my three-door coverage. **19/19 mutations killed**, each
 by the named failing test. The change also exposed that `driver/fixture_builder._build_instance` — production code — generated unnormalized factor
 matrices, so every scientific-carrier fixture bound banks that named a rule they broke; it now
 normalizes. Full compose suite **2202 passed, 2 skipped**. Detail in `2026-08-17-compose-ablation-ladder-decisions.md` §5.3.
@@ -2085,8 +2089,8 @@ digest-bound helper. **The 2026-08-25 fix missed a sibling inside the very file 
 **So the helper stopped living in a consumer.** `driver/preseal_read.py` now holds it and every lane
 calls it: the `phase2a_inputs` lane, `preflight_cmd`'s config plus its two raw byte reads plus the
 pair manifest, the config load in `phase2a_cmd` and `phase2b_cmd`, and the bias lane. Fixing this in
-one place is now the only way to fix it at all — the same structural move made twice on the
-collaboration side this week for the worktree pin and the agent timeout. `carrier_loader._read_json`
+one place is now the only way to fix it at all — the same structural move this repository has had to
+make elsewhere. `[2026-09-08 redaction]` `carrier_loader._read_json`
 lost its last caller and was deleted rather than left as a path anyone could reach for.
 
 Each caller converts `PresealBytesError` into the error its own contract already raises. Widening a

@@ -310,20 +310,18 @@ re-plumb the binding, so #7's seal-adjacent constraint still holds.
 **Tolerance: derived, not a sampled constant — and the derivation is not mine.** The normalization
 is exact to machine precision; what sets the floor is the artifact's own 12-decimal rounding. I first
 shipped a flat `1e-9`, justified empirically over 87 banks (worst round-trip deviation `8.4e-13`).
-The fix pipeline's **autonomous agent independently fixed the same finding** on 2026-08-22
-(`claude/audit-fixes-2026-08-22`, `d9f4452`) and derived the bound instead of sampling it: by Weyl's
-inequality `|σmax(Z+E) − σmax(Z)| ≤ ‖E‖₂ ≤ ‖E‖_F`, so a bank that was normalized exactly can arrive
-off by at most `5e-13·√(n·k)` plus an SVD backward-error floor.
+An **independent external fix of the same finding** (2026-08-22) derived the bound instead of
+sampling it: by Weyl's inequality `|σmax(Z+E) − σmax(Z)| ≤ ‖E‖₂ ≤ ‖E‖_F`, so a bank that was
+normalized exactly can arrive off by at most `5e-13·√(n·k)` plus an SVD backward-error floor.
 
 That is strictly better and it has been adopted here: at Norman scale it is `6.4e-11`, **15.6× tighter
 than the flat constant**, and it grows with the matrix instead of staying pinned to the sizes that
 happened to be sampled. Measured before adopting: 45 honest banks clear it with a worst headroom
 ratio of `0.073`, and the `7.0` forgery is refused by eleven orders.
 
-**The two attempts were strong in different places, which is the whole argument for running both.**
-Mine covered three doors; the autonomous agent's covered one (`_deserialize_gene_factor_bank`) and
-left `phase2a` untouched. Its tolerance was better; my coverage was broader. Neither alone was the
-right answer.
+**The two attempts were strong in different places.** This one covered three doors; the external one
+covered one (`_deserialize_gene_factor_bank`) and left `phase2a` untouched. Its tolerance was better;
+this coverage was broader. Neither alone was the right answer.
 
 **The zero bank is mirrored, not exempted.** `build_gene_factors` keeps the rule total by leaving an
 identically-zero `Z` alone at scale `1.0`, so the verifier accepts exactly that shape and no other —
@@ -355,6 +353,8 @@ M13 redundancy was found. The mutation that tests the claim removes it at both s
 
 **`config_sha256` is unchanged at `5fea3b9e…`.** This is a code-only change: no registered value
 moved, no new run identity, and nothing here authorizes a run.
+
+`[2026-09-08 정정: 협력 workflow 서술 제거 — 오너 규칙; 수치·유도 불변]`
 
 ## Addendum — 2026-09-07 (D1-a): the residual this document registered now bounds a claim
 

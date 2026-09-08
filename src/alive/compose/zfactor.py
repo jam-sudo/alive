@@ -216,12 +216,11 @@ def _sigma_max_tolerance(n_genes: int, k_total: int) -> float:
     worst observed round-trip deviation ``8.4e-13``). An empirical constant is
     only as good as its sample: at Norman scale this derived bound is
     ``6.4e-11``, **15.6x tighter**, and a flat constant would have stayed put as
-    banks grew. The derivation is not mine -- the fix pipeline's autonomous agent
-    produced it independently on 2026-08-22 (``claude/audit-fixes-2026-08-22``,
-    ``d9f4452``) while fixing the same audit finding, and it is the better half
-    of two independent attempts. Measured before adopting: 45 honest banks
-    (``k`` in {4,6,8}, 12--2000 genes, input scales 1e-6/1/1e6) all clear it with
-    a worst headroom ratio of ``0.073``.
+    banks grew. The derivation is not mine: an independent external fix of the
+    same finding (2026-08-22) derived the bound rather than sampling it, and this
+    is that derivation. Measured before adopting: 45 honest banks (``k`` in
+    {4,6,8}, 12--2000 genes, input scales 1e-6/1/1e6) all clear it with a worst
+    headroom ratio of ``0.073``.
 
     Parameters
     ----------
