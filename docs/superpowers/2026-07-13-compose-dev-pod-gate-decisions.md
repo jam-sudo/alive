@@ -240,11 +240,109 @@ sealed-run runbook past §2.5 (owner-approved exact Git SHA is a separate, later
 
 | # | decision | current status | owner sign-off (flip to CONFIRMED — name / date) |
 |---|---|---|---|
-| 1 | GEARS revision `cell-gears==0.1.2` + published/default K562 training config | PROPOSED | ______________________ |
+| 1 | GEARS revision `cell-gears==0.1.2` + published/default K562 training config | **CONFIRMED** | Jae Min Yoon / 2026-08-29 |
 | 2 | GEARS GO-graph/gene2go — Harvard Dataverse `doi:10.7910/DVN/Q2ZV3E`, v2 manifest | **RESOLVED** | ______________________ |
-| 3 | CPA revision `cpa-tools==0.8.5` + published/default combo config | PROPOSED | ______________________ |
-| 4 | `approximation_bias` metric DEFINITION (spec `2026-07-13-compose-approximation-bias-metric-design.md`) | PROPOSED | ______________________ |
-| 5 | Dev-pod provider: RunPod A100 80GB PCIe, torch cu124 | PROPOSED | ______________________ |
+| 3 | CPA revision `cpa-tools==0.8.5` + published/default combo config | **CONFIRMED** | Jae Min Yoon / 2026-08-29 |
+| 4 | `approximation_bias` metric DEFINITION (spec `2026-07-13-compose-approximation-bias-metric-design.md`) | **CONFIRMED — the §6.1 v3 definition, not the v1 one this row was drafted against** | Jae Min Yoon / 2026-08-29 |
+| 5 | Dev-pod provider: RunPod A100 80GB PCIe, torch cu124 | **CONFIRMED** | Jae Min Yoon / 2026-08-29 |
+
+
+### 6.1 What changed since this record was drafted — 2026-08-21 re-verification
+
+Five weeks separate the drafting of this record from the signature it is waiting for, so every cited
+fact was re-measured against the current repository before asking for that signature. **Three of the
+four open decisions are unchanged. One is not, and the owner must not sign it without knowing what
+moved.**
+
+**#1, #3, #5 — verified unchanged, measured today.**
+
+| # | claim | re-measured |
+|---|---|---|
+| 1 | `cell-gears==0.1.2` | present verbatim in `docs/activation-evidence/compose/requirements.gears_env.lock`; file SHA-256 `2d55a062…` still equals the value §7 recorded |
+| 3 | `cpa-tools==0.8.5` | present verbatim in `requirements.cpa_env.lock`; file SHA-256 `7d4d034b…` still equals §7's value |
+| 5 | RunPod A100 80GB PCIe, torch `2.6.0+cu124` | both locks still pin `torch==2.6.0+cu124`; manifest/lock host blocks unchanged |
+
+A stale copy of both locks also sits under `artifacts/compose/` carrying the **superseded**
+`cpa-tools==0.7.2` and a non-cu124 `torch==2.6.0`. It is inert: `artifacts/` is gitignored and every
+consumer reads the committed path (`gears_probe_a.py:171`, `scripts/baselines/gears_worker.py:95`).
+Recorded so nobody re-derives it as a finding.
+
+**#4 — the DEFINITION being signed has changed. Three specific moves, each with the commit.**
+
+1. **Report schema `…_v1` → `…_v3`** (spec §4; `approximation_bias.py:23` implements v3). v3 requires
+   Probe-A admission/registration/verification provenance, recomputes every per-pair derived
+   statistic, and has `run_phase2b` re-verify the driver's immutable snapshot before the seal.
+2. **§2's per-cell term changed representation** (`4f417f5`): `δ_i` was
+   `apply_response_projection(…, representation="raw_pseudobulk_approximation")` **per row**; it is now
+   `representation="cell_raw_counts"` computed **once on the full cell matrix**. The population-mean
+   term still uses `raw_pseudobulk_approximation` on the single mean row. This makes the Jensen gap
+   well-defined — the exact per-cell path against the pseudobulk path — rather than comparing the
+   pseudobulk representation with itself. It is a correction of what is measured, not a re-scoping,
+   but it *is* a change to the definition this row asks the owner to settle.
+3. **The flag's CONSEQUENCE changed** (`4f417f5`): `R ≥ R*` now adds a **mandatory narrative
+   limitation only.** It does **not** substitute comparators — the registered roster, comparator
+   family, margins, multiplicity and verdict all stay unchanged. `R` is a pre-registered proxy, not
+   an exchangeability proof.
+
+**Unchanged in #4:** `R_star = 0.5`; the three flag values (`representation_confounded` / `clear` /
+`indeterminate`); measurement on non-sealed roles only; and the fact that the report is pod-generated
+and Probe-A-gated, so `baselines.gears.approximation_bias_report_sha256` stays `null` until it exists.
+
+**#2 needs no signature** (RESOLVED; §2 says so explicitly). Its §6 row exists for audit completeness.
+
+**What signing does and does not do — unchanged from §6 above, restated because it is the question
+that keeps recurring.** Signing these four settles *choices*. It does **not** edit
+`configs/compose_k562_v1_phase2.yaml`, does not fill any null activation blocker, does not move
+`config_sha256`, does not approve an exact Git SHA, and does not open the seal. It unblocks the
+**development pod**, which is the only path that can produce the real-Norman evidence those nulls
+need. Task 0.1's wheel/sdist hashes and pod image digest remain a **separate open acceptance
+condition** for #1 and #3 — signing settles the version choice, not the reproducibility evidence
+for it.
+
+
+### 6.2 Signature record — 2026-08-29
+
+The owner signed **#1, #3, #4 and #5 together** on 2026-08-29, after §6.1's re-verification was put
+in front of them. Recorded here rather than only in the table so that what was signed is legible
+without reconstructing it from four cells.
+
+**#1 — `cell-gears==0.1.2` + the published/default K562 training config.** Settles the *version
+choice*. §6.1 re-measured `requirements.gears_env.lock` and its SHA-256 `2d55a062…` against §7's
+recorded value and found them unchanged.
+
+**#3 — `cpa-tools==0.8.5` + the published/default combo config.** Settles the *version choice*.
+`requirements.cpa_env.lock` SHA-256 `7d4d034b…` re-measured unchanged.
+
+**#4 — the `approximation_bias` DEFINITION, in its current v3 form.** This row was drafted against a
+v1 definition and the definition moved before it was signed, so the signature is recorded against
+what is actually in the repository today, enumerated so it cannot be read as approving the older
+text: report schema `…_v3` (`approximation_bias.py:23`); §2's per-cell term computed once over the
+full cell matrix as `cell_raw_counts` rather than per row as `raw_pseudobulk_approximation`
+(`4f417f5`, which made the Jensen gap well defined instead of comparing the pseudobulk
+representation with itself); and `R ≥ R*` adding a **mandatory narrative limitation only**, never a
+comparator substitution. `R_star = 0.5`, the three flag values, and measurement on non-sealed roles
+only are unchanged.
+
+**#5 — dev-pod provider: RunPod A100 80GB PCIe, torch `2.6.0+cu124`.** Settles the *provider and
+platform choice*. Both locks re-measured still pinning `torch==2.6.0+cu124`.
+
+**What these four signatures do NOT cover.** Enumerated explicitly because the standing audit finding
+`docs.dev-pod-signature-scope-overclaim` is precisely that this record mixes settled package/provider
+choices with runtime configuration that is not yet measured. Signing does not:
+
+- edit `configs/compose_k562_v1_phase2.yaml`, fill any null activation blocker, or move
+  `config_sha256`;
+- approve an exact Git SHA, or advance the sealed-run runbook past §2.5;
+- open the seal, or authorise any sealed run;
+- accept Task 0.1's wheel/sdist hashes or the pod image digest — those remain a **separate open
+  acceptance condition** for #1 and #3, as §6.1 already states;
+- approve the exact `epoch / batch / optimizer / early-stop / seed` used by either baseline. Those
+  are to be read off the **installed wheel on the pod** and recorded then. They are the specific
+  scope the overclaim finding names, and they are outside this signature.
+
+What the signatures do is unblock the **development pod**, which is the only path that can produce
+the real-Norman evidence the null blockers need.
+
 
 ---
 

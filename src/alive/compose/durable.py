@@ -846,6 +846,18 @@ def finalize_phase2b_durable_outputs(
             "fields (terminal_state, final_verdict_checksum, registered_summary_checksum, "
             "evaluation_payload_checksum, provenance_checksum); fail closed."
         )
+    # --- Amendment B (signed 2026-09-05): the descriptive-only band-sensitivity block
+    # rides OUTSIDE the five identity fields with its own checksum. Same
+    # defense-in-depth as above: the whole-body checksum catches post-hoc tampering; a
+    # writer that emits a block and a checksum that disagree is caught only here.
+    sensitivity_block = terminal_body.get("band_sensitivity")
+    if not isinstance(sensitivity_block, dict) or (
+        sha256_json(sensitivity_block) != terminal_body.get("band_sensitivity_checksum")
+    ):
+        raise DurableLedgerError(
+            "terminal band_sensitivity_checksum does not bind its band_sensitivity block "
+            "(sha256_json(block) != band_sensitivity_checksum); fail closed."
+        )
 
     # --- Validate the registered-summary schema + method/comparator rosters (Task 5
     # v1 shape). A wrong schema, a per-method-MSE roster != the 9-method roster (in

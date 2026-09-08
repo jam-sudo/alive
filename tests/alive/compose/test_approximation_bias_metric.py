@@ -29,6 +29,9 @@ import pytest
 import yaml
 
 from alive.compose.approximation_bias import (
+    ADMISSION_STATUSES,
+    ADMITTED,
+    NOT_ADMISSIBLE,
     PROBE_A_ADAPTER_TRANSFORM,
     PROBE_A_NEGATIVE_OUTPUT_POLICY,
     PROBE_A_REGISTRATION_SCHEMA,
@@ -36,8 +39,10 @@ from alive.compose.approximation_bias import (
     PROBE_A_SCHEMA,
     PROBE_A_VERIFICATION_SCHEMA,
     PROTOCOL,
+    REPRESENTATION,
     ApproximationBiasValidationError,
     ProbeAEvidence,
+    bridge_admits,
     canonical_json,
     probe_a_owner_policy_sha256,
     self_checksum,
@@ -850,7 +855,7 @@ def test_report_has_v2_schema_and_strata(tmp_path):
 
     report = module.measure_approximation_bias_v3(**kwargs)
 
-    assert report["schema"] == "compose_approximation_bias_report_v3"
+    assert report["schema"] == "compose_approximation_bias_report_v4"
     assert set(report["strata"]) == {"combo_calibration", "singles"}
     assert report["strata"]["combo_calibration"]["n_pairs"] == 3
     assert report["strata"]["singles"]["n_pairs"] == 6
@@ -887,9 +892,11 @@ def test_report_has_v2_schema_and_strata(tmp_path):
 
 
 def test_report_validator_binds_basis_and_approved_commit(tmp_path):
-    module = _load_metric_module()
+    # The ADMITTED document shape (see `_admitted_report_fixture`): under the frozen
+    # owner policy the producer emits NOT_ADMISSIBLE, and this test's subject is the
+    # provenance binding, not admission.
     kwargs = _full_report_fixture(tmp_path)
-    report = module.measure_approximation_bias_v3(**kwargs)
+    report = _admitted_report_fixture(tmp_path, kwargs)
 
     validate_approximation_bias_report(
         report,
@@ -991,8 +998,7 @@ def test_forged_admission_cannot_widen_registered_tolerance(tmp_path):
 )
 def test_report_validator_recomputes_derived_aggregates(tmp_path, mutate, field):
     """A fresh self-checksum cannot legitimize aggregates that contradict pair data."""
-    module = _load_metric_module()
-    report = module.measure_approximation_bias_v3(**_full_report_fixture(tmp_path))
+    report = _admitted_report_fixture(tmp_path)
     mutated = copy.deepcopy(report)
     mutate(mutated)
     body = {key: value for key, value in mutated.items() if key != "self_checksum"}
@@ -1131,7 +1137,14 @@ def _main_cli_argv(fixture: dict, probe_a_evidence_path: Path, out_path: Path) -
     ]
 
 
-def test_probe_a_pass_admits(tmp_path):
+def test_a_log_normalized_probe_a_pass_does_not_admit_a_raw_count_report(tmp_path):
+    """R1. The frozen owner policy tests ``log_normalized_pseudobulk``; this report measures the
+    raw-count Jensen floor (design spec §1 "Probe-A candidate correction", lines 79-84).
+
+    The measurement still runs and the report is still written -- what a PASS on the other scale
+    must NOT produce is an ``admitted`` report, because ``admitted`` is precisely what the
+    finalizer converts into a config leaf and one fewer activation blocker.
+    """
     module = _load_metric_module()
     fixture = _write_main_cli_fixture(tmp_path)
     probe_a_evidence_path = _write_probe_a_evidence(
@@ -1144,7 +1157,11 @@ def test_probe_a_pass_admits(tmp_path):
     assert exit_code == 0
     assert out_path.exists()
     report = json.loads(out_path.read_text(encoding="utf-8"))
-    assert report["admission_status"] == "admitted"
+    assert report["admission_status"] == NOT_ADMISSIBLE
+    assert report["admission_status"] != ADMITTED
+    # The report still honestly says WHAT it measured and WHAT the probe validated.
+    assert report["method"] == REPRESENTATION == "raw_pseudobulk_approximation"
+    assert report["provenance"]["probe_a_output_representation"] == "log_normalized_pseudobulk"
 
 
 def test_probe_a_bare_pass_is_not_admission_grade(tmp_path):
@@ -1188,3 +1205,126 @@ def test_probe_a_unknown_or_absent_status_fails_closed(tmp_path, evidence):
     with pytest.raises(ValueError, match="Probe-A missing; measurement NOT_ADMISSIBLE"):
         module.main(_main_cli_argv(fixture, probe_a_evidence_path, out_path))
     assert not out_path.exists()
+
+
+# ---------------------------------------------------------------------------
+# R1 (2026-09-07 audit debate): the report's ``method`` must be the representation
+# Probe A actually validated, or the report cannot be ``admitted``.
+#
+# ``REPRESENTATION`` (:29) and ``PROBE_A_REPRESENTATION`` (:30) were two different
+# strings that no code compared, while the producer stamped ``admission_status``
+# with a literal -- so a log-normalized PASS admitted a raw-count report whose SHA
+# cleared the finalizer and removed an activation blocker. Design spec lines 79-84
+# forbid exactly that. The value travels as a provenance leaf, so every consumer
+# (report_from_evidence -> load_approximation_bias_report -> bias_report_preseal ->
+# phase2b) inherits the same check.
+# ---------------------------------------------------------------------------
+
+
+def test_the_bridge_predicate_admits_only_an_exact_representation_match():
+    """Producer and validator share ONE definition of "the bridge admits this report"."""
+    assert bridge_admits(method=REPRESENTATION, probe_representation=REPRESENTATION)
+    assert not bridge_admits(method=REPRESENTATION, probe_representation=PROBE_A_REPRESENTATION)
+    # The premise the whole contract rests on, measured rather than assumed:
+    assert REPRESENTATION == "raw_pseudobulk_approximation"
+    assert PROBE_A_REPRESENTATION == "log_normalized_pseudobulk"
+    assert REPRESENTATION != PROBE_A_REPRESENTATION
+
+
+def _admitted_report_fixture(tmp_path: Path, kwargs: dict | None = None) -> dict:
+    """A real measured report put into the ADMITTED document shape, by hand.
+
+    The frozen owner policy pins Probe A to ``log_normalized_pseudobulk``, so the
+    producer cannot mark a raw-count report ``admitted`` today -- that is the R1
+    fail-closed state asserted by
+    ``test_a_log_normalized_probe_a_pass_does_not_admit_a_raw_count_report``. The
+    validator tests below still need that document shape, so the numbers here are the
+    producer's real ones and only the two admission fields are the ones the owner
+    amendment (Task 2 amendment D) would produce.
+    """
+    module = _load_metric_module()
+    report = module.measure_approximation_bias_v3(**(kwargs or _full_report_fixture(tmp_path)))
+    assert report["admission_status"] == NOT_ADMISSIBLE  # what the producer really emits today
+    report["admission_status"] = ADMITTED
+    report["provenance"]["probe_a_output_representation"] = REPRESENTATION
+    report["self_checksum"] = self_checksum(
+        {key: value for key, value in report.items() if key != "self_checksum"}
+    )
+    return report
+
+
+def test_a_probe_a_bridge_of_a_different_representation_does_not_admit_this_report(tmp_path):
+    """R1: an ADMITTED report's method must be the representation Probe A validated."""
+    report = _admitted_report_fixture(tmp_path)
+    report["provenance"]["probe_a_output_representation"] = PROBE_A_REPRESENTATION
+    report["self_checksum"] = self_checksum(
+        {key: value for key, value in report.items() if key != "self_checksum"}
+    )
+
+    with pytest.raises(ApproximationBiasValidationError, match="representation mismatch"):
+        validate_approximation_bias_report(report)
+
+
+def test_a_matching_probe_a_representation_still_admits(tmp_path):
+    """Non-vacuity: the check must be able to pass, or it measures nothing."""
+    report = _admitted_report_fixture(tmp_path)
+    assert report["provenance"]["probe_a_output_representation"] == REPRESENTATION
+
+    validate_approximation_bias_report(report)
+
+
+def test_a_mismatched_bridge_is_legal_while_the_report_is_not_admitted(tmp_path):
+    """The contract is about ADMISSION, not about measuring.
+
+    A report that honestly records "I measured the raw floor, the probe validated the log
+    scale, therefore I am NOT_ADMISSIBLE" is a valid document -- it is what the producer
+    writes today. Only ``admitted`` + mismatch is forbidden.
+    """
+    module = _load_metric_module()
+    report = module.measure_approximation_bias_v3(**_full_report_fixture(tmp_path))
+
+    assert report["admission_status"] == NOT_ADMISSIBLE
+    assert report["provenance"]["probe_a_output_representation"] == PROBE_A_REPRESENTATION
+    validate_approximation_bias_report(report, require_admitted=False)
+
+    # ... and the consuming boundaries still refuse it, by default.
+    with pytest.raises(ApproximationBiasValidationError, match="must be 'admitted'"):
+        validate_approximation_bias_report(report)
+
+
+def test_the_admission_status_roster_is_exactly_admitted_and_not_admissible():
+    """The roster is the whole vocabulary; widening it silently widens what a report may claim.
+
+    ``ADMITTED`` is the ONLY value a consuming boundary accepts, so a third status added
+    here would be a third thing the validator lets through the roster gate on its way to
+    the ``require_admitted`` check. Pin the exact set and both literals: the on-disk
+    ``"admitted"`` value is what every archived report and fixture already carries, and
+    ``"NOT_ADMISSIBLE"`` is the design spec's own token.
+    """
+    assert ADMITTED == "admitted"
+    assert NOT_ADMISSIBLE == "NOT_ADMISSIBLE"
+    assert ADMISSION_STATUSES == frozenset({ADMITTED, NOT_ADMISSIBLE})
+
+
+def test_an_unregistered_admission_status_is_refused_by_its_own_message(tmp_path):
+    """An invented status is refused as UNREGISTERED, not as merely not-admitted.
+
+    The two refusals are different findings -- "this file says something the schema has no
+    meaning for" versus "this is a valid refusal record you may not consume" -- so they
+    carry different messages and this test pins the first one specifically.
+    """
+    report = _admitted_report_fixture(tmp_path)
+    report["admission_status"] = "provisionally_admitted"
+    report["self_checksum"] = self_checksum(
+        {key: value for key, value in report.items() if key != "self_checksum"}
+    )
+
+    with pytest.raises(
+        ApproximationBiasValidationError, match="is not a registered admission status"
+    ):
+        validate_approximation_bias_report(report)
+    # ... and not even the producer's own lenient path accepts it.
+    with pytest.raises(
+        ApproximationBiasValidationError, match="is not a registered admission status"
+    ):
+        validate_approximation_bias_report(report, require_admitted=False)

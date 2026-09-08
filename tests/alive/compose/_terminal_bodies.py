@@ -57,10 +57,26 @@ def minimal_registered_summary(**overrides: object) -> dict:
     return summary
 
 
+def minimal_band_sensitivity_block() -> dict:
+    """A minimal VALID descriptive-only band-sensitivity block (Amendment B, 2026-09-05)."""
+    return {
+        "schema": "compose_band_sensitivity_v1",
+        "descriptive_only": True,
+        "comparators": ["additive"],
+        "by_lambda": [
+            {"lambda": 1.0, "lower": {"additive": 0.10}},
+            {"lambda": 1.25, "lower": {"additive": 0.02}},
+        ],
+        "flip_lambda": {"additive": 1.5625},
+        "verdict_holds_below_lambda": 1.5625,
+    }
+
+
 def minimal_v2_terminal_body(**summary_overrides: object) -> dict:
     """Build the exact COMPLETE / INVALID state roster (spec §2.1) for a unit test.
 
-    Returns only the seven state-specific fields; the terminal writer injects the
+    Returns only the nine state-specific fields (seven since D1 Task 3, plus the
+    Amendment B ``band_sensitivity`` block and its checksum); the terminal writer injects the
     common identity roster and the self-excluding ``terminal_payload_checksum``, and
     :meth:`~alive.compose.terminal.Phase2bTerminal.complete` /
     :meth:`~alive.compose.terminal.Phase2bTerminal.invalid` set the top-level
@@ -78,6 +94,7 @@ def minimal_v2_terminal_body(**summary_overrides: object) -> dict:
             "provenance_checksum": _PROVENANCE_CHECKSUM,
         }
     )
+    sensitivity = minimal_band_sensitivity_block()
     return {
         "registered_summary": summary,
         "registered_summary_checksum": registered_summary_checksum,
@@ -86,4 +103,6 @@ def minimal_v2_terminal_body(**summary_overrides: object) -> dict:
         "provenance_checksum": _PROVENANCE_CHECKSUM,
         "evaluation_payload_checksum": _EVALUATION_PAYLOAD_CHECKSUM,
         "final_result_checksum": final_result_checksum,
+        "band_sensitivity": sensitivity,
+        "band_sensitivity_checksum": sha256_json(sensitivity),
     }

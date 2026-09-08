@@ -30,7 +30,9 @@ claim that the real Norman stage-1 corpus or real GEARS/CPA execution environmen
 **Out of scope.**
 
 - Real raw/processed Norman → stage-1 artifact production (pod PREPARE).
-- Sub-project B's versioned `adapter_version` manifest and real `gears`/`cpa` workers.
+- Sub-project B's real `gears`/`cpa` workers. (2026-09-07: the committed method manifest
+  `configs/compose_adapter_versions_v1.json` has landed — see the driver spec §5 adapter-manifest
+  contract — so what remains out of scope here is real `.pyz` worker parity, which is POD-GATED.)
 - A green scientific Phase-2a/D2/Phase-2b integration run. The current call graph resolves worker
   identity before Phase-2a activation and D2; therefore this is impossible until B ships.
 - Opening or materializing the sealed source, constructing a `ComposeOutcomeStore`, or running a
@@ -311,8 +313,11 @@ Required tests:
 6. **Environment/provenance plumbing:** scientific Phase-2a receives the exact `EnvironmentInfo` and
    never writes the `UNKNOWN` placeholder; typed Phase-2b inputs agree with the persisted ledger.
 7. **Current B boundary:** full scientific CLI assembly reaches `assemble_execution_identity_lock`,
-   fails on the absent committed scientific `adapter_version`, creates no run-produced file/store,
-   and leaves the seal/audit untouched. The test does **not** claim D2 was reached.
+   fails on the scientific `adapter_version`, creates no run-produced file/store, and leaves the
+   seal/audit untouched. The test does **not** claim D2 was reached. (2026-09-07: the stopping point
+   moved one step later without opening — the committed method manifest now resolves the version, and
+   the CLI stops on the declared-vs-manifest comparison because the synthetic fixture declares the
+   stub worker's version. Real `.pyz` parity is POD-GATED.)
 8. **Structural seal safety:** the sole store-construction site and §4.3 structural tests remain
    unchanged and green.
 
@@ -326,7 +331,8 @@ this B-blocked sub-project.
 
 Completion of this carrier sub-project is **not** seal readiness. The following remain mandatory:
 
-1. B: committed versioned adapter manifest, real workers, immutable environments and integration.
+1. B: real workers, immutable environments and integration (the committed versioned adapter manifest
+   landed 2026-09-07; real `.pyz` worker↔manifest parity remains POD-GATED).
 2. Pod PREPARE: real Norman stage-1 artifact production and reviewed evidence.
 3. GU: the roster's `full_var_order_sha256` must equal the response/fit-role `gene_order_sha256`
    (both digest the full `U_full` gene order) with matching raw-data identity — this is the coherent

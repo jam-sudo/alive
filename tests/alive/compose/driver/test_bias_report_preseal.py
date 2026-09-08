@@ -14,6 +14,7 @@ from types import MappingProxyType
 import pytest
 
 from alive.compose.approximation_bias import (
+    REPRESENTATION,
     ApproximationBiasValidationError,
     basis_config_sha256_from_final_config,
     measurement_contract_sha256,
@@ -84,6 +85,7 @@ def test_shared_helper_pins_exact_expected_provenance_roster(scientific_context,
         "gene_order_sha256": projection["gene_order_sha256"],
         "pca_dim": len(projection["control_mean"]),
         "registered_seeds": list(config.registered_seeds),
+        "probe_a_output_representation": REPRESENTATION,
     }
 
 

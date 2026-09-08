@@ -126,6 +126,10 @@ def _run(inst, **overrides):
         "eps_split_a": inst["eps_split_a"],
         "eps_split_b": inst["eps_split_b"],
         "measurability_role": CALIBRATION_ROLE_NAME,
+        # The registered floor (config ``futility.measurability_ceiling_floor``).
+        # Its own behaviour is pinned in ``test_gates.py``; here it is threaded
+        # explicitly because the diagnostics entry point has no default.
+        "measurability_ceiling_floor": 0.2,
         "unregularized_oof_rank_policy": "require_full_rank_each_train_fold",
         "rank_tolerance_rule": "max_shape_times_float64_eps_times_sigma_max",
         "lambda_scaling": "calibration_sigma_max_squared",

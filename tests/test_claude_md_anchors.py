@@ -31,6 +31,9 @@ CODE_DIRS = ("src", "tests", "scripts", "configs")
 HISTORICAL_NUMERIC_REF_ALLOWLIST = {
     "docs/superpowers/2026-07-04-CLAUDE-md-patch-pack.md",
     "docs/superpowers/audits/2026-07-04-repo-doc-consistency-audit.md",
+    # External audit drop, excluded via .git/info/exclude (absent in clean clones); it
+    # quotes fragile refs verbatim, so scanning it reports a violation about a report.
+    "docs/GPT audit/comprehensiveaudit.md",
     # Personal local-only drafts excluded by .git/info/exclude; absent in clean clones.
     "docs/superpowers/plans/2026-06-30-loop-engineering.md",
     "docs/superpowers/plans/2026-06-30-science-dev-profile.md",

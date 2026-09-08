@@ -86,6 +86,7 @@ _DRIVER_MODULES = frozenset(
         "phase2a_cmd",
         "phase2b_cmd",
         "preflight_cmd",
+        "preseal_read",
         "recover_cmd",
         "run_dir_state",
         "run_spec",

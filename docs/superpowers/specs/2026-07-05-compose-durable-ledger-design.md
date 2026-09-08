@@ -103,7 +103,10 @@ Phase2b는 terminal 전이 전에 최종 state와 최종 verdict를 먼저 결�
 
 COMPLETE/INVALID의 state-specific exact fields는 `registered_summary`,
 `registered_summary_checksum`, `final_verdict_checksum`, `terminal_embedded_provenance`,
-`provenance_checksum`, `evaluation_payload_checksum`, `final_result_checksum`이다.
+`provenance_checksum`, `evaluation_payload_checksum`, `final_result_checksum`이다. **[2026-09-05 수정안
+B(위임 서명): `band_sensitivity`와 `band_sensitivity_checksum`을 더한다 — descriptive-only band-inflation
+sensitivity 블록과 그 자신의 `sha256_json`. `final_result_checksum`의 다섯 구성요소 밖이며, durable
+finalizer는 블록 checksum이 블록을 결속하는지 재검증한다.]**
 `registered_summary`와 `terminal_embedded_provenance`는 checksum만이 아니라 canonical payload 자체를
 포함한다.
 
@@ -216,13 +219,13 @@ Recovery는 pre-access ledger에 기록된 seed-variability artifact의 실제 r
 ### 4.1 대상 method
 
 현재 코드에서 외부 seed로 재적합 가능한 stochastic comparator는 `gears`, `cpa`다. 현재
-`l3_hypernetwork`는 module-fixed seed를 사용하는 결정론적 구현이므로 deterministic single-shot으로
+`l3_symmetric_mlp`는 module-fixed seed를 사용하는 결정론적 구현이므로 deterministic single-shot으로
 분류한다. L3에 외부 seed parameter를 추가하려면 별도 protocol amendment와 model checksum schema
 revision이 필요하다.
 
 현재 deterministic roster는 다음과 같다.
 
-- `l1_bilinear_identifiable`, `l2_saturation`, `l3_hypernetwork`, `id_only`
+- `l1_bilinear_identifiable`, `l2_saturation`, `l3_symmetric_mlp`, `id_only`
 - `additive`, `no_change`, `perturbation_mean`
 
 ### 4.2 평가 설계

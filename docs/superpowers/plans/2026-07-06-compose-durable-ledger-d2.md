@@ -39,7 +39,7 @@ and payload schema drift.
   `config.uncovered_tolerance` (direct `ComposePhase2Config` fields).
 - Seed loop roster is exactly `("gears", "cpa")`.
 - Deterministic single-shot roster is exactly
-  `l1_bilinear_identifiable`, `l2_saturation`, `l3_hypernetwork`, `id_only`, `additive`,
+  `l1_bilinear_identifiable`, `l2_saturation`, `l3_symmetric_mlp`, `id_only`, `additive`,
   `no_change`, `perturbation_mean`.
 - Sample standard deviation uses `ddof=1`.
 - A failed seed or fold, coverage mismatch, non-finite statistic, or uncovered fraction above the

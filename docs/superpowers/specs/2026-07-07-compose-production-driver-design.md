@@ -1,7 +1,7 @@
 # COMPOSE 단일 production driver (sub-project C) Design
 
 > **문서 역할:** dev-stage 구현·검증 계약 (scientific claim contract 아님)
-> **개정일:** 2026-07-19 (status sanitization; design unchanged)
+> **개정일:** 2026-09-07 (§5 adapter manifest 계약 개정; 그 외 design unchanged)
 > **상태:** IMPLEMENTED + MERGED (fixture orchestration and scientific PREPARE carrier). 이 문서의
 > NEEDS-IMPLEMENTATION/TODO 서술은 설계 당시 snapshot이며 current remaining blocker는 readiness row C가
 > 추적한다. Production sealed run은 계속 RELEASE-BLOCKED다.
@@ -372,12 +372,17 @@ sequence/feature/factor/response/model/bundle/ledger/pair-index/seed-report chec
 selected hyperparameters, worker/config/resource/env identity, double/single pair count와 ordered seal-request
 checksum, `CONTINUE`, access count 0, forbidden-output absence, owner-approved `accepted_limitations` exact
 roster를 포함한다. Method roster는 정확히
-`[l1_bilinear_identifiable,l2_saturation,l3_hypernetwork,additive,no_change,perturbation_mean,id_only,gears,cpa]`,
-verdict comparator roster는 정확히 `[additive,gears,cpa,id_only,l3_hypernetwork]`이며 order까지 고정한다.
+`[l1_bilinear_identifiable,l2_saturation,l3_symmetric_mlp,additive,no_change,perturbation_mean,id_only,gears,cpa]`,
+verdict comparator roster는 정확히 `[additive,gears,cpa,id_only,l3_symmetric_mlp]`이며 order까지 고정한다.
+**[2026-08-20: `l3_hypernetwork` → `l3_symmetric_mlp` (owner 결정 #6). 이름만 바뀌었고 모델·order는 그대로다.]**
 이 두 roster는 `config2._EXPECTED_METHOD_ROSTER`/`_EXPECTED_COMPARATOR_FAMILY`와 정확히 같고 config가 이미
 강제하므로, driver는 하드코딩 대신 config 상수를 참조해 drift를 피한다.
 `confirmation_checksum`은 자신을
-제외한 payload의 `sha256_json`이다. 화면에는 canonical payload와 full checksum을 출력한다.
+제외한 payload의 `sha256_json`이다. payload는 화면이 아니라 write-once manifest 파일로만 남긴다 — 확인은
+runbook §6의 2인 통제대로 그 파일을 대조해 수행하며, `preflight`는 stdout에 아무것도 쓰지 않는다.
+**[수정안 C — 2026-09-05 위임 아래 서명. 이전 문장 "화면에는 canonical payload와 full checksum을
+출력한다"는 runbook의 파일 매개 2인 통제와 충돌했고 구현은 처음부터 출력하지 않았다(`preflight_cmd.py`에
+print 없음, 실측). 테스트 `test_preflight_writes_nothing_to_stdout`가 이를 고정한다.]**
 
 ### 3.3 `phase2b --confirm-seal <confirmation_checksum>`
 
@@ -413,6 +418,12 @@ seal 직전(runbook §6/§7) 순서로 재검증한다.
    Fixture면 §4 전용 factory를, scientific이면 일반 store를 사용한다.
    **`ComposeOutcomeStore`가 import·생성되는 유일한 함수이며 phase2b에서만 도달 가능하다(§4).** fixture
    builder는 store 객체가 아니라 sealed-outcome DATA만 만든다(§6).
+   **[2026-09-08 정정 — PR #15 C1]** 이 descriptor의 digest 재검사는 store의
+   `post_materialization_check`로 전달되어 `materialize_claimed`가 claim된 모든 pair를 물질화한 직후,
+   반환 직전에 정확히 한 번 돈다 — terminal 보호 경계 **안**이므로 소비 중 in-place 변조는
+   `ABORTED_AFTER_SEAL`(exit 30, `recover`도 30)로 끝난다. 이전 배치(`with` 문 exit에서의 재검사)는
+   COMPLETE terminal이 durable해진 **뒤에** 돌아 실패가 pre-seal exit 10으로 잘못 분류됐다(두 독립 리뷰가
+   실측). 소비가 끝난 **뒤의** 변조는 stderr 진단 한 줄이며 terminal을 바꾸지 않는다.
 5. `run_phase2b[_fixture](run_dir=, outcome_store=, frozen_bundle=, pair_manifest=, response_artifact=,
    config=, ledger=, approximation_bias_report_evidence=<immutable pre-seal snapshot>, ...)`를 호출한다.
    Scientific config SHA가 non-null인데 이 path가 전달되지 않는 상태는 금지한다. 내부에서 D1/D2 §7 전체
@@ -474,8 +485,22 @@ value일 뿐 ground truth 자체가 아니다. Worker self-report가 이 lock에
 | `config_sha256` | 실제 worker-config bytes를 driver가 stream-hash | 로컬/pod |
 | `resource_sha256` | 실제 resource-manifest bytes를 driver가 stream-hash | 로컬/pod |
 
-현재 dependency manifest에는 `adapter_version`이 없으므로 sub-project B가 versioned adapter manifest를
-추가하기 전 scientific assembler는 fail-closed한다. `adapter_sha256`은 **launched `worker_script`가 아니라
+**adapter manifest 계약 (2026-09-07 개정).** `adapter_version`의 committed source는 phase-2 config와
+**분리된** 파일 `configs/compose_adapter_versions_v1.json`이다: exact schema `compose_adapter_versions_v1`,
+top-level key는 정확히 `{schema, methods}`, `methods` roster는 정확히 `{gears, cpa}`, 값은 non-empty string
+version이다. Assembler는 저장소 루트를 자기 모듈 위치에서 잡아(절대경로 hardcode 금지) 이 파일을
+node-kind 정책으로 stream-hash한 뒤 그 digest에 묶어 파싱한다(`preseal_read.read_verified_json` —
+hash와 parse 사이의 swap은 fail-closed). Unknown method·roster 불일치·schema 불일치·empty version·
+non-regular node·부재는 모두 `AssemblerError`다. Declared lock의 `adapter_version`은 **expectation**일 뿐이며
+manifest 값과 다르면 fail-closed한다 — worker self-report는 결코 source가 아니다. 이 manifest는 adapter의
+**API semantic identity**를 고정하며 model hyperparameter가 아니다. 별도 파일이므로 wiring이
+`config_sha256`을 움직이지 않는다. **정지점은 두 단계다 — 섞지 않는다.** (1) **지금(assembly)**: synthetic
+scientific CLI는 assembler의 declared↔manifest 비교에서 정지한다 — carrier fixture가 선언한 stub worker의
+`stub-2`가 manifest 값과 다르기 때문이며, exit 10·run 산출물 0·store 0·seal UNOPENED다. 로컬 테스트가
+증명하는 것은 이 **declared** 불일치뿐이다. (2) **POD-GATED(runtime)**: real pod-built `.pyz` worker의
+**self-reported** `_ADAPTER_VERSION`이 manifest 값과 일치하는지는 predict 시점에
+`baseline_subprocess._verify_execution_manifest`가 수행하는 **더 나중 검사**이며 **아직 도달하지 않았다**;
+synthetic fixture로 주장할 수 없다. `adapter_sha256`은 **launched `worker_script`가 아니라
 별도 `adapter_artifact` bytes를 해시**한다: committed runtime(`baseline_subprocess.py`)은 lock의
 `adapter_sha256`을 worker self-report의 adapter identity(`stub_worker.py`의 `_ADAPTER_SHA256`)와 대조하고,
 launched `worker_script` 파일은 **별개 field `worker_sha256`으로** 재해시·검증한다 — 둘은 서로 다른 identity다.
@@ -642,9 +667,10 @@ release blocker는 상단의 readiness index가 추적한다.
    `run_id` mismatch가 fail-closed하는 negative test가 green이어야 한다.
 5. Fixture e2e와 별도로 scientific no-seal assembly test가 activation/provenance/D2 report wiring을 검증함.
 6. C의 로컬 gate에서는 **stub worker/config/resource/lock bytes**가 assembled lock과 일치하고, adapter
-   manifest 부재 시 scientific assembler가 fail-closed함을 검증한다. 실제 GEARS/CPA
-   worker/config/resource/requirements/adapter-manifest bytes와 lock 일치는 sub-project B가 versioned
-   adapter manifest를 ship한 뒤 pod에서 확립하는 항목이며 C의 로컬 완료 조건이 아니다.
+   manifest가 부재·malformed일 때 scientific assembler가 fail-closed함을 검증한다(2026-09-07: manifest가
+   committed되어 로컬 resolution은 green이며, 부재/malformed는 명시 negative로 보존된다). 실제 GEARS/CPA
+   worker/config/resource/requirements bytes와 lock 일치, 그리고 real `.pyz` worker의 self-reported
+   `_ADAPTER_VERSION`↔manifest parity는 pod에서 확립하는 항목이며 C의 로컬 완료 조건이 아니다.
 7. Exact 9-method roster는 freeze/scoring/descriptive summary까지 유지되고, verdict comparator family는 등록된
    5개와 정확히 일치함.
 8. 전체 pytest, Ruff check, Ruff format check, worker locked-env integration, science-dev/spec-review gate green.

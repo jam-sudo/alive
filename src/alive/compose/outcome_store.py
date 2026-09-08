@@ -358,6 +358,15 @@ class ComposeOutcomeStore:
         audit boundary. It may return a validated source object, which atomically
         replaces the lazy path before row materialisation; ``None`` retains the
         original source.
+    post_materialization_check : callable or None, optional
+        Driver-supplied integrity check invoked exactly once after EVERY claimed
+        pair has been materialised and immediately before they are returned. The
+        symmetric partner of ``materialization_validator``: that one validates
+        the source before any row is read, this one proves the source was still
+        the verified bytes after the last row was read. A raise here means no
+        pair is returned at all, and (because ``materialize_claimed`` runs inside
+        the terminal protection boundary) the run ends with an
+        ``ABORTED_AFTER_SEAL`` terminal instead of a COMPLETE one.
 
     Notes
     -----
@@ -373,6 +382,7 @@ class ComposeOutcomeStore:
         *,
         audit_path: str | Path,
         materialization_validator: Callable[[], object | None] | None = None,
+        post_materialization_check: Callable[[], None] | None = None,
     ) -> None:
         try:
             verify_split_manifest(dict(manifest))
@@ -414,6 +424,7 @@ class ComposeOutcomeStore:
         self._manifest = manifest
         self._audit_path = Path(audit_path)
         self._materialization_validator = materialization_validator
+        self._post_materialization_check = post_materialization_check
         self._source_validated = False
 
         # Guard the manifest at construction: a malformed manifest must fail
@@ -621,7 +632,10 @@ class ComposeOutcomeStore:
 
         Verifies the ``claim`` against the persisted audit (a run_id, request or
         reference mismatch fails closed) BEFORE materialising any row, then slices
-        only the claim's bounded pair rows (no global densification).
+        only the claim's bounded pair rows (no global densification), and finally
+        runs the driver's ``post_materialization_check`` — the point where every
+        sealed byte this run will ever read has been read, so it is the last
+        moment a source-integrity failure can still decide the terminal state.
 
         Parameters
         ----------
@@ -639,7 +653,9 @@ class ComposeOutcomeStore:
             If the persisted audit is absent, does not match the claim's
             ``run_id`` / ``request_checksum`` / ``audit_reference``, or if the
             claim's ``pair_ids`` do not re-derive the persisted sealed union
-            (the payload selector is authenticated before any row is sliced).
+            (the payload selector is authenticated before any row is sliced), or
+            if ``post_materialization_check`` refuses the consumed source (no
+            pair is returned in that case).
         """
         records = self._read_audit_records()
         if not records:
@@ -683,7 +699,23 @@ class ComposeOutcomeStore:
             if validated_source is not None:
                 self._source = validated_source
             self._source_validated = True
-        return self._materialise_pairs(sealed_pairs)
+        release = self._materialise_pairs(sealed_pairs)
+        # CONSUMPTION ENDS HERE. `_materialise_pairs` densified every claimed row
+        # into numpy above; from this line on the library only computes in memory,
+        # so this is the boundary the driver's "the bytes we verified are the bytes
+        # we consumed" contract is about. Running the re-hash here (rather than at
+        # the driver's `with` exit, PR #15 finding C1) keeps the failure INSIDE the
+        # terminal protection boundary: it becomes ABORTED_AFTER_SEAL with the
+        # claim preserved, not an exception thrown after COMPLETE was made durable.
+        if self._post_materialization_check is not None:
+            try:
+                self._post_materialization_check()
+            except Exception as exc:
+                raise ComposeSealingError(
+                    "sealed source integrity check failed after materialization: "
+                    f"{type(exc).__name__}: {exc}"
+                ) from exc
+        return release
 
     @staticmethod
     def _audit_reference(record: Mapping) -> str:
@@ -906,7 +938,10 @@ class ComposeOutcomeStore:
         return records
 
     def _write_audit_record(self, run_id: str, canon: list[PairID]) -> dict:
-        """Append an immutable audit record to the durable JSONL audit file.
+        """Publish an immutable audit record to the durable JSONL audit file.
+
+        Not an append: io.atomic_write_once publishes by os.link, which refuses an
+        existing destination (F-A6).
 
         Called by :meth:`claim_sealed_access` BEFORE materialisation so that a
         crash during data loading still consumes the access (fail-safe toward
@@ -1003,6 +1038,7 @@ def build_fixture_outcome_store(
     source_sha256: str,
     builder_code_sha256: str,
     materialization_validator: Callable[[], object | None] | None = None,
+    post_materialization_check: Callable[[], None] | None = None,
 ) -> FixtureOutcomeStore:
     """Build the ONLY sanctioned :class:`FixtureOutcomeStore`.
 
@@ -1014,7 +1050,7 @@ def build_fixture_outcome_store(
 
     Parameters
     ----------
-    pair_index, source, manifest, audit_path
+    pair_index, source, manifest, audit_path, materialization_validator, post_materialization_check
         Forwarded verbatim to :class:`ComposeOutcomeStore` (see its docstring).
     corpus_id : str
         Identifier of the synthetic fixture corpus; must be allowlisted.
@@ -1051,6 +1087,7 @@ def build_fixture_outcome_store(
         manifest,
         audit_path=audit_path,
         materialization_validator=materialization_validator,
+        post_materialization_check=post_materialization_check,
         fixture_corpus_attestation=attestation,
     )
 

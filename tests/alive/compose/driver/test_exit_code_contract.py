@@ -89,6 +89,21 @@ _CLASSIFICATION: dict[str, tuple[str, str]] = {
         PRESEAL_REJECTION,
         "RunSpecError subclass; covered by the roster's RunSpecError entry.",
     ),
+    "alive.compose.driver.preseal_read::PresealDescriptorError": (
+        UNREACHABLE_FROM_DRIVER,
+        "Same shape as PresealBytesError below: raised by the shared descriptor-pinned "
+        "read, converted by every caller in the same block (phase2b_cmd -> "
+        "Phase2bSubcommandError, bias_report_preseal -> ApproximationBiasValidationError), "
+        "and pinned by test_preseal_read_conversion.",
+    ),
+    "alive.compose.driver.preseal_read::PresealBytesError": (
+        UNREACHABLE_FROM_DRIVER,
+        "Raised inside driver modules but never ESCAPES one: every caller converts it to "
+        "its own rostered error in the same function (pinned by "
+        "test_preseal_bytes_error_never_escapes_its_caller). Not PRESEAL_REJECTION, which "
+        "in this registry means 'actually maps to exit 10' -- if this reached the CLI a "
+        "site forgot to convert, and that bug must not be dressed up as a clean exit 10.",
+    ),
     "alive.compose.driver.run_dir_state::RunDirStateError": (
         PRESEAL_REJECTION,
         "Run-directory entry roster violated, checked before any fit.",
@@ -701,8 +716,20 @@ def test_the_enumeration_counts_are_pinned():
     # it is a SelectionError subclass, and `except` matches by isinstance, so the
     # existing entry already routes it to exit 10. This registry is what noticed
     # the new class at all -- the targeted selection suites were green without it.
-    assert len(_CLASSES) == 75, f"exception classes under src/alive: {len(_CLASSES)}"
-    assert len(_CLASSIFICATION) == 75, f"classification entries: {len(_CLASSIFICATION)}"
+    #
+    # 2026-08-30: 75 -> 76 for preseal_read::PresealBytesError, when the digest-bound
+    # pre-seal read moved out of one consumer and into a module every lane calls.
+    # The roster still stays 42, for a DIFFERENT reason than above: this class is not
+    # a subclass of anything rostered, and it is never meant to reach the CLI at all --
+    # each call site converts it to its own rostered error. If it ever arrived at the
+    # CLI that would mean a site forgot to convert, and a bug must not be dressed up
+    # as a clean pre-seal rejection.
+    # 2026-08-30 (same wave): 76 -> 77 for preseal_read::PresealDescriptorError, when the
+    # descriptor-pinned read moved here so the pre-seal bias lane could reuse it without
+    # editing a file inside the frozen kernel-isolation closure. Roster still 42, same
+    # reason: it is converted at every call site and must never reach the CLI.
+    assert len(_CLASSES) == 77, f"exception classes under src/alive: {len(_CLASSES)}"
+    assert len(_CLASSIFICATION) == 77, f"classification entries: {len(_CLASSIFICATION)}"
     assert len(cli._KNOWN_PRESEAL_REJECTIONS) == 42, (
         f"roster size: {len(cli._KNOWN_PRESEAL_REJECTIONS)}"
     )

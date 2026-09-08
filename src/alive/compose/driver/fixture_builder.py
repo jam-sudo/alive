@@ -116,7 +116,7 @@ _CONFIG_PATH = "configs/compose_k562_v1_phase2.yaml"
 _MODEL_CLASS_BY_NAME = {
     "l1_bilinear_identifiable": L1Model,
     "l2_saturation": L2Model,
-    "l3_hypernetwork": L3Model,
+    "l3_symmetric_mlp": L3Model,
     "id_only": IDOnlyModel,
 }
 
@@ -289,6 +289,16 @@ def _build_instance(manifest: Mapping[str, Any], *, k_grid: tuple[int, ...]) -> 
         else:
             extra = [z0[:, i % k0] ** 2 for i in range(kt - k0)]
             factors_by_k[kt] = np.column_stack([z0, *extra])
+        # Registered factor-bank normalization (owner decision #7): the bank is
+        # scaled so sigma_max(Z) == 1, and consumers verify that the declaration
+        # is true of the numbers. A fixture instance whose matrices do not obey
+        # it would make fixture runs exercise a DIFFERENT contract from
+        # scientific runs -- and, since the bank rows are bound to these matrices
+        # byte for byte, would produce a bank that names a rule it breaks.
+        column = np.asarray(factors_by_k[kt], dtype=np.float64)
+        sigma_max = float(np.linalg.svd(column, compute_uv=False)[0])
+        if sigma_max > 0.0:
+            factors_by_k[kt] = np.ascontiguousarray(column / sigma_max)
 
     return {
         "gene_ids": gene_ids,
@@ -618,7 +628,8 @@ def build_compose_fixture(tmp_root: Path) -> FixtureBundle:
         "raw_data_checksum": raw_or_source_digest,
         "sequence_mapping_checksum": sequence_mapping_digest,
     }
-    assert set(checksums) == set(EXPECTED_HASHES_KEYS)
+    if set(checksums) != set(EXPECTED_HASHES_KEYS):
+        raise ValueError("fixture key roster: expected hashes mismatch")
 
     # --- 4. Phase2aInputs (in memory) + serialized payload --------------------
     phase2a_inputs = _build_phase2a_inputs(
@@ -756,7 +767,8 @@ def build_compose_fixture(tmp_root: Path) -> FixtureBundle:
         "pair_index_manifest": pair_index_manifest_path,
         "approved_sealed_input_attestation": attestation_path,
     }
-    assert set(pre_seal_paths) == set(PRE_SEAL_PATH_FIELDS)
+    if set(pre_seal_paths) != set(PRE_SEAL_PATH_FIELDS):
+        raise ValueError("fixture key roster: pre-seal paths mismatch")
 
     # --- 8. worker files (stub bytes) -----------------------------------------
     workers_dir.mkdir(parents=True, exist_ok=True)

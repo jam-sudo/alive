@@ -18,7 +18,7 @@
 - **Opens NO seal.** Every test uses synthetic fixtures/tmp paths. No real Norman data. No gears/cpa import in `src/`.
 - **Canonicalizer landmine (terminal):** any recomputation of a terminal's `terminal_payload_checksum` MUST go through `alive.compose.terminal.canonicalize_terminal_checksum_input` (floats → `float.hex()`), never a raw `sha256_json` over the decoded body.
 - **Canonicalizer landmine (pairs):** three different pair canonicalizers exist (`outcome_store._canonical` uses `<=`; `fit_role._canonical_pair` uses `<`; `preflight._canonical_pair_set` rejects `>`). For pair-index keys, reuse `ComposeOutcomeStore._canonical`. Do NOT introduce a fourth.
-- **Exact rosters (order-fixed, = config2 constants):** full method roster (9) = `config2._EXPECTED_METHOD_ROSTER` = `("l1_bilinear_identifiable","l2_saturation","l3_hypernetwork","additive","no_change","perturbation_mean","id_only","gears","cpa")`; verdict comparator family (5) = `config2._EXPECTED_COMPARATOR_FAMILY` = `("additive","gears","cpa","id_only","l3_hypernetwork")`.
+- **Exact rosters (order-fixed, = config2 constants):** full method roster (9) = `config2._EXPECTED_METHOD_ROSTER` = `("l1_bilinear_identifiable","l2_saturation","l3_symmetric_mlp","additive","no_change","perturbation_mean","id_only","gears","cpa")`; verdict comparator family (5) = `config2._EXPECTED_COMPARATOR_FAMILY` = `("additive","gears","cpa","id_only","l3_symmetric_mlp")`.
 - **Write-once / atomicity:** durable installs use `atomic_write_once` (`alive.io`); never a plain `RunLedger.write` in a durable/cross-process path.
 - **No per-pair CI / no per-pair arrays** leak into any registered summary or terminal.
 - **Every fix carries a negative (fail-closed) test**, not only a positive one.

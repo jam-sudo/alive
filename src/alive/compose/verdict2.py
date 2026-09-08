@@ -372,7 +372,7 @@ def sealed_verdict(
     comparators : tuple[str, ...]
         The EXACT registered comparator family
         (``config.comparator_family`` = ``additive, gears, cpa, id_only,
-        l3_hypernetwork``). ``"additive"`` must be present and the learned family
+        l3_symmetric_mlp``). ``"additive"`` must be present and the learned family
         (``comparators`` minus ``{"additive"}``) must be non-empty.
     additive_margin : float
         Material margin the additive lower bound must strictly exceed

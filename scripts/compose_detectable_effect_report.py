@@ -86,6 +86,16 @@ def main(argv: list[str] | None = None) -> int:
         or phase1_config_sha256 != REGISTERED_PHASE1_CONFIG_SHA256
     ):
         raise SystemExit("phase1 power contract drifted from the registered 20-pair/50-cell config")
+    # Registered futility floor (F-A3). Both configs register it and the scientific
+    # boundary re-checks the report against the PHASE-2 value, so a silent
+    # disagreement between the two files would produce evidence that can never
+    # validate. Refuse here instead, before any data is read.
+    ceiling_floor = float(p1["measurability_ceiling_floor"])
+    if ceiling_floor != float(raw["futility"]["measurability_ceiling_floor"]):
+        raise SystemExit(
+            "phase-1 and phase-2 measurability_ceiling_floor registrations disagree: "
+            f"{ceiling_floor} vs {raw['futility']['measurability_ceiling_floor']}"
+        )
 
     adata = ad.read_h5ad(args.h5ad)
     obs_values = np.asarray(adata.obs[str(d["perturbation_key"])].to_numpy())
@@ -155,6 +165,7 @@ def main(argv: list[str] | None = None) -> int:
         regime_cells_per_pair=regime_cells_per_pair,
         min_pairs=min_pairs,
         min_cells=min_cells,
+        ceiling_floor=ceiling_floor,
     )
 
     report_ready = report["measurability"]["passed"] and report["headline_powered"]
@@ -189,7 +200,10 @@ def main(argv: list[str] | None = None) -> int:
     args.out.write_text(serialized + "\n", encoding="utf-8")
     print(f"wrote {args.out}")
     m, e = report["measurability"], report["effect_size"]
-    print(f"  measurability ceiling={m['ceiling']:.4f} passed={m['passed']}")
+    print(
+        f"  measurability ceiling={m['ceiling']:.4f} "
+        f"floor={m['ceiling_floor']:.4f} passed={m['passed']}"
+    )
     print(f"  effect mean|eps|={e['mean_pair_eps_l2']:.4f} snr={e['signal_to_noise']:.3f}")
     for regime, r in report["regimes"].items():
         print(f"  {regime}: n={r['n_pairs']} power={r['power_passed']}")

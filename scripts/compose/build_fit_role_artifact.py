@@ -1,9 +1,8 @@
 #!/usr/bin/env python
-"""Pod CLI: extract fit roles -> write immutable .h5ad -> validate (A1).
+"""Pod CLI STUB: always exits 2 and writes nothing.
 
-Thin wrapper over ``alive.compose.fit_role``. The RunSpec/source/split assembly
-that feeds real digests is the production driver's job (sub-project C); this
-entry point only orchestrates the library and fails closed.
+Real source/split assembly is the production driver's job (sub-project C); the
+dev-smoke path is scripts/compose/build_dev_smoke_payload.py.
 """
 
 from __future__ import annotations

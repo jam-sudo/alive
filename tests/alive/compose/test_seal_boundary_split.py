@@ -400,6 +400,125 @@ def test_materialize_genuine_claim_returns_sealed_union(tmp_path: Path) -> None:
         assert obs.pair_id == pid
 
 
+# --------------------------------------------------------------------------- #
+# Replay of a genuine claim (2026-08-28 adjudication of
+# `seal.claim-materialization-replay`)
+#
+# The consumption boundary is `claim_sealed_access`, which writes the durable
+# audit record FIRST so a crash during materialisation still burns the path.
+# Materialisation is therefore idempotent BY DESIGN and may run more than once.
+#
+# Nothing pinned that. Measured 2026-08-28 by walking every test in the
+# repository with `ast`: NO test called `materialize_claimed` twice, so the
+# replay contract was unstated and unprotected against silent drift.
+# --------------------------------------------------------------------------- #
+def test_replay_of_a_genuine_claim_returns_a_byte_identical_payload(tmp_path: Path) -> None:
+    """A second materialisation of the same claim yields the same rows."""
+    store, manifest = _build_store(tmp_path)
+    union = _sealed_union(manifest)
+    claim = store.claim_sealed_access("run-replay", union)
+
+    first = store.materialize_claimed(claim)
+    second = store.materialize_claimed(claim)
+
+    assert set(first) == set(second) == set(union)
+    for pid in first:
+        assert np.array_equal(first[pid].cells, second[pid].cells)
+
+
+def test_replay_does_not_inflate_the_durable_access_count(tmp_path: Path) -> None:
+    """Replay must not add an audit record: the count tracks CLAIMS, not slices.
+
+    This is the property the external audit reported as a mismatch. It is the
+    intended one -- but it has to be pinned, because the honest reading of
+    "the seal is opened exactly once" depends on it staying true.
+    """
+    store, manifest = _build_store(tmp_path)
+    union = _sealed_union(manifest)
+    claim = store.claim_sealed_access("run-replay-count", union)
+    audit_path = store._audit_path
+
+    for _ in range(3):
+        store.materialize_claimed(claim)
+
+    lines = [ln for ln in audit_path.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    assert len(lines) == 1
+    assert store.sealed_access_count == 1
+
+
+def test_replay_reslices_the_validated_source_not_the_original_one(tmp_path: Path) -> None:
+    """WHY replay is safe: the validator's source replaces the original, ONCE.
+
+    `materialize_claimed` runs `materialization_validator` behind a latch and
+    adopts whatever source it returns. In production that return value is an
+    fd-backed, SHA-256-verified AnnData opened exactly once
+    (`phase2b_cmd._open_verified_sealed_source`), so every replay re-slices the
+    same verified inode rather than re-resolving a pathname. This test pins the
+    store-side half of that: the validator runs once, and BOTH the first and the
+    replayed payload come from the source it returned -- not from the source the
+    store was constructed with.
+    """
+    manifest = _build_manifest()
+    original, pair_index = _build_pair_index(manifest)
+    validated = _InMemorySource(n_rows=original.X.shape[0])
+    validated.X = original.X + 1000.0  # distinguishable from the constructed source
+    calls: list[int] = []
+
+    def _validate() -> _InMemorySource:
+        calls.append(1)
+        return validated
+
+    store = ComposeOutcomeStore(
+        pair_index=pair_index,
+        source=original,
+        manifest=manifest,
+        audit_path=tmp_path / "compose_audit.jsonl",
+        materialization_validator=_validate,
+    )
+    union = _sealed_union(manifest)
+    claim = store.claim_sealed_access("run-replay-validated", union)
+
+    first = store.materialize_claimed(claim)
+    second = store.materialize_claimed(claim)
+
+    assert len(calls) == 1, "the validator is latched; a replay must not re-open a source"
+    for pid in first:
+        assert np.array_equal(first[pid].cells, second[pid].cells)
+        # Every row came from the VALIDATED source, both times.
+        assert float(first[pid].cells.min()) >= 1000.0
+
+
+def test_the_store_alone_does_not_bind_the_payload_bytes(tmp_path: Path) -> None:
+    """RESIDUAL, recorded rather than fixed (2026-08-28).
+
+    The durable audit record binds WHICH pairs (`request_checksum`) and WHICH
+    manifest (`manifest_checksum`). It does NOT carry a digest of the rows that
+    were served. At this layer, mutating the source between two materialisations
+    therefore changes the second payload while the audit still reads "one access".
+
+    That binding lives one layer up, and is already tested there: the driver
+    hands the store an fd-backed source whose bytes were hashed through the same
+    descriptor, so a pathname swap cannot change what is read
+    (`tests/alive/compose/driver/test_phase2b_cmd.py::
+    test_verified_descriptor_survives_source_path_replacement`).
+
+    If this test ever starts FAILING, the store gained a payload binding of its
+    own and this note is stale -- that is a good change; update the record
+    rather than relaxing the test.
+    """
+    store, manifest = _build_store(tmp_path)
+    union = _sealed_union(manifest)
+    claim = store.claim_sealed_access("run-replay-residual", union)
+
+    before = store.materialize_claimed(claim)
+    store._source.X = store._source.X + 1.0
+    after = store.materialize_claimed(claim)
+
+    assert any(not np.array_equal(before[pid].cells, after[pid].cells) for pid in before)
+    lines = [ln for ln in store._audit_path.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    assert len(lines) == 1
+
+
 def test_concurrent_claims_one_audit_one_winner(tmp_path: Path, monkeypatch) -> None:
     manifest = _build_manifest()
     audit_path = tmp_path / "compose_audit.jsonl"

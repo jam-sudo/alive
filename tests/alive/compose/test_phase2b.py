@@ -40,7 +40,9 @@ import numpy as np
 import pytest
 
 from alive.compose.approximation_bias import (
+    ADMITTED,
     APPROXIMATION_BIAS_SCHEMA,
+    NOT_ADMISSIBLE,
     PROBE_A_ADAPTER_TRANSFORM,
     PROBE_A_NEGATIVE_OUTPUT_POLICY,
     PROBE_A_REGISTRATION_SCHEMA,
@@ -50,6 +52,7 @@ from alive.compose.approximation_bias import (
     PROTOCOL,
     REPRESENTATION,
     ApproximationBiasEvidence,
+    ApproximationBiasValidationError,
     ProbeAEvidence,
     canonical_json,
     load_approximation_bias_report,
@@ -276,7 +279,7 @@ def _predictions_for_role(pair_ids, *, response_dim, headline_factor):
     roster = (
         "l1_bilinear_identifiable",
         "l2_saturation",
-        "l3_hypernetwork",
+        "l3_symmetric_mlp",
         "additive",
         "no_change",
         "perturbation_mean",
@@ -292,7 +295,7 @@ def _predictions_for_role(pair_ids, *, response_dim, headline_factor):
             size=response_dim
         )
         out["l2_saturation"][pid] = additive_pred + 3.0 * rng.normal(size=response_dim)
-        out["l3_hypernetwork"][pid] = additive_pred + 5.0 * rng.normal(size=response_dim)
+        out["l3_symmetric_mlp"][pid] = additive_pred + 5.0 * rng.normal(size=response_dim)
         out["id_only"][pid] = additive_pred + 5.0 * rng.normal(size=response_dim)
         out["gears"][pid] = additive_pred + 5.0 * rng.normal(size=response_dim)
         out["cpa"][pid] = additive_pred + 5.0 * rng.normal(size=response_dim)
@@ -540,7 +543,7 @@ def test_preflight_failure_keeps_access_zero_and_no_terminal(tmp_path):
 # ===========================================================================
 
 
-@pytest.mark.parametrize("drop", ["gears", "cpa", "id_only", "l3_hypernetwork"])
+@pytest.mark.parametrize("drop", ["gears", "cpa", "id_only", "l3_symmetric_mlp"])
 def test_missing_registered_comparator_fails_preflight(tmp_path, drop):
     kit = _make_run(tmp_path)
     # Drop a comparator's predictions from the double-unseen regime; the bundle
@@ -1035,6 +1038,64 @@ def test_complete_terminal_embeds_summary_and_final_result_checksum(tmp_path):
     )
     # Phase2bResult.result_checksum IS the layered final_result_checksum.
     assert result.result_checksum == body["final_result_checksum"]
+
+
+def test_the_sealed_result_carries_the_band_sensitivity_computed_from_the_headline_bounds(
+    tmp_path,
+):
+    """Amendment B (signed 2026-09-05): one computation, from the bounds the verdict used.
+
+    The sensitivity is descriptive-only and never a verdict gate; what makes it
+    honest is that it is computed inside the sealed run from the SAME
+    `regime_double.bounds` the verdict was decided on, not re-derived later from
+    a report. `lower_by_lambda[1.0]` is therefore the registered bounds exactly.
+    """
+    from alive.compose.inference2 import band_sensitivity
+
+    kit = _make_run(tmp_path)
+    result = run_phase2b_fixture(**_fixture_kwargs(kit))
+    cfg = kit["cfg"]
+
+    expected = band_sensitivity(
+        bounds=result.regime_double.bounds,
+        band_inflation=cfg.sensitivity_band_inflation,
+        additive_margin=cfg.material_margin_vs_additive,
+        learned_margin=cfg.learned_comparator_margin,
+    )
+    assert result.band_sensitivity == expected
+    assert result.band_sensitivity.lower_by_lambda[1.0] == result.regime_double.bounds.lower
+
+
+def test_the_terminal_carries_the_sensitivity_outside_the_result_checksum_with_its_own_checksum(
+    tmp_path,
+):
+    """Amendment B: where the sensitivity is recorded, and what it is NOT part of.
+
+    It is written into the terminal report body as `band_sensitivity` with its own
+    `band_sensitivity_checksum`; `final_result_checksum` keeps its exact five-field
+    composition, so a descriptive report never enters the run's registered
+    identity (the opposite of what the pair-dependence decision says).
+    """
+    kit = _make_run(tmp_path)
+    result = run_phase2b_fixture(**_fixture_kwargs(kit))
+    body = _read_terminal(kit["run_dir"], "complete")
+
+    block = body["band_sensitivity"]
+    assert block["schema"] == "compose_band_sensitivity_v1"
+    assert block["descriptive_only"] is True
+    ladder = [entry["lambda"] for entry in block["by_lambda"]]
+    assert ladder == [float(x) for x in kit["cfg"].sensitivity_band_inflation]
+    assert block["by_lambda"][0]["lower"] == pytest.approx(result.regime_double.bounds.lower)
+    assert body["band_sensitivity_checksum"] == sha256_json(block)
+    assert body["final_result_checksum"] == sha256_json(
+        {
+            "terminal_state": body["terminal_state"],
+            "final_verdict_checksum": body["final_verdict_checksum"],
+            "registered_summary_checksum": body["registered_summary_checksum"],
+            "evaluation_payload_checksum": body["evaluation_payload_checksum"],
+            "provenance_checksum": body["provenance_checksum"],
+        }
+    )
 
 
 def test_per_method_aggregate_mse_reports_both_regimes_unpooled(tmp_path):
@@ -1537,6 +1598,11 @@ def test_build_provenance_rejects_environment_mismatch(tmp_path):
         )
 
 
+def _declared(path: Path) -> tuple[Path, str]:
+    """``(path, sha256)`` as the validated run spec would declare it -- the boundary's shape."""
+    return path, hashlib.sha256(path.read_bytes()).hexdigest()
+
+
 def test_build_activation_provenance_inputs_hashes_real_files(tmp_path):
     processed = tmp_path / "processed.h5ad"
     feature_bank = tmp_path / "features.json"
@@ -1549,11 +1615,11 @@ def test_build_activation_provenance_inputs_hashes_real_files(tmp_path):
     gears.write_text("cell-gears==0.1.2\n", encoding="utf-8")
     cpa.write_text("cpa-tools==0.7.2\n", encoding="utf-8")
     inputs = build_activation_provenance_inputs(
-        processed_path=processed,
-        feature_bank_path=feature_bank,
-        dependency_lock_path=dependency,
-        gears_requirements_path=gears,
-        cpa_requirements_path=cpa,
+        processed=_declared(processed),
+        feature_bank=_declared(feature_bank),
+        dependency_lock=_declared(dependency),
+        gears_requirements=_declared(gears),
+        cpa_requirements=_declared(cpa),
         environment=_environment(),
         device="cuda:0",
         precision="float32",
@@ -1564,6 +1630,154 @@ def test_build_activation_provenance_inputs_hashes_real_files(tmp_path):
     assert inputs.cpa_revision == "0.7.2"
     assert len(inputs.dependency_lock_sha256) == 64
     assert inputs.git_commit == _environment().git_commit
+
+
+def _provenance_fixture(tmp_path):
+    """Small files for the activation-provenance inputs, gears pinned at 0.1.2."""
+    processed = tmp_path / "processed.h5ad"
+    feature_bank = tmp_path / "features.json"
+    dependency = tmp_path / "dependency.json"
+    gears = tmp_path / "gears.lock"
+    cpa = tmp_path / "cpa.lock"
+    processed.write_bytes(b"processed")
+    feature_bank.write_bytes(b"features")
+    dependency.write_text("{}", encoding="utf-8")
+    gears.write_text("cell-gears==0.1.2\n", encoding="utf-8")
+    cpa.write_text("cpa-tools==0.7.2\n", encoding="utf-8")
+    return processed, feature_bank, dependency, gears, cpa
+
+
+_PROVENANCE_FIELDS = (
+    "processed",
+    "feature_bank",
+    "dependency_lock",
+    "gears_requirements",
+    "cpa_requirements",
+)
+
+
+@pytest.mark.parametrize("field", _PROVENANCE_FIELDS)
+def test_a_provenance_input_whose_bytes_are_not_the_declared_digest_is_refused(tmp_path, field):
+    """The boundary carries the digest the run spec verified, and the read checks it.
+
+    `60a8c5f` closed the double read INSIDE this function. The window that
+    remained was at its boundary: the caller unwrapped five declared `PathSha`
+    objects to bare paths and this function hashed whatever was on disk NOW. A
+    file replaced between run-spec verification and provenance assembly was
+    recorded with the replacement's digest, and nothing refused it -- the
+    feature-bank residual and the worker-requirements lane the daily review
+    reported on separate days are the same window in two of the five lanes.
+    Now each input is `(path, declared_sha256)` and bytes that do not hash to the
+    declaration are refused, naming the lane.
+    """
+    files = dict(zip(_PROVENANCE_FIELDS, _provenance_fixture(tmp_path), strict=True))
+    declared = {name: _declared(path) for name, path in files.items()}
+    # A replacement that still parses, so the ONLY reason to refuse is the digest.
+    swapped = {
+        "gears_requirements": b"cell-gears==0.1.2\n# replaced after verification\n",
+        "cpa_requirements": b"cpa-tools==0.7.2\n# replaced after verification\n",
+    }.get(field, b"replaced after the run spec verified it")
+    files[field].write_bytes(swapped)
+
+    with pytest.raises(Phase2bError, match=field):
+        build_activation_provenance_inputs(
+            **declared, environment=_environment(), device="cuda:0", precision="float32"
+        )
+
+
+def _install_swapping_open(monkeypatch, target: str, fire_on: int, state: dict, new_text: str):
+    """Count opens of *target* and rewrite it just before its *fire_on*-th open.
+
+    Installed on **both** ``builtins.open`` and ``io.open``. That is not belt and
+    braces -- it is required, and measuring it is how this probe was fixed:
+    ``sha256_file`` calls the bare ``open`` (``builtins.open``) while
+    ``Path.read_text`` calls ``io.open``, and the two names are separate
+    references. Patching only ``builtins.open`` counted ONE of the two reads, so
+    the first version of the test below passed against the unfixed code. The
+    control arm ``test_the_swap_probe_is_not_vacuous`` is what caught that.
+    """
+    import builtins
+    import io
+    import os
+
+    real_open = builtins.open
+
+    def wrapper(file, *args, **kwargs):
+        try:
+            key = os.fspath(file)
+        except TypeError:
+            key = None
+        if key == target:
+            state["opens"] = state.get("opens", 0) + 1
+            if state["opens"] == fire_on:
+                state["fired"] = True
+                with real_open(key, "w", encoding="utf-8") as fh:
+                    fh.write(new_text)
+        return real_open(file, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", wrapper)
+    monkeypatch.setattr(io, "open", wrapper)
+
+
+def test_the_requirements_file_is_read_once_so_a_swap_has_no_window(tmp_path, monkeypatch):
+    """The recorded revision and the recorded digest must come from ONE read.
+
+    The previous shape hashed ``gears_requirements_path`` with ``sha256_file`` and
+    then reopened the SAME pathname to parse the pinned revision. A writer landing
+    between the two reads makes ``dependency_lock_sha256`` and ``gears_revision``
+    describe different bytes, and nothing refuses it -- reproduced by the external
+    audit and by the 2026-09-03 review with a control arm. Two of the six
+    registered activation blockers are exactly these revisions, so the window
+    corrupts the evidence a dev-pod run is meant to produce.
+    """
+    processed, feature_bank, dependency, gears, cpa = _provenance_fixture(tmp_path)
+    # The declarations are the run spec's reads, made BEFORE the probe is armed;
+    # the probe counts only the builder's own opens of the file.
+    declared = {
+        "processed": _declared(processed),
+        "feature_bank": _declared(feature_bank),
+        "dependency_lock": _declared(dependency),
+        "gears_requirements": _declared(gears),
+        "cpa_requirements": _declared(cpa),
+    }
+    state: dict = {}
+    _install_swapping_open(monkeypatch, str(gears), 2, state, "cell-gears==9.9.9\n")
+    inputs = build_activation_provenance_inputs(
+        **declared, environment=_environment(), device="cuda:0", precision="float32"
+    )
+    monkeypatch.undo()
+
+    assert state.get("opens") == 1, (
+        "the requirements file was opened more than once -- the gap between those "
+        f"reads is the TOCTOU window (opens={state.get('opens')})"
+    )
+    assert not state.get("fired"), "the swap fired, so a second read existed"
+    assert inputs.gears_revision == "0.1.2"
+    assert gears.read_text(encoding="utf-8") == "cell-gears==0.1.2\n"
+
+
+def test_the_swap_probe_is_not_vacuous(tmp_path, monkeypatch):
+    """Control arm: the same injection DOES corrupt a deliberate two-read function.
+
+    Without this, the test above would pass for a function that never reads the
+    file at all, and would be measuring nothing.
+    """
+    _, _, _, gears, _ = _provenance_fixture(tmp_path)
+    state: dict = {}
+    _install_swapping_open(monkeypatch, str(gears), 2, state, "cell-gears==9.9.9\n")
+
+    def two_reads(path):
+        first = hashlib.sha256(Path(path).read_bytes()).hexdigest()
+        second = Path(path).read_text(encoding="utf-8").strip()
+        return first, second
+
+    digest, line = two_reads(gears)
+    monkeypatch.undo()
+
+    assert state.get("opens") == 2
+    assert state.get("fired") is True
+    assert line == "cell-gears==9.9.9"
+    assert digest == hashlib.sha256(b"cell-gears==0.1.2\n").hexdigest()
 
 
 # ===========================================================================
@@ -1848,7 +2062,7 @@ def _write_bias_report(
     bootstrap_95_interval=(0.4, 0.9),
     R_star=0.5,
 ):
-    """Write a REAL-shaped ``compose_approximation_bias_report_v3`` report and return
+    """Write a REAL-shaped ``compose_approximation_bias_report_v4`` report and return
     its ``sha256_file`` content SHA.
 
     Faithful to the true on-disk contract that ``measure_approximation_bias_v3`` /
@@ -1922,6 +2136,7 @@ def _write_bias_report(
             "probe_a_evidence_manifest_sha256": "6" * 64,
             "probe_a_registration_sha256": "7" * 64,
             "probe_a_verification_sha256": "8" * 64,
+            "probe_a_output_representation": REPRESENTATION,
             "sealed_pair_overlap_count": 0,
             "pod_instance": "unit-test",
         },
@@ -2028,7 +2243,7 @@ def test_null_config_field_yields_unavailable_block(tmp_path):
 # ---------------------------------------------------------------------------
 # END-TO-END: metric ↔ finalize ↔ phase2b agree on BOTH schema nesting AND the
 # on-disk-bytes hashing recipe. This is the integration seam the per-task stubs
-# papered over: it builds a REAL compose_approximation_bias_report_v3 via the
+# papered over: it builds a REAL compose_approximation_bias_report_v4 via the
 # metric, writes it EXACTLY as production does (canonical JSON + trailing '\n'),
 # finalizes the config leaf SHA via the real finalize tool (which now pins
 # sha256_file of those bytes), and feeds that SHA + report path into the phase2b
@@ -2126,8 +2341,8 @@ def _probe_a_evidence_snapshot() -> ProbeAEvidence:
     )
 
 
-def _build_real_bias_report(tmp_path):
-    """Build a REAL v2 report via ``measure_approximation_bias_v3`` on a small
+def _build_real_bias_report(tmp_path, *, admitted: bool = True):
+    """Build a REAL v4 report via ``measure_approximation_bias_v3`` on a small
     synthetic control-free fit-role artifact + identity projection block, bound to a
     bias-NULL basis config. Writes the report EXACTLY as the metric CLI does
     (canonical JSON + trailing newline). Returns ``(report, basis_yaml, report_path)``.
@@ -2218,6 +2433,20 @@ def _build_real_bias_report(tmp_path):
         probe_a_registration_sha256=probe_a_evidence.registration_sha256,
         probe_a_verification_sha256=probe_a_evidence.verification_sha256,
     )
+    # R1: the frozen Probe-A owner policy validates ``log_normalized_pseudobulk``, so the
+    # producer marks this raw-count measurement NOT_ADMISSIBLE and no consuming boundary
+    # will take it. ``admitted=True`` therefore hands the chain a SYNTHETIC DOCUMENT SHAPE:
+    # the numbers are the producer's real ones, and only the two admission fields are the
+    # ones the owner amendment (Task 2 amendment D) would produce. The current owner policy
+    # cannot produce an admitted raw report at all -- that is the point of R1, and
+    # ``admitted=False`` is the arm that proves it.
+    assert report["admission_status"] == NOT_ADMISSIBLE
+    if admitted:
+        report["admission_status"] = ADMITTED
+        report["provenance"]["probe_a_output_representation"] = REPRESENTATION
+        report["self_checksum"] = self_checksum(
+            {key: value for key, value in report.items() if key != "self_checksum"}
+        )
     report_path = tmp_path / "approximation_bias_report.json"
     # EXACTLY as measure_pseudobulk_approximation_bias.py::main writes it.
     canonical = json.dumps(report, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
@@ -2226,6 +2455,13 @@ def _build_real_bias_report(tmp_path):
 
 
 def test_metric_finalize_phase2b_roundtrip(tmp_path):
+    """metric -> finalize -> phase2b, on the real numbers.
+
+    The admission fields are a SYNTHETIC DOCUMENT SHAPE: the current owner policy cannot
+    produce an admitted raw-count report (R1), so the arm that proves what the producer
+    really emits today is
+    ``test_the_log_pass_report_this_fixture_really_produces_is_refused_by_the_finalizer``.
+    """
     # Build the REAL report + finalize the config leaf via the real tool.
     report, basis_yaml, report_path = _build_real_bias_report(tmp_path)
     gi = report["gi_and_fairness"]
@@ -2274,6 +2510,24 @@ def test_metric_finalize_phase2b_roundtrip(tmp_path):
     assert block["R_star"] == gi["R_star"]
 
 
+def test_the_log_pass_report_this_fixture_really_produces_is_refused_by_the_finalizer(tmp_path):
+    """R1 negative arm of the round-trip above.
+
+    Under the frozen Probe-A owner policy the producer writes a NOT_ADMISSIBLE report, and
+    the finalizer refuses it -- so the admitted document shape the round-trip uses is not
+    quietly standing in for something reachable today.
+    """
+    report, basis_yaml, report_path = _build_real_bias_report(tmp_path, admitted=False)
+
+    assert report["admission_status"] == NOT_ADMISSIBLE
+    assert report["provenance"]["probe_a_output_representation"] == PROBE_A_REPRESENTATION
+    finalize = _load_script_module(
+        "scripts/compose/finalize_approximation_bias_config.py", "_finalize_bias_config_e2e_neg"
+    )
+    with pytest.raises(ApproximationBiasValidationError, match="must be 'admitted'"):
+        finalize.finalize_bias_config(basis_config_path=basis_yaml, report_path=report_path)
+
+
 # Fail-closed unit coverage for the seal-critical loader's numeric/interval helpers +
 # loader-level branches (final-review Minor: these leak-barrier branches were only
 # reached by the round-trip happy path). The KEY assertion is that every malformed
@@ -2311,7 +2565,7 @@ def test_loader_fail_closed_branches(tmp_path):
     with pytest.raises(ApproximationBiasReportError, match="no immutable report"):
         _load_approximation_bias_fairness(report_sha256="a" * 64, report_evidence=None)
     # A report whose content SHA matches the pin but lacks the nested gi_and_fairness block.
-    nogi_bytes = b'{"schema":"compose_approximation_bias_report_v3"}\n'
+    nogi_bytes = b'{"schema":"compose_approximation_bias_report_v4"}\n'
     nogi_sha = sha256_bytes(nogi_bytes)
     with pytest.raises(ApproximationBiasReportError):
         _load_approximation_bias_fairness(

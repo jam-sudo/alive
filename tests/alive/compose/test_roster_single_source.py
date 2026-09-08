@@ -18,7 +18,7 @@ from alive.compose import config2, freeze, inference2, phase2b, verdict2
 HEADLINE = "l1_bilinear_identifiable"
 
 #: The exact registered comparator family (order included).
-COMPARATOR_FAMILY = ("additive", "gears", "cpa", "id_only", "l3_hypernetwork")
+COMPARATOR_FAMILY = ("additive", "gears", "cpa", "id_only", "l3_symmetric_mlp")
 
 
 def test_freeze_required_methods_match_config_roster() -> None:

@@ -67,7 +67,7 @@ from alive.compose.models import fitted_model_checksum
 from alive.compose.response import ResponseSpace, bind_response_source, verify_response_artifact
 from alive.compose.roles import CALIBRATION_ROLE_NAME
 from alive.compose.select import OOFFoldManifest
-from alive.compose.zfactor import GeneFactorBank
+from alive.compose.zfactor import GeneFactorBank, verify_bank_normalization
 from alive.provenance import RunLedger, sha256_bytes, sha256_file, sha256_json
 
 #: The registered headline operator. Selection fits ONLY this model, so it is the
@@ -866,6 +866,17 @@ def _verify_factor_banks(inputs: Phase2aInputs, *, require_banks: bool) -> None:
         bank = banks[k_total]
         if sha256_bytes(bank.artifact_bytes()) != bank.checksum:
             raise HashMismatchError(f"factor bank k={k_total} checksum does not verify")
+        # The checksum binds the bank to itself, and the row loop below binds the
+        # runtime matrix to the bank. Neither says the bank obeys the REGISTERED
+        # normalization: an unnormalized bank and a runtime matrix copied from it
+        # agree perfectly and are both wrong. Verify the rule on the numbers.
+        # Raised as HashMismatchError so it cannot escape a caller that handles
+        # this function's failures -- the same escape that let LinAlgError past
+        # the pre-seal roster once before.
+        try:
+            verify_bank_normalization(bank)
+        except ValueError as exc:
+            raise HashMismatchError(f"factor bank k={k_total}: {exc}") from exc
         if int(bank.k_total) != k_total:
             raise HashMismatchError(
                 f"factor bank key {k_total} disagrees with bank.k_total={bank.k_total}"
@@ -1498,6 +1509,7 @@ def _run_phase2a_core(
         eps_split_b=np.asarray(inputs.eps_split_b, dtype=float),
         dev_oof_threshold=cfg.dev_oof_threshold,
         measurability_role=CALIBRATION_ROLE_NAME,
+        measurability_ceiling_floor=cfg.futility_measurability_ceiling_floor,
         unregularized_oof_rank_policy=cfg.unregularized_oof_rank_policy,
         rank_tolerance_rule=cfg.rank_tolerance_rule,
         lambda_scaling=cfg.lambda_scaling,

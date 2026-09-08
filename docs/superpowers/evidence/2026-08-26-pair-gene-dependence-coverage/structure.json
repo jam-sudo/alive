@@ -1,0 +1,59 @@
+{
+ "known_answer_match": true,
+ "rows": [
+  {
+   "role": "sealed_double_unseen (HEADLINE)",
+   "n_pairs": 22,
+   "n_genes_used": 21,
+   "mean_degree": 2.0952380952380953,
+   "max_degree": 5,
+   "degree_histogram": {
+    "1": 6,
+    "2": 10,
+    "3": 3,
+    "4": 1,
+    "5": 1
+   },
+   "shared_gene_pair_fraction": 0.15151515151515152,
+   "n_shared_gene_pair_couples": 35,
+   "n_pairs_sharing_no_gene": 0
+  },
+  {
+   "role": "sealed_single_unseen",
+   "n_pairs": 68,
+   "n_genes_used": 58,
+   "mean_degree": 2.3448275862068964,
+   "max_degree": 7,
+   "degree_histogram": {
+    "1": 22,
+    "2": 14,
+    "3": 11,
+    "4": 6,
+    "5": 3,
+    "7": 2
+   },
+   "shared_gene_pair_fraction": 0.06804214223002635,
+   "n_shared_gene_pair_couples": 155,
+   "n_pairs_sharing_no_gene": 1
+  },
+  {
+   "role": "combo_calibration",
+   "n_pairs": 41,
+   "n_genes_used": 37,
+   "mean_degree": 2.2162162162162162,
+   "max_degree": 7,
+   "degree_histogram": {
+    "1": 16,
+    "2": 10,
+    "3": 4,
+    "4": 4,
+    "5": 1,
+    "6": 1,
+    "7": 1
+   },
+   "shared_gene_pair_fraction": 0.11219512195121951,
+   "n_shared_gene_pair_couples": 92,
+   "n_pairs_sharing_no_gene": 2
+  }
+ ]
+}

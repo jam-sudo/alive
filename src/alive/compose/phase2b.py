@@ -53,6 +53,7 @@ import math
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
+from typing import Any, Literal
 
 import numpy as np
 
@@ -71,6 +72,7 @@ from alive.compose.config2 import (
 from alive.compose.detectable_effect import REGISTERED_MIN_PAIRS
 from alive.compose.durable import finalize_phase2b_durable_outputs
 from alive.compose.freeze import FrozenPredictionBundle
+from alive.compose.inference2 import ComposeBandSensitivity, band_sensitivity
 from alive.compose.outcome_store import (
     _FIXTURE_CORPUS_ALLOWLIST,
     ComposeOutcomeStore,
@@ -117,7 +119,13 @@ from alive.compose.verdict2 import (
     SealedAxis,
     sealed_verdict,
 )
-from alive.provenance import EnvironmentInfo, RunLedger, sha256_file, sha256_json
+from alive.provenance import (
+    EnvironmentInfo,
+    RunLedger,
+    sha256_bytes,
+    sha256_file,
+    sha256_json,
+)
 
 #: The two sealed regime role labels, bound to the single canonical roster in
 #: :mod:`alive.compose.split` rather than re-spelled here.
@@ -250,6 +258,12 @@ class Phase2bResult:
     durable_commit_path : str or None
         The filesystem path of the published durable commit marker (companion to
         :attr:`durable_commit_checksum`); ``None`` until finalize succeeds.
+    band_sensitivity : ComposeBandSensitivity or None
+        Amendment B (signed 2026-09-05): the descriptive-only band-inflation
+        sensitivity, computed inside the sealed run from the SAME
+        ``regime_double.bounds`` the verdict was decided on. Never a verdict gate;
+        written into the terminal body outside :attr:`result_checksum`'s five
+        components. ``None`` only on a result that carries no sealed scoring.
     """
 
     run_id: str
@@ -263,6 +277,7 @@ class Phase2bResult:
     ledger: RunLedger
     durable_commit_checksum: str | None = None
     durable_commit_path: str | None = None
+    band_sensitivity: ComposeBandSensitivity | None = None
 
 
 # --------------------------------------------------------------------------- #
@@ -454,24 +469,87 @@ class ActivationProvenanceInputs:
 
 def build_activation_provenance_inputs(
     *,
-    processed_path: str | Path,
-    feature_bank_path: str | Path,
-    dependency_lock_path: str | Path,
-    gears_requirements_path: str | Path,
-    cpa_requirements_path: str | Path,
+    processed: tuple[str | Path, str],
+    feature_bank: tuple[str | Path, str],
+    dependency_lock: tuple[str | Path, str],
+    gears_requirements: tuple[str | Path, str],
+    cpa_requirements: tuple[str | Path, str],
     environment: EnvironmentInfo,
     device: str,
     precision: str,
 ) -> ActivationProvenanceInputs:
-    """Build activation provenance from actual files and the captured environment."""
+    """Build activation provenance from the declared files, refusing bytes that are not theirs.
 
-    def _pinned_revision(path: str | Path, package: str) -> str:
-        prefix = package.casefold() + "=="
+    Every input is ``(path, declared_sha256)`` exactly as the validated run spec
+    recorded it. The digest crosses this boundary instead of being discarded at
+    it: the previous signature took bare paths, so the caller unwrapped five
+    verified ``PathSha`` objects to ``.path`` and this function recorded whatever
+    the files hashed to by the time it ran. A replacement landing between run-spec
+    verification and provenance assembly was recorded as provenance and refused by
+    nothing -- the feature-bank residual and the worker-requirements lane the daily
+    review reported on separate days were that one window in two of the five lanes.
+
+    Small files (the dependency lock and both requirements locks) are read once and
+    the bytes that were read are hashed and compared with the declaration; the
+    pinned revisions are parsed from those same bytes (``60a8c5f`` closed the double
+    read inside this function; this closes the boundary around it). The two large
+    inputs are streamed through ``sha256_file`` and compared the same way. A
+    mismatch raises :class:`Phase2bError` naming the lane, before any digest is
+    recorded.
+    """
+
+    def _declared(item: tuple[str | Path, str], field: str) -> tuple[Path, str]:
         try:
-            lines = Path(path).read_text(encoding="utf-8").splitlines()
+            path, declared = item
+        except (TypeError, ValueError) as exc:
+            raise Phase2bError(
+                f"activation provenance input {field} must be (path, declared_sha256)"
+            ) from exc
+        if not isinstance(declared, str) or not declared:
+            raise Phase2bError(
+                f"activation provenance input {field} has no declared sha256 to verify against"
+            )
+        return Path(path), declared
+
+    def _refuse(field: str, path: Path, actual: str, declared: str) -> Phase2bError:
+        return Phase2bError(
+            f"activation provenance input {field} at {str(path)!r}: bytes hash to {actual}, "
+            f"not the declared {declared} -- the file changed after the run spec verified it"
+        )
+
+    def _read_verified(item: tuple[str | Path, str], field: str) -> bytes:
+        """Read a small provenance input exactly once and prove it is the declared one."""
+        path, declared = _declared(item, field)
+        try:
+            raw = path.read_bytes()
         except OSError as exc:
             raise Phase2bError(
                 f"failed to read dependency requirements {str(path)!r}: {exc}"
+            ) from exc
+        actual = sha256_bytes(raw)
+        if actual != declared:
+            raise _refuse(field, path, actual, declared)
+        return raw
+
+    def _verify_streamed(item: tuple[str | Path, str], field: str) -> str:
+        """Stream-hash a large provenance input and prove it is the declared one."""
+        path, declared = _declared(item, field)
+        try:
+            actual = sha256_file(path)
+        except OSError as exc:
+            raise Phase2bError(f"failed to hash activation provenance input: {exc}") from exc
+        if actual != declared:
+            raise _refuse(field, path, actual, declared)
+        return actual
+
+    def _pinned_revision(raw: bytes, path: str | Path, package: str) -> str:
+        """Parse the pinned revision out of bytes already verified above."""
+        prefix = package.casefold() + "=="
+        try:
+            lines = raw.decode("utf-8").splitlines()
+        except UnicodeDecodeError as exc:
+            raise Phase2bError(
+                f"failed to decode dependency requirements {str(path)!r}: {exc}"
             ) from exc
         matches = [line.strip() for line in lines if line.strip().casefold().startswith(prefix)]
         if len(matches) != 1:
@@ -480,26 +558,31 @@ def build_activation_provenance_inputs(
             )
         return matches[0].split("==", 1)[1]
 
-    paths = {
-        "dependency_manifest": dependency_lock_path,
-        "gears_requirements": gears_requirements_path,
-        "cpa_requirements": cpa_requirements_path,
+    # One verified read per small file; the digest below and the revisions come
+    # from these exact bytes, and those bytes are the ones the run spec declared.
+    raw_by_name = {
+        "dependency_manifest": _read_verified(dependency_lock, "dependency_lock"),
+        "gears_requirements": _read_verified(gears_requirements, "gears_requirements"),
+        "cpa_requirements": _read_verified(cpa_requirements, "cpa_requirements"),
     }
-    try:
-        dependency_digest = sha256_json(
-            {name: sha256_file(path) for name, path in sorted(paths.items())}
-        )
-        processed_digest = sha256_file(processed_path)
-        feature_digest = sha256_file(feature_bank_path)
-    except OSError as exc:
-        raise Phase2bError(f"failed to hash activation provenance input: {exc}") from exc
+    dependency_digest = sha256_json(
+        {name: sha256_bytes(raw) for name, raw in sorted(raw_by_name.items())}
+    )
+    processed_digest = _verify_streamed(processed, "processed")
+    feature_digest = _verify_streamed(feature_bank, "feature_bank")
+    gears_requirements_path, _ = _declared(gears_requirements, "gears_requirements")
+    cpa_requirements_path, _ = _declared(cpa_requirements, "cpa_requirements")
 
     return ActivationProvenanceInputs(
         processed_sha256=processed_digest,
         feature_bank_sha256=feature_digest,
         dependency_lock_sha256=dependency_digest,
-        gears_revision=_pinned_revision(gears_requirements_path, "cell-gears"),
-        cpa_revision=_pinned_revision(cpa_requirements_path, "cpa-tools"),
+        gears_revision=_pinned_revision(
+            raw_by_name["gears_requirements"], gears_requirements_path, "cell-gears"
+        ),
+        cpa_revision=_pinned_revision(
+            raw_by_name["cpa_requirements"], cpa_requirements_path, "cpa-tools"
+        ),
         python_version=environment.python_version,
         platform=environment.platform,
         device=device,
@@ -664,6 +747,131 @@ def _finite_or_sentinel(value: float) -> float | str:
     """
     number = float(value)
     return number if math.isfinite(number) else _NON_FINITE_SENTINEL
+
+
+#: Schema tag of the terminal's descriptive-only band-sensitivity block (Amendment B).
+BAND_SENSITIVITY_SCHEMA = "compose_band_sensitivity_v1"
+#: Flip-point labels for the two non-finite cases ``band_sensitivity`` can return: a
+#: zero-width band keeps its lambda = 1 state at every inflation, so the clause either
+#: never flips (``+inf``) or already fails at the registered band (``-inf``). Encoded
+#: as labels rather than the shared NON_FINITE sentinel so the two are distinguishable.
+_FLIP_NEVER = "NEVER_FLIPS"
+_FLIP_ALREADY_FAILED = "FAILS_AT_REGISTERED_BAND"
+
+
+def _flip_or_label(value: float) -> float | str:
+    number = float(value)
+    if math.isfinite(number):
+        return number
+    return _FLIP_NEVER if number > 0 else _FLIP_ALREADY_FAILED
+
+
+def preregistered_headline_branch(
+    *, band_passes: bool, flip: float | str, ladder_max: float
+) -> Literal["i", "ii", "iii"]:
+    """Which pre-registered headline sentence a result selects (D4 §8).
+
+    The decision document pre-registers four sentences so nobody can pick the
+    wording after seeing the result. Its first three were written against the two
+    NON-FINITE flip labels only, which a zero-width band (``q == 0``) produces --
+    and a normal ``q > 0`` run produces a FINITE flip. PR #15 finding I3 measured
+    two such results that no sentence claimed: ``flip = 2.5`` with a passing band
+    (outside the registered ladder, so it never flips inside it) and
+    ``flip = 0.5`` with a failing band. The branch therefore lives here, in code,
+    and §8 cites it; the document no longer owns a partition it cannot enumerate.
+
+    Parameters
+    ----------
+    band_passes : bool
+        Did the headline additive contrast clear its registered material margin
+        at the REGISTERED band ``lambda = 1.0``? This is the verdict's own
+        question and is authoritative for sentence (iii).
+    flip : float or str
+        ``ComposeBandSensitivity.flip_lambda['additive']``, either as the serialised
+        label (:data:`_FLIP_NEVER` / :data:`_FLIP_ALREADY_FAILED`) or as the raw
+        float, ``+-inf`` included.
+    ladder_max : float
+        The largest registered ``sensitivity_band_inflation`` (currently ``1.25``).
+        Passed by the caller from the committed config -- never hardcoded here,
+        because the ladder is a registered value and this module is production
+        source.
+
+    Returns
+    -------
+    {"i", "ii", "iii"}
+        ``"i"``  -- the margin holds across the WHOLE registered ladder
+        (``NEVER_FLIPS``, or a finite flip beyond ``ladder_max``);
+        ``"ii"`` -- won at the registered band, flips at a registered higher
+        ``lambda`` (finite ``1.0 < flip <= ladder_max``);
+        ``"iii"`` -- the registered band itself was not cleared.
+
+    Raises
+    ------
+    ValueError
+        If ``band_passes`` is true while the flip says the clause fails at or
+        below the registered band (finite ``flip <= 1.0`` or
+        ``FAILS_AT_REGISTERED_BAND``). Clearing the band means the lower bound is
+        above the threshold at ``lambda = 1``, which forces ``flip > 1.0`` or
+        ``+inf``; the pair is unreachable by construction, so it is a bug rather
+        than a fourth outcome to name.
+    """
+    if not band_passes:
+        # The verdict is decided at lambda = 1.0 and it did not clear. Whatever the
+        # flip encodes (the -inf label, or a finite value at or below 1.0), the
+        # sentence is the same one.
+        return "iii"
+
+    if isinstance(flip, str):
+        if flip == _FLIP_NEVER:
+            return "i"
+        if flip == _FLIP_ALREADY_FAILED:
+            raise ValueError(
+                "inconsistent band verdict and flip: the band was cleared at "
+                f"lambda = 1.0 but the flip says {_FLIP_ALREADY_FAILED}"
+            )
+        raise ValueError(f"unknown flip label {flip!r}")
+
+    value = float(flip)
+    if math.isnan(value):
+        raise ValueError("inconsistent band verdict and flip: flip is NaN")
+    if value == math.inf:
+        return "i"
+    if value == -math.inf or value <= 1.0:
+        raise ValueError(
+            "inconsistent band verdict and flip: the band was cleared at "
+            f"lambda = 1.0 but the flip is {value!r} (<= 1.0)"
+        )
+    return "ii" if value <= float(ladder_max) else "i"
+
+
+def _band_sensitivity_block(sensitivity: ComposeBandSensitivity) -> dict[str, Any]:
+    """Serialise the sensitivity for the terminal body: finite floats or labels only.
+
+    Ordered by the registered ladder so ``by_lambda[0]`` is the registered band
+    (``lambda = 1.0``) and equals the bounds the verdict used. Every float goes
+    through the same finiteness discipline as the registered summary so a
+    degenerate value can never abort a legitimate terminal write.
+    """
+    return {
+        "schema": BAND_SENSITIVITY_SCHEMA,
+        "descriptive_only": True,
+        "comparators": list(sensitivity.comparators),
+        "by_lambda": [
+            {
+                "lambda": float(lam),
+                "lower": {
+                    comparator: _finite_or_sentinel(value)
+                    for comparator, value in sensitivity.lower_by_lambda[lam].items()
+                },
+            }
+            for lam in sensitivity.band_inflation
+        ],
+        "flip_lambda": {
+            comparator: _flip_or_label(value)
+            for comparator, value in sensitivity.flip_lambda.items()
+        },
+        "verdict_holds_below_lambda": _flip_or_label(sensitivity.verdict_holds_below_lambda),
+    }
 
 
 #: The registered-summary key carrying the pre-registered approximation-bias fairness
@@ -1854,6 +2062,15 @@ def _evaluate_inside_boundary(
         integrity=integrity,
         method_axis=MethodAxis.METHOD_VALIDATED,
     )
+    # Amendment B (signed 2026-09-05): the descriptive-only band-inflation sensitivity,
+    # from the SAME bounds the verdict was just decided on. Never a verdict gate; it
+    # rides in the terminal body outside final_result_checksum's five components.
+    sensitivity = band_sensitivity(
+        bounds=bounds,
+        band_inflation=config.sensitivity_band_inflation,
+        additive_margin=config.material_margin_vs_additive,
+        learned_margin=config.learned_comparator_margin,
+    )
 
     # --- Step 11: COMPLETE composite provenance + post-access consistency. -----
     provenance = _build_provenance(
@@ -2006,6 +2223,7 @@ def _evaluate_inside_boundary(
     # The v2 COMPLETE / INVALID body: exactly the state-specific roster (spec §2.1).
     # The whole-body terminal_payload_checksum is computed by the terminal writer;
     # these are the inner content checksums over specific in-process dicts.
+    sensitivity_block = _band_sensitivity_block(sensitivity)
     body = {
         "registered_summary": summary,
         "registered_summary_checksum": registered_summary_checksum,
@@ -2014,6 +2232,9 @@ def _evaluate_inside_boundary(
         "provenance_checksum": expected_provenance_checksum,
         "evaluation_payload_checksum": evaluation_payload_checksum,
         "final_result_checksum": final_result_checksum,
+        # Amendment B: descriptive-only, with its own checksum, OUTSIDE the five above.
+        "band_sensitivity": sensitivity_block,
+        "band_sensitivity_checksum": sha256_json(sensitivity_block),
     }
 
     if terminal_state is TerminalState.COMPLETE:
@@ -2031,6 +2252,7 @@ def _evaluate_inside_boundary(
         provenance_checksum=expected_provenance_checksum,
         result_checksum=final_result_checksum,
         ledger=terminal.ledger,
+        band_sensitivity=sensitivity,
     )
 
 

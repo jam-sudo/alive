@@ -34,7 +34,7 @@ from alive.compose.verdict2 import (
 )
 
 # The EXACT registered comparator family (config inference.comparator_family).
-FAMILY = ("additive", "gears", "cpa", "id_only", "l3_hypernetwork")
+FAMILY = ("additive", "gears", "cpa", "id_only", "l3_symmetric_mlp")
 # Registered double-unseen / single-unseen role names (config split.roles).
 DOUBLE_UNSEEN = "sealed_double_unseen"
 SINGLE_UNSEEN = "sealed_single_unseen"
@@ -80,7 +80,7 @@ def _valid_integrity(**overrides) -> ComposeIntegrityReport:
 
 def _win_lower() -> dict[str, float]:
     """Lower bounds that, with valid integrity, produce GI_LEARNABLE_WIN."""
-    return {"additive": 0.07, "gears": 0.03, "cpa": 0.02, "id_only": 0.04, "l3_hypernetwork": 0.01}
+    return {"additive": 0.07, "gears": 0.03, "cpa": 0.02, "id_only": 0.04, "l3_symmetric_mlp": 0.01}
 
 
 # ---------------------------------------------------------------------------
@@ -185,7 +185,7 @@ def test_absent_comparator_key_raises() -> None:
     """A bounds object missing one of the five registered comparators raises."""
     lower = _win_lower()
     del lower["cpa"]
-    bad = _bounds(lower, comparators=("additive", "gears", "id_only", "l3_hypernetwork"))
+    bad = _bounds(lower, comparators=("additive", "gears", "id_only", "l3_symmetric_mlp"))
     with pytest.raises(ValueError):
         sealed_verdict(
             regime=DOUBLE_UNSEEN,
@@ -217,7 +217,7 @@ def test_extra_comparator_key_raises() -> None:
 
 def test_missing_additive_key_raises() -> None:
     """'additive' must be present in the roster (and in the bounds)."""
-    no_additive = ("gears", "cpa", "id_only", "l3_hypernetwork")
+    no_additive = ("gears", "cpa", "id_only", "l3_symmetric_mlp")
     lower = {c: 0.03 for c in no_additive}
     with pytest.raises(ValueError):
         sealed_verdict(
@@ -465,7 +465,7 @@ def test_evidence_carries_bounds_margins_comparators_and_disclaimer() -> None:
         "gears": 0.03,
         "cpa": 0.02,
         "id_only": 0.04,
-        "l3_hypernetwork": 0.01,
+        "l3_symmetric_mlp": 0.01,
     }
     assert res.evidence["additive_margin"] == ADDITIVE_MARGIN
     assert res.evidence["learned_margin"] == LEARNED_MARGIN

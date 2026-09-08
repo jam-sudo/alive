@@ -625,3 +625,54 @@ def test_dependency_manifest_extra_key_rejects(tmp_path: Path) -> None:
     _rewrite(bundle, mutate)
     with pytest.raises(RunSpecError, match="keys"):
         _load(bundle)
+
+
+# --------------------------------------------------------------------------- #
+# The trust object's immutability is DEEP, not just top-level
+# --------------------------------------------------------------------------- #
+# 2026-08-22, from an external audit and reproduced here: `MappingProxyType(
+# dict(mode_block))` froze only the top level. Every nested dict inside the
+# validated scientific block stayed the original mutable object, so after full
+# validation `sealed_input["source_path"]` and `activation_evidence["owner"]`
+# could both be reassigned while `self_checksum` and `file_sha256` stayed put --
+# and the mutated owner then reached `ActivationRecord.owner`. The class
+# docstring already promised an immutable spec; these tests make the promise
+# true rather than shallow.
+def test_the_validated_scientific_block_is_frozen_all_the_way_down(tmp_path: Path) -> None:
+    spec = _load(build_scientific_carrier_fixture(tmp_path / "a", repo_root=tmp_path / "r"))
+
+    # Non-vacuity: the paths below must actually be NESTED, or this test would
+    # only be re-asserting the top-level proxy that already existed.
+    assert "sealed_input" in spec.scientific
+    assert "owner" in spec.scientific["activation_evidence"]
+
+    with pytest.raises(TypeError):
+        spec.scientific["injected"] = 1
+    with pytest.raises(TypeError):
+        spec.scientific["sealed_input"]["source_path"] = "/tmp/EVIL"
+    with pytest.raises(TypeError):
+        spec.scientific["activation_evidence"]["owner"] = "mallory"
+    with pytest.raises(TypeError):
+        spec.scientific["activation_evidence"]["requirements"]["injected"] = {}
+
+
+def test_freezing_the_spec_preserves_every_value(tmp_path: Path) -> None:
+    """A freeze that changed the values would be a worse defect than the one it
+    fixes, so assert the frozen view still reads exactly what was validated."""
+    bundle = build_scientific_carrier_fixture(tmp_path / "a", repo_root=tmp_path / "r")
+    raw = json.loads(Path(bundle.spec_path).read_text())["scientific"]
+    spec = _load(bundle)
+
+    def same(frozen, plain, where=""):
+        if isinstance(plain, dict):
+            assert set(frozen) == set(plain), where
+            for key in plain:
+                same(frozen[key], plain[key], f"{where}[{key!r}]")
+        elif isinstance(plain, list):
+            assert list(frozen) == plain or len(frozen) == len(plain), where
+            for i, item in enumerate(plain):
+                same(frozen[i], item, f"{where}[{i}]")
+        else:
+            assert frozen == plain, where
+
+    same(spec.scientific, raw, "scientific")

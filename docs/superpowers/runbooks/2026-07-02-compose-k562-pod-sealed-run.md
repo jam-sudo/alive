@@ -26,7 +26,37 @@
 - primary error: `e = p^{-1} ||δ̂ − δ||²`(낮을수록 좋음).
 - headline: `l1_bilinear_identifiable`.
 - simultaneous comparator family: `additive`, `gears`, `cpa`, `id_only`,
-  `l3_hypernetwork`. L1은 headline이며 L2는 ablation roster에는 있지만 verdict comparator family에는 없다.
+  `l3_symmetric_mlp`. L1은 headline이며 L2는 ablation roster에는 있지만 verdict comparator family에는 없다.
+  **[2026-08-20]** 이 항목은 `l3_hypernetwork`에서 이름만 바뀌었다(owner 결정 #6). **모델은 동일하며**
+  등록 이름이 구현(고정 `z` 위 symmetric MLP)과 일치하도록 정정한 것이다. `config_sha256`은
+  `3faacaff…` → `c25734d5…`로 이동했으므로 **이전 digest에 bind된 evidence는 재생성 대상이다**.
+  **[2026-08-21]** 결정 #7(factor bank normalization, `sigma_max(Z)=1`)이 digest를 **한 번 더**
+  옮겼다: `c25734d5…` → `5fea3b9e69112b1f6dfd5f6d33249df9d13156ed46011e3dc46f4f8cf3a66100`.
+  **task #14의 재생성은 `c25734d5…` 이전 어느 digest에서도 하지 않는다** — 그건 중간값이다.
+  #7은 seal guard를 건드리지 않았다(`phase2a.py` diff 없음).
+  **[2026-08-23 정정]** 이 항목은 원래 "이 wave의 최종 digest는 `5fea3b9e…` 이며 task #14의
+  재생성은 여기에서 해야 한다"였다. 그 문장은 **틀렸다.** `5fea3b9e…`는 **하한이지 목표가
+  아니다** — config에 activation blocker **여섯**이 그대로 남아 있고, 열거는 로더
+  (`ComposePhase2Config.activation_blockers`)가 내는 그대로다: `regimes.power_status`;
+  `baselines.gears.revision`; `baselines.gears.environment_status`; `baselines.cpa.revision`;
+  `baselines.cpa.environment_status`; 그리고 **집합 키** `baselines.approximation_bias_report_sha256`
+  (근사 표현 중 bias report 가 없는 것이 하나라도 있으면 로더가 올린다 — 오늘은 GEARS).
+  **[2026-08-29]** pair-dependence 결정이 digest 를 한 번 더 옮겼다: `5fea3b9e…` →
+  `0d20774637775eda79cb682a5d28bf7df40bf5b0a3f5768ef109ba7fa37c6c99`.
+  `inference.simultaneous_coverage_claim` 과 `inference.sensitivity_band_inflation` 두 값이
+  등록됐다(결정문 `docs/superpowers/2026-08-29-compose-pair-dependence-decision.md`).
+  **하한이 `5fea3b9e…`에서 `0d207746…`로 올라갔을 뿐 여전히 하한이다** — blocker 여섯이
+  그대로라 task #14 의 재생성 지점은 아니다.
+  **[2026-09-07]** 이 digest 는 `a9dc9410…` 로 이동했다 — futility floor 등록(2026-09-07, F-A3,
+  오너 승인). `futility.measurability_ceiling_floor: 0.2` 가 config 에 등록되면서
+  `0d207746…` → `a9dc9410d1b7fe1580e179b1fa5f9f3756688e059247a6d63322edf642b44767` 로 옮겨졌다.
+  blocker 는 여전히 **여섯**이고 seal 은 UNOPENED 다 — 여전히 하한이지 목표가 아니다.
+  아래 2026-08-23 정정의 논리가 그대로 적용된다.
+  CPA 의 bias null 은 blocker 가 **아니다**: 표현이 exact(`cell_raw_counts`)이고 로더는 exact
+  `cell_*` 표현을 집합 키에 세지 않는다. readiness step 4의 순서가 그 null을
+  채운 **뒤에** evidence를 재생성하도록 정한다. null을 채우면 digest가 또 움직인다.
+  정정 커밋 `3557a1c`가 decisions·readiness 두 문서만 고치고 **이 runbook을 빠뜨렸다**(외부
+  감사 `docs.final-digest-and-blocker-contract-contradiction`, 재현으로 확인).
 - `GI_LEARNABLE_WIN`: additive lower bound `> 0.05`이고 모든 learned comparator lower
   bound `> 0`이며 integrity가 valid일 때만 가능하다.
 - additive 조건만 통과하면 `PARTIAL`; additive 조건도 실패하면 `NO_DISTINCT_WIN`;

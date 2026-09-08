@@ -72,7 +72,6 @@ import fcntl
 import hashlib
 import json
 import os
-import stat
 import sys
 from pathlib import Path
 from typing import Any, Iterator, Mapping
@@ -83,7 +82,7 @@ from alive.compose.approximation_bias import (
     ApproximationBiasEvidence,
     ApproximationBiasValidationError,
 )
-from alive.compose.config2 import load_compose_phase2_config
+from alive.compose.config2 import ComposePhase2Config, load_compose_phase2_config_from_text
 from alive.compose.driver.bias_report_preseal import (
     ApproximationBiasDeclarationError,
     gears_approximation_bias_sha,
@@ -91,6 +90,13 @@ from alive.compose.driver.bias_report_preseal import (
 )
 from alive.compose.driver.confirmation import verify_seal_confirmation_manifest
 from alive.compose.driver.preflight_cmd import build_confirmation_inputs
+from alive.compose.driver.preseal_read import (
+    PresealBytesError,
+    PresealDescriptorError,
+    VerifiedDescriptor,
+    read_verified_bytes,
+    verified_descriptor_handle,
+)
 from alive.compose.driver.run_dir_state import (
     DRIVER_LOCK_FILE,
     TERMINAL_BASENAMES,
@@ -168,6 +174,26 @@ class Phase2bSubcommandError(RuntimeError):
 # --------------------------------------------------------------------------- #
 # Public subcommand
 # --------------------------------------------------------------------------- #
+
+
+def _preseal_bytes(spec: ResolvedRunSpec, field: str) -> bytes:
+    """Digest-bound read of a pre-seal artifact (see `driver.preseal_read`).
+
+    2026-08-30: this used to be `Path(spec.pre_seal[field].path).read_bytes()` --
+    a SECOND read of a pathname whose digest was checked during spec validation,
+    so "already-SHA-verified bytes" described the first read, not this one. The
+    shared helper reads once and hashes what it read.
+    """
+    declared = spec.pre_seal[field]
+    try:
+        return read_verified_bytes(declared.path, declared.sha256, field=field)
+    except PresealBytesError as exc:
+        raise Phase2bSubcommandError(str(exc)) from exc
+
+
+def _preseal_config(spec: ResolvedRunSpec) -> ComposePhase2Config:
+    """Load the pre-seal config from the exact bytes whose digest matched."""
+    return load_compose_phase2_config_from_text(_preseal_bytes(spec, "config").decode("utf-8"))
 
 
 def run_phase2b_subcommand(
@@ -278,7 +304,7 @@ def _run_confirmed_phase2b(
     spec = load_resolved_run_spec(
         spec_path, approved_artifacts_root=approved_artifacts_root, mode_expected=mode
     )
-    config = load_compose_phase2_config(spec.pre_seal["config"].path)
+    config = _preseal_config(spec)
     approximation_bias_report_evidence = _resolve_approximation_bias_report(
         spec, config, response_artifact=run_spec.response_artifact
     )
@@ -506,7 +532,12 @@ def _build_sealed_store(
     validation runs only after :meth:`ComposeOutcomeStore.claim_sealed_access`
     has durably consumed the seal.  The retained descriptor ensures validation
     and materialisation reopen the exact inode whose bytes were hashed, even if
-    the source pathname is replaced concurrently. Fixture mode mints a sanctioned
+    the source pathname is replaced concurrently, and the store re-hashes that
+    descriptor through ``post_materialization_check`` at the moment the last
+    claimed row has been read -- inside the terminal protection boundary, so an
+    IN-PLACE mutation of the consumed inode ends the run ``ABORTED_AFTER_SEAL``
+    (exit 30) instead of after a durable COMPLETE (PR #15 C1, 2026-09-08).
+    Fixture mode mints a sanctioned
     :class:`~alive.compose.outcome_store.FixtureOutcomeStore` via the allowlisted
     :func:`~alive.compose.outcome_store.build_fixture_outcome_store`; scientific
     mode builds a plain :class:`~alive.compose.outcome_store.ComposeOutcomeStore`.
@@ -538,11 +569,12 @@ def _build_sealed_store(
 
     with _open_verified_sealed_source(source_path, expected_source_sha) as verified_source:
         opened_source: Any | None = None
+        consumption_check_failed = False
 
         def _validate_source_obs_after_claim() -> Any:
             """Open once post-claim, validate, then retain this exact backed source."""
             nonlocal opened_source
-            source_obj = anndata.read_h5ad(verified_source, backed="r")
+            source_obj = anndata.read_h5ad(verified_source.path, backed="r")
             try:
                 validate_pair_index_against_source_obs(
                     source_obj,
@@ -557,120 +589,159 @@ def _build_sealed_store(
             opened_source = source_obj
             return source_obj
 
+        def _recheck_source_after_materialization() -> None:
+            """Prove the consumed bytes are the verified bytes, at consumption end.
+
+            Handed to the store as ``post_materialization_check``: it runs after the
+            last claimed row is densified and before any pair is returned, i.e. still
+            inside the terminal protection boundary, so a failure yields
+            ``ABORTED_AFTER_SEAL`` + exit 30 rather than an exception raised after a
+            COMPLETE terminal was already durable (PR #15 finding C1, 2026-09-08).
+            """
+            nonlocal consumption_check_failed
+            try:
+                verified_source.recheck()
+            except BaseException:
+                consumption_check_failed = True
+                raise
+
         if spec.mode == "fixture":
             # Fixture-vs-real-source byte comparison stays OFF (validated by index +
             # attestation, not raw source bytes): the allowlisted attestation triple
             # is passed through and checked against the committed allowlist only.
             outcome_store = build_fixture_outcome_store(
                 pair_index,
-                verified_source,
+                verified_source.path,
                 pair_manifest,
                 audit_path=audit_path,
                 corpus_id=sealed_outcome["corpus_id"],
                 source_sha256=sealed_outcome["source_sha256"],
                 builder_code_sha256=sealed_outcome["builder_code_sha256"],
                 materialization_validator=_validate_source_obs_after_claim,
+                post_materialization_check=_recheck_source_after_materialization,
             )
         else:
             outcome_store = ComposeOutcomeStore(
                 pair_index,
-                verified_source,
+                verified_source.path,
                 pair_manifest,
                 audit_path=audit_path,
                 materialization_validator=_validate_source_obs_after_claim,
+                post_materialization_check=_recheck_source_after_materialization,
             )
         try:
             yield outcome_store
+        except BaseException:
+            # An exception is in flight: it is the failure that matters. Re-checking
+            # here could only replace it with a digest complaint (the same principle
+            # the re-check has always been written under: never in `finally`).
+            raise
+        else:
+            # Normal path only, and DIAGNOSTIC only. Consumption already ended inside
+            # `materialize_claimed`, which re-checked the bytes it actually consumed;
+            # what the file does AFTER that is outside the "verified == consumed"
+            # contract and must not contradict a terminal state that is already
+            # durable. So report it on stderr and leave the terminal alone -- raising
+            # here is exactly the COMPLETE-terminal / exit-code contradiction C1
+            # measured. Skipped when the consumption-boundary check already refused
+            # (its message is the accurate one).
+            #
+            # NOTHING in this branch may raise (PR #15 re-review R1, 2026-09-08,
+            # reproduced): `recheck()` re-streams the digest with `os.lseek`/`os.read`,
+            # so a storage-level `OSError` (EIO) is possible here independently of any
+            # writer D3-a's premises exclude, and `SealedSourceHandle.recheck` converts
+            # only `PresealDescriptorError`. An exception raised HERE leaves the `with
+            # store_context` exit, skips step 5's post-seal handler, and lands as a
+            # pre-seal exit while a durable COMPLETE terminal sits on disk with
+            # `recover` returning 0 -- the same contradiction, arriving by an I/O error
+            # instead of a digest mismatch. `Exception`, not `BaseException`:
+            # KeyboardInterrupt/SystemExit stay the operator's to see.
+            #
+            # This does NOT weaken the consumption boundary. An `OSError` inside
+            # `materialize_claimed`'s `post_materialization_check` is still wrapped by
+            # the store into `ComposeSealingError` (it catches `Exception`), so failing
+            # to PROVE integrity while consumption is still open fails closed:
+            # ABORTED_AFTER_SEAL, exit 30, `recover` 30. Both arms are pinned in
+            # `test_sealed_source_integrity_e2e.py`.
+            if not consumption_check_failed:
+                try:
+                    verified_source.recheck()
+                except Phase2bSubcommandError as exc:
+                    print(
+                        "phase2b: sealed source changed AFTER consumption; the consumed "
+                        f"bytes were verified at materialization against {expected_source_sha}; "
+                        f"terminal state unaffected ({exc})",
+                        file=sys.stderr,
+                    )
+                except Exception as exc:  # noqa: BLE001 - diagnostic must never raise
+                    print(
+                        "phase2b: post-consumption diagnostic re-hash could not run "
+                        f"({type(exc).__name__}: {exc}); the consumed bytes were verified "
+                        f"at materialization against {expected_source_sha}; terminal state "
+                        "unaffected",
+                        file=sys.stderr,
+                    )
         finally:
             if opened_source is not None:
                 opened_source.file.close()
 
 
-@contextlib.contextmanager
-def _open_verified_sealed_source(source_path: Path, expected_sha: str) -> Iterator[Path]:
-    """Yield an fd-backed path to the integrity-checked sealed source.
+class SealedSourceHandle:
+    """The driver's view of the open, digest-verified sealed source.
 
-    Opens the source with ``O_NOFOLLOW`` (rejecting a symlink final component),
-    fstat-verifies it is a regular file, captures its
-    ``(device, inode, size, mtime_ns)`` identity, streams the SHA-256, then
-    re-captures the identity and requires it unchanged (a mutation during
-    hashing fails closed). The streamed digest must equal ``expected_sha``.
-    The original descriptor remains open while the yielded ``/proc/self/fd`` or
-    ``/dev/fd`` path is used, closing the hash-then-reopen pathname race.
-
-    Raises
-    ------
-    Phase2bSubcommandError
-        On a symlink / non-regular node, an identity change during hashing, an
-        unreadable file, a digest mismatch, or an unavailable/mismatched
-        descriptor-backed path.
+    Wraps a :class:`~alive.compose.driver.preseal_read.VerifiedDescriptor` so
+    that BOTH the open-time failure and the re-check failure surface as this
+    module's :class:`Phase2bSubcommandError` -- the contract every existing
+    message match relies on -- while the re-check itself stays a call the
+    consumer makes at the moment consumption ends.
     """
-    if source_path.is_symlink():
-        raise Phase2bSubcommandError(
-            f"sealed source {str(source_path)!r} is a symlink (node-kind policy)"
-        )
-    flags = os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0)
-    try:
-        fd = os.open(source_path, flags)
-    except OSError as exc:
-        raise Phase2bSubcommandError(
-            f"cannot open sealed source {str(source_path)!r} (O_NOFOLLOW): {exc}"
-        ) from exc
-    try:
-        pre = os.fstat(fd)
-        if not stat.S_ISREG(pre.st_mode):
-            raise Phase2bSubcommandError(
-                f"sealed source {str(source_path)!r} is not a regular file (node-kind policy)"
-            )
-        identity_before = (pre.st_dev, pre.st_ino, pre.st_size, pre.st_mtime_ns)
-        digest = hashlib.sha256()
-        while True:
-            chunk = os.read(fd, _HASH_CHUNK)
-            if not chunk:
-                break
-            digest.update(chunk)
-        post = os.fstat(fd)
-        identity_after = (post.st_dev, post.st_ino, post.st_size, post.st_mtime_ns)
-        if identity_before != identity_after:
-            raise Phase2bSubcommandError(
-                f"sealed source {str(source_path)!r} changed identity during hashing "
-                f"(before={identity_before!r} after={identity_after!r})"
-            )
-        actual_sha = digest.hexdigest()
-        if actual_sha != expected_sha:
-            raise Phase2bSubcommandError(
-                f"sealed source {str(source_path)!r} digest mismatch "
-                f"(expected {expected_sha!r}, got {actual_sha!r})"
-            )
 
-        os.lseek(fd, 0, os.SEEK_SET)
-        descriptor_path: Path | None = None
-        for candidate in (Path(f"/proc/self/fd/{fd}"), Path(f"/dev/fd/{fd}")):
-            try:
-                candidate_fd = os.open(candidate, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0))
-            except OSError:
-                continue
-            try:
-                candidate_stat = os.fstat(candidate_fd)
-                candidate_identity = (
-                    candidate_stat.st_dev,
-                    candidate_stat.st_ino,
-                    candidate_stat.st_size,
-                    candidate_stat.st_mtime_ns,
-                )
-            finally:
-                os.close(candidate_fd)
-            if candidate_identity == identity_after:
-                descriptor_path = candidate
-                break
-        if descriptor_path is None:
-            raise Phase2bSubcommandError(
-                "cannot obtain an identity-matched descriptor path for sealed source "
-                f"{str(source_path)!r}; refusing a pathname reopen"
-            )
-        yield descriptor_path
-    finally:
-        os.close(fd)
+    __slots__ = ("_handle", "expected_sha", "path")
+
+    def __init__(self, handle: VerifiedDescriptor) -> None:
+        self._handle = handle
+        self.path = handle.path
+        self.expected_sha = handle.expected_sha
+
+    def recheck(self) -> None:
+        """Re-stream the digest through the same descriptor; convert the error."""
+        try:
+            self._handle.recheck()
+        except PresealDescriptorError as exc:
+            raise Phase2bSubcommandError(str(exc)) from exc
+
+
+@contextlib.contextmanager
+def _open_verified_sealed_source(
+    source_path: Path, expected_sha: str
+) -> Iterator[SealedSourceHandle]:
+    """Descriptor-pinned read of the sealed source, delegating to the shared helper.
+
+    The implementation moved to :mod:`alive.compose.driver.preseal_read` on
+    2026-08-30 so the pre-seal bias lane could reuse it. That lane could not be
+    closed the obvious way: its reconstruction helper lives in
+    ``src/alive/compose/approximation_bias.py``, which is inside the FROZEN
+    kernel-isolation closure, and editing it invalidates archived Linux CI evidence
+    that only a fresh CI run can re-establish (`test_kernel_isolation_ci` caught
+    exactly that when the first attempt tried). Sharing that helper closes the lane
+    without touching a single byte the proof covers.
+
+    On 2026-09-08 (PR #15 finding C1) this switched from
+    :func:`~alive.compose.driver.preseal_read.verified_descriptor` to
+    :func:`~alive.compose.driver.preseal_read.verified_descriptor_handle`: the
+    exit-time re-check ran after the library had already published a COMPLETE
+    terminal, so its failure could not decide the terminal state. The handle is
+    yielded instead and :meth:`SealedSourceHandle.recheck` is called at the real
+    consumption boundary (``materialize_claimed``).
+
+    `PresealDescriptorError` is converted to this module's error, so the existing
+    contract and every message it is matched on are unchanged.
+    """
+    try:
+        with verified_descriptor_handle(source_path, expected_sha) as handle:
+            yield SealedSourceHandle(handle)
+    except PresealDescriptorError as exc:
+        raise Phase2bSubcommandError(str(exc)) from exc
 
 
 def _resolve_approximation_bias_report(

@@ -55,7 +55,7 @@ from alive.provenance import sha256_json
 REQUIRED_METHODS: tuple[str, ...] = (
     "l1_bilinear_identifiable",
     "l2_saturation",
-    "l3_hypernetwork",
+    "l3_symmetric_mlp",
     "additive",
     "no_change",
     "perturbation_mean",

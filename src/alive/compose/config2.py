@@ -74,6 +74,7 @@ _EXPECTED_REGULARIZED_SOLVER = "svd_ridge_filter_factors"
 _EXPECTED_IDENTIFICATION_SELECTION = "calibration_oof_gene_disjoint"
 _EXPECTED_UNREGULARIZED_OOF_RANK_POLICY = "require_full_rank_each_train_fold"
 _EXPECTED_LAMBDA_SCALING = "calibration_sigma_max_squared"
+_EXPECTED_FACTOR_BANK_NORMALIZATION = "sigma_max_z_unit"
 _EXPECTED_RANK_TOLERANCE_RULE = "max_shape_times_float64_eps_times_sigma_max"
 _EXPECTED_OOF_FOLDS = 3
 _EXPECTED_UNCOVERED_TOLERANCE = 0.75
@@ -93,12 +94,12 @@ _EXPECTED_COMPARATOR_FAMILY: tuple[str, ...] = (
     "gears",
     "cpa",
     "id_only",
-    "l3_hypernetwork",
+    "l3_symmetric_mlp",
 )
 _EXPECTED_METHOD_ROSTER: tuple[str, ...] = (
     "l1_bilinear_identifiable",
     "l2_saturation",
-    "l3_hypernetwork",
+    "l3_symmetric_mlp",
     "additive",
     "no_change",
     "perturbation_mean",
@@ -119,6 +120,11 @@ _EXPECTED_SHARED_RESAMPLES_ACROSS_CONTRASTS = True
 _EXPECTED_FAMILY_CONFIDENCE = 0.95
 _EXPECTED_BOOTSTRAP_REPLICATES = 10000
 _EXPECTED_ESM_MODEL = "esm2_t33_650M_UR50D_mean_pool"
+#: Registered split-half measurability floor (``futility.measurability_ceiling_floor``).
+#: The gate that consumes it lives in ``alive.compose.gates.measurability_gate``; this
+#: constant only pins the registered VALUE, it is never the gate's own threshold.
+_EXPECTED_MEASURABILITY_CEILING_FLOOR: float = 0.2
+_EXPECTED_INCLUDE_ESM: bool = True
 _EXPECTED_ESTABLISHED_POWER_STATUS = "established_from_registered_report"
 _BLOCKED_POWER_STATUS = "unestablished_activation_blocker"
 _EXPECTED_ROLE_NAMES: tuple[str, ...] = ROLE_NAMES
@@ -269,6 +275,7 @@ _KNOWN_IDENTIFICATION = frozenset(
         "unregularized_oof_rank_policy",
         "rank_tolerance_rule",
         "lambda_scaling",
+        "factor_bank_normalization",
         "oof_folds",
         "uncovered_tolerance",
         "condition_ceiling",
@@ -296,6 +303,8 @@ _KNOWN_INFERENCE = frozenset(
         "shared_resamples_across_contrasts",
         "family_confidence",
         "bootstrap_replicates",
+        "simultaneous_coverage_claim",
+        "sensitivity_band_inflation",
     }
 )
 _KNOWN_REGIMES = frozenset(
@@ -348,7 +357,9 @@ _KNOWN_LEAKAGE_CONTROL = frozenset(
     {"baseline_training_roles", "sealed_outcomes_touched_before_freeze"}
 )
 _KNOWN_PHASING = frozenset({"phase_2a", "phase_2b"})
-_KNOWN_FUTILITY = frozenset({"conditions", "dev_oof_metric", "dev_oof_threshold"})
+_KNOWN_FUTILITY = frozenset(
+    {"conditions", "dev_oof_metric", "dev_oof_threshold", "measurability_ceiling_floor"}
+)
 _KNOWN_SEAL = frozenset(
     {"artifacts_root", "run_id_inputs", "sealed_access_max", "minimum_sealed_n", "write_once"}
 )
@@ -471,6 +482,7 @@ class ComposePhase2Config:
     unregularized_oof_rank_policy: str
     rank_tolerance_rule: str
     lambda_scaling: str
+    factor_bank_normalization: str
     oof_folds: int
     uncovered_tolerance: float
     condition_ceiling: float
@@ -492,12 +504,15 @@ class ComposePhase2Config:
     shared_resamples_across_contrasts: bool
     family_confidence: float
     bootstrap_replicates: int
+    simultaneous_coverage_claim: str
+    sensitivity_band_inflation: tuple[float, ...]
     role_names: tuple[str, ...]
     fit_roles: tuple[str, ...]
     sealed_minimum_n: int
     futility_conditions: tuple[str, ...]
     dev_oof_metric: str
     dev_oof_threshold: float
+    futility_measurability_ceiling_floor: float
     config_sha256: str
 
     @property
@@ -688,7 +703,34 @@ def load_compose_phase2_config(path: str | Path) -> ComposePhase2Config:
         If the file is empty, carries unknown or missing keys, or any
         scientifically load-bearing value deviates from the pre-registration.
     """
-    raw: dict[str, Any] | None = yaml.safe_load(Path(path).read_text())
+    return load_compose_phase2_config_from_text(Path(path).read_text())
+
+
+def load_compose_phase2_config_from_text(text: str) -> ComposePhase2Config:
+    """Validate a Phase-2 config from TEXT already in hand.
+
+    :func:`load_compose_phase2_config` is the path form and delegates here. This
+    entry point exists so a caller that has already read a file's bytes -- and
+    verified their digest -- can parse *those same bytes* instead of reopening
+    the path. Reopening is what let verified bytes and consumed bytes diverge
+    (``provenance.preseal-hash-reopen-toctou``, reproduced 2026-08-24).
+
+    Parameters
+    ----------
+    text
+        The YAML document.
+
+    Returns
+    -------
+    ComposePhase2Config
+        A frozen, fully validated config.
+
+    Raises
+    ------
+    Phase2ConfigError
+        Same conditions as the path form.
+    """
+    raw: dict[str, Any] | None = yaml.safe_load(text)
     if not isinstance(raw, dict) or not raw:
         raise Phase2ConfigError("config is empty or not a mapping")
 
@@ -720,15 +762,19 @@ def load_compose_phase2_config(path: str | Path) -> ComposePhase2Config:
         unregularized_oof_rank_policy,
         rank_tolerance_rule,
         lambda_scaling,
+        factor_bank_normalization,
         oof_folds,
         uncovered_tolerance,
         condition_ceiling,
     ) = _validate_identification(_require(raw, "identification", "top-level"))
     split_seed, registered_seeds = _validate_seeds(_require(raw, "seeds", "top-level"))
     sealed_minimum_n = _validate_seal(_require(raw, "seal", "top-level"))
-    futility_conditions, dev_oof_metric, dev_oof_threshold = _validate_futility(
-        _require(raw, "futility", "top-level")
-    )
+    (
+        futility_conditions,
+        dev_oof_metric,
+        dev_oof_threshold,
+        measurability_ceiling_floor,
+    ) = _validate_futility(_require(raw, "futility", "top-level"))
     method_roster, baseline_representations, baseline_activation_statuses = _validate_baselines(
         _require(raw, "baselines", "top-level")
     )
@@ -752,6 +798,8 @@ def load_compose_phase2_config(path: str | Path) -> ComposePhase2Config:
         shared_resamples,
         family_confidence,
         bootstrap_replicates,
+        simultaneous_coverage_claim,
+        sensitivity_band_inflation,
     ) = _validate_inference(_require(raw, "inference", "top-level"))
     role_names, fit_roles = _validate_roles(
         _require(raw, "split", "top-level"),
@@ -773,6 +821,7 @@ def load_compose_phase2_config(path: str | Path) -> ComposePhase2Config:
         unregularized_oof_rank_policy=unregularized_oof_rank_policy,
         rank_tolerance_rule=rank_tolerance_rule,
         lambda_scaling=lambda_scaling,
+        factor_bank_normalization=factor_bank_normalization,
         oof_folds=oof_folds,
         uncovered_tolerance=uncovered_tolerance,
         condition_ceiling=condition_ceiling,
@@ -794,12 +843,15 @@ def load_compose_phase2_config(path: str | Path) -> ComposePhase2Config:
         shared_resamples_across_contrasts=shared_resamples,
         family_confidence=family_confidence,
         bootstrap_replicates=bootstrap_replicates,
+        simultaneous_coverage_claim=simultaneous_coverage_claim,
+        sensitivity_band_inflation=sensitivity_band_inflation,
         role_names=role_names,
         fit_roles=fit_roles,
         sealed_minimum_n=sealed_minimum_n,
         futility_conditions=futility_conditions,
         dev_oof_metric=dev_oof_metric,
         dev_oof_threshold=dev_oof_threshold,
+        futility_measurability_ceiling_floor=measurability_ceiling_floor,
         config_sha256=sha256_json(raw),
     )
 
@@ -908,6 +960,13 @@ def _validate_factor_z(
     expression_dims = tuple(
         _strict_int(x, "factor_z.expression_dims entry") for x in expression_raw
     )
+    include_esm = _require(block, "include_esm", "factor_z")
+    if include_esm is not _EXPECTED_INCLUDE_ESM:
+        raise Phase2ConfigError(
+            f"factor_z.include_esm must be the registered boolean {_EXPECTED_INCLUDE_ESM}; "
+            f"got {include_esm!r}. No ESM-off arm is registered, so flipping this flag would "
+            "move the config digest without constructing an ablation"
+        )
     esm_model = _require(block, "esm_model", "factor_z")
     if esm_model != _EXPECTED_ESM_MODEL:
         raise Phase2ConfigError(
@@ -983,6 +1042,12 @@ def _validate_identification(
             "identification.rank_tolerance_rule must match the preregistration exactly: "
             f"{_EXPECTED_RANK_TOLERANCE_RULE!r}"
         )
+    factor_bank_normalization = _require(block, "factor_bank_normalization", "identification")
+    if factor_bank_normalization != _EXPECTED_FACTOR_BANK_NORMALIZATION:
+        raise Phase2ConfigError(
+            "identification.factor_bank_normalization must match the preregistration "
+            f"exactly: {_EXPECTED_FACTOR_BANK_NORMALIZATION!r}"
+        )
     lambda_scaling = _require(block, "lambda_scaling", "identification")
     if lambda_scaling != _EXPECTED_LAMBDA_SCALING:
         raise Phase2ConfigError(
@@ -1041,6 +1106,7 @@ def _validate_identification(
         rank_policy,
         rank_rule,
         lambda_scaling,
+        factor_bank_normalization,
         oof_folds,
         tolerance,
         ceiling,
@@ -1103,8 +1169,16 @@ def _validate_seal(block: dict[str, Any]) -> int:
     return minimum_sealed_n
 
 
-def _validate_futility(block: dict[str, Any]) -> tuple[tuple[str, ...], str, float]:
-    """Validate and return the complete preregistered development futility rule."""
+def _validate_futility(block: dict[str, Any]) -> tuple[tuple[str, ...], str, float, float]:
+    """Validate and return the complete preregistered development futility rule.
+
+    Returns
+    -------
+    tuple
+        ``(conditions, dev_oof_metric, dev_oof_threshold, measurability_ceiling_floor)``.
+        The measurability floor is the registered threshold the ``measurability_fail``
+        condition is decided against; it lives here rather than in source (F-A3).
+    """
     _close_schema(block, _KNOWN_FUTILITY, "futility")
     raw_conditions = _require(block, "conditions", "futility")
     if not isinstance(raw_conditions, list) or not all(
@@ -1130,7 +1204,22 @@ def _validate_futility(block: dict[str, Any]) -> tuple[tuple[str, ...], str, flo
         raise Phase2ConfigError(
             f"futility.dev_oof_threshold must be {_EXPECTED_DEV_OOF_THRESHOLD}, got {threshold}"
         )
-    return conditions, metric, threshold
+    floor_raw = _require(block, "measurability_ceiling_floor", "futility")
+    if (
+        isinstance(floor_raw, bool)
+        or not isinstance(floor_raw, (int, float))
+        or not math.isfinite(float(floor_raw))
+    ):
+        raise Phase2ConfigError(
+            f"futility.measurability_ceiling_floor must be a finite number, got {floor_raw!r}"
+        )
+    measurability_ceiling_floor = float(floor_raw)
+    if measurability_ceiling_floor != _EXPECTED_MEASURABILITY_CEILING_FLOOR:
+        raise Phase2ConfigError(
+            "futility.measurability_ceiling_floor must be "
+            f"{_EXPECTED_MEASURABILITY_CEILING_FLOOR}, got {measurability_ceiling_floor}"
+        )
+    return conditions, metric, threshold, measurability_ceiling_floor
 
 
 def _validate_baselines(
@@ -1157,7 +1246,7 @@ def _validate_baselines(
     ladder = _require(block, "ablation_ladder", "baselines")
     if lower_bounds != ["no_change", "perturbation_mean"]:
         raise Phase2ConfigError("baselines.lower_bounds must be [no_change, perturbation_mean]")
-    if ladder != ["l1_bilinear_identifiable", "l2_saturation", "l3_hypernetwork"]:
+    if ladder != ["l1_bilinear_identifiable", "l2_saturation", "l3_symmetric_mlp"]:
         raise Phase2ConfigError("baselines.ablation_ladder does not match the registered ladder")
     representations: list[tuple[str, str, str | None]] = []
     activation_statuses: list[tuple[str, str | None, str]] = []
@@ -1260,9 +1349,18 @@ def _validate_metric(
     )
 
 
+# 2026-08-29 결정(pair-dependence). 등록된 pair-i.i.d. bootstrap 의 simultaneous coverage
+# 주장은 **무조건이 아니다** — headline 구조가 그 가정을 구성상 위배한다(22 pairs / 21 genes,
+# 유전자를 하나도 공유하지 않는 행 0 개). 주장을 가정 아래로 제한하고, 밴드 팽창 사다리를
+# 얼려 verdict 가 어디서 뒤집히는지 함께 보고한다. 사다리는 descriptive-only 이며
+# verdict 는 언제나 첫 값(1.0, 등록된 밴드)에서만 판정한다.
+_EXPECTED_SIMULTANEOUS_COVERAGE_CLAIM = "conditional_on_registered_resampling_unit"
+_EXPECTED_SENSITIVITY_BAND_INFLATION = (1.0, 1.1, 1.15, 1.25)
+
+
 def _validate_inference(
     block: dict[str, Any],
-) -> tuple[tuple[str, ...], str, str, bool, float, int]:
+) -> tuple[tuple[str, ...], str, str, bool, float, int, str, tuple[float, ...]]:
     """Validate the comparator roster and bootstrap settings."""
     _close_schema(block, _KNOWN_INFERENCE, "inference")
 
@@ -1312,6 +1410,25 @@ def _validate_inference(
             f"{_EXPECTED_BOOTSTRAP_REPLICATES}, got {bootstrap_replicates}"
         )
 
+    coverage_claim = _require(block, "simultaneous_coverage_claim", "inference")
+    if coverage_claim != _EXPECTED_SIMULTANEOUS_COVERAGE_CLAIM:
+        raise Phase2ConfigError(
+            "inference.simultaneous_coverage_claim must be "
+            f"{_EXPECTED_SIMULTANEOUS_COVERAGE_CLAIM!r}, got {coverage_claim!r}"
+        )
+
+    ladder_raw = _require(block, "sensitivity_band_inflation", "inference")
+    if not isinstance(ladder_raw, list) or not all(
+        isinstance(x, (int, float)) and not isinstance(x, bool) for x in ladder_raw
+    ):
+        raise Phase2ConfigError("inference.sensitivity_band_inflation must be a list of numbers")
+    ladder = tuple(float(x) for x in ladder_raw)
+    if ladder != _EXPECTED_SENSITIVITY_BAND_INFLATION:
+        raise Phase2ConfigError(
+            "inference.sensitivity_band_inflation must match the registered ladder exactly: "
+            f"expected {list(_EXPECTED_SENSITIVITY_BAND_INFLATION)}, got {list(ladder)}"
+        )
+
     return (
         comparator_family,
         method,
@@ -1319,6 +1436,8 @@ def _validate_inference(
         shared,
         family_confidence,
         bootstrap_replicates,
+        coverage_claim,
+        ladder,
     )
 
 
@@ -1611,6 +1730,7 @@ def assert_scientific_mode_allowed(
                 expected_split_seed=config.split_seed,
                 expected_data_sha256=data_sha256,
                 expected_pair_counts=independent_pair_counts,
+                ceiling_floor=config.futility_measurability_ceiling_floor,
             )
         except ValueError as exc:
             raise ScientificModeError(

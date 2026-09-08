@@ -62,7 +62,7 @@ from alive.compose.config2 import (
     ActivationRecord,
     ComposePhase2Config,
     assert_scientific_mode_allowed,
-    load_compose_phase2_config,
+    load_compose_phase2_config_from_text,
 )
 from alive.compose.driver.bias_report_preseal import (
     ApproximationBiasDeclarationError,
@@ -70,7 +70,12 @@ from alive.compose.driver.bias_report_preseal import (
 )
 from alive.compose.driver.fixture_builder import _MODEL_CLASS_BY_NAME
 from alive.compose.driver.pair_index import validate_scientific_sealed_declaration
+from alive.compose.driver.preseal_read import (
+    PresealBytesError,
+    read_verified_bytes,
+)
 from alive.compose.driver.run_spec import (
+    PathSha,
     ResolvedRunSpec,
     RunSpecError,
     load_resolved_run_spec,
@@ -336,8 +341,8 @@ def load_run_spec_carrier(
         spec_path, approved_artifacts_root=approved_artifacts_root, mode_expected="scientific"
     )
     # §5.2: sealed attestation equality (no source access).
-    attestation = _read_json(spec.pre_seal["approved_sealed_input_attestation"].path)
-    pair_index_manifest = _read_json(spec.pre_seal["pair_index_manifest"].path)
+    attestation = _preseal_json(spec, "approved_sealed_input_attestation")
+    pair_index_manifest = _preseal_json(spec, "pair_index_manifest")
     validate_scientific_sealed_declaration(
         sealed_input=spec.scientific["sealed_input"],
         attestation=attestation,
@@ -348,7 +353,9 @@ def load_run_spec_carrier(
     )
     # Load the config before runtime capture so EnvironmentInfo records the exact
     # pre-registered seed roster rather than an empty provenance placeholder.
-    config = load_compose_phase2_config(spec.pre_seal["config"].path)
+    config = load_compose_phase2_config_from_text(
+        _read_verified_bytes(spec.pre_seal["config"], field="config").decode("utf-8")
+    )
     _validate_scientific_approximation_bias_report(spec, config)
     # §5.3: runtime git/environment identity (fail closed vs approved_git_sha).
     context = resolve_scientific_runtime_context(
@@ -357,6 +364,21 @@ def load_run_spec_carrier(
         lockfile_path=Path(spec.scientific["dependency_manifest"]["path"]),
         registered_seeds=config.registered_seeds,
     )
+    # The runtime context hashed the dependency manifest by pathname (capture_environment)
+    # and that digest is serialised into the pre-access ledger as environment.lockfile_sha256.
+    # It is the third consumer of the dependency-manifest lane: the run spec verified the
+    # declared digest at load and the provenance builder verifies it again below, but a
+    # file replaced during this capture and restored before provenance assembly would leave
+    # the ledger describing bytes nobody declared while both checks pass (reproduced with a
+    # control arm, 2026-09-06). A record may carry only the declared digest.
+    declared_lockfile_sha256 = spec.scientific["dependency_manifest"]["sha256"]
+    if context.environment.lockfile_sha256 != declared_lockfile_sha256:
+        raise RunSpecError(
+            "environment lockfile_sha256 "
+            f"{context.environment.lockfile_sha256} != declared scientific.dependency_manifest "
+            f"sha256 {declared_lockfile_sha256}; the dependency manifest changed between run-spec "
+            "verification and environment capture"
+        )
     # §5.4: config + ActivationRecord (re-validated through assert_scientific_mode_allowed).
     activation_record = _assemble_activation_record(spec, config, git_is_clean=context.git_is_clean)
     # §5.5-6: reuse deserializers + typed provenance.
@@ -472,15 +494,17 @@ def _assemble_activation_record(
 # --------------------------------------------------------------------------- #
 
 
-def _processed_asset_path(spec: ResolvedRunSpec) -> str:
-    """Return raw_asset.path ONLY if the validated data card declares it the processed asset (§4).
+def _processed_asset(spec: ResolvedRunSpec) -> PathSha:
+    """Return raw_asset as a ``PathSha`` ONLY if the data card declares it the processed asset (§4).
 
     The final PREPARE schema must add a separately verified ``processed_asset`` field if the raw
     asset is genuinely raw; until then this refuses to record a raw-file digest as
     ``processed_sha256`` unless the data card binds the raw asset AS the processed analysis asset.
+    Returns the declared object, path AND digest: the digest is what the provenance builder
+    verifies the bytes against.
     """
     raw = spec.pre_seal["raw_asset"]
-    card = _read_json(spec.pre_seal["data_card"].path)
+    card = _preseal_json(spec, "data_card")
     declared = card.get("processed_analysis_asset")
     if not isinstance(declared, dict) or declared.get("sha256") != raw.sha256:
         raise RunSpecError(
@@ -488,20 +512,34 @@ def _processed_asset_path(spec: ResolvedRunSpec) -> str:
             "record a raw-file digest as processed_sha256 (spec §4 requires a separate "
             "processed_asset field for a genuinely raw asset)"
         )
-    return raw.path
+    return raw
 
 
 def _assemble_provenance_inputs(
     spec: ResolvedRunSpec, config: ComposePhase2Config, *, environment: EnvironmentInfo
 ) -> ActivationProvenanceInputs:
-    """Build the typed Phase-2b provenance via the existing helper (§4 authoritative-source map)."""
+    """Build the typed Phase-2b provenance via the existing helper (§4 authoritative-source map).
+
+    Each of the five file inputs crosses this boundary as ``(path, sha256)`` -- the exact
+    declaration ``load_resolved_run_spec`` verified. The previous shape passed ``.path`` alone
+    and the builder recorded whatever the file hashed to by then, so a replacement landing
+    between run-spec verification and this call became provenance. Carrying the digest lets the
+    builder refuse bytes that are not the declared ones, and this is the only place the five
+    declarations are unwrapped, so the fix is applied to all five lanes at once rather than to
+    the one a review happened to name.
+    """
     scientific = spec.scientific
+    processed = _processed_asset(spec)
+    feature_bank = spec.pre_seal["feature_bank"]
+    dependency = scientific["dependency_manifest"]
+    gears = spec.worker_blocks["gears"].requirements_lock
+    cpa = spec.worker_blocks["cpa"].requirements_lock
     return build_activation_provenance_inputs(
-        processed_path=_processed_asset_path(spec),
-        feature_bank_path=spec.pre_seal["feature_bank"].path,
-        dependency_lock_path=scientific["dependency_manifest"]["path"],
-        gears_requirements_path=spec.worker_blocks["gears"].requirements_lock.path,
-        cpa_requirements_path=spec.worker_blocks["cpa"].requirements_lock.path,
+        processed=(processed.path, processed.sha256),
+        feature_bank=(feature_bank.path, feature_bank.sha256),
+        dependency_lock=(dependency["path"], dependency["sha256"]),
+        gears_requirements=(gears.path, gears.sha256),
+        cpa_requirements=(cpa.path, cpa.sha256),
         environment=environment,
         device=scientific["device"],
         precision=scientific["precision"],
@@ -525,12 +563,38 @@ def _peek_mode(spec_path: Path) -> str:
     return mode
 
 
-def _read_json(path: str | Path) -> dict[str, Any]:
-    """Parse a pre-seal JSON stage-1 artifact (already SHA-verified by the loader)."""
-    obj = json.loads(Path(path).read_bytes())
+def _read_verified_bytes(declared: PathSha, *, field: str) -> bytes:
+    """Digest-bound read, delegating to the shared helper.
+
+    The implementation and its rationale moved to
+    :mod:`alive.compose.driver.preseal_read` on 2026-08-30, because keeping it
+    here meant every other consumer of a pre-seal path had its own ungoverned
+    read -- including one lane inside this very file. `PresealBytesError` is
+    converted to this module's `RunSpecError` so the existing contract is
+    unchanged.
+    """
+    try:
+        return read_verified_bytes(declared.path, declared.sha256, field=field)
+    except PresealBytesError as exc:
+        raise RunSpecError(str(exc)) from exc
+
+
+def _read_verified_json(declared: PathSha, *, field: str) -> dict[str, Any]:
+    """Digest-bound JSON read: parse the same bytes that were hashed."""
+    obj = json.loads(_read_verified_bytes(declared, field=field))
     if not isinstance(obj, dict):
-        raise RunSpecError(f"stage-1 artifact {path} is not a JSON object")
+        raise RunSpecError(f"stage-1 artifact {declared.path} is not a JSON object")
     return obj
+
+
+def _preseal_json(spec: ResolvedRunSpec, field: str) -> dict[str, Any]:
+    """Read a pre-seal JSON artifact by field name, digest-bound.
+
+    The field name is written once. The previous call shape repeated it -- once
+    to index ``spec.pre_seal`` and once for the error message -- which is a
+    place for the two to drift apart.
+    """
+    return _read_verified_json(spec.pre_seal[field], field=field)
 
 
 # --------------------------------------------------------------------------- #
@@ -547,10 +611,10 @@ def _load_phase2a_inputs(spec: ResolvedRunSpec, *, require_factor_banks: bool) -
     source of truth). ``content_checksum`` is recomputed in ``__post_init__`` and
     reproduces the serialized value because every field is byte-faithful.
     """
-    payload = _read_json(spec.pre_seal["phase2a_inputs"].path)
+    payload = _preseal_json(spec, "phase2a_inputs")
     factor_banks_by_k = None
     if require_factor_banks:
-        factor_payload = _read_json(spec.pre_seal["factor_bank"].path)
+        factor_payload = _preseal_json(spec, "factor_bank")
         try:
             factor_banks_by_k, aggregate = deserialize_factor_bank_collection(factor_payload)
         except (TypeError, ValueError) as exc:
@@ -627,8 +691,8 @@ def _load_dev_store_audit(spec: ResolvedRunSpec) -> dict[str, Any]:
     the :class:`~alive.compose.phase2a.OutcomeAccessAudit` is reconstructed from the
     manifest's ``access_audit`` block (its five fields map exactly).
     """
-    source = _read_json(spec.pre_seal["development_outcome_source"].path)
-    manifest = _read_json(spec.pre_seal["development_outcome_manifest"].path)
+    source = _preseal_json(spec, "development_outcome_source")
+    manifest = _preseal_json(spec, "development_outcome_manifest")
     return {
         "combo_calibration_eps": np.asarray(source["combo_calibration_eps"], dtype=np.float64),
         "combo_calibration_pair_ids": tuple(
@@ -640,7 +704,7 @@ def _load_dev_store_audit(spec: ResolvedRunSpec) -> dict[str, Any]:
 
 def _load_response_artifact(spec: ResolvedRunSpec) -> dict[str, Any]:
     """Rehydrate the live response artifact (space + control_mean + fit-role spec)."""
-    payload = _read_json(spec.pre_seal["response_artifact"].path)
+    payload = _preseal_json(spec, "response_artifact")
     return {
         "response_space": _deserialize_response_space(payload["response_space"]),
         "control_mean": np.asarray(payload["control_mean"], dtype=np.float64),
@@ -711,8 +775,8 @@ def _load_sealed_outcome(spec: ResolvedRunSpec) -> dict[str, Any]:
     committed ``FIXTURE_CORPUS_V1`` constant. NO outcome bytes are read (``phase2b``
     opens the source ``O_NOFOLLOW`` at seal time).
     """
-    pair_index_manifest = _read_json(spec.pre_seal["pair_index_manifest"].path)
-    split_manifest = _read_json(spec.pre_seal["pair_manifest"].path)
+    pair_index_manifest = _preseal_json(spec, "pair_index_manifest")
+    split_manifest = _preseal_json(spec, "pair_manifest")
     pair_index = {
         (str(entry["gene_a"]), str(entry["gene_b"])): np.asarray(
             entry["row_indices"], dtype=np.int64
@@ -742,8 +806,8 @@ def _load_scientific_sealed_outcome(spec: ResolvedRunSpec) -> dict[str, Any]:
     perturbation column and combo separator. It NEVER carries the fixture corpus attestation
     triple. No outcome bytes are read (``phase2b`` opens the source ``O_NOFOLLOW`` at seal time).
     """
-    pair_index_manifest = _read_json(spec.pre_seal["pair_index_manifest"].path)
-    split_manifest = _read_json(spec.pre_seal["pair_manifest"].path)
+    pair_index_manifest = _preseal_json(spec, "pair_index_manifest")
+    split_manifest = _preseal_json(spec, "pair_manifest")
     pair_index = {
         (str(entry["gene_a"]), str(entry["gene_b"])): np.asarray(
             entry["row_indices"], dtype=np.int64

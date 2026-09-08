@@ -29,6 +29,7 @@ from pathlib import Path
 
 import anndata
 import numpy as np
+import pytest
 
 from alive.compose.datacard import compute_compose_run_id
 from alive.compose.driver.fixture_builder import FixtureBundle, build_compose_fixture
@@ -290,3 +291,23 @@ def test_run_dir_starts_empty(tmp_path: Path) -> None:
     assert bundle.run_dir.is_dir()
     assert list(bundle.run_dir.iterdir()) == []
     assert not bundle.audit_path.exists()
+
+
+# --------------------------------------------------------------------------- #
+# Key-roster guards: enforcement, not a debug aid (audit F-A7, 2026-09-07)
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("field", ["EXPECTED_HASHES_KEYS", "PRE_SEAL_PATH_FIELDS"])
+def test_the_fixture_key_roster_guard_survives_python_optimize(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, field: str
+) -> None:
+    """The builder must REFUSE a roster it does not fill, under ``python -O`` too.
+
+    Both sites were bare ``assert`` until 2026-09-07: under ``PYTHONOPTIMIZE`` the
+    guard vanished and the builder would have emitted a fixture whose checksum /
+    pre-seal-path roster silently disagreed with ``run_spec``.
+    """
+    from alive.compose.driver import fixture_builder as fb
+
+    monkeypatch.setattr(fb, field, (*getattr(fb, field), "unexpected_test_key"))
+    with pytest.raises(ValueError, match="fixture key roster"):
+        fb.build_compose_fixture(tmp_path)

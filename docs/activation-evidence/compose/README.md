@@ -178,7 +178,11 @@ insufficient.
 - Evidence, **not** a green light: the runtime observations found useful compatibility
   faults, but they are not auditable seal-safe run evidence. A release-quality rerun must
   use only the COMPOSE fit-role artifact and populate every field in
-  `run_gate.required_evidence`, with overlap count zero and exit code zero.
+  `run_gate.required_evidence`, with overlap count zero and exit code zero. The producer is
+  `scripts/compose_smoke_evidence.py promote` (`src/alive/compose/smoke_evidence.py`): it derives
+  both sides of every cross-check from one computation, validates a staged copy with
+  `validate_dependency_lock`, and publishes write-once; a refusal leaves this directory
+  byte-identical.
 - Exact version pins are not exact package artifacts. A content-addressed wheelhouse
   manifest and immutable container image digest remain mandatory.
 - `|combo_calibration|` = 41 and double-unseen = 22 are small; the double-unseen

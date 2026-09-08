@@ -607,6 +607,33 @@ _ISOLATION_CLOSURE = (
     ".python-version",
 )
 
+#: Closure files whose shipped bytes have INTENTIONALLY moved past the archived proof:
+#: ``rel -> (sha256 of the exact shipped bytes that are allowed to differ, the change that
+#: made the proof stale, why)``. The second element names the CHANGE, not a commit whose
+#: blob equals the digest -- a later follow-up may refine the same file, in which case the
+#: digest moves with the shipped bytes while the stale-making change stays what it was.
+#:
+#: This is not a way to stop checking a file: an entry admits ONE known byte
+#: sequence, so any further edit to that file drifts again and fails closed. It exists
+#: because re-establishing the proof needs a Linux kernel-isolation CI run (POD-GATED),
+#: which cannot happen in the same change that alters the code -- and leaving the suite
+#: red in the meantime is how a real drift gets normalised into background noise.
+#:
+#: An entry may be removed ONLY by moving ``_V2_SHA`` to a fresh archive at the changed
+#: code. ``test_a_pending_kernel_reproof_is_declared_in_the_readiness_index`` keeps the
+#: human-facing readiness index saying so for as long as this roster is non-empty.
+_PENDING_REPROOF: dict[str, tuple[str, str, str]] = {
+    "src/alive/compose/approximation_bias.py": (
+        "af0dab18086bcdf5adc3d19815ac6fa4a7695efa9f6dd1f6d58138c83f6c31c2",
+        "aed26aa",
+        "R1 admission contract (2026-09-07): kernel-isolation proof STALE for this file "
+        "until the Linux CI is re-run at the changed code and this pin moves",
+    )
+}
+
+_READINESS_INDEX = _REPO / "docs/superpowers/COMPOSE-SEAL-READINESS.md"
+_STALE_PROOF_MARKER = "kernel-isolation proof: STALE"
+
 
 @pytest.mark.repo_history
 def test_the_v2_kernel_proof_still_covers_the_shipped_isolation_closure():
@@ -623,15 +650,57 @@ def test_the_v2_kernel_proof_still_covers_the_shipped_isolation_closure():
     changed code, and that this pin must then move to that run's commit.
     """
     drifted = []
+    pending = []
     for rel in _ISOLATION_CLOSURE:
         recorded = _git(_REPO, "cat-file", "blob", f"{_V2_SHA}:{rel}")
-        if (_REPO / rel).read_bytes() != recorded:
-            drifted.append(rel)
+        shipped = (_REPO / rel).read_bytes()
+        if shipped == recorded:
+            continue
+        allowed = _PENDING_REPROOF.get(rel)
+        if allowed is not None and sha256_bytes(shipped) == allowed[0]:
+            pending.append(rel)
+            continue
+        drifted.append(rel)
     assert not drifted, (
         f"the v2 kernel-isolation proof at {_V2_SHA[:7]} no longer covers these shipped files: "
         f"{drifted}. Re-run the Linux kernel-isolation CI at the changed code, archive a new "
         "receipt, and move this pin -- do not delete the check"
     )
+    # Not an escape hatch, and this assertion now measures that. ``pending`` is filled
+    # only from ``_PENDING_REPROOF`` hits, so ``pending <= _PENDING_REPROOF`` was true by
+    # construction and could not fail (PR #15 fable Minor 4). The property worth holding is
+    # the converse: every pinned exception must be a file that ACTUALLY drifted and still
+    # hashes to its declared digest. When the bytes come back, the entry stops being reached
+    # and this fails -- the exception has to be deleted rather than left standing.
+    assert pending == sorted(_PENDING_REPROOF), (
+        "every pinned kernel-reproof exception must name a file that is actually drifting "
+        f"from {_V2_SHA[:7]} with its declared digest; pending={pending}, "
+        f"pinned={sorted(_PENDING_REPROOF)}. An entry whose bytes match the archive again "
+        "is stale -- delete it instead of carrying an exception that exempts nothing"
+    )
+
+
+@pytest.mark.repo_history
+def test_a_pending_kernel_reproof_is_declared_in_the_readiness_index():
+    """A pinned exception must be visible to a human, not only to the test suite.
+
+    ``_PENDING_REPROOF`` keeps the suite green while the Linux CI re-run is pending, which
+    is exactly the state in which the readiness index must NOT go on implying the kernel
+    evidence still covers the shipped code -- the failure mode the closure test was written
+    for in the first place. So while the roster is non-empty the index has to say so, and
+    name every file it is saying it about.
+    """
+    if not _PENDING_REPROOF:
+        pytest.skip("no pending kernel-isolation re-proof to declare")
+    text = _READINESS_INDEX.read_text(encoding="utf-8")
+    assert _STALE_PROOF_MARKER in text, (
+        f"{_READINESS_INDEX.name} must carry the marker {_STALE_PROOF_MARKER!r} while "
+        f"_PENDING_REPROOF is non-empty ({sorted(_PENDING_REPROOF)})"
+    )
+    for rel in _PENDING_REPROOF:
+        assert rel in text, f"{_READINESS_INDEX.name} does not name the pending file {rel}"
+    # A pinned exception for a file outside the closure would check nothing at all.
+    assert set(_PENDING_REPROOF) <= set(_ISOLATION_CLOSURE)
 
 
 @pytest.mark.repo_history

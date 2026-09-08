@@ -21,12 +21,12 @@ _MIN_PAIRS = 20
 _MIN_CELLS = 50
 
 
-def _eps(n_pairs: int, p: int, *, corr: bool, seed: int = 0):
+def _eps(n_pairs: int, p: int, *, corr: bool, seed: int = 0, noise: float = 0.1):
     rng = np.random.default_rng(seed)
     truth = rng.standard_normal((n_pairs, p))
-    if corr:  # both halves see the same signal + small independent noise
-        a = truth + 0.1 * rng.standard_normal((n_pairs, p))
-        b = truth + 0.1 * rng.standard_normal((n_pairs, p))
+    if corr:  # both halves see the same signal + independent noise of scale ``noise``
+        a = truth + noise * rng.standard_normal((n_pairs, p))
+        b = truth + noise * rng.standard_normal((n_pairs, p))
     else:  # halves are independent: split-half agreement ~ 0
         a = rng.standard_normal((n_pairs, p))
         b = rng.standard_normal((n_pairs, p))
@@ -34,8 +34,10 @@ def _eps(n_pairs: int, p: int, *, corr: bool, seed: int = 0):
     return full, a, b
 
 
-def _report(*, n_cal=30, p=5, corr=True, double=22, single=68, cells=60.0):
-    full, a, b = _eps(n_cal, p, corr=corr)
+def _report(
+    *, n_cal=30, p=5, corr=True, double=22, single=68, cells=60.0, noise=0.1, ceiling_floor=0.2
+):
+    full, a, b = _eps(n_cal, p, corr=corr, noise=noise)
     return compute_regime_detectable_effect_report(
         eps_calibration=full,
         eps_split_a=a,
@@ -44,11 +46,19 @@ def _report(*, n_cal=30, p=5, corr=True, double=22, single=68, cells=60.0):
         regime_cells_per_pair={"sealed_double_unseen": cells, "sealed_single_unseen": cells},
         min_pairs=_MIN_PAIRS,
         min_cells=_MIN_CELLS,
+        ceiling_floor=ceiling_floor,
     )
 
 
-def _activation_envelope(*, double=22, single=68, cells=60.0):
-    report = _report(n_cal=30, double=double, single=single, cells=cells)
+def _activation_envelope(*, double=22, single=68, cells=60.0, noise=0.1, ceiling_floor=0.2):
+    report = _report(
+        n_cal=30,
+        double=double,
+        single=single,
+        cells=cells,
+        noise=noise,
+        ceiling_floor=ceiling_floor,
+    )
     return {
         "activation": "READY — synthetic known-answer evidence",
         "calibration_fraction": 0.6,
@@ -74,7 +84,7 @@ def _activation_envelope(*, double=22, single=68, cells=60.0):
     }
 
 
-def _validate_activation_envelope(envelope):
+def _validate_activation_envelope(envelope, *, ceiling_floor=0.2):
     validate_regime_detectable_effect_activation_report(
         envelope,
         expected_protocol="COMPOSE-K562-v1",
@@ -87,6 +97,7 @@ def _validate_activation_envelope(envelope):
             "sealed_double_unseen": envelope["regime_pair_counts"]["sealed_double_unseen"],
             "sealed_single_unseen": envelope["regime_pair_counts"]["sealed_single_unseen"],
         },
+        ceiling_floor=ceiling_floor,
     )
 
 
@@ -143,7 +154,7 @@ def test_measurability_gate_refuses_sealed_role():
     with pytest.raises(LeakageError):
         from alive.compose.gates import measurability_gate
 
-        measurability_gate(a, a, _role="sealed_double_unseen")
+        measurability_gate(a, a, _role="sealed_double_unseen", ceiling_floor=0.2)
 
 
 def test_ready_activation_report_passes_strict_independent_validation():
@@ -168,3 +179,45 @@ def test_detectable_effect_schema_is_closed():
     envelope["report"]["unregistered_claim"] = True
     with pytest.raises(ValueError, match="schema mismatch"):
         _validate_activation_envelope(envelope)
+
+
+def test_the_report_records_the_floor_it_was_generated_under():
+    """F-A3: the floor is an input, so the report must say which one produced it."""
+    rep = _report(ceiling_floor=0.2)
+    assert rep["measurability"]["ceiling_floor"] == 0.2
+    strict = _report(ceiling_floor=0.9)
+    assert strict["measurability"]["ceiling_floor"] == 0.9
+
+
+def test_the_activation_validator_recomputes_against_the_registered_floor():
+    """Mutation guard for ``detectable_effect.py``'s own copy of the threshold.
+
+    The ceiling here sits strictly between the registered ``0.2`` and the stricter
+    ``0.9``, and the report was generated under ``0.9`` (so ``passed`` is False).
+    The correct recomputation agrees and rejects with "gate did not pass"; a
+    hardcoded ``ceiling > 0.2`` would instead expect ``passed`` to be True and
+    reject with the *inconsistency* message, so the assertion below is what
+    separates the two.
+    """
+    envelope = _activation_envelope(noise=0.9, ceiling_floor=0.9)
+    ceiling = envelope["report"]["measurability"]["ceiling"]
+    assert 0.2 < ceiling < 0.9, ceiling  # construction: the floors must disagree here
+    assert envelope["report"]["measurability"]["passed"] is False
+    with pytest.raises(ValueError, match="measurability gate did not pass"):
+        _validate_activation_envelope(envelope, ceiling_floor=0.9)
+
+
+def test_a_report_generated_under_another_floor_cannot_cross_the_boundary():
+    """A report whose own ``ceiling_floor`` is not the registered one is refused."""
+    envelope = _activation_envelope(noise=0.9, ceiling_floor=0.2)
+    assert envelope["report"]["measurability"]["ceiling_floor"] == 0.2
+    assert envelope["report"]["measurability"]["passed"] is True
+    with pytest.raises(ValueError, match="was generated under a floor other than"):
+        _validate_activation_envelope(envelope, ceiling_floor=0.9)
+
+
+def test_a_ready_report_generated_under_a_stricter_floor_still_validates():
+    """Non-vacuity: a non-default floor is not rejected merely for being non-default."""
+    _validate_activation_envelope(
+        _activation_envelope(noise=0.1, ceiling_floor=0.9), ceiling_floor=0.9
+    )

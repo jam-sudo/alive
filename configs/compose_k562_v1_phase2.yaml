@@ -86,6 +86,20 @@ identification:
   # sqrt(sigma_max) (verified to one ulp), applied here so the bank stays a pure
   # function of the encoders and k_total rather than depending on the split.
   lambda_scaling: calibration_sigma_max_squared
+  # The factor bank is normalized at construction so sigma_max(Z) == 1, removing
+  # the arbitrary bank scale entirely. lambda_scaling above makes the HEADLINE's
+  # penalty relative, but the ablation ladder also contains L2, whose registered
+  # tanh saturation has an INTRINSIC scale that no penalty rescaling can absorb
+  # (measured: applying the headline's scale to L2 makes it WORSE, 2.08 vs 1.88).
+  # Pinning the bank is the only thing that makes all three arms comparable.
+  # sigma_max(Z), not sigma_max(Phi_cal): the latter needs the calibration pair
+  # roster, which would make the bank artifact split-dependent and force a
+  # re-plumbing of phase2a._verify_factor_banks' byte-for-byte binding.
+  # cond(Phi) and rank are invariant to a uniform rescale, so the registered
+  # condition_ceiling and rank policy keep their exact meaning.
+  # Owner decision #7 (2026-08-21):
+  # docs/superpowers/2026-08-17-compose-ablation-ladder-decisions.md
+  factor_bank_normalization: sigma_max_z_unit
   oof_folds: 3
   uncovered_tolerance: 0.75
   # Admissibility bound on cond(Phi). Screened in TWO places inside selection:
@@ -118,11 +132,19 @@ metric:
 
 inference:
   method: max_deviation_bootstrap     # reuse alive.eval.bootstrap (CARTOGRAPHER)
-  comparator_family: [additive, gears, cpa, id_only, l3_hypernetwork]
+  comparator_family: [additive, gears, cpa, id_only, l3_symmetric_mlp]
   resampling_unit: perturbation_pair
   shared_resamples_across_contrasts: true
   family_confidence: 0.95
   bootstrap_replicates: 10000
+  # 2026-08-29 결정: simultaneous coverage 주장은 등록된 resampling unit 가정 아래에서만
+  # 성립한다(무조건이 아니다). headline sealed_double_unseen 은 22 pairs 를 21 genes 에서
+  # 뽑아 유전자를 하나도 공유하지 않는 행이 0 개이므로 pair-i.i.d. 는 구성상 위배된다.
+  simultaneous_coverage_claim: conditional_on_registered_resampling_unit
+  # verdict 는 λ=1.0 (등록된 밴드)에서만 판정한다. 나머지 λ 는 **descriptive-only** 로
+  # 함께 보고해 승리가 어디서 뒤집히는지 드러낸다. 값은 실측 앵커가 있다(결정문 참조):
+  # 1.0 등록 하한 · 1.1 sgd 0.3/0.9 회복 · 1.15 최악(sgd 0.6) 회복 · 1.25 여유.
+  sensitivity_band_inflation: [1.0, 1.1, 1.15, 1.25]
 
 regimes:
   headline_candidate: double_unseen
@@ -146,7 +168,16 @@ baselines:                            # roster FROZEN before any outcome (§9 / 
     environment_status: unpinned_activation_blocker
     prediction_representation: cell_raw_counts   # exact per-cell; change only by config revision
     approximation_bias_report_sha256: null   # must stay null for an exact representation
-  ablation_ladder: [l1_bilinear_identifiable, l2_saturation, l3_hypernetwork]  # L1 = headline
+  # L3 was registered as `l3_hypernetwork` until 2026-08-20. The implementation
+  # never was one: it is a two-hidden-layer tanh MLP on the symmetric pair
+  # feature [z_g + z_h, |z_g - z_h|] over a FIXED z. Measured — after fit, z is
+  # byte-identical to the input and the 6 trainable arrays are the MLP's own
+  # weights/biases; no network generates the operator and nothing is end-to-end
+  # in z. The MODEL is unchanged by this rename; only the registered name is,
+  # so that the ladder does not claim an unconstrained-capacity arm it does not
+  # have. Owner decision #6 (option B), 2026-08-20:
+  # docs/superpowers/2026-08-17-compose-ablation-ladder-decisions.md
+  ablation_ladder: [l1_bilinear_identifiable, l2_saturation, l3_symmetric_mlp]  # L1 = headline
 
 leakage_control:
   baseline_training_roles: [singles, combo_calibration]   # GEARS/CPA NEVER see sealed pairs in training
@@ -160,6 +191,7 @@ futility:                             # development-stage stop (§10); seal stay
   conditions: [dev_oof_delta_below_threshold, rank_condition_fail, measurability_fail]
   dev_oof_metric: paired_relative_error_reduction_vs_additive
   dev_oof_threshold: 0.0
+  measurability_ceiling_floor: 0.2      # split-half GI ceiling must exceed this or the run is futility-stopped (registered 2026-06-23 in plan, moved here 2026-09-07)
 
 seal:                                 # independent of TG-K562 (§6.3)
   artifacts_root: artifacts/compose

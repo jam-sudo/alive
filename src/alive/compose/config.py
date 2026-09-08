@@ -6,6 +6,7 @@ CARTOGRAPHER ``alive.config.Config`` so Phase-1 work cannot perturb that run_id.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -26,6 +27,7 @@ _KNOWN = frozenset(
         "synthetic_noise_sd",
         "min_double_unseen_pairs",
         "min_cells_per_pair",
+        "measurability_ceiling_floor",
         "calibration_fraction",
         "recovery_rel_err_tol",
         "registered_seeds",
@@ -44,6 +46,7 @@ class ComposePhase1Config:
     synthetic_noise_sd: tuple[float, ...]
     min_double_unseen_pairs: int
     min_cells_per_pair: int
+    measurability_ceiling_floor: float
     calibration_fraction: float
     recovery_rel_err_tol: float
     registered_seeds: tuple[int, ...]
@@ -58,6 +61,21 @@ def load_compose_config(path: str | Path) -> ComposePhase1Config:
     frac = float(raw.get("calibration_fraction", 0.6))
     if not 0.0 < frac < 1.0:
         raise ConfigError(f"calibration_fraction must be in (0,1), got {frac}")
+    if "measurability_ceiling_floor" in raw:
+        # Registered futility floor (F-A3): the gate compares it to a split-half
+        # correlation, so it must be a real number inside [-1, 1]. A bool would
+        # silently read as 1.0 and stop every run.
+        floor_raw = raw["measurability_ceiling_floor"]
+        if (
+            isinstance(floor_raw, bool)
+            or not isinstance(floor_raw, (int, float))
+            or not math.isfinite(float(floor_raw))
+            or not -1.0 <= float(floor_raw) <= 1.0
+        ):
+            raise ConfigError(
+                "measurability_ceiling_floor must be a finite number in [-1, 1] "
+                f"(it is compared to a correlation), got {floor_raw!r}"
+            )
     try:
         return ComposePhase1Config(
             k_grid=tuple(int(x) for x in raw["k_grid"]),
@@ -67,6 +85,7 @@ def load_compose_config(path: str | Path) -> ComposePhase1Config:
             synthetic_noise_sd=tuple(float(x) for x in raw["synthetic_noise_sd"]),
             min_double_unseen_pairs=int(raw["min_double_unseen_pairs"]),
             min_cells_per_pair=int(raw["min_cells_per_pair"]),
+            measurability_ceiling_floor=float(raw["measurability_ceiling_floor"]),
             calibration_fraction=frac,
             recovery_rel_err_tol=float(raw["recovery_rel_err_tol"]),
             registered_seeds=tuple(int(x) for x in raw["registered_seeds"]),

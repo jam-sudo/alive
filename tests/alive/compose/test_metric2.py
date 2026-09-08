@@ -126,6 +126,23 @@ def test_theta_zero_denominator_guard():
     assert theta == pytest.approx(0.0)
 
 
+@pytest.mark.parametrize("mse,expected", [(0.0, 0.0), (5e-13, 0.5), (1e-12, 1.0)])
+def test_theta_at_and_below_the_comparator_epsilon_floor_is_the_stabilized_difference(
+    mse, expected
+):
+    """Known answers where the registered formula (mean_C - mean_M)/max(mean_C, 1e-12) and the
+    withdrawn spec sentence 1 - mean_M/max(mean_C, 1e-12) differ below the floor and agree at the
+    boundary (mse=1e-12 -> 1.0 in both): a perfect method against a comparator at or below the
+    floor. The withdrawn form returns 1.0 in every row."""
+    truth = np.zeros((2, 1))
+    comparator = np.full((2, 1), np.sqrt(mse))
+    ids = ["a", "b"]
+    theta = paired_relative_error_reduction(
+        truth, comparator, truth, pair_ids=ids, comparator_ids=ids, truth_ids=ids
+    )
+    assert theta == pytest.approx(expected, rel=1e-9)
+
+
 def test_theta_shuffled_pair_ids_aligned_not_positional():
     """Permuting the comparator/truth ID order must not change theta."""
     truth = np.array([[0.0], [0.0], [0.0]])

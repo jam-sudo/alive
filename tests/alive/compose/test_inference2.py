@@ -23,7 +23,7 @@ from alive.compose.inference2 import (
 from alive.eval import bootstrap as bs
 
 # The EXACT registered comparator family (config inference.comparator_family).
-FAMILY = ("additive", "gears", "cpa", "id_only", "l3_hypernetwork")
+FAMILY = ("additive", "gears", "cpa", "id_only", "l3_symmetric_mlp")
 CONF = 0.95
 REPS = 200  # numeric-test value; the 10000 floor is enforced by the config validator.
 SEED = 1234
@@ -127,7 +127,7 @@ def test_one_degraded_comparator_band_driven_by_hard_comparator() -> None:
         "gears": degraded.copy(),
         "cpa": degraded.copy(),
         "id_only": degraded.copy(),
-        "l3_hypernetwork": degraded.copy(),
+        "l3_symmetric_mlp": degraded.copy(),
     }
 
     res = simultaneous_theta_bounds(
@@ -140,7 +140,7 @@ def test_one_degraded_comparator_band_driven_by_hard_comparator() -> None:
     )
 
     # The degraded comparators are near a perfect win.
-    for c in ("gears", "cpa", "id_only", "l3_hypernetwork"):
+    for c in ("gears", "cpa", "id_only", "l3_symmetric_mlp"):
         assert res.theta[c] > 0.99, (c, res.theta[c])
     # The hard comparator has a small positive point theta.
     assert 0.0 < res.theta["additive"] < 0.3
@@ -175,7 +175,7 @@ def test_one_degraded_comparator_band_driven_by_hard_comparator() -> None:
     )
     # The degraded win is not manufactured: it remains a near-perfect win even
     # after subtracting the shared (hard-driven) q.
-    for c in ("gears", "cpa", "id_only", "l3_hypernetwork"):
+    for c in ("gears", "cpa", "id_only", "l3_symmetric_mlp"):
         assert res.lower[c] == pytest.approx(res.theta[c] - res.band_halfwidth, abs=1e-12)
 
 

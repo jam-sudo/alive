@@ -1,5 +1,17 @@
 # COMPOSE-K562-v1 — decisions #6 and #7: the ablation ladder's name and its penalty units
 
+> **STATUS: APPROVED and IMPLEMENTED — see §5, §5.1 and §5.2.** #6 was approved 2026-08-20
+> (option B) and implemented in `dc252d3`; #7 was approved 2026-08-20 (option A), **re-signed
+> 2026-08-21 with the normalizer changed to `sigma_max(Z) = 1`** (§5.1), and implemented in
+> `e1d95cd`. The sign-off table in §5 is the current state.
+>
+> **`config_sha256` HAS moved since this was drafted** — `3faacaff…` → `c25734d5…` (#6) →
+> `5fea3b9e…` (#7) → `0d207746…` (2026-08-29 pair-dependence decision; see
+> `2026-08-29-compose-pair-dependence-decision.md`). 이 digest 는 `a9dc9410…` 로 이동했다 — futility
+> floor 등록(2026-09-07, F-A3, 오너 승인). The unchanged-digest sentence in the original
+> banner describes the document at drafting time, not the repository now. The banner as originally
+> written follows.
+>
 > **STATUS: PROPOSED — owner approval required before any code, config or spec change.** This
 > document carries the two HIGH findings from the 2026-08-17 external audit
 > (`docs/GPT audit/comprehensiveaudit.md`, F-04 and F-05) that a drafter must not resolve alone,
@@ -138,7 +150,7 @@ attribution is registered as confirmatory. **C must not be chosen — it is meas
 | # | decision | proposed | owner | date |
 |---|---|---|---|---|
 | 6 | `l3_hypernetwork` — rename + spec amendment (option B) | ✅ B | ✅ **APPROVED — option B** | 2026-08-20 |
-| 7 | ladder penalty units — normalize the bank (A) or restrict the claim (D) | ✅ A, else D | ✅ **APPROVED — option A** (the recommendation) | 2026-08-20 |
+| 7 | ladder penalty units — normalize the bank (A) or restrict the claim (D) | ✅ A, else D | ✅ **APPROVED — option A**, re-signed 2026-08-21 with the normalizer changed to `sigma_max(Z) = 1` (§5.1) | 2026-08-20 / 2026-08-21 |
 
 > **[2026-08-20 — what approving #7 as option A commits, restated before implementation.]** A
 > normalizes the factor bank so `σmax(Φ_cal) = 1` and pins the scalar in evidence. Two consequences
@@ -149,3 +161,256 @@ attribution is registered as confirmatory. **C must not be chosen — it is meas
 > L1↔L2/L3 comparison to exploratory; no code, digest unchanged) remains the recorded fallback if the
 > re-plumbing turns out to weaken the binding rather than move it. **No guard will be weakened to make
 > A fit;** if that is the only way, the implementation stops and D is raised instead.
+
+## 5.1 Normalizer changed after sign-off — `sigma_max(Phi_cal)` → `sigma_max(Z)`
+
+**What changed.** #7 was signed on 2026-08-20 as option A *"normalize the factor bank so
+`sigma_max(Phi_cal) = 1`"*. Implementation began on 2026-08-21 and immediately surfaced a fork, which
+was raised rather than resolved silently — the same handling as the fork found while implementing #43.
+The owner re-signed with the normalizer changed to **`sigma_max(Z) = 1`**.
+
+**Why.** Both normalizers remove the arbitrary bank scale `c`, which is the entire purpose of #7. They
+differ only in cost, and the difference is exactly the two consequences the 2026-08-20 sign-off note
+had flagged as the price of A:
+
+| | signed: `sigma_max(Phi_cal) = 1` | implemented: `sigma_max(Z) = 1` |
+|---|---|---|
+| inputs needed | `Z` **and the calibration pair roster** | `Z` alone |
+| bank artifact becomes split-dependent | **yes** | **no** |
+| `phase2a._verify_factor_banks` re-plumbing (seal-adjacent) | **required** | **none — untouched** |
+| removes `c` for every ladder arm | yes | yes (measured below) |
+| headline's relative `lambda` still works | yes | yes |
+
+`_verify_factor_banks` binds every runtime factor row to the bank row byte for byte, so the
+normalization has to live in the artifact either way. Putting a *pair-roster-dependent* scale there is
+what would have forced the re-plumbing; a `Z`-only scale does not.
+
+**Measured.** Under a pure units change (inputs scaled by `c`), held-out error per ladder arm:
+
+| | before #7 | after `sigma_max(Z) = 1` |
+|---|---|---|
+| L1 | `3.6e-15` | `~1e-15` |
+| L2 | **`1.88e+00`** | `~1e-15` |
+| L3 | **`6.1e-01`** | `~1e-16` |
+
+**Stated honestly: after normalization this invariance is true by construction** — `c` cancels out of
+the inputs, so the arms *cannot* differ. That is the point of the change, not a surprising empirical
+result. What the measurement adds is that the cancellation is exact in floating point for arms whose
+penalties are not even in the same units, and that nothing downstream moved: `cond(Phi)` and `rank`
+are invariant to a uniform rescale, so the registered `condition_ceiling` and the rank policy keep
+their exact meaning (asserted in `test_normalization_leaves_cond_and_rank_alone`).
+
+**What this does not do.** It does not make the ladder's arms *comparable in units* — L1 is penalised
+relatively, L2's saturation is absolute, L3's weight decay is in feature units. It removes the one
+degree of freedom that was **unregistered and arbitrary**. Any remaining difference between arms is a
+property of their registered definitions, which is what an ablation is supposed to measure.
+
+**Digest.** `c25734d5…` → `5fea3b9e69112b1f6dfd5f6d33249df9d13156ed46011e3dc46f4f8cf3a66100`, a new
+run identity. With #6 this is the **second** move in this wave, so **task #14 must not regenerate at
+any earlier digest.**
+
+`5fea3b9e…` is a **floor, not the target.** The committed config still carries **six** explicit
+activation blockers, exactly as `ComposePhase2Config.activation_blockers` measures them —
+`regimes.power_status`; `baselines.gears.revision`; `baselines.gears.environment_status`; `baselines.cpa.revision`;
+`baselines.cpa.environment_status`; and `baselines.approximation_bias_report_sha256`, a single collective
+key the loader raises while any approximate representation lacks its bias report (today: GEARS).
+The CPA bias null is **not** a blocker: its representation is exact (`cell_raw_counts`), the config
+comments the field *"must stay null for an exact representation"*, and the loader never counts
+exact `cell_*` representations toward the collective key.
+And the readiness
+index's own step 4 orders config finalization (filling those nulls, which moves the digest again)
+*before* evidence regeneration. Regenerating #14 at `5fea3b9e…` today would bind evidence to a
+lineage that is guaranteed to move. #14's actual target is the digest that stands after the nulls
+are filled, and filling them is pod work (sub-project B).
+
+### 5.2 Mutation evidence — 13/13, and the one test that had to be replaced first
+
+The rule is enforced in four places, and the mutable set covers all of them: the bank builder and
+the artifact deserializer (`zfactor.py`), the registered-value check (`config2.py`), the committed
+value itself (`configs/compose_k562_v1_phase2.yaml`), and the rank tolerance that makes the
+"`cond` keeps its meaning" claim true (`identify.py`). Every mutation below was applied to committed
+source, the suite was run, and the source was restored byte-for-byte (verified by digest).
+
+| | mutation | killed by |
+|---|---|---|
+| M01 | the normalization is not applied at all | `test_every_bank_is_built_with_unit_sigma_max` |
+| M02 | normalize by the Frobenius norm instead of `sigma_max` | same |
+| M03 | normalize per column instead of by one scalar | same |
+| M04 | record the scale as `1.0` (the constant a zero bank correctly takes) | `test_the_bank_records_the_scale_it_removed` |
+| M05 | drop the `sigma_max == 0` guard | `test_a_zero_bank_does_not_divide_by_zero` |
+| M06 | the artifact stops refusing a foreign normalization name | `test_a_bank_normalized_under_another_rule_is_refused` |
+| M07 | the artifact stops type-checking the recorded scale | `test_an_unusable_scale_is_refused` |
+| M08 | the artifact stops requiring a finite positive scale | same |
+| M09 | the rank tolerance becomes ABSOLUTE instead of relative to `sigma_max` | `test_normalization_leaves_cond_and_rank_alone` |
+| M10 | the config stops refusing an unregistered value | `test_the_config_refuses_an_unregistered_normalization_value` |
+| M11 | the registered constant drifts from the preregistration | `test_the_config_registers_the_normalization_rule` |
+| M12 | the committed config names a different rule | same |
+| M13 | the field stops being required **at every site** | `test_the_config_refuses_a_missing_normalization_value` |
+
+Each kill is attested by the **named failing test**, not by a nonzero exit code, and in every case
+the killer is the test whose own name makes the claim.
+
+**Two findings came out of running it, and both were defects in this wave's own work.**
+
+**(a) `test_normalization_leaves_cond_and_rank_alone` asserted nothing.** As first written it built
+banks at input scales `1.0` and `100.0` and compared their `rank_diagnostics`. But those banks are
+*normalized*, so they are identical to `2.9e-15` — the test compared a matrix with itself and could
+not have failed under any normalizer, including one that redefined the registered
+`condition_ceiling`. Measured before rewriting, not inferred. The claim it was cited for is a
+property of `rank_diagnostics` (the registered `rank_tolerance_rule` is relative to `sigma_max`), so
+it is now asserted against a *rescale* of one bank: `c = 1e-10`, `c = 1e10`, and the bank's own
+`normalization_scale`, which reconstructs the pre-normalization bank exactly. The extremes are
+load-bearing — an absolute tolerance survives a factor of 100 and is caught only when
+`sigma_min(Phi)` is driven under it, which `c = 1e-10` does because `Phi` is bilinear and scales as
+`c²`.
+
+**(b) The single-site form of M13 SURVIVED,** because a missing config field is refused twice —
+`_close_schema`'s missing-key check *and* `_require`. Killing one leaves the other. That is
+belt-and-braces in the loader, not a gap, but it means the mutation that tests the claim has to
+remove the field's required-ness at *every* site; the version that edited one site was measuring
+redundancy, not the contract.
+
+### 5.3 The rule was in the generator and the config, not at the consumption boundary
+
+**Found by the external audit, reproduced here.** On 2026-08-21 the Codex audit reported that a
+factor bank could declare `sigma_max_z_unit`, record a scale, carry a checksum that verifies against
+the declaring artifact, and be **accepted** with an actual `sigma_max(Z)` far from 1. Adjudicated by
+running it, not by reading:
+
+```
+honest bank: sigma_max(Z) = 1.000000000000  declared='sigma_max_z_unit'
+
+FORGED BANK ACCEPTED BY _deserialize_gene_factor_bank
+  declared normalization : 'sigma_max_z_unit'
+  recorded scale         : 7.466811203808
+  ACTUAL sigma_max(Z)    : 7.000000000000
+```
+
+**Why every existing check missed it: each one compared the bank with itself.** The checksum is
+recomputed from the same declared numbers. `phase2a._verify_factor_banks` binds the runtime matrix to
+those same numbers row by row — so an unnormalized bank and a matrix copied from it agree perfectly
+and are both wrong. §5.2's 13 mutations all lived on the generator side or on the *name*; nothing
+asserted that a consumer verifies the invariant, and a contract no test claims cannot be mutated.
+The test file's own docstring had gone half way — *"the **name** has to be checked rather than
+inferred"* — and stopped short of checking the value.
+
+**Fixed at every door a bank can enter through**, via one function, `zfactor.verify_bank_normalization`:
+
+| door | site | on failure |
+|---|---|---|
+| A | `_deserialize_gene_factor_bank` — a serialized artifact read back | `ValueError` |
+| B | `phase2a._verify_factor_banks` — a bank object handed to the pipeline | `HashMismatchError` |
+| C | `serialize_factor_bank_collection` — before bytes become the durable carrier | `ValueError` |
+
+Door B converts rather than propagating: a bare `ValueError` escaping a caller that handles
+`HashMismatchError` is the same escape that let `LinAlgError` past the pre-seal roster once before.
+**`_verify_factor_banks`' byte-for-byte binding is untouched** — this adds a refusal, it does not
+re-plumb the binding, so #7's seal-adjacent constraint still holds.
+
+**Tolerance: derived, not a sampled constant — and the derivation is not mine.** The normalization
+is exact to machine precision; what sets the floor is the artifact's own 12-decimal rounding. I first
+shipped a flat `1e-9`, justified empirically over 87 banks (worst round-trip deviation `8.4e-13`).
+An **independent external fix of the same finding** (2026-08-22) derived the bound instead of
+sampling it: by Weyl's inequality `|σmax(Z+E) − σmax(Z)| ≤ ‖E‖₂ ≤ ‖E‖_F`, so a bank that was
+normalized exactly can arrive off by at most `5e-13·√(n·k)` plus an SVD backward-error floor.
+
+That is strictly better and it has been adopted here: at Norman scale it is `6.4e-11`, **15.6× tighter
+than the flat constant**, and it grows with the matrix instead of staying pinned to the sizes that
+happened to be sampled. Measured before adopting: 45 honest banks clear it with a worst headroom
+ratio of `0.073`, and the `7.0` forgery is refused by eleven orders.
+
+**The two attempts were strong in different places.** This one covered three doors; the external one
+covered one (`_deserialize_gene_factor_bank`) and left `phase2a` untouched. Its tolerance was better;
+this coverage was broader. Neither alone was the right answer.
+
+**The zero bank is mirrored, not exempted.** `build_gene_factors` keeps the rule total by leaving an
+identically-zero `Z` alone at scale `1.0`, so the verifier accepts exactly that shape and no other —
+a zero bank recording any other scale is refused. Refusing the shape outright would have made this
+library produce an artifact it cannot read back.
+
+**Fixtures were declaring a rule they did not obey — and I first measured that blast radius wrong.**
+Running `test_phase2a.py` alone showed exactly one failure, and I reported it as the whole radius.
+The full suite then failed **48 tests**: `driver/fixture_builder._build_instance` — *production* code,
+not a test helper — generates the synthetic factor matrices every scientific-carrier fixture binds
+its banks to, and those matrices were never normalized. The lesson is the narrow one: a targeted run
+measures the target, not the radius; only the full suite measures the radius.
+
+The fix is in `_build_instance` rather than in the fixtures that consume it. A fixture instance whose
+matrices break the registered rule would make **fixture runs exercise a different contract from
+scientific runs**, and since bank rows are bound to those matrices byte for byte it would keep
+producing banks that name a rule they break. `test_phase2a.py::_factor_banks` normalizes its own
+matrices for the same reason. Every failure was the check working; none was a reason to loosen it.
+
+**19/19 mutations killed**, each by the **named failing test** whose own name makes the claim (§5.2's
+13 plus six more: each door's check removed, the tolerance loosened until the forgery fits, the
+zero-bank scale check removed, and door B propagating `ValueError` instead of `HashMismatchError`).
+
+**A second measured redundancy, recorded rather than assumed.** The single-site form of the door-C
+mutation **survived**: `serialize_factor_bank_collection` round-trips every bank through a lossless
+carrier report, and that path passes door A. Door C is therefore redundant inside that function —
+it only fails earlier and names `k`. Measured by instrumenting which line raised, the same way §5.2's
+M13 redundancy was found. The mutation that tests the claim removes it at both sites.
+
+**`config_sha256` is unchanged at `5fea3b9e…`.** This is a code-only change: no registered value
+moved, no new run identity, and nothing here authorizes a run.
+
+`[2026-09-08 정정: 협력 workflow 서술 제거 — 오너 규칙; 수치·유도 불변]`
+
+## Addendum — 2026-09-07 (D1-a): the residual this document registered now bounds a claim
+
+이 절은 **추가**다. 위의 어떤 절도 고치지 않는다 — #6·#7 의 결정, 측정값, sign-off 는 as-built 로 그대로 둔다.
+
+**무엇이 새로 측정됐나.** 2026-09-06/07 적대적 감사(감사자 A, finding F-A1)가 §5.1 이 "**What this does not
+do**" 로 등록해 둔 잔여 — arm 별 유효 penalty 가 같은 단위가 아니라는 것 — 의 **크기**를 처음으로 쟀다.
+구성: **비-gene-disjoint**(test genes 가 calibration genes 와 겹친다) 합성 40 seed, `k=6`, `p=8`,
+37 genes / 41 calibration pairs / 22 held-out pairs — 세 roster 가 같은 37-gene universe 에서 뽑힌다 —,
+저랭크 대칭 참 operator + 30% noise, `identification.lambda_grid` 의 최대값 λ=0.1, 저장소 함수만 사용
+(`calibration_lambda_scale`, `L1Model`, `L2Model`). 이것이 감사 A `audit-A-claude.md` §5.2 의 구성이며,
+2026-09-07 재측정 결과:
+
+```
+raw    mean +0.4286  median +0.4332  40/40 > 0
+scaled mean -0.3348  median -0.3097  0/40 > 0
+sigma_max(Phi)^2 mean 0.0452  -> effective penalty ratio 22.1x
+```
+
+`raw` 는 현행 구현(L2 는 raw λ), `scaled` 는 L2 에도 headline 과 같은 scale 을 준 반사실이다. θ(L1,L2) 의
+**부호가 40/40 ↔ 0/40 으로 완전히 뒤집힌다.** 세 번째 줄은 그 원인의 크기다: headline 은 λ·σmax(Φ)² 로,
+comparator 는 λ 로 적합되므로 이 구성에서 headline 의 penalty 가 약 **22× 약하다**. (감사자 A 가 §4.1 에서
+따로 구성한 bank 표는 같은 자리에서 0.0383–0.0435, 즉 23–26× 를 보고했다. 상수는 구성에 따라 움직이고,
+자리수와 방향은 두 구성에서 같다.)
+
+**진짜 gene-disjoint 구성은 이 커밋이 재측정하지 않았다.** 감사 A 가 라운드 2 에서 커밋된 실제 구조
+(z-universe 73 genes · calibration 44 genes · `combo_calibration` 41 pairs · `sealed_double_unseen`
+22 pairs over 21 genes, 유전자 교집합 0)를 세워 40 seed 로 다시 돌린 것이 있고 — **2026-09-06 감사 토론에서
+검토자 A 가 보고한 비재현 재실행 값(저장소 밖, 재현되지 않음)** — 거기서는 σmax(Φ)² = 0.0145 — 유효 penalty 비
+**약 69×** — 이며 λ=0.1 의 40/40 ↔ 0/40 반전이 그대로 유지된다고 보고한다. **그 수치는 감사 A 의 보고이고
+이 커밋에서 재현하지 않았다.** 위 코드 블록의 세 줄만 2026-09-07 에 이 저장소에서 실행한 값이다.
+`[2026-09-08 정정 — PR 리뷰 I2/M3: 위 외부 보고의 파일시스템 경로 인용(gitignored 이라 어떤 clone 에서도
+해석되지 않는다)을 제거했다. 22.1×(비-gene-disjoint)와 69×(gene-disjoint)는 다른 구성이므로 치환·혼용하지
+않는다. 수치·구성·상태 불변.]`
+
+**등록된 잔여이지 은폐가 아니다.** 비대칭 자체는 `src/alive/compose/phase2a.py:1554-1567` 의 주석이
+"open residual" 로 적어 두었고, `tests/alive/compose/test_lambda_scaling.py::test_the_final_fit_scales_the_headline_operator_and_leaves_the_baseline_alone`
+가 그 동작을 이름으로 고정하며, 이 문서 §5.1 의 "What this does not do" 문단이 비주장으로 등록했다.
+새로 알게 된 것은 존재가 아니라 **크기 — 그리고 그 크기가 spec §3.3 질문의 부호를 정한다**는 점이다.
+
+**오너 결정(2026-09-07, 지시 "모두 권장사항으로 진행") = D1-a.** 2026-08-20 sign-off note 가 적어 둔
+fallback **option D**("restrict the L1↔L2/L3 comparison to exploratory; no code, digest unchanged")를
+채택한다. 구현은 main spec `docs/superpowers/specs/2026-06-22-compose-epistasis-operator-design.md`
+§3.3 끝의 **수정안 F** 다: L1↔L0(additive) 는 **confirmatory** 로 남고, L1↔L2·L1↔L3 의 architecture
+attribution 은 **exploratory** 로 강등된다. 등록된 comparator family({GEARS, CPA, ID-only, L3};
+`configs/compose_k562_v1_phase2.yaml:135` 의 `comparator_family` 에서 `additive` 를 뺀 것)와
+`GI_LEARNABLE_WIN` 의 learned-comparator 조건은 그대로다(config 불변). **L2 는 원래 family 밖의
+ablation arm 이고 L3 는 family 안에 있다** — 바뀌는 것은 해석만이다: L1↔L2·L1↔L3 의 architecture
+attribution 을 confirmatory 로 보고하지 않는다(순수 architecture 효과로 해석하지 않는다). 결정문은
+`docs/superpowers/2026-09-07-compose-audit-release-decisions.md` D1 이다.
+
+**바뀌지 않는 것.** 코드 0 줄, config 0 줄. `config_sha256` 은 이 addendum 으로 **이동하지 않는다**.
+COMPOSE 는 여전히 **RELEASE-BLOCKED**, seal 은 **UNOPENED**, 이 문서의 어떤 문장도 run 을 승인하지 않는다.
+
+**열린 것.** real Norman bank 에서 OOF selection 이 고른 λ\* 에서 이 부호가 어떻게 되는지는 **측정되지
+않았다** — 합성 1 계열이고 real bank 는 POD-GATED 다. λ=0.01 에서는 부호가 유지되나 효과크기가 24× 줄고
+λ=0.001 에서는 반대로 뒤집힌다는 것이 감사자 A 의 보고이며(§4.1), 어느 쪽도 real 의 측정이 아니다. D1-c
+(승인된 nonsealed gene-disjoint OOF 에서 λ\*, cond(Φ), 두 penalty 아래 held-out θ; sealed 22 pairs 는
+읽지 않음)는 이 결정으로 닫히지 않았고 pod 단계에 남는다.

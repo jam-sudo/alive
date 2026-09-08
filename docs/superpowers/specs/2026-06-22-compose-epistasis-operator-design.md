@@ -176,8 +176,37 @@ $$z_g=[\,\mathrm{PCA}_k(\delta_g)\;;\;\text{(optional) ESM 사영}\,]\in\mathbb{
 \text{singles에서 먼저 고정}.$$
 
 ESM는 bolt-on이 아니라 **고정 입력 factor**로 재도입한다(project-memory *cartographer-mvp-built-merged*의 OOF
-탐색적 가설 1: 서열 축이 신호를 가질 수 있음을, 이번엔 식별가능 구조 안에서 검증). $z_g$를 먼저
+탐색적 가설 1: 서열 축이 신호를 가질 수 있음). **[2026-09-07 수정안 G / 결정 D2-b — 이 자리에 있던
+"이번엔 식별가능 구조 안에서 검증"은 superseded. 근거: 등록된 어떤 arm 도 ESM 열을 끄지 않는다.]**
+본 protocol 은 ESM의 marginal signal을 검증했다고 주장하지 않는다(결정 D2-b, 2026-09-07); ID-only 는
+같은 factor bank 위의 non-bilinear comparator 로 bilinear 구조의 기여만 격리한다. encoder ablation 은
+ESM 열이 없는 arm(matched total-$k$)을 요구하며 등록돼 있지 않다 — 별도 spec+plan 사안이다. $z_g$를 먼저
 고정해야 Stage 2가 선형이 된다(end-to-end는 rotation ambiguity로 식별성을 잃음 → ablation L3).
+
+> **[2026-08-21 amendment — owner decision #7, 재서명본.]** factor bank는 이제 **등록된
+> normalization** 아래 구성된다: 하나의 스칼라로 나누어 $\sigma_{\max}(Z)=1$ 이 되게 하고,
+> 제거한 스칼라를 아티팩트에 함께 기록한다(`identification.factor_bank_normalization:
+> sigma_max_z_unit`).
+>
+> **왜.** ablation ladder는 penalty의 **단위가 서로 다른** arm들을 비교하는데, bank scale $c$는
+> 등록된 적 없는 자유도였다. `identification.lambda_scaling`(#43)이 headline의 penalty를 상대화해
+> L1은 이미 scale-free였지만, L2의 등록된 `tanh` saturation은 **고유 scale**을 가져 어떤 penalty
+> 재조정으로도 흡수되지 않는다(실측: headline의 scale을 L2에 적용하면 오히려 **악화**, 1.88 → 2.08).
+> 모든 arm에 동시에 닿는 유일한 방법은 $c$ 자체를 제거하는 것이다. 순수 단위 변경에 대한 held-out
+> 오차: L1 `3.6e-15` → `~1e-15`, L2 **`1.88`** → `~1e-15`, L3 **`0.61`** → `~1e-16`.
+>
+> **정직하게: 이 불변성은 normalization 이후 *구성상 참*이다** — $c$가 입력에서 상쇄되므로 arm들이
+> 다를 수 *없다*. 측정이 더하는 것은 그 상쇄가 부동소수점에서 **정확**하다는 것뿐이다.
+>
+> **$\sigma_{\max}(\Phi_{cal})$ 이 아니라 $\sigma_{\max}(Z)$ 인 이유.** 둘 다 $c$를 제거하지만
+> 전자는 calibration pair roster를 필요로 해 bank 아티팩트가 **split-dependent** 해지고
+> `phase2a._verify_factor_banks`의 byte-for-byte 바인딩(**seal-adjacent**)을 재배선해야 한다.
+> 후자는 $Z$만으로 계산된다 — bank는 split-free로 남고 **verifier는 손대지 않았다.**
+>
+> **바뀌지 않은 것.** $\mathrm{cond}(\Phi)$와 rank는 균일 rescale에 불변이므로(rank tolerance가
+> $\sigma_{\max}$에 **상대적**으로 등록되어 있다) 등록된 `condition_ceiling`과 rank policy는
+> 의미가 정확히 보존된다. 그리고 이것이 arm들을 **단위상 비교 가능**하게 만들지는 **않는다** —
+> 제거된 것은 등록되지 않은 임의 자유도 하나뿐이고, 남은 차이는 각 arm의 등록된 정의의 성질이다.
 
 ### 3.2 Stage 2 (대수적으로 식별가능한 bilinear operator $B$ = headline A)
 
@@ -206,10 +235,41 @@ known-answer recovery(§3.4)를 함께 보고한다.
 - **L1 = A (headline)** 2단계 bilinear 식별 operator.
 - **L2 = C** + 사전등록된 단조 saturation 비선형 $\varepsilon=\sigma(\text{bilinear})$ — 최소 비선형성이
   이득을 주는지 보는 constrained extension. Claim 1의 대수적 식별가능성 주장은 L1에 한정한다.
-- **L3 = B** hypernetwork로 $z$·operator end-to-end 학습 — capacity 최대, **식별가능성 정리 없음**.
+- **L3 = B** (`l3_symmetric_mlp`) 고정 $z$ 위의 **symmetric MLP** — 대칭 pair feature
+  $[z_g+z_h,\ |z_g-z_h|]$에 대한 2-hidden-layer tanh MLP. bilinear 형태를 쓰지 않는 **더 넓은
+  함수족**이지만 **무제약이 아니다**: $z$는 고정 입력이고 그 feature의 함수만 표현할 수 있다.
+  **식별가능성 정리 없음.**
 
-답하는 질문: **식별가능한 핵심 구조(L1; L2는 제약 확장)가 additive(L0)와 무제약 capacity(L3)를
-둘 다 이기는가?**
+답하는 질문: **식별가능한 핵심 구조(L1; L2는 제약 확장)가 additive(L0)와, 같은 고정 $z$ 위의
+비-bilinear 함수족(L3)을 둘 다 이기는가?**
+
+> **[2026-08-20 amendment — owner decision #6, option B.]** 위 L3 정의와 질문 문장은 이번에
+> **교체된 것**이며, 교체 전 원문은 다음과 같았다: *"**L3 = B** hypernetwork로 $z$·operator
+> end-to-end 학습 — capacity 최대, 식별가능성 정리 없음"*, 그리고 질문은 *"…additive(L0)와
+> **무제약 capacity(L3)**를 둘 다 이기는가?"*였다.
+>
+> **왜 교체했나.** 등록된 이름 `l3_hypernetwork`가 구현과 다른 모델을 가리켰다. 2026-08-17 외부
+> 감사(F-04)가 지적했고 재현으로 확인했다: `models.py`의 L3는 **고정 $Z$** 위 MLP이며, fit 후
+> $Z$는 **byte-identical**이고 학습 가능한 배열 6개는 MLP 자신의 weight/bias뿐이다(dims
+> `(8,16,16,5)`). hypernetwork도 아니고 $z$에 대해 end-to-end도 아니다.
+>
+> **무엇이 바뀌고 무엇이 안 바뀌었나.** **모델은 그대로다** — 코드 한 줄 바뀌지 않았고 예측도
+> 동일하다. 바뀐 것은 (1) 등록된 이름, (2) 이 arm이 무엇을 대표한다고 주장하는가이다. 고정 $z$의
+> 대칭 feature에 대한 함수족은 **무제약 capacity가 아니므로**, "L1이 L3를 이긴다"는 결과는
+> **"무제약 capacity를 이긴다"는 주장을 뒷받침하지 않는다.** 그 주장을 하려면 등록된
+> hypernetwork를 실제로 구현해야 하며(결정 문서의 옵션 A), 그것은 별도 spec·baseline·ablation이
+> 필요한 별개 작업이다.
+>
+> 이름은 `comparator_family`와 `ablation_ladder` 양쪽에서 바뀌었고 `config_sha256`이
+> `3faacaff…` → `c25734d5…`로 이동했다 — **새 run identity**이며 이 결정이 만들도록 승인된 것이다.
+
+**[수정안 F — 2026-09-07, SIGNED by owner instruction "모두 권장사항으로 진행" — EFFECTIVE Task 11, claim 상한.]** L1↔L0(additive) 대비는 **confirmatory** 로 남는다. L1↔L2 와 L1↔L3 는 **exploratory** 다: arm 별 유효
+penalty 가 같은 단위가 아니고(결정 #7 §5.1), 합성 실측에서 그 비대칭이 λ=0.1 에서 θ(L1,L2) 의 부호를 40/40 ↔ 0/40 으로 뒤집는다. 따라서
+"식별가능 구조가 비-bilinear 함수족을 이긴다"는 등록된 confirmatory 주장이 아니다. 등록된 comparator family({GEARS, CPA, ID-only, L3})와
+`GI_LEARNABLE_WIN` 의 learned-comparator 조건은 그대로다(config 불변). L2 는 원래 family 밖의 ablation arm 이고 L3 는 family 안에 있다;
+바뀌는 것은 해석만이다 — L1↔L2·L1↔L3 의 architecture attribution 을 confirmatory 로 보고하지 않는다(순수 architecture 효과로 해석하지 않는다).
+verdict 문장은 pair-dependence decision §8 (iv) — `docs/superpowers/2026-08-29-compose-pair-dependence-decision.md` — 에 사전등록되어 있다: `GI_LEARNABLE_WIN` 의 learned-family 조건 통과를
+어떤 문장으로 보고할지는 결과를 보기 전에 확정되었고, 그 문장은 통과를 architecture attribution 으로 쓰지 않는다.
 
 ### 3.4 합성 recovery 프로토콜 (claim 1 입증, real과 독립)
 
@@ -239,7 +299,9 @@ cross-validation으로 선택하되, **OOF fold는 sealed와 동일한 gene-disj
 2. no-change / control, perturbation-mean — 하한.
 3. **GEARS** — published combo SOTA(강한 learned baseline; Phase 2).
 4. **CPA** — latent-*additive* baseline(비가산 항의 차별점 정조준; Phase 2).
-5. **linear / ID-only** — bilinear 구조 없는 선형.
+5. **linear / ID-only(= symmetric non-bilinear factor ridge; encoder ablation 아님)** —
+   bilinear 구조 없는 선형. L1 과 **같은 factor bank**(ESM 열 포함)를 소비하므로 격리하는 것은
+   bilinear 구조의 기여이지 encoder 의 marginal signal 이 아니다(결정 D2-b, 2026-09-07).
 6. ablation **L2·L3** — "구조 vs capacity" comparator.
 
 ### 4.2 Primary metric & 방향
@@ -466,10 +528,18 @@ $\sigma_{\max}$는 새 통계량이 아니다 — 이미 등록된 rank toleranc
 비교 불가능해진다. `lambda = 0.0`은 정확히 `0.0`으로 남으므로 등록된 unregularized rank policy와 조건수
 ceiling은 영향을 받지 않으며, $\mathrm{cond}$와 rank도 불변이므로 등록된 ceiling의 의미도 그대로다.
 
+**[HISTORICAL — 결정 #7 이전의 검토.]** 아래는 bank를 정규화하지 않고 penalty 쪽에 적용한 이유의 기록이다. 현행
+등록은 config `identification.factor_bank_normalization: sigma_max_z_unit`
+(`configs/compose_k562_v1_phase2.yaml:102`)이며 §3.1의 2026-08-21 amendment(결정 #7 재서명본) 문단이 현재
+계약이다 — bank는 split에 의존하지 않는 $\sigma_{\max}(Z)$로 정규화된다. penalty 쪽 scaling
+(`identification.lambda_scaling`)은 그대로 등록돼 있다.
+
 factor bank를 $\sqrt{\sigma_{\max}}$로 rescale하는 것과 1 ulp 이내로 **동치**임을 측정했으나, penalty
 쪽에 적용한다. bank를 정규화하면 bank artifact가 split에 의존하게 되어 encoder lineage와 split lineage가
 섞이고, runtime factor row를 checksum된 bank artifact에 byte 단위로 결속하는 provenance guard를
 다시 배선해야 하기 때문이다.
+
+<!-- /HISTORICAL -->
 
 > **적용 범위 (비주장).** selection은 headline operator만 적합하므로 이 상대 해석 아래 penalty가 선택된
 > 모델도 그것뿐이다. 최종 fit에서 `id_only` baseline은 **절대 $\lambda$를 유지한다**: 그 feature는 $z$에
@@ -521,7 +591,12 @@ $(3.03\times10^{12},\ 5.17,\ 7.13)$으로 fold 0만 11.7 order 떨어져 있다.
 factor가 실효 조건수를 묶으므로 비정칙 조건수로 거부하면 실제 solve가 멀쩡한 후보를 버리게 된다. 등록된
 `unregularized_oof_rank_policy`가 `lam == 0.0`에만 적용되는 것과 같은 경계다.
 
-> **한계 (2026-08-07 독립 리뷰).** 이 보호의 크기는 factor bank의 scale에 의존하며, 그 scale은 어떤 config
+> **[HISTORICAL — 결정 #7(2026-08-21 재서명본) 이후 무효.] 한계 (2026-08-07 독립 리뷰).** 이 문단이 기술하는
+> 상태(bank scale을 어떤 config field도 묶지 않음)는 결정 #7이 채택한
+> `identification.factor_bank_normalization: sigma_max_z_unit`으로 **종료됐다**. 아래 측정치는 그 결정의
+> 근거로 보존한다.
+>
+> 이 보호의 크기는 factor bank의 scale에 의존하며, 그 scale은 어떤 config
 > field도 묶지 않는다. $\Phi$는 $z$에 대해 bilinear이므로 $z\to cz$이면 $\Phi\to c^{2}\Phi$이고,
 > `solve_ridge_svd`는 penalty를 raw $\Phi$에 걸므로 실효 penalty는 $\lambda/c^{4}$가 된다. 반면
 > $\mathrm{cond}(\Phi)$는 uniform rescale에 불변이고(이 문서가 위에서 detector 성질로 등록한 바로 그
@@ -551,6 +626,8 @@ factor가 실효 조건수를 묶으므로 비정칙 조건수로 거부하면 �
 > > 실제 차이는 noise였다.
 > > 재현 실패의 원인은 내가 fix wave 이전의 noiseless exhibit으로 측정한 것이다. 기각을 철회하고
 > > 리뷰어의 측정을 채택한다. 이는 이 commit이 고쳤다고 주장한 misattribution과 **같은 유형**이다.
+
+<!-- /HISTORICAL -->
 
 이 arm이 바로잡는 것은 **일반적으로 승자 오염이 아니라 사유 오귀속**이다. 조건수는 **noise 증폭**을
 묶는 양이므로, noise가 있는 데이터에서 조건 악화는 held-out 오차를 키워 $\theta$를 낮추고 따라서 argmax를
@@ -609,13 +686,18 @@ screen하고 나머지로 진행하므로, 그것만으로 report 전체를 거�
 ### 10.5 Baselines, metric and inference
 
 family = {additive(null floor), GEARS(published SOTA, GO-graph 사용 — 우리 차별점), CPA(latent-
-additive), ID-only, L1(headline)/L2/L3}. **GEARS/CPA는 singles+combo_calibration에만 학습**(sealed
+additive), ID-only(= symmetric non-bilinear factor ridge; encoder ablation 아님), L1(headline)/L2/L3}. **GEARS/CPA는 singles+combo_calibration에만 학습**(sealed
 미노출, leakage 차단).
 
 pair $i$, method $M$의 response-space error는
 $e_{M,i}=p^{-1}\|\hat\delta_{M,i}-\delta_i\|_2^2$이다. comparator $C$ 대비 paired relative
-improvement는 $\theta_{M,C}=1-\overline e_M/\max(\overline e_C,10^{-12})$로 고정한다. headline
-primary estimand은 $\theta_{L1,additive}$이며 material margin은 0.05다. 동일 sealed pair
+improvement는 $\theta_{M,C}=(\overline e_C-\overline e_M)/\max(\overline e_C,10^{-12})$로 고정한다 — config `metric.formula`
+`(mean(error_comparator) - mean(error_l1)) / max(mean(error_comparator), 1e-12)` 와 `metric2.paired_relative_error_reduction` 이
+계산하는 바로 그 식이다. $\overline e_C\ge10^{-12}$ 에서 두 형태는 같지만 epsilon-floor 아래에서는 다르며 등록된 것은 이 형태다
+(method 가 완벽해 $\overline e_M=0$ 인 경우: comparator 도 완벽하면 무승부 0.0 이고 완승 1.0 이 아니며,
+$\overline e_C=5\times10^{-13}$ 이면 0.5, $\overline e_C=10^{-12}$ 이면 1.0 — 마지막 점에서 두 형태가 일치한다).
+**[수정안 E — 2026-09-07, SIGNED by owner instruction "모두 권장사항으로 진행" — EFFECTIVE Task 3. 근거: 09/06 감사 토론 R5/D-4, 양쪽 수치 재현.]**
+headline primary estimand은 $\theta_{L1,additive}$이며 material margin은 0.05다. 동일 sealed pair
 resample에서 각 replicate의 두 mean error를 다시 계산하고, 그 resample을 모든 contrast에 공유하는
 10,000회 max-deviation bootstrap으로 simultaneous 95% lower bounds를 계산한다.
 
@@ -625,6 +707,20 @@ resample에서 각 replicate의 두 mean error를 다시 계산하고, 그 resam
 - `NO_DISTINCT_WIN`: additive lower bound $\le0.05$.
 - non-finite/missing pair prediction, roster 불완전, provenance/leakage 실패는 `INVALID`;
   해당 pair/method를 사후 제외하지 않는다.
+
+위 simultaneous coverage 주장은 등록된 resampling unit(`perturbation_pair`) 가정 **아래에서만**
+성립한다. headline `sealed_double_unseen`은 22 pairs를 21 genes에서 뽑으므로 유전자를 하나도 공유하지
+않는 pair가 없고, 연결성분이 둘(19, 3)이라 의존성을 흡수하는 재표본 단위가 존재하지 않는다. verdict는
+언제나 등록된 밴드($\lambda=1.0$)에서 판정하며, 등록된 `inference.sensitivity_band_inflation` 사다리의
+각 $\lambda$에서의 lower bound와 comparator별 뒤집힘 지점을 **descriptive-only**로 함께 보고한다. 이
+sensitivity는 어떤 경우에도 verdict gate가 아니다. sensitivity는 sealed run에서 verdict가 쓴 것과 같은
+`bounds`로 계산해 `Phase2bResult`에 싣고, terminal report body에 `band_sensitivity`와
+`band_sensitivity_checksum`(블록 자신의 `sha256_json`) 두 필드로 기록한다 — `final_result_checksum`의
+다섯 구성요소 **밖**이며 등록된 run identity에 들어가지 않는다.
+**[수정안 B — 2026-09-05 위임 아래 서명. 근거: `2026-08-29-compose-pair-dependence-decision.md`(측정값),
+`docs/superpowers/2026-08-30-compose-spec-10-5-amendments.md` §3.]**
+
+각 verdict 결과군의 headline 문장은 seal 전에 `docs/superpowers/2026-08-29-compose-pair-dependence-decision.md` §8(D4, 2026-09-07)에서 확정되었다 — 결과를 본 뒤 문구를 고르지 않는다.
 
 secondary = GI-explained fraction과 구조 복원이며 verdict gate로 사용하지 않고 effect size,
 simultaneous interval, chance/null definition과 함께 전부 보고한다.
@@ -648,3 +744,39 @@ seal·run-identity는 TG-K562와 **영구 독립**(§6.3): `artifacts/compose/<r
 config+Norman data-card(sha256)+sequence-mapping+raw sha256, sealed access 0(2a/futility)→1(2b),
 write-once. verdict 2축(method × sealed); "모든 무결성 검증 완료"로 표현하지 않는다(구조적 self-check
 한계 명시).
+
+sealed cohort의 *소비*는 `claim_sealed_access`가 수행한다. 이 호출은 어떤 row도 materialise하기 전에
+durable audit record를 먼저 기록하므로, materialisation 도중 crash가 나도 audit path는 소진된다.
+`materialize_claimed`는 하나의 claim에 대해 두 번 이상 호출될 수 있다 — **다만 이를 멱등이라고 쓰지
+않는다.** audit record 자체는 내어준 bytes를 결속하지 않으며, 두 호출이 같은 bytes를 낸다는 것은 sealed
+source의 bytes가 그 사이에 바뀌지 않았을 때에 한해 참이다. 그 조건은 run의 `processed_sha256`과,
+descriptor로 고정되고 소비 후 재검증되는 sealed source가 함께 확보하도록 **설계돼 있다** — 다만
+재검증 전에 복원되는 일시 변조(`seal.transient-inode-mutation-restoration`)가 열려 있는 동안 그 확보는
+조건부다. 따라서 등록된 access count는 materialisation이 아니라 **claim**을 센다.
+**[수정안 A — 2026-09-03 서명(Jae Min Yoon). 2026-09-05 위임 아래 삽입: 서명된 문장이 spec에 실려
+있지 않았다(실측). 배치는 서명문서의 §10.5가 아니라 access count를 정의하는 이 §10.6으로 옮겼고,
+"보증한다"는 transient 잔여가 열려 있는 동안 참이 아니어서 "설계돼 있다 … 조건부"로 정정했다.
+근거: `docs/superpowers/2026-08-30-compose-spec-10-5-amendments.md`.]**
+
+**[D3-a — 2026-09-07, SIGNED by owner instruction "모두 권장사항으로 진행".]** 위 transient 잔여는 승인 runtime 전제(동시 writer 배제·mount 불변) 아래의 **수용된 잔여**로 확정한다 — 전제·위협 모델은 `2026-09-07-compose-audit-release-decisions.md` D3.
+
+**[2026-09-08 정정 — PR #15 C1.]** 위 "소비 후 재검증"의 시점을 못박는다: 재검증은 `materialize_claimed`가
+claim된 모든 pair를 물질화한 직후·반환 직전에 한 번 돈다(terminal 보호 경계 안 → 실패는
+`ABORTED_AFTER_SEAL`). 그 전까지의 배치는 driver의 `with` exit이었고, 그것은 COMPLETE terminal이 이미
+durable해진 뒤여서 실패가 durable witness를 남기지 못했다. 수용된 잔여와 access-count 정의는 불변이다 —
+`2026-09-07-compose-audit-release-decisions.md` D3의 정정 문단.
+
+---
+
+## 부록 H — historical 문단 색인 (2026-09-07)
+
+이 spec은 as-built 문서이므로 폐기된 분석을 지우지 않고 격리한다. 아래 문단은 **현행 계약이 아니다**.
+위치는 2026-09-07 기준이며 앞의 인용 문구가 정본 anchor다. 두 normalization 문단은 그 자리에서
+**HISTORICAL** 표시로 격리했고(각 블록의 끝은 `<!-- /HISTORICAL -->`), metric 식은 수정안 E로 현행
+식으로 대체했다 — 격리와 대체는 서로 다른 처리다. 이 색인은 그 처리를 대신하지 않고 모아 보여줄 뿐이다.
+
+| 위치 | 무엇이 폐기됐나 | 대체한 것 |
+|---|---|---|
+| §10.4 "factor bank를 $\sqrt{\sigma_{\max}}$로 rescale" 문단(`:523-526`) | "bank를 정규화하면 bank artifact가 split에 의존" — penalty 쪽 적용 선택의 근거 | 결정 #7 `identification.factor_bank_normalization: sigma_max_z_unit`(§3.1의 2026-08-21 amendment) |
+| §10.4 "한계 (2026-08-07 독립 리뷰)" 인용블록(`:580-614`) | "그 scale은 어떤 config field도 묶지 않는다" | 같은 결정 |
+| §10.5 metric 식 | $1-\overline e_M/\max(\overline e_C,\epsilon)$ | 수정안 E (2026-09-07, Task 3) |

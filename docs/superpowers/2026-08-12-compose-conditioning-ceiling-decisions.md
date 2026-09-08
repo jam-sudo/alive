@@ -1,5 +1,16 @@
 # COMPOSE-K562-v1 — conditioning-ceiling gate-decision record
 
+> **STATUS: ALL FOUR DECISIONS SETTLED — see §6.** #1, #2 and #3 were **CONFIRMED by the owner
+> on 2026-08-20** (#3 signed as the ARM only; the scope note attached to it is explicitly not
+> endorsed). #4, listed below as `OPEN` with no proposal, was **DECIDED 2026-08-13** and
+> implemented as `identification.lambda_scaling: calibration_sigma_max_squared` — see
+> `2026-08-13-compose-factor-scale-normalization-proposal.md`. The table in §6 is the current
+> state.
+>
+> **`config_sha256` HAS moved since this was drafted**, through #4's implementation and the
+> later ablation-ladder wave; the no-config-edit sentence in the original banner describes this
+> record's own footprint, not the repository now. The banner as originally written follows.
+>
 > **STATUS: PROPOSED — pending owner sign-off (§6).** This record settles the disposition of the
 > registered `identification.condition_ceiling` and its two application points, and it *presents but
 > does not settle* the unbounded `‖z‖` scale gap. Each decision is `PROPOSED` until the owner flips

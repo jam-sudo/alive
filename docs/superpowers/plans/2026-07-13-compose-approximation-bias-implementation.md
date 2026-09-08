@@ -8,6 +8,12 @@
 
 > **Updated 2026-07-20 — Probe-A admission model superseded.** The single-`status` Probe-A admission gate described below was hardened into a THREE-ARTIFACT anti-forgery chain: an outcome-independent committed owner policy plus a run-specific `compose_gears_probe_a_registration_v2`, an OCI-image- and verifier-code-bound `compose_gears_probe_a_verification_v3` receipt, and a `compose_gears_probe_a_admission_v3` admission that binds both by externally anchored SHA. Verification v3 additionally binds independently pinned worker-payload, selected-roster-receipt, verifier-image digest, and canonical owner image-lock SHA. The registration-v2 scale is derived from the prepared manifest and the candidate is explicitly `log_normalized_pseudobulk`; it does not validate the raw Jensen-floor metric or activate the still-blocked scientific config. Where this plan differs from the authoritative spec and runbook, those govern.
 
+> **Updated 2026-09-07 — report schema superseded (Amendment D).** Every `compose_approximation_bias_report_v3`
+> mention below is historical (v3, superseded 2026-09-07 → v4): the spec and code now require
+> `compose_approximation_bias_report_v4`, which additionally binds `provenance.probe_a_output_representation`
+> to the report's `method` (`docs/superpowers/specs/2026-07-13-compose-approximation-bias-metric-design.md`
+> Amendment D). This historical plan's v3 field lists/examples are preserved as-written below, not rewritten.
+
 **Goal:** Implement the LOCAL, seal-safe parts of the COMPOSE #4 approximation-bias design (`docs/superpowers/specs/2026-07-13-compose-approximation-bias-metric-design.md`): upgrade the measurement script to `compose_approximation_bias_report_v3`, add its known-answer/seal-safety tests, a one-way config finalization tool, the verdict-invariant durable fairness carry, and the committed Phase-1-entry gate-decision record.
 
 **Architecture:** A pure-numpy, model-free measurement (`scripts/compose/measure_pseudobulk_approximation_bias.py`) reuses `fit_role.apply_response_projection` BYTE-UNCHANGED to compute the representation-floor bias on observed non-sealed `{singles, combo_calibration}` cells, emits a stratified v1 report with a pre-registered fairness flag, and a separate finalization tool binds the report SHA one-way into config. A phase2b build-time summary block carries the fairness values into the durable registered summary WITHOUT touching the verdict. Everything here opens no seal and runs on the MacBook against synthetic fixtures; the real measurement is pod-only and out of scope.
