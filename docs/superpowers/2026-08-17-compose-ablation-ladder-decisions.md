@@ -382,10 +382,13 @@ comparator 는 λ 로 적합되므로 이 구성에서 headline 의 penalty 가 
 
 **진짜 gene-disjoint 구성은 이 커밋이 재측정하지 않았다.** 감사 A 가 라운드 2 에서 커밋된 실제 구조
 (z-universe 73 genes · calibration 44 genes · `combo_calibration` 41 pairs · `sealed_double_unseen`
-22 pairs over 21 genes, 유전자 교집합 0)를 세워 40 seed 로 다시 돌린 것이 있고
-(`artifacts/audit-debate-2026-09-06/response-A.md` §1.1), 거기서는 σmax(Φ)² = 0.0145 — 유효 penalty 비
+22 pairs over 21 genes, 유전자 교집합 0)를 세워 40 seed 로 다시 돌린 것이 있고 — **2026-09-06 감사 토론에서
+검토자 A 가 보고한 비재현 재실행 값(저장소 밖, 재현되지 않음)** — 거기서는 σmax(Φ)² = 0.0145 — 유효 penalty 비
 **약 69×** — 이며 λ=0.1 의 40/40 ↔ 0/40 반전이 그대로 유지된다고 보고한다. **그 수치는 감사 A 의 보고이고
 이 커밋에서 재현하지 않았다.** 위 코드 블록의 세 줄만 2026-09-07 에 이 저장소에서 실행한 값이다.
+`[2026-09-08 정정 — PR 리뷰 I2/M3: 위 외부 보고의 파일시스템 경로 인용(gitignored 이라 어떤 clone 에서도
+해석되지 않는다)을 제거했다. 22.1×(비-gene-disjoint)와 69×(gene-disjoint)는 다른 구성이므로 치환·혼용하지
+않는다. 수치·구성·상태 불변.]`
 
 **등록된 잔여이지 은폐가 아니다.** 비대칭 자체는 `src/alive/compose/phase2a.py:1554-1567` 의 주석이
 "open residual" 로 적어 두었고, `tests/alive/compose/test_lambda_scaling.py::test_the_final_fit_scales_the_headline_operator_and_leaves_the_baseline_alone`

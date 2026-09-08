@@ -20,15 +20,27 @@ release: GO-LOCAL (Task 11, 2026-09-07 — spec §3.3 수정안 F)
 | D1-b | 등록된 estimator 차이: §10.5 "적용 범위(비주장)" 에 arm 별 penalty 단위를 표로 등록 | confirmatory 유지, 상한 명시 | 불변 | Task 11 변형 b |
 | D1-c | 보류: pod 에서 real bank 의 λ* 로 θ(L1,L2) 부호를 양쪽 penalty 로 측정한 뒤 결정 | seal 전 미결 | 불변 | Task 11 변형 c (POD-GATED) |
 
-**측정된 사실(양쪽 재현).** gene-disjoint 40 seed 합성, λ=0.1 에서 θ(L1,L2) 는 현행 40/40 > 0, L2 에도 같은 scale 을 준 반사실 0/40 > 0.
+**측정된 사실 — 이 저장소에서 재현된 것.** 2026-09-07 에 저장소 함수만으로 재측정한 구성은 **비-gene-disjoint**
+합성 40 seed(37 genes / 41 calibration pairs / 22 held-out pairs, `k=6`, `p=8`, λ=0.1)이며, 거기서 θ(L1,L2) 는
+현행 40/40 > 0, L2 에도 같은 scale 을 준 반사실 0/40 > 0 으로 **부호가 완전히 뒤집힌다**; 원인의 크기는
+σmax(Φ)² = 0.0452, 즉 유효 penalty 비 **≈22×** 다. 재현 절차와 코드 블록은
+`2026-08-17-compose-ablation-ladder-decisions.md` Addendum(2026-09-07) 에 있다. 이것이 D1 의 **현행 근거**다.
 `src/alive/compose/phase2a.py:1554-1567` 이 `headline_lambda_scale` 을 `HEADLINE_MODEL_NAME` 에만 적용한다. **은폐가 아니다** —
 spec `:522-528` "적용 범위(비주장)" 과 `test_lambda_scaling.py::test_the_final_fit_scales_the_headline_operator_and_leaves_the_baseline_alone` 가
 고정한다. 새로 측정된 것은 그 **크기가 spec §3.3 질문의 부호를 정한다**는 점이다. 순수 architecture 효과로 해석하지 않는다.
 
-**[2026-09-07 Task 11 정정 — 수치는 그대로, 구성 라벨만 정확히.]** 위 40/40 ↔ 0/40 은 **gene-disjoint** 구성(z-universe 73 genes · calibration 44 genes · 41 cal pairs · sealed 22 pairs over 21 genes; σmax(Φ)²=0.0145,
-유효 penalty 비 ≈69×)의 값이며 출처는 `artifacts/audit-debate-2026-09-06/response-A.md` §1.1 이다 — Task 11 은 이것을
-재측정하지 않았다. Task 11 이 재측정한 것은 감사 A `audit-A-claude.md` §5.2 의 **비-gene-disjoint** 37 genes / 41 cal /
-22 held-out 구성(σmax(Φ)²=0.0452, ≈22×)이고, 거기서도 λ=0.1 의 부호는 40/40 ↔ 0/40 으로 뒤집힌다.
+**외부 보고(재현되지 않음) — gene-disjoint 구성.** 2026-09-06 감사 토론에서 검토자 A 가 커밋된 실제 구조를 세워
+(z-universe 73 genes · calibration 44 genes · 41 cal pairs · sealed 22 pairs over 21 genes, 유전자 교집합 0)
+40 seed 로 다시 돌린 값을 보고했다: σmax(Φ)² = 0.0145, 유효 penalty 비 **≈69×**, λ=0.1 의 40/40 ↔ 0/40 반전 유지.
+**이것은 저장소 밖의 비재현 재실행 값이다** — 어떤 커밋도 이를 재측정하지 않았고, 근거 파일은 저장소에 없다.
+두 값은 **구성이 다르므로** 서로 치환하거나 혼용하지 않는다(22.1× 를 gene-disjoint 결과로 다시 쓰지 않는다).
+D1 의 결론은 위 재현된 22.1× 만으로도 같다 — 부호 반전이 두 구성 모두에서 관찰된다.
+
+**[2026-09-07 Task 11 정정 — 수치는 그대로, 구성 라벨만 정확히.]** Task 11 이전의 이 절은 40/40 ↔ 0/40 을 라벨 없이
+적었다. 위 두 문단이 그 라벨을 붙인다: 재현된 것은 비-gene-disjoint(≈22×), 외부 보고는 gene-disjoint(≈69×) 다.
+**[2026-09-08 PR 리뷰 정정 — I2/M3]** 위 외부 보고의 출처를 `artifacts/…` 파일시스템 경로로 인용하던 문장을
+제거했다: `artifacts/` 는 gitignored 이므로 어떤 clone 에서도 그 경로가 해석되지 않는다. 수치·구성·상태는 불변이고,
+바뀐 것은 출처 표기뿐이다.
 
 ## D2 — ESM ID-null
 status: SIGNED: b — 오너 지시 2026-09-07 "모두 권장사항으로 진행"
