@@ -2345,7 +2345,9 @@ def _build_real_bias_report(tmp_path, *, admitted: bool = True):
     """Build a REAL v4 report via ``measure_approximation_bias_v3`` on a small
     synthetic control-free fit-role artifact + identity projection block, bound to a
     bias-NULL basis config. Writes the report EXACTLY as the metric CLI does
-    (canonical JSON + trailing newline). Returns ``(report, basis_yaml, report_path)``.
+    (canonical JSON + trailing newline). Also writes the three Probe-A byte
+    sources the finalizer now REQUIRES, so the chain consumes the same bytes the
+    producer measured. Returns ``(report, basis_yaml, report_path, probe)``.
 
     The synthetic roster mirrors the metric test's ``_full_report_fixture`` (three
     combo pairs / six singles, identity block) — already known to yield real, finite,
@@ -2419,6 +2421,14 @@ def _build_real_bias_report(tmp_path, *, admitted: bool = True):
         "control_mean": [0.0] * 6,
     }
     probe_a_evidence = _probe_a_evidence_snapshot()
+    probe = {
+        "probe_a_evidence_path": tmp_path / "probe_a_evidence.json",
+        "probe_a_registration_path": tmp_path / "probe_a_registration.json",
+        "probe_a_verification_path": tmp_path / "probe_a_verification.json",
+    }
+    probe["probe_a_evidence_path"].write_bytes(probe_a_evidence.evidence_bytes)
+    probe["probe_a_registration_path"].write_bytes(probe_a_evidence.registration_bytes)
+    probe["probe_a_verification_path"].write_bytes(probe_a_evidence.verification_bytes)
     report = metric.measure_approximation_bias_v3(
         fit_role_artifact=str(artifact),
         response_projection=block,
@@ -2451,35 +2461,51 @@ def _build_real_bias_report(tmp_path, *, admitted: bool = True):
     # EXACTLY as measure_pseudobulk_approximation_bias.py::main writes it.
     canonical = json.dumps(report, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     report_path.write_text(canonical + "\n", encoding="utf-8")
-    return report, basis_yaml, report_path
+    return report, basis_yaml, report_path, probe
 
 
-def test_metric_finalize_phase2b_roundtrip(tmp_path):
-    """metric -> finalize -> phase2b, on the real numbers.
+def test_metric_leaf_write_and_phase2b_agree_on_the_one_content_sha_recipe(tmp_path):
+    """metric -> ``sha256_file(report)`` -> leaf write -> phase2b, on the real numbers.
 
-    The admission fields are a SYNTHETIC DOCUMENT SHAPE: the current owner policy cannot
-    produce an admitted raw-count report (R1), so the arm that proves what the producer
-    really emits today is
-    ``test_the_log_pass_report_this_fixture_really_produces_is_refused_by_the_finalizer``.
+    What this proves is the ONE content-SHA recipe: the metric writes canonical JSON
+    plus a trailing newline, the finalizer's leaf write pins ``sha256_file`` of exactly
+    those bytes, and the phase2b loader re-verifies with the same recipe -- off by a
+    newline anywhere and this test fails.
+
+    It calls ``_write_single_leaf``, the guardless helper ``finalize_bias_config`` uses
+    once every guard has passed, rather than the guarded entry point. Since 2026-09-09
+    the finalizer re-opens the Probe-A bytes, and the guarded success path is
+    unreachable BY CONSTRUCTION under the committed owner policy: the only Probe-A
+    evidence that validates bridges ``log_normalized_pseudobulk`` and every admissible
+    report declares ``raw_pseudobulk_approximation``. The two arms that measure that are
+    ``test_the_admitted_synthetic_shape_is_refused_once_the_probe_a_bytes_are_re_opened``
+    and ``test_the_log_pass_report_this_fixture_really_produces_is_refused_by_the_finalizer``.
+
+    The admission fields here remain a SYNTHETIC DOCUMENT SHAPE for the loader's sake
+    (it too requires ``admitted``); nothing in this test claims they are reachable.
     """
-    # Build the REAL report + finalize the config leaf via the real tool.
-    report, basis_yaml, report_path = _build_real_bias_report(tmp_path)
+    # Build the REAL report + apply the real leaf write.
+    report, basis_yaml, report_path, _probe = _build_real_bias_report(tmp_path)
     gi = report["gi_and_fairness"]
     # Sanity: this fixture yields a genuinely populated (non-degenerate) report.
     assert gi["fairness_flag"] in {"clear", "representation_confounded"}
     assert isinstance(gi["bias_to_signal_ratio_R"], float)
     assert isinstance(gi["bootstrap_95_interval"]["bias_to_signal_ratio_R"], list)
 
+    import yaml
+
     finalize = _load_script_module(
         "scripts/compose/finalize_approximation_bias_config.py", "_finalize_bias_config_e2e"
     )
-    final_config = finalize.finalize_bias_config(
-        basis_config_path=basis_yaml, report_path=report_path
-    )
+    basis = yaml.safe_load(Path(basis_yaml).read_text(encoding="utf-8"))
+    final_config = finalize._write_single_leaf(basis, sha256_file(report_path))
     pinned_sha = final_config["baselines"]["gears"]["approximation_bias_report_sha256"]
-    # The finalized leaf must be the SHA of the EXACT on-disk report bytes — the one
+    # The pinned leaf must be the SHA of the EXACT on-disk report bytes — the one
     # recipe phase2b re-verifies. (Off-by-a-newline here is Important-2.)
     assert pinned_sha == sha256_file(report_path)
+    # And the write really is a single-leaf write on the real config.
+    assert basis["baselines"]["gears"]["approximation_bias_report_sha256"] is None
+    finalize._assert_single_leaf_diff(basis, final_config)
 
     # Feed the finalized SHA + immutable report evidence into the phase2b loader.
     base = _builder_base_kwargs(tmp_path)
@@ -2517,7 +2543,7 @@ def test_the_log_pass_report_this_fixture_really_produces_is_refused_by_the_fina
     the finalizer refuses it -- so the admitted document shape the round-trip uses is not
     quietly standing in for something reachable today.
     """
-    report, basis_yaml, report_path = _build_real_bias_report(tmp_path, admitted=False)
+    report, basis_yaml, report_path, probe = _build_real_bias_report(tmp_path, admitted=False)
 
     assert report["admission_status"] == NOT_ADMISSIBLE
     assert report["provenance"]["probe_a_output_representation"] == PROBE_A_REPRESENTATION
@@ -2525,7 +2551,36 @@ def test_the_log_pass_report_this_fixture_really_produces_is_refused_by_the_fina
         "scripts/compose/finalize_approximation_bias_config.py", "_finalize_bias_config_e2e_neg"
     )
     with pytest.raises(ApproximationBiasValidationError, match="must be 'admitted'"):
-        finalize.finalize_bias_config(basis_config_path=basis_yaml, report_path=report_path)
+        finalize.finalize_bias_config(
+            basis_config_path=basis_yaml, report_path=report_path, **probe
+        )
+
+
+def test_the_admitted_synthetic_shape_is_refused_once_the_probe_a_bytes_are_re_opened(tmp_path):
+    """The hole PR #15 item 2 named, closed on the REAL producer chain.
+
+    The round-trip's admitted document shape passes every report-level check -- its
+    ``self_checksum`` is rebuilt and its three ``probe_a_*_sha256`` fields are the true
+    digests of the bytes the producer measured. Before 2026-09-09 the finalizer took the
+    report's word for ``probe_a_output_representation`` and would have finalized it.
+    Re-opening the evidence shows the bridge validated ``log_normalized_pseudobulk``,
+    which does not admit a raw-count report, and the config leaf is not written.
+    """
+    report, basis_yaml, report_path, probe = _build_real_bias_report(tmp_path)
+
+    assert report["admission_status"] == ADMITTED
+    assert report["provenance"]["probe_a_output_representation"] == REPRESENTATION
+    assert report["provenance"]["probe_a_evidence_sha256"] == sha256_file(
+        probe["probe_a_evidence_path"]
+    )
+    finalize = _load_script_module(
+        "scripts/compose/finalize_approximation_bias_config.py", "_finalize_bias_config_e2e_bridge"
+    )
+
+    with pytest.raises(ValueError, match="which does not admit a"):
+        finalize.finalize_bias_config(
+            basis_config_path=basis_yaml, report_path=report_path, **probe
+        )
 
 
 # Fail-closed unit coverage for the seal-critical loader's numeric/interval helpers +

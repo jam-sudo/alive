@@ -37,11 +37,27 @@ itself feeds this same report, recreating the forbidden cycle this tool
 exists to avoid (see
 ``tests/alive/compose/test_finalize_approximation_bias_config.py::test_bias_requirement_not_config_bound``).
 
+The report's ``provenance`` is NOT trusted for the Probe-A facts it declares.
+Every call re-opens the three Probe-A byte sources (admission, registration,
+verification receipt) through the SAME validators the producer used, checks
+their digests against the report's three ``probe_a_*_sha256`` fields, and
+refuses unless the representation the evidence ACTUALLY validated both admits
+this method and is the one the report declares. Under the committed Probe-A
+owner policy (``configs/compose_gears_probe_a_owner_policy_v1.json``) the bridge
+validates ``log_normalized_pseudobulk`` while every admissible report must
+declare ``raw_pseudobulk_approximation``, so this tool admits NOTHING today: the
+success path is POD-GATED behind the R1 representation decision
+(``docs/superpowers/COMPOSE-SEAL-READINESS.md:118``). That is the honest state
+of the evidence, not a defect in the tool.
+
 Usage
 -----
     uv run python scripts/compose/finalize_approximation_bias_config.py \\
         --basis-config configs/compose_k562_v1_phase2.yaml \\
         --report artifacts/compose/approximation_bias_report.json \\
+        --probe-a-evidence artifacts/compose/probe_a_admission.json \\
+        --probe-a-registration artifacts/compose/probe_a_registration.json \\
+        --probe-a-verification artifacts/compose/probe_a_verification.json \\
         --out artifacts/compose/compose_k562_v1_phase2_bias_finalized.yaml
 """
 
@@ -59,7 +75,10 @@ import yaml
 
 from alive.compose.approximation_bias import (
     REPRESENTATION,
+    bridge_admits,
+    load_probe_a_evidence,
     measurement_contract_sha256,
+    probe_a_from_evidence,
     validate_approximation_bias_report,
 )
 from alive.provenance import sha256_file, sha256_json
@@ -169,7 +188,45 @@ def _assert_no_final_sha_leak(final: Mapping, report: Mapping) -> None:
         )
 
 
-def finalize_bias_config(*, basis_config_path: str | Path, report_path: str | Path) -> dict:
+def _write_single_leaf(basis: dict, report_content_sha: str) -> dict:
+    """Return a deep copy of ``basis`` with ONLY the registered bias leaf set.
+
+    The pure leaf write, carrying NO guards of its own:
+    :func:`finalize_bias_config` runs every admission guard BEFORE calling it.
+    It is a named function rather than three inline lines because the ONE
+    authoritative content-SHA recipe it applies -- ``sha256_file`` of the exact
+    on-disk report bytes, the same recipe ``phase2b`` re-verifies -- must stay
+    provable end to end even though the guarded path above it cannot succeed
+    under today's Probe-A owner policy (see the module docstring). The
+    metric -> recipe -> loader round-trip in
+    ``tests/alive/compose/test_phase2b.py`` calls it directly for exactly that.
+
+    Parameters
+    ----------
+    basis : dict
+        The bias-NULL basis config as loaded from YAML.
+    report_content_sha : str
+        ``sha256_file`` of the completed report's exact on-disk bytes.
+
+    Returns
+    -------
+    dict
+        A deep copy of ``basis`` with ``baselines.gears``
+        ``.approximation_bias_report_sha256`` set to ``report_content_sha``.
+    """
+    final = copy.deepcopy(basis)
+    final["baselines"]["gears"]["approximation_bias_report_sha256"] = report_content_sha
+    return final
+
+
+def finalize_bias_config(
+    *,
+    basis_config_path: str | Path,
+    report_path: str | Path,
+    probe_a_evidence_path: str | Path,
+    probe_a_registration_path: str | Path,
+    probe_a_verification_path: str | Path,
+) -> dict:
     """Bind a completed approximation-bias report's content SHA into its basis config.
 
     Reads the bias-NULL YAML config at ``basis_config_path`` and the
@@ -190,7 +247,8 @@ def finalize_bias_config(*, basis_config_path: str | Path, report_path: str | Pa
        previously-recorded SHA.
     3. The report must be bound to this exact basis:
        ``report["provenance"]["basis_config_sha256"] == basis_sha``.
-    4. ``final = copy.deepcopy(basis)``; set ONLY the one registered leaf to
+    4. :func:`_write_single_leaf` deep-copies the basis and sets ONLY the one
+       registered leaf to
        ``sha256_file(report_path)`` — the SHA-256 of the EXACT on-disk report
        bytes the metric script wrote (``_canonical_json(report) + "\n"``, WITH
        the trailing newline). This is the single authoritative content-SHA
@@ -206,6 +264,17 @@ def finalize_bias_config(*, basis_config_path: str | Path, report_path: str | Pa
        SHA does not appear inside the report (the one-way/no-cycle
        invariant).
 
+    Between 3. and 4. the report's Probe-A *self-declaration* is checked against
+    the Probe-A BYTES: the three paths are mandatory, their ``sha256_file``
+    digests must equal the report's ``probe_a_evidence_sha256`` /
+    ``probe_a_registration_sha256`` / ``probe_a_verification_sha256``, the
+    admission is revalidated through :func:`load_probe_a_evidence` /
+    :func:`probe_a_from_evidence` (no new trust assumption is created here --
+    the same validators the producer ran), the representation that bridge
+    actually validated must ADMIT this method (:func:`bridge_admits`), and it
+    must be the representation the report declares. The three paths are required
+    keyword arguments on purpose: an optional guard is bypassed by omission.
+
     Parameters
     ----------
     basis_config_path : str or Path
@@ -213,6 +282,13 @@ def finalize_bias_config(*, basis_config_path: str | Path, report_path: str | Pa
     report_path : str or Path
         Path to the completed ``compose_approximation_bias_report_v4`` JSON
         report.
+    probe_a_evidence_path : str or Path
+        Path to the Probe-A admission JSON whose bytes the report pins in
+        ``provenance.probe_a_evidence_sha256``. REQUIRED.
+    probe_a_registration_path : str or Path
+        Path to the owner-frozen Probe-A registration JSON. REQUIRED.
+    probe_a_verification_path : str or Path
+        Path to the offline Probe-A verification receipt JSON. REQUIRED.
 
     Returns
     -------
@@ -224,8 +300,14 @@ def finalize_bias_config(*, basis_config_path: str | Path, report_path: str | Pa
     ------
     ValueError
         If the basis does not parse to a mapping, the basis is not
-        bias-NULL, the report is not bound to this basis, the leaf-diff
-        guard fires, or the one-way SHA-leak guard fires.
+        bias-NULL, the report is not bound to this basis, any of the three
+        Probe-A byte sources disagrees with the digest the report declares for
+        it, the Probe-A bridge does not admit this method, the report declares a
+        representation the evidence did not validate, the leaf-diff guard fires,
+        or the one-way SHA-leak guard fires.
+    ApproximationBiasValidationError
+        If the report itself, or any of the three Probe-A artifacts, fails the
+        shared integrity contracts.
     """
     basis = yaml.safe_load(Path(basis_config_path).read_text(encoding="utf-8"))
     if not isinstance(basis, dict):
@@ -273,13 +355,49 @@ def finalize_bias_config(*, basis_config_path: str | Path, report_path: str | Pa
         },
     )
 
-    final = copy.deepcopy(basis)
+    provenance = report["provenance"]
+    for path, key, field in (
+        (probe_a_evidence_path, "probe_a_evidence_sha256", "Probe-A admission"),
+        (probe_a_registration_path, "probe_a_registration_sha256", "Probe-A registration"),
+        (probe_a_verification_path, "probe_a_verification_sha256", "Probe-A verification"),
+    ):
+        if sha256_file(path) != provenance[key]:
+            raise ValueError(f"finalize_bias_config: {field} bytes do not match the report's {key}")
+    # Re-run the SAME validators the producer ran -- so that binding the report to
+    # these bytes creates no new trust assumption of its own.
+    evidence = load_probe_a_evidence(
+        probe_a_evidence_path,
+        registration_path=probe_a_registration_path,
+        verification_path=probe_a_verification_path,
+        expected_git_commit=str(provenance["git_commit"]),
+        expected_registration_sha256=str(provenance["probe_a_registration_sha256"]),
+        expected_verification_sha256=str(provenance["probe_a_verification_sha256"]),
+    )
+    probe_a = probe_a_from_evidence(
+        evidence,
+        expected_git_commit=str(provenance["git_commit"]),
+        expected_registration_sha256=str(provenance["probe_a_registration_sha256"]),
+        expected_verification_sha256=str(provenance["probe_a_verification_sha256"]),
+    )
+    bridged = str(probe_a["output_bridge"]["representation"])
+    if not bridge_admits(method=REPRESENTATION, probe_representation=bridged):
+        raise ValueError(
+            "finalize_bias_config: the Probe-A bridge validated "
+            f"{bridged!r}, which does not admit a {REPRESENTATION!r} report"
+        )
+    if bridged != str(provenance["probe_a_output_representation"]):
+        raise ValueError(
+            "finalize_bias_config: the report's probe_a_output_representation "
+            f"({provenance['probe_a_output_representation']!r}) is not what the Probe-A "
+            f"evidence actually validated ({bridged!r})"
+        )
+
     # The ONE authoritative content-SHA recipe: the SHA-256 of the EXACT on-disk
     # report bytes (canonical JSON + trailing newline, as the metric wrote them).
     # phase2b re-verifies the pinned config SHA with this same sha256_file, so
     # metric-writes → finalize-pins → phase2b-verifies never disagree by a byte.
     report_content_sha = sha256_file(report_path)
-    final["baselines"]["gears"]["approximation_bias_report_sha256"] = report_content_sha
+    final = _write_single_leaf(basis, report_content_sha)
 
     _assert_single_leaf_diff(basis, final)
     _assert_no_final_sha_leak(final, report)
@@ -288,7 +406,10 @@ def finalize_bias_config(*, basis_config_path: str | Path, report_path: str | Pa
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Thin CLI: read ``--basis-config`` + ``--report``, write the finalized config.
+    """Thin CLI: read the config, the report and the three Probe-A byte sources.
+
+    The three ``--probe-a-*`` paths are ``required=True``: an optional evidence
+    binding is a guard bypassed by omission.
 
     Parameters
     ----------
@@ -308,10 +429,28 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--report", required=True, type=Path, help="completed approximation_bias_report_v4 JSON"
     )
+    parser.add_argument(
+        "--probe-a-evidence", required=True, type=Path, help="Probe-A admission JSON"
+    )
+    parser.add_argument(
+        "--probe-a-registration", required=True, type=Path, help="Probe-A registration JSON"
+    )
+    parser.add_argument(
+        "--probe-a-verification",
+        required=True,
+        type=Path,
+        help="Probe-A verification receipt JSON",
+    )
     parser.add_argument("--out", required=True, type=Path, help="finalized config YAML output")
     args = parser.parse_args(argv)
 
-    final = finalize_bias_config(basis_config_path=args.basis_config, report_path=args.report)
+    final = finalize_bias_config(
+        basis_config_path=args.basis_config,
+        report_path=args.report,
+        probe_a_evidence_path=args.probe_a_evidence,
+        probe_a_registration_path=args.probe_a_registration,
+        probe_a_verification_path=args.probe_a_verification,
+    )
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(yaml.safe_dump(final, sort_keys=False), encoding="utf-8")

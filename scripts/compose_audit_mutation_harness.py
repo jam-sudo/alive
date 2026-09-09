@@ -463,6 +463,27 @@ SANDBOX_CASES: tuple[SandboxCase, ...] = (
             "sandbox on 2026-09-07; that record is now supporting history, not the evidence."
         ),
     ),
+    SandboxCase(
+        name="M19 the finalizer takes the report's word for the representation it declares",
+        relative_target="scripts/compose/finalize_approximation_bias_config.py",
+        old='    if bridged != str(provenance["probe_a_output_representation"]):',
+        new="    if False:",
+        nodeid="tests/alive/compose/test_finalize_approximation_bias_config.py"
+        "::test_the_finalizer_refuses_a_representation_the_probe_a_evidence_did_not_validate",
+        redirect_module="tests.alive.compose.test_finalize_approximation_bias_config",
+        redirect_old='_SCRIPT = _REPO / "scripts" / "compose" '
+        '/ "finalize_approximation_bias_config.py"',
+        redirect_new='_SCRIPT = Path("' + SANDBOX_TOKEN + "/scripts/compose"
+        '/finalize_approximation_bias_config.py")',
+        note=(
+            "The named test patches `bridge_admits` permissive on the finalizer's own module "
+            "(rule 7: the R1 relation refuses first, so the redundant site must fall before "
+            "this comparison can be measured at all). With the comparison gone the call "
+            "returns a finalized config instead of raising, and the capture-and-assert helper "
+            "in the test module reports it -- the AssertionError is the TEST's, not the "
+            "library's typed error (rule 8)."
+        ),
+    ),
 )
 
 
