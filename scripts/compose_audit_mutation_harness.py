@@ -38,6 +38,15 @@ instrument that checks the tests, the instrument's own blind spot.
    ``HARNESS_FAILURE (non-assertion: <Type>)``. Where a contract IS a typed
    error, the fix is a killer that asserts the TYPE, so the mutant's stray
    exception becomes an assertion-level failure.
+   **Second level: the KIND does not say WHOSE assertion failed.** Production
+   code carries bare ``assert`` statements, and a mutation that flips one gives
+   the pinned test a genuine call-phase ``AssertionError`` while the test's own
+   assertions were never reached -- measured on ``models.py``'s
+   ``assert self.weights_ is not None``, which today's classifier would have
+   scored ``KILLED``. So the child records the traceback's files too, and a kill
+   additionally requires the LAST repository-owned frame to BE the pinned node
+   ID's test module (:func:`_repo_frame`). Anything else is
+   ``HARNESS_FAILURE (frame outside the test module: <path>)``.
 
 **How this engine differs from its siblings, and why.** The siblings edit ``src/``
 in place and restore in a ``finally``. This wave must not modify pinned files at
@@ -149,6 +158,11 @@ class _CallPhaseRecorder:
                     "when": call.when,
                     "type": call.excinfo.type.__name__,
                     "repr": repr(call.excinfo.value)[:400],
+                    # Rule 8, second level: the KIND alone cannot tell the
+                    # test's own assertion from a bare ``assert`` in the
+                    # production code the test calls. Keep the frames so the
+                    # parent can attest WHERE the assertion was raised.
+                    "frames": [str(entry.path) for entry in call.excinfo.traceback],
                 }
             )
         return None
@@ -194,6 +208,12 @@ class CaseRun:
         as ``"<phase>:<Type>"`` so it can never be read as an assertion.
     call_repr
         ``repr`` of that exception, truncated. Evidence for the ledger.
+    call_frame
+        Repo-relative POSIX path of the LAST repository-owned traceback frame of
+        that exception (see :func:`_repo_frame`), or ``None`` when nothing was
+        recorded. A kill requires this to be the pinned node ID's own test
+        module: an ``AssertionError`` raised inside production code is the
+        production module's assertion, not the test's.
     """
 
     returncode: int
@@ -201,6 +221,7 @@ class CaseRun:
     summary: str
     call_kind: str | None = None
     call_repr: str = ""
+    call_frame: str | None = None
 
 
 @dataclass(frozen=True)
@@ -459,20 +480,60 @@ def _parse(stdout: str) -> tuple[frozenset[str], str]:
     return failed, lines[-1] if lines else "(no output)"
 
 
-def _call_phase(records: list[dict], nodeid: str) -> tuple[str | None, str]:
-    """Return ``(kind, repr)`` for ``nodeid``'s failing phase (rule 8).
+def _repo_frame(frames: list[str]) -> str | None:
+    """Return the LAST repository-owned traceback frame, repo-relative.
+
+    Frames inside the virtualenv are excluded, and that exclusion is the whole
+    design: ``pytest.fail`` and an unfulfilled ``pytest.raises`` both leave
+    ``_pytest/outcomes.py`` / ``_pytest/raises.py`` as the deepest frame -- 9 of
+    the 18 registered cases end there, all of them in-memory ones (measured
+    2026-09-09, not cited). A naive "the last frame must be the test module"
+    rule would therefore break those 9 while proving nothing. What identifies
+    the assertion's owner is the last frame the REPOSITORY owns: the test module
+    for the test's own assertion, the production module for a bare ``assert``
+    the test merely called into.
+
+    Parameters
+    ----------
+    frames : list of str
+        Absolute file paths of the traceback entries, outermost first.
+
+    Returns
+    -------
+    str or None
+        Repo-relative POSIX path, or ``None`` if no frame is repository-owned.
+    """
+    repo = str(REPO) + "/"
+    owned = [
+        frame[len(repo) :]
+        for frame in frames
+        if frame.startswith(repo) and not frame[len(repo) :].startswith(".venv/")
+    ]
+    return owned[-1] if owned else None
+
+
+def _call_phase(records: list[dict], nodeid: str) -> tuple[str | None, str, str | None]:
+    """Return ``(kind, repr, frame)`` for ``nodeid``'s failing phase (rule 8).
 
     A call-phase failure reports the bare exception type; a setup/teardown
     failure is prefixed with its phase so it can never match
-    :data:`ASSERTION_KINDS`.
+    :data:`ASSERTION_KINDS`. ``frame`` is :func:`_repo_frame` of that failure.
     """
     for record in records:
         if record["nodeid"] == nodeid and record["when"] == "call":
-            return str(record["type"]), str(record["repr"])
+            return (
+                str(record["type"]),
+                str(record["repr"]),
+                _repo_frame(list(record.get("frames", []))),
+            )
     for record in records:
         if record["nodeid"] == nodeid:
-            return f"{record['when']}:{record['type']}", str(record["repr"])
-    return None, ""
+            return (
+                f"{record['when']}:{record['type']}",
+                str(record["repr"]),
+                _repo_frame(list(record.get("frames", []))),
+            )
+    return None, "", None
 
 
 def run_plan(plan: Sequence[tuple[str, Sequence[tuple[str, str]]]], nodeid: str) -> CaseRun:
@@ -522,13 +583,14 @@ def run_plan(plan: Sequence[tuple[str, Sequence[tuple[str, str]]]], nodeid: str)
         summary = anchor[0] if anchor else summary
     elif not stdout.strip() and proc.stderr:
         summary = (proc.stderr.strip().splitlines() or ["(no output)"])[-1]
-    kind, detail = _call_phase(records, nodeid)
+    kind, detail, frame = _call_phase(records, nodeid)
     return CaseRun(
         returncode=proc.returncode,
         failed=failed,
         summary=summary,
         call_kind=kind,
         call_repr=detail,
+        call_frame=frame,
     )
 
 
@@ -597,19 +659,24 @@ def classify(*, baseline: CaseRun, mutant: CaseRun, nodeid: str) -> str:
     A kill is exactly: baseline green through this machinery, then the SAME node
     ID reported FAILED by the mutant run **because its own assertion failed**
     (``AssertionError``, or pytest's ``Failed`` from ``pytest.fail`` / an
-    unfulfilled ``pytest.raises``). Everything else -- collection errors, usage
-    errors, a crash while re-executing the module, an anchor miss, a different
-    test going red, or the named test dying on a stray exception it never
-    claimed -- is a harness failure, not a kill (rules 4, 6 and 8).
+    unfulfilled ``pytest.raises``) **in its own module's frame**. Everything else
+    -- collection errors, usage errors, a crash while re-executing the module, an
+    anchor miss, a different test going red, the named test dying on a stray
+    exception it never claimed, or an ``AssertionError`` that belongs to a bare
+    ``assert`` in the production code the test called -- is a harness failure,
+    not a kill (rules 4, 6 and 8).
     """
     if baseline.returncode != 0 or baseline.failed:
         return HARNESS_FAILURE
     if mutant.returncode == 0 and not mutant.failed:
         return SURVIVED
     if mutant.returncode == 1 and nodeid in mutant.failed:
-        if mutant.call_kind in ASSERTION_KINDS:
-            return KILLED
-        return f"{HARNESS_FAILURE} (non-assertion: {mutant.call_kind})"
+        if mutant.call_kind not in ASSERTION_KINDS:
+            return f"{HARNESS_FAILURE} (non-assertion: {mutant.call_kind})"
+        test_module = nodeid.split("::")[0]
+        if mutant.call_frame != test_module:
+            return f"{HARNESS_FAILURE} (frame outside the test module: {mutant.call_frame})"
+        return KILLED
     return HARNESS_FAILURE
 
 
@@ -669,7 +736,8 @@ def _report(name: str, nodeid: str, verdict: str, baseline: CaseRun, mutant: Cas
     print(f"{'':<16} nodeid   {nodeid}")
     print(
         f"{'':<16} exit     baseline={baseline.returncode} mutant={mutant.returncode}"
-        f"  |  kind={mutant.call_kind}  |  {mutant.summary}"
+        f"  |  kind={mutant.call_kind}  |  frame={mutant.call_frame}"
+        f"  |  {mutant.summary}"
     )
     print(f"{'':<16} raised   {mutant.call_repr or '(none)'}")
     if not verdict.startswith(KILLED):
