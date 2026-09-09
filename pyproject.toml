@@ -34,8 +34,14 @@ extend-exclude = [
 ]
 
 [tool.ruff.lint]
-select = ["E", "F", "W", "I"]
+select = ["E", "F", "W", "I", "S101"]
 ignore = []
+
+[tool.ruff.lint.per-file-ignores]
+# 테스트와 스크립트의 `assert` 는 이 저장소의 검증 언어 자체다(kill 인증도 그 위에 선다).
+# S101 은 production source 에만 적용한다 — `-O` 실행에서 조용히 사라지는 검사를 막는 것이 목적.
+"tests/**" = ["S101"]
+"scripts/**" = ["S101"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
