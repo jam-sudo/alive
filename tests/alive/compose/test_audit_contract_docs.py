@@ -315,6 +315,80 @@ def test_a_signed_source_threat_model_names_the_consumption_residual():
     assert "동시 writer" in body and "mount" in body
 
 
+_OUTCOME_STORE_SOURCE = Path("src/alive/compose/outcome_store.py")
+_TERMINAL_SOURCE = Path("src/alive/compose/terminal.py")
+_SEALED_SOURCE_E2E = Path("tests/alive/compose/driver/test_sealed_source_integrity_e2e.py")
+
+
+def _between(source: str, start: str, end: str) -> str:
+    """Return the slice between two literals, or ``""`` when the opening one is gone."""
+    if start not in source:
+        return ""
+    tail = source.split(start, 1)[1]
+    return tail.split(end, 1)[0] if end in tail else tail
+
+
+def _opening_docstring(source: str, header: str) -> str:
+    """Return the docstring that opens the block ``header`` introduces.
+
+    Scope matters here. ``terminal.py`` already names ``ComposeSealingError`` once —
+    in ``TerminalError``'s own docstring — so a whole-file search would be satisfied
+    without ``_ProtectBoundary`` saying anything about the consumption boundary.
+    """
+    if header not in source:
+        return ""
+    parts = source.split(header, 1)[1].split('"""')
+    return parts[1] if len(parts) >= 3 else ""
+
+
+def _missing_consumption_role_tokens() -> list[str]:
+    """Return ``site: token`` for every enforcement role not written AT ITS OWN site.
+
+    Pure predicate — the assertion stays in the named test's frame (변이 규칙 6).
+    """
+    consumption = _between(
+        _OUTCOME_STORE_SOURCE.read_text(encoding="utf-8"),
+        "CONSUMPTION ENDS HERE",
+        "return release",
+    )
+    protect = _opening_docstring(
+        _TERMINAL_SOURCE.read_text(encoding="utf-8"), "class _ProtectBoundary:"
+    )
+    arm = _opening_docstring(
+        _SEALED_SOURCE_E2E.read_text(encoding="utf-8"),
+        "def test_an_io_error_in_the_materialization_recheck_still_aborts_after_seal(",
+    )
+    scoped = {
+        "outcome_store consumption boundary": (
+            consumption,
+            ("TYPED CONTEXT", "_ProtectBoundary"),
+        ),
+        "terminal._ProtectBoundary docstring": (protect, ("DURABLE ABORT", "ComposeSealingError")),
+        "sealed-source e2e arm docstring": (arm, ("_seal_consumed", "EXIT CODE")),
+    }
+    return [
+        f"{site}: {token}"
+        for site, (scope, tokens) in scoped.items()
+        for token in tokens
+        if token not in scope
+    ]
+
+
+def test_the_three_consumption_failure_enforcement_roles_are_documented():
+    """소비 경계의 실패를 처리하는 **세 강제 지점**이 각자의 자리에 역할로 적혀 있다.
+
+    exit code 30 을 결정하는 것은 store 의 래핑도 ``protect()`` 도 아니라
+    ``phase2b_cmd._seal_consumed(audit_path)`` 다 — durable audit 의 존재만 본다.
+    그래서 store 의 ``except Exception`` 을 무력화하는 **단일** 변이는 exit-code 단언을
+    그대로 통과시킨다(실측). 기록이 없으면 그 SURVIVED 를 "테스트가 공허하다" 로 오독한다
+    (변이 규칙 7: 중복 강제는 모든 site 가 죽어야 죽는다).
+
+    각 역할은 그 역할을 수행하는 파일에 적혀야 의미가 있으므로 haystack 을 site 별로 좁힌다.
+    """
+    missing = _missing_consumption_role_tokens()
+    assert not missing, f"소비 경계의 강제 역할이 자기 site 에 기록되지 않았다: {missing}"
+
+
 _PAIR_DEPENDENCE = Path("docs/superpowers/2026-08-29-compose-pair-dependence-decision.md")
 _PHASE2B_SOURCE = Path("src/alive/compose/phase2b.py")
 _HEADLINE_SECTION = "8. seal 전에 확정된 headline 문장"

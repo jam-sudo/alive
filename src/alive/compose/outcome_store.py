@@ -707,6 +707,16 @@ class ComposeOutcomeStore:
         # the driver's `with` exit, PR #15 finding C1) keeps the failure INSIDE the
         # terminal protection boundary: it becomes ABORTED_AFTER_SEAL with the
         # claim preserved, not an exception thrown after COMPLETE was made durable.
+        #
+        # 소비 경계의 실패는 세 지점이 각기 다른 역할로 처리한다 (변이 규칙 7):
+        #   1) 이 site = TYPED CONTEXT. 실패를 ComposeSealingError 로 감싸 메시지를 소유한다.
+        #   2) _ProtectBoundary.__exit__ (terminal.py:1386-1405) = DURABLE ABORT. 예외 타입과
+        #      무관하게 ABORTED_AFTER_SEAL terminal 을 쓰고 원 예외를 재전파한다.
+        #   3) phase2b_cmd._seal_consumed (driver/phase2b_cmd.py:424-426, :853) = EXIT CODE.
+        #      예외 타입이 아니라 durable audit 의 존재만 보고 30 을 돌려준다.
+        # 따라서 이 site 를 무력화하는 단일 변이는 exit code 30 을 그대로 남긴다(실측). 그런 변이가
+        # SURVIVED 로 보이면 테스트가 공허한 것이 아니라 (2)(3)이 막은 것이다 -- 어느 line 이
+        # raise 했는지 먼저 측정하고, kill 은 메시지 단언으로 받는다.
         if self._post_materialization_check is not None:
             try:
                 self._post_materialization_check()

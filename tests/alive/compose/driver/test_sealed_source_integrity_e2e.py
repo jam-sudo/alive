@@ -298,6 +298,12 @@ def test_an_io_error_in_the_materialization_recheck_still_aborts_after_seal(
     so this becomes ``ABORTED_AFTER_SEAL`` / exit 30 and ``recover`` agrees. Widening
     the diagnostic branch to ``except Exception`` must not reach this position ---
     that is what this arm measures.
+
+    The EXIT CODE below is NOT the store's to give: ``phase2b_cmd._seal_consumed``
+    returns 30 on the durable audit's mere existence, whatever the exception type.
+    Measured: disabling the store's ``except Exception`` leaves ``rc == 30`` green and
+    turns only the message assertion red -- so the message assertion, not ``rc``, is
+    this arm's kill for a mutation of that wrapping (변이 규칙 7).
     """
     fx = _run_preseal(tmp_path)
     token = _confirmation_token(fx.run_dir)

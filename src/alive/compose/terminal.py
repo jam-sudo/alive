@@ -1349,6 +1349,13 @@ class _ProtectBoundary:
       → record an ``ABORTED_AFTER_SEAL`` artifact with
       ``stage="no-terminal-written"``.
 
+    This is the DURABLE ABORT role of the sealed-source consumption boundary, and it
+    keys on the PRESENCE of an exception, never on its type: a failure the store
+    wrapped into :class:`~alive.compose.outcome_store.ComposeSealingError` (that
+    site's TYPED CONTEXT role, at ``post_materialization_check``) and a raw one land
+    on the same ``ABORTED_AFTER_SEAL`` record here. The exit code belongs to a third
+    site, ``phase2b_cmd._seal_consumed``.
+
     Parameters
     ----------
     owner : Phase2bTerminal
