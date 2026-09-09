@@ -776,47 +776,53 @@ def test_the_finalizer_refuses_when_the_probe_a_bridge_does_not_admit_this_metho
     )
 
 
-def test_the_finalizer_refuses_a_representation_the_probe_a_evidence_did_not_validate(
-    tmp_path, monkeypatch
-):
-    """(d) Defense in depth: even if the R1 relation admitted this method, the
-    representation the report DECLARES must still be the one the evidence
-    actually validated.
+def test_the_finalizer_refuses_a_representation_the_probe_a_evidence_did_not_validate():
+    """(d) Defense in depth: the representation the report DECLARES must be the one
+    the Probe-A evidence actually validated.
 
-    ``bridge_admits`` refuses first today, so this comparison is unreachable
-    while that holds. Patching the relation permissive ON THE FINALIZER'S OWN
-    MODULE is the same "make the redundant site fall so the named site can be
-    measured" move the mutation harness makes (rule 7); nothing else is patched
-    -- the report, the three byte sources and every validator are the real ones.
+    Measured on the REAL comparison. ``bridge_admits`` refuses first for every real
+    input today, so this check is unreachable *through* ``finalize_bias_config`` -- and
+    the answer to that is to call the comparison the finalizer itself calls, NOT to
+    replace the admission guard in front of it with a permissive double. Nothing here is
+    mocked, patched or stubbed: ``_require_representation_matches`` is the same function
+    object ``finalize_bias_config`` invokes, with the same operator and the same message.
+    The wiring is pinned separately by
+    ``test_the_finalizer_actually_calls_the_representation_comparison``.
     """
     module = _load_finalize_module()
-    basis_path, basis_sha = _round_tripped_basis(tmp_path)
-    probe = _probe_a_paths(tmp_path)
-    report_path = _write_report_json(
-        tmp_path, _bound_report_with(basis_sha, provenance=_probe_a_digests(probe))
-    )
 
-    # Measure the premise in both directions rather than assuming it.
-    assert (
-        module.bridge_admits(method=REPRESENTATION, probe_representation=PROBE_A_REPRESENTATION)
-        is False
-    )
-    monkeypatch.setattr(module, "bridge_admits", lambda **_kwargs: True)
-    assert (
-        module.bridge_admits(method=REPRESENTATION, probe_representation=PROBE_A_REPRESENTATION)
-        is True
-    )
+    # Anti-tautology: the matching case really does pass, so the refusal below is
+    # the comparison speaking rather than an unconditional raise.
+    module._require_representation_matches(REPRESENTATION, REPRESENTATION)
+    module._require_representation_matches(PROBE_A_REPRESENTATION, PROBE_A_REPRESENTATION)
 
     _refused(
-        lambda: module.finalize_bias_config(
-            basis_config_path=basis_path, report_path=report_path, **probe
-        ),
+        lambda: module._require_representation_matches(REPRESENTATION, PROBE_A_REPRESENTATION),
         expected_type=ValueError,
         expected_message=(
             "finalize_bias_config: the report's probe_a_output_representation "
             f"({REPRESENTATION!r}) is not what the Probe-A evidence actually validated "
             f"({PROBE_A_REPRESENTATION!r})"
         ),
+    )
+
+
+def test_the_finalizer_actually_calls_the_representation_comparison():
+    """The wiring the extraction could otherwise lose.
+
+    ``_require_representation_matches`` being correct is worth nothing if
+    ``finalize_bias_config`` stops calling it, and no real-input test can catch that
+    while ``bridge_admits`` refuses first. This reads the compiled function's own name
+    table -- not its source text, and without mocking anything -- so removing the call
+    is a failure here.
+    """
+    module = _load_finalize_module()
+
+    assert "_require_representation_matches" in module.finalize_bias_config.__code__.co_names
+    # Anti-tautology: the table is real and does not contain arbitrary names.
+    assert "bridge_admits" in module.finalize_bias_config.__code__.co_names
+    assert "_require_representation_never_called" not in (
+        module.finalize_bias_config.__code__.co_names
     )
 
 

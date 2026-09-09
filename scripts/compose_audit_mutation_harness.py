@@ -479,7 +479,7 @@ SANDBOX_CASES: tuple[SandboxCase, ...] = (
     SandboxCase(
         name="M19 the finalizer takes the report's word for the representation it declares",
         relative_target="scripts/compose/finalize_approximation_bias_config.py",
-        old='    if bridged != str(provenance["probe_a_output_representation"]):',
+        old="    if bridged != report_leaf:",
         new="    if False:",
         nodeid="tests/alive/compose/test_finalize_approximation_bias_config.py"
         "::test_the_finalizer_refuses_a_representation_the_probe_a_evidence_did_not_validate",
@@ -489,12 +489,15 @@ SANDBOX_CASES: tuple[SandboxCase, ...] = (
         redirect_new='_SCRIPT = Path("' + SANDBOX_TOKEN + "/scripts/compose"
         '/finalize_approximation_bias_config.py")',
         note=(
-            "The named test patches `bridge_admits` permissive on the finalizer's own module "
-            "(rule 7: the R1 relation refuses first, so the redundant site must fall before "
-            "this comparison can be measured at all). With the comparison gone the call "
-            "returns a finalized config instead of raising, and the capture-and-assert helper "
-            "in the test module reports it -- the AssertionError is the TEST's, not the "
-            "library's typed error (rule 8)."
+            "`bridge_admits` refuses first for every real input today, so this comparison "
+            "cannot be reached THROUGH `finalize_bias_config` -- and the fix for that is not "
+            "to mock the admission guard in front of it (a test that mocks a guard measures "
+            "the mock). The comparison is a guard-free helper and the named test calls it "
+            "directly, so this mutation removes the real operator the finalizer invokes: the "
+            "helper then returns instead of raising and the capture-and-assert helper in the "
+            "test module reports it -- the AssertionError is the TEST's (rule 8). The call "
+            "site itself is pinned by "
+            "`test_the_finalizer_actually_calls_the_representation_comparison`."
         ),
     ),
 )

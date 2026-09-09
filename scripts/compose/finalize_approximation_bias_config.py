@@ -188,6 +188,40 @@ def _assert_no_final_sha_leak(final: Mapping, report: Mapping) -> None:
         )
 
 
+def _require_representation_matches(report_leaf: str, bridged: str) -> None:
+    """Refuse unless the report DECLARES the representation the evidence validated.
+
+    The (d) half of the Probe-A binding, as a pure two-string comparison with no
+    I/O, no validators and no admission logic of its own -- which is what makes
+    it directly measurable. Today ``bridge_admits`` refuses first for every real
+    input (the committed owner policy validates ``log_normalized_pseudobulk``
+    and every admissible report declares ``raw_pseudobulk_approximation``), so
+    this comparison is unreachable THROUGH :func:`finalize_bias_config`. The way
+    to measure it is to call it, not to replace the admission guard in front of
+    it with a permissive double: a test that mocks a guard measures the mock.
+
+    Parameters
+    ----------
+    report_leaf : str
+        ``report["provenance"]["probe_a_output_representation"]`` -- what the
+        report says its Probe-A bridge validated.
+    bridged : str
+        ``output_bridge.representation`` of the revalidated Probe-A admission --
+        what it actually validated.
+
+    Raises
+    ------
+    ValueError
+        If the two differ.
+    """
+    if bridged != report_leaf:
+        raise ValueError(
+            "finalize_bias_config: the report's probe_a_output_representation "
+            f"({report_leaf!r}) is not what the Probe-A "
+            f"evidence actually validated ({bridged!r})"
+        )
+
+
 def _write_single_leaf(basis: dict, report_content_sha: str) -> dict:
     """Return a deep copy of ``basis`` with ONLY the registered bias leaf set.
 
@@ -272,7 +306,8 @@ def finalize_bias_config(
     :func:`probe_a_from_evidence` (no new trust assumption is created here --
     the same validators the producer ran), the representation that bridge
     actually validated must ADMIT this method (:func:`bridge_admits`), and it
-    must be the representation the report declares. The three paths are required
+    must be the representation the report declares
+    (:func:`_require_representation_matches`). The three paths are required
     keyword arguments on purpose: an optional guard is bypassed by omission.
 
     Parameters
@@ -385,12 +420,7 @@ def finalize_bias_config(
             "finalize_bias_config: the Probe-A bridge validated "
             f"{bridged!r}, which does not admit a {REPRESENTATION!r} report"
         )
-    if bridged != str(provenance["probe_a_output_representation"]):
-        raise ValueError(
-            "finalize_bias_config: the report's probe_a_output_representation "
-            f"({provenance['probe_a_output_representation']!r}) is not what the Probe-A "
-            f"evidence actually validated ({bridged!r})"
-        )
+    _require_representation_matches(str(provenance["probe_a_output_representation"]), bridged)
 
     # The ONE authoritative content-SHA recipe: the SHA-256 of the EXACT on-disk
     # report bytes (canonical JSON + trailing newline, as the metric wrote them).
