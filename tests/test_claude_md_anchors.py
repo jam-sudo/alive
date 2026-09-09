@@ -123,3 +123,15 @@ def test_root_claude_md_is_concise_and_protocol_independent():
     assert (ROOT / ".claude/rules/cartographer.md").is_file()
     assert (ROOT / ".claude/rules/compose.md").is_file()
     assert (ROOT / ".claude/rules/documentation.md").is_file()
+
+
+def test_root_governance_uses_the_current_signed_attribution_and_stable_registry_anchor():
+    text = CLAUDE_MD.read_text(encoding="utf-8")
+    # 1. 개정일은 이 개정의 날짜다 — 낡은 날짜는 "이 파일이 최신"이라는 잘못된 신호를 준다.
+    assert "> **개정일:** 2026-09-09" in text
+    # 2. registry 참조는 renumber 에 깨지는 `§5` 가 아니라 stable anchor 다.
+    assert "`#registry`" in text
+    assert "§5 registry" not in text
+    # 3. D2-b 처분의 근거는 대화 인용이 아니라 서명된 결정문이다.
+    assert "모두 권장사항으로" not in text
+    assert "수정안 G(2026-09-07 결정문" in text

@@ -1,7 +1,7 @@
 # ALIVE — Virtual Cell Project Governance
 
 > **역할:** project-wide scientific governance + agent operating contract
-> **개정일:** 2026-07-19
+> **개정일:** 2026-09-09
 > **protocol lifecycle:** `COMPOSE-K562-v1` ACTIVE · `TG-K562-v1` COMPLETE · `CT-RPE1-v1` DEFERRED
 > **execution readiness:** COMPOSE **RELEASE-BLOCKED** · seal **UNOPENED**
 > **다음 gate:** `docs/superpowers/COMPOSE-SEAL-READINESS.md`의 blocker와 owner release gate를 모두 충족
@@ -22,7 +22,7 @@
 6. Current release readiness → `docs/superpowers/COMPOSE-SEAL-READINESS.md`
 7. Vision/evidence/long-range → `virtual-cell-model-blueprint.md` ·
    `virtual-cell-research-report.md` **(⚠ SUPERSEDED 2026-07-04)** · `virtual-cell-project-plan.md` **(⚠ SUPERSEDED 2026-07-04)** —
-   뒤 둘은 K562→RPE1 을 1차 MVP 로 제시하는 pre-pivot 기록이며 현재 protocol 상태는 §5 registry 가 authoritative 하다.
+   뒤 둘은 K562→RPE1 을 1차 MVP 로 제시하는 pre-pivot 기록이며 현재 protocol 상태는 `#registry` 가 authoritative 하다.
 
 Safety invariant와 claim/config가 충돌하면 safety가 우선한다. 충돌을 발견하면 (1) 충돌과 affected protocol/
 invariant를 보고하고, (2) scientific run을 시작·계속하지 않으며, (3) owner가 authoritative 문서를
@@ -132,8 +132,8 @@ privacy를 확인한다. External-feature eligibility와 ambiguous/missing ID �
 revision·dimension·pooling·sequence/ontology release를 기록한다. 새 deep architecture/operator/decoder는 별도
 spec, strongest baseline, ablation이 필요하다. Biological prior encoder(gene/pathway/network)는 ID-only null
 baseline과 ablation해 marginal signal을 격리한다 (COMPOSE-K562-v1 한정: 2026-09-07 결정 D2-b 로 ESM
-marginal-signal claim 을 철회하고 이 ablation 의무를 deferred 로 처분 — 오너 지시 "모두 권장사항으로
-진행"; 별도 spec 없이 ablation 을 주장하지 않는다). Population sample 출력만으로 heterogeneity 학습을 주장하지
+marginal-signal claim 을 철회하고 이 ablation 의무를 deferred 로 처분 — 수정안 G(2026-09-07 결정문
+서명표); 별도 spec 없이 ablation 을 주장하지 않는다). Population sample 출력만으로 heterogeneity 학습을 주장하지
 않고 pseudobulk·self-distance/noise floor·mean-collapse diagnostic를 유지한다.
 
 **Evaluation.** Comparator roster와 protocol을 outcome 전에 freeze한다. Metric 방향·scientific event를
