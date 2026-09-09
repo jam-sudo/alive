@@ -19,6 +19,17 @@ from pathlib import Path
 import pytest
 
 from alive.compose.config2 import load_compose_phase2_config
+from alive.compose.headline import (
+    FINITE_FLIP_NOTE,
+    NO_HEADLINE_AXES,
+    REGISTERED_HEADLINE_SENTENCES,
+    render_preregistered_headline,
+)
+
+# Imported through `phase2b` ON PURPOSE: §8 cites the dotted path
+# `alive.compose.phase2b.preregistered_headline_branch`, and the branch now lives in
+# `alive.compose.headline`. This import is what keeps that citation from going stale silently --
+# if the re-export is dropped, this module fails to import at all.
 from alive.compose.phase2b import (
     _FLIP_ALREADY_FAILED,
     _FLIP_NEVER,
@@ -105,6 +116,35 @@ def _partition_historical(current: str) -> tuple[list[str], str]:
         live.append(current[cursor:start])
         blocks.append(current[start:end])
         cursor = end
+
+
+_DOC_RULES = Path(".claude/rules/documentation.md")
+
+
+def _missing_historical_sentinel_tokens(rule_text: str) -> list[str]:
+    """Return the tokens a written documentation rule must carry, in order.
+
+    Pure predicate: the assertion stays in the named test's own frame so a kill is
+    attested there (변이 규칙 6). The two markers are the very constants
+    ``_partition_historical`` computes the block extent with, so the written rule
+    cannot drift away from the enforced contract.
+    """
+    required = (_HISTORICAL_START, _HISTORICAL_END, "never sentence heuristics")
+    return [token for token in required if token not in rule_text]
+
+
+def test_documentation_rule_requires_the_explicit_historical_closing_sentinel():
+    """작성 규칙이 HISTORICAL 블록의 **종료 sentinel** 을 명시적으로 요구한다.
+
+    이 계약은 ``_partition_historical`` 의 범위 계산에만 살아 있었고 작성 규칙에는
+    없었다. sentinel 을 요구하지 않으면 배너만 단 문서가 규칙을 통과하고 격리 범위가
+    문장 추정(sentence heuristics)으로 넓어진다.
+    ``tests/test_claude_md_anchors.py`` 는 이 규칙 파일의 **존재**만 확인한다.
+    """
+    missing = _missing_historical_sentinel_tokens(_DOC_RULES.read_text(encoding="utf-8"))
+    assert not missing, (
+        f"{_DOC_RULES} 가 HISTORICAL 종료 sentinel 규칙의 토큰을 담지 않는다: {missing}"
+    )
 
 
 def test_the_current_normalization_contract_is_separate_from_its_history():
@@ -286,8 +326,85 @@ def test_a_signed_source_threat_model_names_the_consumption_residual():
     assert "동시 writer" in body and "mount" in body
 
 
+_OUTCOME_STORE_SOURCE = Path("src/alive/compose/outcome_store.py")
+_TERMINAL_SOURCE = Path("src/alive/compose/terminal.py")
+_SEALED_SOURCE_E2E = Path("tests/alive/compose/driver/test_sealed_source_integrity_e2e.py")
+
+
+def _between(source: str, start: str, end: str) -> str:
+    """Return the slice between two literals, or ``""`` when the opening one is gone."""
+    if start not in source:
+        return ""
+    tail = source.split(start, 1)[1]
+    return tail.split(end, 1)[0] if end in tail else tail
+
+
+def _opening_docstring(source: str, header: str) -> str:
+    """Return the docstring that opens the block ``header`` introduces.
+
+    Scope matters here. ``terminal.py`` already names ``ComposeSealingError`` once —
+    in ``TerminalError``'s own docstring — so a whole-file search would be satisfied
+    without ``_ProtectBoundary`` saying anything about the consumption boundary.
+    """
+    if header not in source:
+        return ""
+    parts = source.split(header, 1)[1].split('"""')
+    return parts[1] if len(parts) >= 3 else ""
+
+
+def _missing_consumption_role_tokens() -> list[str]:
+    """Return ``site: token`` for every enforcement role not written AT ITS OWN site.
+
+    Pure predicate — the assertion stays in the named test's frame (변이 규칙 6).
+    """
+    consumption = _between(
+        _OUTCOME_STORE_SOURCE.read_text(encoding="utf-8"),
+        "CONSUMPTION ENDS HERE",
+        "return release",
+    )
+    protect = _opening_docstring(
+        _TERMINAL_SOURCE.read_text(encoding="utf-8"), "class _ProtectBoundary:"
+    )
+    arm = _opening_docstring(
+        _SEALED_SOURCE_E2E.read_text(encoding="utf-8"),
+        "def test_an_io_error_in_the_materialization_recheck_still_aborts_after_seal(",
+    )
+    scoped = {
+        "outcome_store consumption boundary": (
+            consumption,
+            ("TYPED CONTEXT", "_ProtectBoundary"),
+        ),
+        "terminal._ProtectBoundary docstring": (protect, ("DURABLE ABORT", "ComposeSealingError")),
+        "sealed-source e2e arm docstring": (arm, ("_seal_consumed", "EXIT CODE")),
+    }
+    return [
+        f"{site}: {token}"
+        for site, (scope, tokens) in scoped.items()
+        for token in tokens
+        if token not in scope
+    ]
+
+
+def test_the_three_consumption_failure_enforcement_roles_are_documented():
+    """소비 경계의 실패를 처리하는 **세 강제 지점**이 각자의 자리에 역할로 적혀 있다.
+
+    exit code 30 을 결정하는 것은 store 의 래핑도 ``protect()`` 도 아니라
+    ``phase2b_cmd._seal_consumed(audit_path)`` 다 — durable audit 의 존재만 본다.
+    그래서 store 의 ``except Exception`` 을 무력화하는 **단일** 변이는 exit-code 단언을
+    그대로 통과시킨다(실측). 기록이 없으면 그 SURVIVED 를 "테스트가 공허하다" 로 오독한다
+    (변이 규칙 7: 중복 강제는 모든 site 가 죽어야 죽는다).
+
+    각 역할은 그 역할을 수행하는 파일에 적혀야 의미가 있으므로 haystack 을 site 별로 좁힌다.
+    """
+    missing = _missing_consumption_role_tokens()
+    assert not missing, f"소비 경계의 강제 역할이 자기 site 에 기록되지 않았다: {missing}"
+
+
 _PAIR_DEPENDENCE = Path("docs/superpowers/2026-08-29-compose-pair-dependence-decision.md")
 _PHASE2B_SOURCE = Path("src/alive/compose/phase2b.py")
+#: Where the branch and the four sentences live since 2026-09-09 (leaf module: `durable`
+#: has to import them, and `phase2b` already imports `durable`).
+_HEADLINE_SOURCE = Path("src/alive/compose/headline.py")
 _HEADLINE_SECTION = "8. seal 전에 확정된 headline 문장"
 
 #: §8 이 claim 으로 써서는 안 되는 네 토큰. 결정문 §8 의 금지 문장이 이들을 이름으로 부르므로
@@ -347,19 +464,32 @@ def test_the_preregistered_headline_uses_the_codes_own_flip_vocabulary():
     유한 2.5(사다리 밖)·0.5(밴드 미통과)는 §8 의 어느 조건에도 배정되지 않았다(**1 passed** 였다).
     그래서 이제 §8 이 **분기 함수 이름과 세 경계**를 부르고, 그 함수가 소스에 실재할 것을 요구한다 —
     분기를 문서가 아니라 코드가 소유한다는 것이 정정의 내용이기 때문이다.
+
+    2026-09-09 부터 그 소스는 leaf 모듈 `headline.py` 다(`durable` 이 문장을 재도출해야 하는데
+    `phase2b` 가 이미 `durable` 을 import 하므로 순환이다 — 실측). §8 이 인용하는 dotted path 는
+    여전히 `alive.compose.phase2b.…` 이므로, **정의는 leaf 에**·**re-export 는 phase2b 에** 있을
+    것을 둘 다 요구한다: 한쪽만 만족시키면 문서의 인용이나 durable 의 import 중 하나가 죽는다.
     """
     section = _headline_section()
-    source = _PHASE2B_SOURCE.read_text(encoding="utf-8")
+    source = _HEADLINE_SOURCE.read_text(encoding="utf-8")
     for token in ("NEVER_FLIPS", "FAILS_AT_REGISTERED_BAND", "sensitivity_band_inflation"):
         assert token in section, f"§8 이 `{token}` 를 부르지 않는다"
-        assert token in source, f"`{token}` 가 {_PHASE2B_SOURCE} 에 없다 — 문장이 코드와 어긋난다"
+        assert token in source, f"`{token}` 가 {_HEADLINE_SOURCE} 에 없다 — 문장이 코드와 어긋난다"
 
     # 분기를 소유하는 함수: §8 이 이름으로 부르고, 그 이름이 소스에 정의되어 있어야 한다.
     assert "preregistered_headline_branch" in section, (
         "§8 이 결과군 분기를 소유하는 함수를 이름으로 부르지 않는다"
     )
     assert "def preregistered_headline_branch(" in source, (
-        f"`preregistered_headline_branch` 가 {_PHASE2B_SOURCE} 에 정의돼 있지 않다"
+        f"`preregistered_headline_branch` 가 {_HEADLINE_SOURCE} 에 정의돼 있지 않다"
+    )
+    # §8 이 적는 dotted path 는 `phase2b` 다 — re-export 가 사라지면 그 인용이 거짓이 된다.
+    assert "alive.compose.phase2b.preregistered_headline_branch" in " ".join(section.split()), (
+        "§8 이 분기 함수의 dotted path 를 적지 않는다"
+    )
+    assert "preregistered_headline_branch" in _PHASE2B_SOURCE.read_text(encoding="utf-8"), (
+        f"`preregistered_headline_branch` 가 {_PHASE2B_SOURCE} 에서 re-export 되지 않는다 — "
+        "§8 이 인용하는 경로가 죽는다"
     )
     # 세 경계 — 이것들이 없으면 (i)/(ii)/(iii) 의 적용 구간이 다시 미정이 된다.
     flat_section = " ".join(section.split())
@@ -432,6 +562,137 @@ def test_the_headline_correction_states_the_same_partition_the_code_implements()
             preregistered_headline_branch(band_passes=True, flip=flip, ladder_max=ladder_max)
             == "ii"
         ), f"등록 사다리 안에서 뒤집히는데 flip={flip!r} 가 (ii) 가 아니다"
+
+
+def _registered_headline_sentences() -> dict[str, str]:
+    """§8 의 네 논리 문장을 Markdown prefix 없이, 줄바꿈을 공백 하나로 정규화해 뽑는다.
+
+    (i)~(iii) 은 각 문단의 **따옴표 안**이 논리 문장이고 (iv) 는 blockquote 다. 인용부호 밖의
+    라벨(``**(ii) 등록 밴드에서는 승리, 상위 λ 에서 뒤집힘.**``)은 문장이 아니라 색인이므로 뺀다 —
+    코드 상수는 문장만 담는다. 문단 수를 함께 고정하므로 문장이 삭제되거나 복제되면 여기서 먼저
+    걸린다.
+    """
+    paragraphs = _headline_section().split("\n\n")
+    sentences: dict[str, str] = {}
+    for key in ("i", "ii", "iii"):
+        prefix = f"**({key}) "
+        matches = [p for p in paragraphs if p.startswith(prefix)]
+        assert len(matches) == 1, f"§8 에 `{prefix}` 로 시작하는 문단이 정확히 하나여야 한다"
+        body = matches[0]
+        sentences[key] = " ".join(body[body.index('"') + 1 : body.rindex('"')].split())
+    quotes = [p for p in paragraphs if p.startswith("> ")]
+    assert len(quotes) == 1, "§8 의 (iv) blockquote 가 정확히 하나여야 한다"
+    body = "\n".join(line.removeprefix("> ") for line in quotes[0].splitlines())
+    sentences["iv"] = " ".join(body[body.index('"') + 1 : body.rindex('"')].split())
+    return sentences
+
+
+def test_the_registered_headline_sentences_match_the_code_constants():
+    """문서가 정본, `headline.py` 상수는 그 복사본 — 같은 정규화 뒤 **완전 일치**여야 한다.
+
+    2026-09-09 이전에는 문장을 내보내는 코드가 아예 없었으므로 drift 가 불가능했다. 이제
+    renderer 가 문장을 terminal 로 내보내므로 사본이 생겼고, 사본은 조용히 떠내려간다: 서명된
+    문장의 한 글자가 코드에서 바뀌어도 문서 검사는 전부 통과한다(문서를 안 보므로). 그래서
+    equality 를 여기 둔다 — 어느 쪽이 바뀌든 이 하나가 실패한다.
+    """
+    assert _registered_headline_sentences() == REGISTERED_HEADLINE_SENTENCES, (
+        "§8 의 서명된 문장과 `headline.py` 상수가 다르다 — 사본이 정본에서 떠내려갔다"
+    )
+    # placeholder 는 (ii) 에만 있다. (i) 의 유한 flip 병기는 별도 note 이고 문장이 아니다.
+    assert "<flip>" in REGISTERED_HEADLINE_SENTENCES["ii"]
+    for key in ("i", "iii", "iv"):
+        assert "<flip>" not in REGISTERED_HEADLINE_SENTENCES[key], (
+            f"({key}) 에 치환 placeholder 가 있다 — 사전등록 문장에 없던 자유가 생긴다"
+        )
+
+
+#: §8 의 2026-09-09 정정 문단: 문장이 어디에 실리고 누가 재검증하는지.
+_EMISSION_CORRECTION_MARK = "**[2026-09-09 정정 — 문장 emission 과 적용 범위]**"
+
+#: 유한 flip 병기 문구를 §8 에 **등록하는** 문단의 라벨. `**(i) ` 로 시작하지 않으므로
+#: :func:`_registered_headline_sentences` 의 네 문장 추출과 겹치지 않는다.
+_FINITE_FLIP_NOTE_MARK = "**(i-note) 유한 flip 외삽 병기 문구 (2026-09-09 등록).**"
+
+
+def test_the_registered_finite_flip_note_matches_the_code_constant():
+    """유한 flip 병기 문구도 이제 **등록된 문구**다 — 문서와 코드가 같은 바이트여야 한다.
+
+    2026-09-08 정정의 (i) bullet 은 "`λ=<flip>` 을 병기하고 claim 은 사다리 안" 이라는 **요구**만
+    적고 문구를 등록하지 않았다. 그래서 `FINITE_FLIP_NOTE` 는 구현자가 쓴 문장이었고, 사전등록
+    문장 옆에 사전등록되지 않은 문장이 함께 실리는 상태였다(2026-09-09 리뷰 지적). 2026-09-09 정정이
+    그 문구를 §8 에 등록했으므로, 서명된 네 문장과 **같은 정규화 뒤 완전 일치**를 여기서 요구한다 —
+    어느 쪽이 바뀌든 이 하나가 실패한다.
+    """
+    section = _headline_section()
+    paragraphs = section.split("\n\n")
+    matches = [p for p in paragraphs if p.startswith(_FINITE_FLIP_NOTE_MARK)]
+    assert len(matches) == 1, (
+        f"§8 에 `{_FINITE_FLIP_NOTE_MARK}` 로 시작하는 문단이 정확히 하나여야 한다"
+    )
+    body = matches[0]
+    registered = " ".join(body[body.index('"') + 1 : body.rindex('"')].split())
+    assert registered == " ".join(FINITE_FLIP_NOTE.split()), (
+        "§8 에 등록된 병기 문구와 `headline.py` 의 `FINITE_FLIP_NOTE` 가 다르다"
+    )
+    # 두 placeholder 가 모두 살아 있어야 치환이 의미를 갖는다.
+    for placeholder in ("<flip>", "<ladder_max>"):
+        assert placeholder in registered, f"등록 문구에 {placeholder} 가 없다"
+
+
+def test_the_emission_correction_records_where_the_sentence_is_written():
+    """문장을 어디에 싣고 누가 재검증하는지가 문서에 있어야 코드의 규정이 사전등록 안에 있다.
+
+    코드만 고치면 emission 위치·schema·치환 표기가 사전등록 **밖**의 규정이 된다. 그래서 문서가
+    세 가지를 이름으로 부르고(중첩 위치·schema v2·`repr(float(...))`), 그 셋이 실제 코드 값과
+    일치하는지 여기서 함께 본다.
+    """
+    from alive.compose.phase2b import BAND_SENSITIVITY_SCHEMA
+
+    section = _headline_section()
+    assert _EMISSION_CORRECTION_MARK in section, (
+        f"§8 에 emission 정정 문단({_EMISSION_CORRECTION_MARK})이 없다"
+    )
+    correction = " ".join(section.split(_EMISSION_CORRECTION_MARK, 1)[1].split())
+    assert "`band_sensitivity.headline`" in correction, "§8 이 emission 위치를 적지 않는다"
+    assert f"`{BAND_SENSITIVITY_SCHEMA}`" in correction, (
+        f"§8 이 현재 블록 schema({BAND_SENSITIVITY_SCHEMA}) 를 적지 않는다"
+    )
+    assert "`repr(float(...))`" in correction, "§8 이 canonical float 표기를 적지 않는다"
+    assert "`inconsistent: true`" in correction, "§8 이 marker 를 publish 하지 않음을 적지 않는다"
+
+
+#: §8 의 2026-09-09 정정 문단: 유효한 verdict 가 없는 terminal 에는 사전등록 문장을 싣지 않는다.
+_NO_VERDICT_CORRECTION_MARK = "**[2026-09-09 정정 — 유효한 verdict 가 없는 terminal]**"
+
+
+def test_the_two_no_verdict_axes_carry_no_sentence_in_the_document_and_in_the_code():
+    """문서가 두 axis 를 예외로 적고, renderer 가 실제로 문장을 만들지 않아야 한다.
+
+    D4 는 이 규정을 적지 않았다 — `INVALID` 는 `COMPLETE` 와 **같은 terminal body** 를 쓰고
+    swap 시 clause 가 원값 그대로 실리므로, 그대로 두면 "신뢰할 수 없음" 으로 선언된 run 에
+    headline claim 이 붙는다. 오너 승인(2026-09-09) 아래 날짜 붙은 정정 문단으로 닫았고, 서명된
+    네 문장은 한 글자도 바뀌지 않았다. 문서만 고치면 코드가 여전히 문장을 싣고, 코드만 고치면
+    사전등록 밖의 규정이 되므로 **둘 다** 요구한다.
+    """
+    section = _headline_section()
+    assert _NO_VERDICT_CORRECTION_MARK in section, (
+        f"§8 에 유효한 verdict 없는 terminal 의 정정 문단({_NO_VERDICT_CORRECTION_MARK})이 없다"
+    )
+    correction = " ".join(section.split(_NO_VERDICT_CORRECTION_MARK, 1)[1].split())
+    for axis in ("INVALID", "FUTILITY_STOPPED"):
+        assert f"`{axis}`" in correction, f"§8 정정이 `{axis}` 를 이름으로 적지 않는다"
+        assert axis in NO_HEADLINE_AXES, f"코드가 `{axis}` 를 예외 axis 로 등록하지 않았다"
+        marker = render_preregistered_headline(
+            band_passes=True, flip=_FLIP_NEVER, ladder_max=1.25, sealed_axis=axis
+        )
+        assert marker == {"applicable": False, "reason": axis}
+        for key, sentence in REGISTERED_HEADLINE_SENTENCES.items():
+            assert sentence not in repr(marker), f"{axis} terminal 에 문장 ({key}) 이 실렸다"
+    # 비-예외 axis 는 여전히 문장을 받는다 — 규정이 전부를 삼키지 않았음을 실측으로 고정한다.
+    kept = render_preregistered_headline(
+        band_passes=True, flip=_FLIP_NEVER, ladder_max=1.25, sealed_axis="PARTIAL"
+    )
+    assert kept["band_sentence"] == REGISTERED_HEADLINE_SENTENCES["i"]
 
 
 def test_the_preregistered_headline_never_asserts_a_prohibited_claim():

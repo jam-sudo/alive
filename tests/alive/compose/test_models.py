@@ -18,6 +18,9 @@ Known-answer coverage (brief):
 
 from __future__ import annotations
 
+import subprocess
+import sys
+
 import numpy as np
 import pytest
 
@@ -376,3 +379,80 @@ def test_the_id_only_comparator_consumes_the_same_factor_bank_as_the_operator():
         for g, h in pairs
     )
     assert delta > 1.0
+
+
+# --------------------------------------------------------------------------- #
+# The two internal L3 invariants must survive `python -O` (a bare assert does not)
+# --------------------------------------------------------------------------- #
+#: Child program for the `python -O` arm. `sys.argv[1]` selects which of the two reach
+#: paths to exercise, and the program PRINTS the escaping exception's type and message so
+#: the parent asserts on WHAT escaped rather than on an exit code (which a non-contractual
+#: `TypeError` would satisfy just as well).
+_OPTIMIZED_PROBE = """
+import sys
+
+import numpy as np
+
+from alive.compose.models import L3Model
+
+if __debug__:  # -O must actually be in force, or this arm proves nothing
+    raise SystemExit("probe ran without -O: asserts are still live")
+
+model = L3Model()
+
+if sys.argv[1] == "forward":
+    call = lambda: model._forward_batch(np.zeros((1, 6)))
+else:
+    model._lazy_init = lambda *a, **k: None  # no-op: leaves weights_ unset
+    call = lambda: model.fit(np.zeros((4, 3)), [(0, 1), (2, 3)], np.zeros((2, 2)), lam=0.0)
+
+try:
+    call()
+except BaseException as exc:
+    print(type(exc).__name__)
+    print(exc)
+else:
+    print("NoExceptionRaised")
+    print("")
+"""
+
+
+def _run_optimized_probe(which: str) -> tuple[str, str]:
+    """Run the probe under `python -O`; return the escaping (exception type, message)."""
+    result = subprocess.run(
+        [sys.executable, "-O", "-c", _OPTIMIZED_PROBE, which],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, f"probe crashed: {result.stderr}"
+    lines = result.stdout.splitlines()
+    return lines[0], (lines[1] if len(lines) > 1 else "")
+
+
+def test_the_l3_forward_refuses_an_uninitialised_weight_bank():
+    """`L3Model._forward_batch` guard: reached by a direct call on an unfitted instance.
+
+    The message is compared HERE, by this module's own `assert`, rather than by
+    `pytest.raises(match=...)`: a wrong message must fail in the test's own frame, and the
+    comparison must be exact so a message that merely CONTAINS the expected text is caught.
+    """
+    with pytest.raises(RuntimeError) as raised:
+        L3Model()._forward_batch(np.zeros((1, 6)))
+    assert str(raised.value) == "L3Model._forward_batch called before fit"
+
+
+def test_the_l3_fit_refuses_when_lazy_init_left_the_bank_unset(monkeypatch):
+    """`L3Model.fit` guard on the line after `_lazy_init`: only a no-op `_lazy_init` reaches it."""
+    monkeypatch.setattr(L3Model, "_lazy_init", lambda self, Z, pairs, eps_obs: None)
+    with pytest.raises(RuntimeError) as raised:
+        L3Model().fit(np.zeros((4, 3)), [(0, 1), (2, 3)], np.zeros((2, 2)), lam=0.0)
+    assert str(raised.value) == "L3Model.fit: _lazy_init left weights_ unset"
+
+
+def test_both_invariants_still_raise_under_optimized_python():
+    """`python -O` strips bare asserts; both checks must still raise the contracted error."""
+    for which, message in (
+        ("forward", "L3Model._forward_batch called before fit"),
+        ("fit", "L3Model.fit: _lazy_init left weights_ unset"),
+    ):
+        assert _run_optimized_probe(which) == ("RuntimeError", message), which

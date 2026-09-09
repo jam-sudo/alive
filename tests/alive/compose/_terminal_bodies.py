@@ -15,6 +15,7 @@ Norman data, no seal, no sealed outcome.
 
 from __future__ import annotations
 
+from alive.compose.headline import render_preregistered_headline
 from alive.provenance import sha256_json
 
 _EVALUATION_PAYLOAD_CHECKSUM = "1" * 64
@@ -43,7 +44,9 @@ def minimal_registered_summary(**overrides: object) -> dict:
         "gi_structure_recovery": "NOT_EVALUABLE",
         "sealed_axis": "NO_DISTINCT_WIN",
         "method_axis": "METHOD_VALIDATED",
-        "verdict_clauses": {"integrity_valid": True},
+        # `additive_clears` is REQUIRED, not decorative: the durable finalizer re-derives
+        # the pre-registered §8 headline sentence from it (2026-09-09).
+        "verdict_clauses": {"integrity_valid": True, "additive_clears": False},
         "integrity_disclaimer": "structural run-internal self-check only",
         "bundle_checksum": "a" * 64,
         "manifest_checksum": "b" * 64,
@@ -57,10 +60,20 @@ def minimal_registered_summary(**overrides: object) -> dict:
     return summary
 
 
-def minimal_band_sensitivity_block() -> dict:
-    """A minimal VALID descriptive-only band-sensitivity block (Amendment B, 2026-09-05)."""
-    return {
-        "schema": "compose_band_sensitivity_v1",
+def minimal_band_sensitivity_block(
+    *, sealed_axis: str = "NO_DISTINCT_WIN", additive_clears: bool = False
+) -> dict:
+    """A minimal VALID descriptive-only band-sensitivity block (Amendment B, 2026-09-05).
+
+    Since ``compose_band_sensitivity_v2`` (2026-09-09) the block NESTS the pre-registered
+    D4 §8 headline sentence, which the durable finalizer re-derives and compares exactly.
+    The sentence is therefore rendered here rather than spelled out, so this fixture stays
+    the VALID baseline the negative arms doctor -- they forge their own wrong sentences.
+    The defaults match :func:`minimal_registered_summary` (``NO_DISTINCT_WIN`` with
+    ``additive_clears = False``), which with the ladder below selects branch (iii).
+    """
+    block: dict = {
+        "schema": "compose_band_sensitivity_v2",
         "descriptive_only": True,
         "comparators": ["additive"],
         "by_lambda": [
@@ -70,6 +83,13 @@ def minimal_band_sensitivity_block() -> dict:
         "flip_lambda": {"additive": 1.5625},
         "verdict_holds_below_lambda": 1.5625,
     }
+    block["headline"] = render_preregistered_headline(
+        band_passes=additive_clears,
+        flip=block["flip_lambda"]["additive"],
+        ladder_max=max(entry["lambda"] for entry in block["by_lambda"]),
+        sealed_axis=sealed_axis,
+    )
+    return block
 
 
 def minimal_v2_terminal_body(**summary_overrides: object) -> dict:
@@ -94,7 +114,14 @@ def minimal_v2_terminal_body(**summary_overrides: object) -> dict:
             "provenance_checksum": _PROVENANCE_CHECKSUM,
         }
     )
-    sensitivity = minimal_band_sensitivity_block()
+    # The block's headline is DERIVED from the summary this body embeds, so an override
+    # of `sealed_axis` / `verdict_clauses` cannot leave the two disagreeing (2026-09-09
+    # review Minor 6). With the defaults these arguments equal the builder's own, so
+    # every existing caller gets byte-identical bodies.
+    sensitivity = minimal_band_sensitivity_block(
+        sealed_axis=summary["sealed_axis"],
+        additive_clears=summary["verdict_clauses"]["additive_clears"],
+    )
     return {
         "registered_summary": summary,
         "registered_summary_checksum": registered_summary_checksum,

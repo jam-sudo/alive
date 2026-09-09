@@ -8,7 +8,7 @@
 > **이 문서는 아무것도 정의하지 않는다** — 세부(task)는 plan, claim은 spec, exact param은 config,
 > 시간순 audit는 git이 authoritative다([sources of truth](../../CLAUDE.md#sources)). 상태 행이 authoritative
 > 문서와 어긋나면 **authoritative 문서가 옳다**; 이 인덱스를 갱신한다.
-> **Updated:** 2026-09-08 @ `fd9a16d` (branch `compose-factor-bank-normalization`)
+> **Updated:** 2026-09-09 @ `36f069a` (branch `compose-pr15-followups`)
 > `scripts/bump-readiness-stamp.sh` / the pre-commit hook from `HEAD` at commit time, so it names the
 > **parent** of the commit that carries it and can never name itself. Reading it as "one commit stale" is a
 > misreading; git is authoritative for when this file actually changed.
@@ -57,7 +57,7 @@ The committed config still carries **six** activation blockers, exactly as
 
 | gate | 현재 | 해소 산출물 | 실행 위치 | 책임 |
 |---|---|---|---|---|
-| `baselines.approximation_bias_report_sha256` | BLOCKED (`a246389` 2026-06-23 이후 값 불변, 2026-09-06 감사 snapshot) | real Norman 에서 생성한 `compose_approximation_bias_report_v4` + `sha256_file(report)` 단방향 finalize | POD-GATED | baselines owner |
+| `baselines.approximation_bias_report_sha256` | BLOCKED (`a246389` 2026-06-23 이후 값 불변, 2026-09-06 감사 snapshot) | real Norman 에서 생성한 `compose_approximation_bias_report_v4` + `sha256_file(report)` 단방향 finalize. [2026-09-09 추가] finalizer 는 세 Probe-A byte source(admission·registration·verification)를 **필수 인자**로 다시 열어 report 의 자기선언 대신 evidence 가 실제로 검증한 representation 을 확인한다 — 현 owner policy 는 `log_normalized_pseudobulk` 를 검증하고 admissible report 는 `raw_pseudobulk_approximation` 을 선언하므로, 이 행은 아래 `:118` representation 결정 전에는 finalize 자체가 성립하지 않는다 | POD-GATED | baselines owner |
 | `baselines.cpa.environment_status` | BLOCKED (`a246389` 2026-06-23 이후 값 불변, 2026-09-06 감사 snapshot) | pinned image 에서 실행한 dependency-lock/runtime 관찰(현재 lock 은 정직하게 `INCOMPLETE`) | POD-GATED | baselines owner |
 | `baselines.cpa.revision` | BLOCKED (`a246389` 2026-06-23 이후 값 불변, 2026-09-06 감사 snapshot) | published upstream config·revision 고정 + pod-built `.pyz` 와의 일치 증명 | POD-GATED | baselines owner |
 | `baselines.gears.environment_status` | BLOCKED (`a246389` 2026-06-23 이후 값 불변, 2026-09-06 감사 snapshot) | pinned image 에서 실행한 dependency-lock/runtime 관찰(현재 lock 은 정직하게 `INCOMPLETE`) | POD-GATED | baselines owner |

@@ -45,6 +45,8 @@ _HARNESS = _REPO / "scripts/compose_audit_mutation_harness.py"
 
 _IO_NODEID = "tests/alive/test_io.py::test_a_second_write_to_the_same_destination_is_refused"
 _OTHER_NODEID = "tests/alive/test_io.py::test_some_other_test"
+_IO_TEST_MODULE = _IO_NODEID.split("::")[0]
+_SYNTHETIC_TEST_MODULE = "_synthetic_frame_test_module"
 
 
 def _load_harness():
@@ -68,9 +70,30 @@ def harness():
     return _load_harness()
 
 
-def _run(harness, returncode: int, failed: frozenset[str], kind: str | None = None):
+def _load_module(name: str, path: Path):
+    """Import a synthetic module from ``path`` under ``name``."""
+    spec = importlib.util.spec_from_file_location(name, path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _run(
+    harness,
+    returncode: int,
+    failed: frozenset[str],
+    kind: str | None = None,
+    frame: str | None = None,
+):
     return harness.CaseRun(
-        returncode=returncode, failed=failed, summary="x", call_kind=kind, call_repr=""
+        returncode=returncode,
+        failed=failed,
+        summary="x",
+        call_kind=kind,
+        call_repr="",
+        call_frame=frame,
     )
 
 
@@ -147,7 +170,9 @@ def test_no_stray_exception_type_can_be_scored_as_a_kill(harness, kind):
 def test_a_call_phase_assertion_error_is_a_kill(harness):
     verdict = harness.classify(
         baseline=_green_baseline(harness),
-        mutant=_run(harness, 1, frozenset({_IO_NODEID}), kind="AssertionError"),
+        mutant=_run(
+            harness, 1, frozenset({_IO_NODEID}), kind="AssertionError", frame=_IO_TEST_MODULE
+        ),
         nodeid=_IO_NODEID,
     )
     assert verdict == harness.KILLED
@@ -157,7 +182,7 @@ def test_a_did_not_raise_failure_is_a_kill(harness):
     """pytest's `Failed` is the test's own assertion machinery, so it counts."""
     verdict = harness.classify(
         baseline=_green_baseline(harness),
-        mutant=_run(harness, 1, frozenset({_IO_NODEID}), kind="Failed"),
+        mutant=_run(harness, 1, frozenset({_IO_NODEID}), kind="Failed", frame=_IO_TEST_MODULE),
         nodeid=_IO_NODEID,
     )
     assert verdict == harness.KILLED
@@ -172,6 +197,141 @@ def test_a_setup_phase_assertion_can_never_be_scored_as_a_kill(harness):
         nodeid=_IO_NODEID,
     )
     assert verdict != harness.KILLED
+
+
+# --------------------------------------------------------------------------- #
+# Rule 8, second level — the assertion must be raised in the TEST's own frame.
+# --------------------------------------------------------------------------- #
+def test_a_kill_requires_the_failing_frame_to_be_the_tests_own_module(harness):
+    """`AssertionError` alone does not identify WHOSE assertion failed.
+
+    Production code carries bare `assert` statements of its own. A mutation that
+    flips one of them reddens the pinned test with a genuine call-phase
+    `AssertionError` -- the kind rule 8 accepts -- while the test's own
+    assertions were never reached. Measured on the real tree before this clause
+    existed: flipping `assert self.weights_ is not None` in
+    `src/alive/compose/models.py` scored `KILLED`, and the last repository-owned
+    traceback frame was `src/alive/compose/models.py`, not the test module.
+    """
+    killed = harness.classify(
+        baseline=_green_baseline(harness),
+        mutant=_run(
+            harness, 1, frozenset({_IO_NODEID}), kind="AssertionError", frame=_IO_TEST_MODULE
+        ),
+        nodeid=_IO_NODEID,
+    )
+    assert killed == harness.KILLED
+
+    verdict = harness.classify(
+        baseline=_green_baseline(harness),
+        mutant=_run(
+            harness,
+            1,
+            frozenset({_IO_NODEID}),
+            kind="AssertionError",
+            frame="src/alive/compose/models.py",
+        ),
+        nodeid=_IO_NODEID,
+    )
+    assert verdict != harness.KILLED
+    assert verdict.startswith(harness.HARNESS_FAILURE)
+    assert "frame outside the test module: src/alive/compose/models.py" in verdict
+
+
+def test_an_assertion_raised_in_a_synthetic_production_module_is_not_a_kill(
+    harness, tmp_path, monkeypatch
+):
+    """The same trap through the real frame SELECTION, on a synthetic tree.
+
+    Synthetic rather than `models.py` on purpose: that production assert is
+    being removed, and evidence that stops reproducing is not evidence. A
+    production module with a bare `assert` and a test module that calls it are
+    written under `tmp_path`, `REPO` is pointed at that root, and the assertion
+    is really raised -- so `_repo_frame` runs on a real traceback rather than a
+    hand-written list. The two directions are measured together: an assertion
+    raised in the test module's own frame is a kill; the identical
+    `AssertionError` raised one frame deeper, inside production, is not.
+    """
+    src = tmp_path / "src"
+    tests = tmp_path / "tests"
+    src.mkdir()
+    tests.mkdir()
+    (src / "synthetic_production.py").write_text(
+        "def fit(weights):\n"
+        "    assert weights is not None  # production's own bare assert\n"
+        "    return weights\n",
+        encoding="utf-8",
+    )
+    (tests / "test_synthetic.py").write_text(
+        "import synthetic_production\n"
+        "\n"
+        "\n"
+        "def test_calls_production():\n"
+        "    synthetic_production.fit(None)\n"
+        "\n"
+        "\n"
+        "def test_asserts_for_itself():\n"
+        "    assert synthetic_production.fit(1) == 2\n",
+        encoding="utf-8",
+    )
+    monkeypatch.syspath_prepend(str(src))
+    monkeypatch.setattr(harness, "REPO", tmp_path)
+    try:
+        module = _load_module(_SYNTHETIC_TEST_MODULE, tests / "test_synthetic.py")
+        with pytest.raises(AssertionError) as production_exc:
+            module.test_calls_production()
+        with pytest.raises(AssertionError) as own_exc:
+            module.test_asserts_for_itself()
+        production_frames = [str(entry.path) for entry in production_exc.traceback]
+        own_frames = [str(entry.path) for entry in own_exc.traceback]
+    finally:
+        sys.modules.pop(_SYNTHETIC_TEST_MODULE, None)
+        sys.modules.pop("synthetic_production", None)
+
+    production_frame = harness._repo_frame(production_frames)
+    own_frame = harness._repo_frame(own_frames)
+    assert production_frame == "src/synthetic_production.py"
+    assert own_frame == "tests/test_synthetic.py"
+
+    nodeid = "tests/test_synthetic.py::test_calls_production"
+    killed = harness.classify(
+        baseline=_green_baseline(harness),
+        mutant=_run(harness, 1, frozenset({nodeid}), kind="AssertionError", frame=own_frame),
+        nodeid=nodeid,
+    )
+    assert killed == harness.KILLED
+
+    verdict = harness.classify(
+        baseline=_green_baseline(harness),
+        mutant=_run(harness, 1, frozenset({nodeid}), kind="AssertionError", frame=production_frame),
+        nodeid=nodeid,
+    )
+    assert verdict != harness.KILLED
+    assert "frame outside the test module: src/synthetic_production.py" in verdict
+
+
+def test_repo_frame_skips_venv_frames_and_picks_the_test_module(harness):
+    """The `.venv/` exclusion is what makes the frame rule usable at all.
+
+    `pytest.fail` and an unfulfilled `pytest.raises` leave `_pytest/outcomes.py`
+    as the DEEPEST traceback frame, and the virtualenv lives INSIDE `REPO` -- so
+    without the exclusion the last "repository-owned" frame of a legitimate kill
+    would be pytest's own module and those cases would all be scored
+    `HARNESS_FAILURE (frame outside the test module: .venv/...)`. The full 20/20
+    run exercises the branch on the 9 cases that end there; a smaller run would
+    not, so the branch is pinned directly rather than only incidentally.
+    """
+    test_module = "tests/alive/compose/test_x.py"
+    venv_module = ".venv/lib/python3.11/site-packages/_pytest/outcomes.py"
+    frames = [str(harness.REPO / test_module), str(harness.REPO / venv_module)]
+
+    assert harness._repo_frame(frames) == test_module
+
+    # Anti-tautology: the venv frame really is under `REPO` (so it is the exclusion
+    # that drops it, not a failed prefix match), and a traceback of nothing but venv
+    # frames owns no repository frame at all.
+    assert str(harness.REPO / venv_module).startswith(str(harness.REPO) + "/")
+    assert harness._repo_frame([str(harness.REPO / venv_module)]) is None
 
 
 # --------------------------------------------------------------------------- #

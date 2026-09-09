@@ -357,7 +357,8 @@ class L3Model:
 
     def _forward_batch(self, feats: np.ndarray) -> tuple[np.ndarray, list[np.ndarray]]:
         """Forward pass over a feature batch; return output and per-layer activations."""
-        assert self.weights_ is not None
+        if self.weights_ is None:  # a bare assert vanishes under `python -O`
+            raise RuntimeError("L3Model._forward_batch called before fit")
         acts = [feats]
         a = feats
         n_layers = len(self.weights_) // 2
@@ -394,7 +395,8 @@ class L3Model:
         Z = np.asarray(Z, dtype=np.float64)
         eps_obs = np.asarray(eps_obs, dtype=np.float64)
         self._lazy_init(Z, pairs, eps_obs)
-        assert self.weights_ is not None
+        if self.weights_ is None:  # a bare assert vanishes under `python -O`
+            raise RuntimeError("L3Model.fit: _lazy_init left weights_ unset")
 
         feats = np.vstack([_sym_id_feature(Z[g], Z[h]) for g, h in pairs])
         y = eps_obs

@@ -186,5 +186,39 @@ sensitivity 사다리의 다른 λ 를 verdict gate 로 승격하지 않는다."
 
 네 문장의 본문과 (iv) 는 그대로다. 이 정정은 어느 문장이 언제 적용되는지만 완전하게 만든다.
 
+**[2026-09-09 정정 — 유효한 verdict 가 없는 terminal]** 위 네 문장은 verdict 가 실제로 내려진
+결과군에만 적용된다. `sealed_axis` 가 `INVALID` 또는 `FUTILITY_STOPPED` 인 terminal 에는 사전등록
+문장을 **싣지 않는다**: `INVALID` 는 무결성 precondition 실패로 신뢰할 수 없다고 선언된 run 이고
+(COMPLETE 와 같은 terminal body 를 쓰므로 그대로 두면 그 run 에 headline 이 붙는다), futility 로
+멈춘 run 은 negative verdict 가 아니다(`CLAUDE.md#seal`). 두 경우에 남는 것은 문장이 아니라 적용
+불가 marker 뿐이다. 분기 함수와 네 문장은 leaf 모듈 `alive.compose.headline` 로 옮겼고
+`alive.compose.phase2b` 가 그대로 re-export 하므로 위에서 인용한 경로는 유효하다 — `durable` 이
+문장을 재도출해야 하는데 `phase2b` 가 이미 `durable` 을 import 하므로 순환이기 때문이다(실측).
+이 정정은 네 문장의 본문도 (i)~(iii) 의 분기 조건도 바꾸지 않고, 문장이 **적용되지 않는** 두 axis
+를 명시할 뿐이다. (오너 승인 2026-09-09.)
+
+**[2026-09-09 정정 — 문장 emission 과 적용 범위]** 위 네 문장은 지금까지 **문서 안에만** 있었다. 어느
+문장이 실제로 선택되었는지는 artifact 어디에도 남지 않았고, (ii) 의 `λ=<flip>` 치환은 보고 시점의 손에
+달려 있었다. 이 정정은 그 자리를 고정한다 — 문장의 본문도 (i)~(iii) 의 분기 조건도 바꾸지 않는다.
+
+- **어디에 실리는가.** 선택된 문장은 terminal body 의 `band_sensitivity.headline` 에 **중첩되어** 실린다.
+  Amendment B 의 기존 `band_sensitivity_checksum` 이 그대로 묶으므로 terminal 최상위 roster(설계 spec §2.1)
+  는 한 필드도 늘지 않는다. 블록 schema 는 `compose_band_sensitivity_v1` → **`compose_band_sensitivity_v2`**
+  로 올린다. 블록은 여전히 `descriptive_only` 이며, 문장은 verdict 를 **다시 말할 뿐** 결정하지 않는다.
+- **누가 재검증하는가.** durable finalizer 는 publish 전에 terminal 자신의 `sealed_axis` ·
+  `verdict_clauses.additive_clears` · `flip_lambda["additive"]` 와 블록 자신의 `by_lambda` 최대 λ 로 문장을
+  **재도출**해 **정확 일치**를 요구한다. checksum 은 블록을 결속할 뿐 블록이 참인지는 말하지 않으므로,
+  그 전까지는 자기일관적인 잘못된 문장이 그대로 published 되었다(다섯 경우를 실측했다). 분기와 flip 이
+  모순인 입력에는 renderer 가 예외 대신 `inconsistent: true` marker 를 기록하고(정당한 terminal write 를
+  중단시키지 않기 위해서다), durable 은 그 marker 를 성공 artifact 로 승인하지 않는다.
+- **λ 값의 표기.** (ii) 의 `<flip>` 과 아래 병기 문구의 `<flip>` · `<ladder_max>` 는 `repr(float(...))`
+  하나로만 치환한다. 한 값에 한 표기이므로 사람이 읽는 문장과 durable 이 재도출하는 문장이 같은 바이트다.
+
+**(i-note) 유한 flip 외삽 병기 문구 (2026-09-09 등록).** 위 2026-09-08 정정의 (i) bullet 은 유한 flip 일 때
+`λ=<flip>` 을 **병기**하라고만 적고 문구를 등록하지 않았다 — 그만큼 문구를 결과를 본 뒤 고를 자유가 남아
+있었다. 그 자유를 여기서 닫는다: "외삽 flip 은 λ=<flip> 이며 등록 사다리 밖이다 — claim 은 등록 사다리 구간(λ ≤ <ladder_max>)에 한정하고 사다리 밖 λ 는 보고값이지 주장이 아니다."
+이 문구는 (i) 문장에 **더해질 뿐** 대체하지 않으며, 유한 flip 이 없으면 실리지 않는다.
+(오너 승인 2026-09-09.)
+
 네 문장 어디에도 "mechanistic" · "causal" · "context transfer" · "unconditional 95%" 를 **긍정 claim 으로** 쓰지 않는다(명시적 비주장 절에서만 등장한다).
 calibration in-sample ICC 의 double-unseen 이식과 λ=1.15 를 새 nominal gate 로 쓰는 것은 금지(결정문 §2, 불변식 7).

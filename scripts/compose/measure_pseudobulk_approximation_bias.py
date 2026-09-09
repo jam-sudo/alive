@@ -616,7 +616,7 @@ def _self_checksum(report_without_checksum: Mapping) -> str:
         spec §4: "SHA-256 of the canonical JSON of every field above except
         ``self_checksum``"). Passing a dict that still contains
         ``self_checksum`` would make the digest depend on itself; callers
-        (including :func:`measure_approximation_bias_v3`) always strip that
+        (including :func:`measure_approximation_bias_v4`) always strip that
         key first.
 
     Returns
@@ -627,7 +627,7 @@ def _self_checksum(report_without_checksum: Mapping) -> str:
     return self_checksum(report_without_checksum)
 
 
-def measure_approximation_bias_v3(
+def measure_approximation_bias_v4(
     *,
     fit_role_artifact: str,
     response_projection: Mapping,
@@ -653,7 +653,7 @@ def measure_approximation_bias_v3(
     ``self_checksum`` blocks (design spec §4). In order:
 
     (a)-(c) Task 3's guards (measured-role whitelist, sealed-roster overlap,
-        gene-order digest) — see :func:`measure_approximation_bias_v3`'s prior
+        gene-order digest) — see :func:`measure_approximation_bias_v4`'s prior
         revision for their exact messages; UNCHANGED here so every existing
         seal-safety negative test keeps matching the metric's OWN message
         before any provenance field is even inspected.
@@ -995,6 +995,16 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--pod-instance", required=True)
     ap.add_argument("--bootstrap-replicates", type=int, default=2000)
     ap.add_argument("--out", required=True, type=Path)
+    ap.add_argument(
+        "--require-admitted",
+        action="store_true",
+        help=(
+            "exit non-zero when the report is NOT_ADMISSIBLE. The report is STILL "
+            "written -- the refusal reason belongs on disk. Default off, because the "
+            "measurement succeeding and the report being admissible are two different "
+            "facts, and two committed tests pin the default."
+        ),
+    )
     args = ap.parse_args(argv)
 
     probe_a_evidence = load_probe_a_evidence(
@@ -1012,7 +1022,7 @@ def main(argv: list[str] | None = None) -> int:
     basis_config_sha256 = sha256_json(basis_config_raw)
     registered_seeds = [int(s) for s in basis_config_raw["seeds"]["registered_seeds"]]
 
-    report = measure_approximation_bias_v3(
+    report = measure_approximation_bias_v4(
         fit_role_artifact=str(args.fit_role_artifact),
         response_projection=block,
         sealed_pair_ids=sealed_pair_ids,
@@ -1035,6 +1045,12 @@ def main(argv: list[str] | None = None) -> int:
         f"fairness_flag={gi['fairness_flag']} "
         f"bias_to_signal_ratio_R={gi['bias_to_signal_ratio_R']}"
     )
+    if args.require_admitted and report["admission_status"] != ADMITTED:
+        print(
+            f"refusing: admission_status={report['admission_status']} (--require-admitted)",
+            file=sys.stderr,
+        )
+        return 4
     return 0
 
 
