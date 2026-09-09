@@ -780,10 +780,13 @@ def test_the_finalizer_refuses_a_representation_the_probe_a_evidence_did_not_val
     """(d) Defense in depth: the representation the report DECLARES must be the one
     the Probe-A evidence actually validated.
 
-    Measured on the REAL comparison. ``bridge_admits`` refuses first for every real
-    input today, so this check is unreachable *through* ``finalize_bias_config`` -- and
-    the answer to that is to call the comparison the finalizer itself calls, NOT to
-    replace the admission guard in front of it with a permissive double. Nothing here is
+    Measured on the REAL comparison. (d) sits BEHIND (e) as defense in depth, not as a
+    live check: the validator pins the report leaf to ``REPRESENTATION`` and
+    ``bridge_admits`` is equality, so whenever (e) passes ``bridged == report_leaf`` and
+    this check is unreachable *through* ``finalize_bias_config`` -- by construction, under
+    every owner policy, not only today's. Independent verification is therefore this direct
+    call plus harness case M19, NOT replacing the admission guard in front of it with a
+    permissive double. Nothing here is
     mocked, patched or stubbed: ``_require_representation_matches`` is the same function
     object ``finalize_bias_config`` invokes, with the same operator and the same message.
     The wiring is pinned separately by

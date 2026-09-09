@@ -489,8 +489,11 @@ SANDBOX_CASES: tuple[SandboxCase, ...] = (
         redirect_new='_SCRIPT = Path("' + SANDBOX_TOKEN + "/scripts/compose"
         '/finalize_approximation_bias_config.py")',
         note=(
-            "`bridge_admits` refuses first for every real input today, so this comparison "
-            "cannot be reached THROUGH `finalize_bias_config` -- and the fix for that is not "
+            "(d) is defense in depth BEHIND (e), not a live check: the validator pins the "
+            "report leaf to `REPRESENTATION` and `bridge_admits` is equality, so whenever (e) "
+            "passes `bridged == report_leaf` and this comparison cannot be reached THROUGH "
+            "`finalize_bias_config` -- by construction, under every owner policy, not only "
+            "today's. The fix for that is not "
             "to mock the admission guard in front of it (a test that mocks a guard measures "
             "the mock). The comparison is a guard-free helper and the named test calls it "
             "directly, so this mutation removes the real operator the finalizer invokes: the "

@@ -114,7 +114,14 @@ def minimal_v2_terminal_body(**summary_overrides: object) -> dict:
             "provenance_checksum": _PROVENANCE_CHECKSUM,
         }
     )
-    sensitivity = minimal_band_sensitivity_block()
+    # The block's headline is DERIVED from the summary this body embeds, so an override
+    # of `sealed_axis` / `verdict_clauses` cannot leave the two disagreeing (2026-09-09
+    # review Minor 6). With the defaults these arguments equal the builder's own, so
+    # every existing caller gets byte-identical bodies.
+    sensitivity = minimal_band_sensitivity_block(
+        sealed_axis=summary["sealed_axis"],
+        additive_clears=summary["verdict_clauses"]["additive_clears"],
+    )
     return {
         "registered_summary": summary,
         "registered_summary_checksum": registered_summary_checksum,

@@ -23,4 +23,5 @@ paths:
   the artifact or remove the requirement to make a link checker pass.
 - When status changes, update every live entry-point banner that claims current state, but do not
   rewrite historical audits to look contemporaneous.
-- Isolate a superseded passage with a `[HISTORICAL …]` marker and close it with an explicit `<!-- /HISTORICAL -->` sentinel; block extent is the sentinel, never sentence heuristics.
+- Isolate a superseded passage with a `[HISTORICAL …]` marker and close it with an explicit
+  `<!-- /HISTORICAL -->` sentinel; block extent is the sentinel, never sentence heuristics.

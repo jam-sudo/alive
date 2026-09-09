@@ -1211,3 +1211,65 @@ def test_recover_aborted_after_seal_broken_symlink_terminal_fails_closed(tmp_pat
     with pytest.raises(TerminalError):
         _recover(run_dir, audit_path)
     assert not (run_dir / Phase2bTerminal.ABORTED_ARTIFACT).exists()
+
+
+# ---------------------------------------------------------------------------
+# Shared-fixture integrity — the body must be self-consistent under overrides.
+# ---------------------------------------------------------------------------
+
+
+def test_the_shared_body_fixture_threads_the_summarys_headline_inputs() -> None:
+    """`minimal_v2_terminal_body` builds the headline from the summary it EMBEDS.
+
+    The band-sensitivity block nests the pre-registered §8 headline, which the durable
+    finalizer re-derives from the embedded ``sealed_axis`` / ``verdict_clauses`` and
+    compares exactly. If the fixture built that block from the BUILDER's defaults, a
+    body made with ``summary_overrides`` would carry a summary and a headline that
+    disagree, and the future test that overrides them would fail on a confusing
+    headline-equality message instead of on its own claim (2026-09-09 review Minor 6).
+
+    Both directions are measured: the default body (where the two sets of defaults
+    coincide) and three overrides. ``sealed_axis="PARTIAL"`` is the case the review
+    named; it is recorded here as measured NON-discriminating on its own — PARTIAL and
+    NO_DISTINCT_WIN render the identical sentence, because only ``INVALID`` /
+    ``FUTILITY_STOPPED`` (no sentence) and ``GI_LEARNABLE_WIN`` (sentence (iv)) change
+    the render. The two arms that actually move the bytes are therefore included.
+    """
+    from alive.compose.headline import render_preregistered_headline
+
+    def _headline_the_summary_implies(body: dict) -> dict:
+        summary = body["registered_summary"]
+        block = body["band_sensitivity"]
+        return render_preregistered_headline(
+            band_passes=summary["verdict_clauses"]["additive_clears"],
+            flip=block["flip_lambda"]["additive"],
+            ladder_max=max(entry["lambda"] for entry in block["by_lambda"]),
+            sealed_axis=summary["sealed_axis"],
+        )
+
+    default_body = minimal_v2_terminal_body()
+    assert default_body["band_sensitivity"]["headline"] == _headline_the_summary_implies(
+        default_body
+    )
+
+    for overrides in (
+        {"sealed_axis": "PARTIAL"},
+        {"sealed_axis": "GI_LEARNABLE_WIN"},
+        {"verdict_clauses": {"integrity_valid": True, "additive_clears": True}},
+    ):
+        body = minimal_v2_terminal_body(**overrides)
+        assert body["band_sensitivity"]["headline"] == _headline_the_summary_implies(body), (
+            f"embedded summary and nested headline disagree for {overrides}"
+        )
+
+    # Anti-tautology: the two discriminating overrides really do move the rendered
+    # headline away from the default one, so the equalities above are the threading
+    # speaking rather than one constant compared with itself.
+    for overrides in (
+        {"sealed_axis": "GI_LEARNABLE_WIN"},
+        {"verdict_clauses": {"integrity_valid": True, "additive_clears": True}},
+    ):
+        assert (
+            minimal_v2_terminal_body(**overrides)["band_sensitivity"]["headline"]
+            != default_body["band_sensitivity"]["headline"]
+        ), overrides

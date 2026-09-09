@@ -193,12 +193,16 @@ def _require_representation_matches(report_leaf: str, bridged: str) -> None:
 
     The (d) half of the Probe-A binding, as a pure two-string comparison with no
     I/O, no validators and no admission logic of its own -- which is what makes
-    it directly measurable. Today ``bridge_admits`` refuses first for every real
-    input (the committed owner policy validates ``log_normalized_pseudobulk``
-    and every admissible report declares ``raw_pseudobulk_approximation``), so
-    this comparison is unreachable THROUGH :func:`finalize_bias_config`. The way
-    to measure it is to call it, not to replace the admission guard in front of
-    it with a permissive double: a test that mocks a guard measures the mock.
+    it directly measurable. It is DEFENSE IN DEPTH BEHIND (e), not a live check,
+    and not merely "today": :func:`validate_approximation_bias_report` pins the
+    report leaf to ``REPRESENTATION`` and :func:`bridge_admits` is equality, so
+    whenever (e) passes ``bridged == report_leaf`` and this comparison cannot
+    raise THROUGH :func:`finalize_bias_config` -- by construction, under every
+    owner policy. It is kept so that a future NON-equality bridge cannot let a
+    report declare a representation the evidence never validated. Independent
+    verification is therefore a direct call to this helper (plus harness case
+    M19), not replacing the admission guard in front of it with a permissive
+    double: a test that mocks a guard measures the mock.
 
     Parameters
     ----------

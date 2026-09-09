@@ -63,8 +63,8 @@ def test_branch_i_finite_above_the_ladder_adds_the_extrapolation_note():
     """A finite flip beyond the ladder is still (i), but §8's correction requires λ=<flip> too.
 
     The correction (`…pair-dependence-decision.md` (i) bullet) says the extrapolation point is
-    reported ALONGSIDE sentence (i) while the claim stays inside the registered ladder. Codex's
-    measured input was exactly this: flip 2.5 with ladder_max 1.25.
+    reported ALONGSIDE sentence (i) while the claim stays inside the registered ladder. A
+    reviewer's measured input (2026-09-09) was exactly this: flip 2.5 with ladder_max 1.25.
     """
     from alive.compose.headline import (
         FLIP_PLACEHOLDER,

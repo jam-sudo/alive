@@ -310,6 +310,30 @@ def test_an_assertion_raised_in_a_synthetic_production_module_is_not_a_kill(
     assert "frame outside the test module: src/synthetic_production.py" in verdict
 
 
+def test_repo_frame_skips_venv_frames_and_picks_the_test_module(harness):
+    """The `.venv/` exclusion is what makes the frame rule usable at all.
+
+    `pytest.fail` and an unfulfilled `pytest.raises` leave `_pytest/outcomes.py`
+    as the DEEPEST traceback frame, and the virtualenv lives INSIDE `REPO` -- so
+    without the exclusion the last "repository-owned" frame of a legitimate kill
+    would be pytest's own module and those cases would all be scored
+    `HARNESS_FAILURE (frame outside the test module: .venv/...)`. The full 20/20
+    run exercises the branch on the 9 cases that end there; a smaller run would
+    not, so the branch is pinned directly rather than only incidentally.
+    """
+    test_module = "tests/alive/compose/test_x.py"
+    venv_module = ".venv/lib/python3.11/site-packages/_pytest/outcomes.py"
+    frames = [str(harness.REPO / test_module), str(harness.REPO / venv_module)]
+
+    assert harness._repo_frame(frames) == test_module
+
+    # Anti-tautology: the venv frame really is under `REPO` (so it is the exclusion
+    # that drops it, not a failed prefix match), and a traceback of nothing but venv
+    # frames owns no repository frame at all.
+    assert str(harness.REPO / venv_module).startswith(str(harness.REPO) + "/")
+    assert harness._repo_frame([str(harness.REPO / venv_module)]) is None
+
+
 # --------------------------------------------------------------------------- #
 # Rule 6 — the killer must be the test whose own name makes the claim.
 # --------------------------------------------------------------------------- #

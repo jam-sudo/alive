@@ -1026,6 +1026,15 @@ T7a → T7b, (T3, T4) → T9.
   D3 의 runtime mount/actor 증거, R1 representation 결정(raw 증명 vs log 채택), D1-c 의 real-bank λ*.
 - **여섯 개 config blocker:** 이 플랜은 `configs/` 를 건드리지 않는다.
 - **재론하지 않는 것:** PR #15 원장이 DROP 으로 판정한 항목들. 새 반대 근거가 나오면 결정 게이트로만 다시 연다.
+- **(2026-09-09 최종 리뷰 Minor 4 — 병합 후)** `pyproject.toml:44` 의 `scripts/**` S101 면제와, sandbox case 가
+  대상 스크립트를 `REPO` 밖(`mkdtemp`, `compose_audit_mutation_harness.py:749`)으로 복사하는 규칙이 겹치면
+  sandbox 안 `scripts/compose/*.py` 의 bare `assert` 는 `-O` 에서 사라지고 프레임 규칙상 테스트 모듈의 것으로
+  채점될 수 있다. **현재 노출 0**(실측 2026-09-09: `ruff check --isolated --select S101 scripts` → 유일한 hit 은
+  pod 전용 `scripts/baselines/gears_worker.py:347`; `scripts/compose/` 와 하네스는 bare assert 0). 면제를
+  `scripts/compose/**` 에서 좁히거나 `_repo_frame` 이 sandbox 루트를 `scripts/…` 로 되돌리는 것은 이 플랜 밖이다.
+- **(2026-09-09 최종 리뷰 Minor 7 — 기록)** `tests/test_claude_md_anchors.py:131` 의 literal 개정일 핀
+  (`> **개정일:** 2026-09-09`)은 T5 가 의도한 결합이다 — 다음 `CLAUDE.md` 개정 때 같은 커밋에서 함께 움직인다.
+  날짜 형식/하한 단언으로 바꿔 churn 을 없앨지는 오너 선택이며 이 플랜은 열지 않는다.
 
 <!-- R4-b: binding rulings와 수정된 실행 가능성을 재검토한 공동 저자 서명을 추가했다. -->
 ## 서명 (R4-b, 공동 저자 B안)
