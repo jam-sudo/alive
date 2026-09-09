@@ -107,6 +107,16 @@ COMPLETE/INVALID의 state-specific exact fields는 `registered_summary`,
 B(위임 서명): `band_sensitivity`와 `band_sensitivity_checksum`을 더한다 — descriptive-only band-inflation
 sensitivity 블록과 그 자신의 `sha256_json`. `final_result_checksum`의 다섯 구성요소 밖이며, durable
 finalizer는 블록 checksum이 블록을 결속하는지 재검증한다.]**
+
+**[2026-09-09 정정 — 이 블록이 담는 것]** 위 수정안 B 는 이 블록을 descriptive-only 로 등록했고 그 지위는
+그대로다. 다만 블록의 내용이 하나 늘었다: `compose_band_sensitivity_v2` 부터 블록은 pair-dependence 결정문
+§8 의 **사전등록 headline 문장**을 `headline` 키에 중첩해 **담는다**(문장 선택이 artifact 밖에 있으면 아무것에도
+결속되지 않기 때문이다). 문장은 verdict 를 다시 말할 뿐이므로 **verdict 를 바꾸지 않고**, `final_result_checksum`
+의 다섯 구성요소도 COMPLETE/INVALID 의 state-specific field 목록도 그대로다 — 중첩이므로 필드 수가 변하지 않는다.
+durable finalizer 는 블록 checksum 결속 재검증에 더해, terminal 자신의 `sealed_axis` ·
+`verdict_clauses.additive_clears` · `flip_lambda["additive"]` 와 블록 자신의 사다리로 그 문장을 재도출해 정확
+일치를 요구하고, `inconsistent: true` marker 를 담은 블록은 publish 하지 않는다.
+
 `registered_summary`와 `terminal_embedded_provenance`는 checksum만이 아니라 canonical payload 자체를
 포함한다.
 

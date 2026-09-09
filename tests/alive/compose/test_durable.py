@@ -132,7 +132,9 @@ def _registered_summary(state: str = "COMPLETE") -> dict:
         "gi_structure_recovery": "NOT_EVALUABLE",
         "sealed_axis": "NO_DISTINCT_WIN",
         "method_axis": "METHOD_VALIDATED",
-        "verdict_clauses": {"integrity_valid": True},
+        # `additive_clears` is REQUIRED, not decorative: the durable finalizer re-derives
+        # the pre-registered §8 headline sentence from it (2026-09-09).
+        "verdict_clauses": {"integrity_valid": True, "additive_clears": False},
         "integrity_disclaimer": "structural run-internal self-check only",
         "bundle_checksum": "a" * 64,
         "manifest_checksum": "b" * 64,
@@ -362,6 +364,7 @@ def _install_doctored_terminal(
     *,
     summary: dict | None = None,
     final_result_checksum: str | None = None,
+    band_sensitivity: dict | None = None,
     band_sensitivity_checksum: str | None = None,
 ) -> None:
     """Doctor an already-written terminal, re-deriving every checksum consistently.
@@ -369,7 +372,10 @@ def _install_doctored_terminal(
     Loads the real v2 body and, when ``summary`` is given, swaps its
     ``registered_summary`` while recomputing ``registered_summary_checksum`` then
     ``final_result_checksum`` from the five identity fields; when
-    ``final_result_checksum`` is given it overrides that field directly. In every
+    ``band_sensitivity`` is given it swaps the Amendment B block and RE-DERIVES
+    ``band_sensitivity_checksum`` from it (so the checksum binding still holds and only a
+    SEMANTIC check downstream can fire); when ``final_result_checksum`` or
+    ``band_sensitivity_checksum`` is given it overrides that field directly. In every
     case the whole-body ``terminal_payload_checksum`` is RE-DERIVED through the SHARED
     canonicalizer, so every EARLIER finalizer check stays self-consistent and only the
     intended NEW check can fire. The whole-body checksum is NEVER recomputed via a raw
@@ -391,6 +397,9 @@ def _install_doctored_terminal(
         )
     if final_result_checksum is not None:
         body["final_result_checksum"] = final_result_checksum
+    if band_sensitivity is not None:
+        body["band_sensitivity"] = band_sensitivity
+        body["band_sensitivity_checksum"] = sha256_json(band_sensitivity)
     if band_sensitivity_checksum is not None:
         body["band_sensitivity_checksum"] = band_sensitivity_checksum
     core = {k: v for k, v in body.items() if k != TERMINAL_PAYLOAD_CHECKSUM_FIELD}
@@ -1287,3 +1296,184 @@ def test_a_sensitivity_block_whose_checksum_does_not_bind_it_fails_closed(tmp_pa
     _install_doctored_terminal(scenario["terminal_path"], band_sensitivity_checksum="0" * 64)
     with pytest.raises(DurableLedgerError, match="band_sensitivity_checksum"):
         _finalize(scenario)
+
+
+# ---------------------------------------------------------------------------
+# Task 7b (2026-09-09): the block CARRIES the pre-registered D4 §8 headline sentence
+# (`compose_band_sensitivity_v2`), so binding it by checksum is no longer enough — the
+# checksum binds whatever the writer chose to SAY. These five arms install terminals whose
+# every earlier check is self-consistent (the block's own checksum is re-derived, and so is
+# the whole-body payload checksum) and whose SENTENCE is wrong. Before the finalizer
+# re-derived the sentence, all five published successfully.
+# ---------------------------------------------------------------------------
+
+
+def _finalize_error(scenario: dict) -> DurableLedgerError:
+    """Run the finalizer, capture what it raises, and keep every verdict in THIS module.
+
+    Capture-and-assert rather than :func:`pytest.raises`: when an arm is false the
+    finalizer either succeeds or raises something else, and both must be reported by an
+    ``AssertionError`` raised HERE — a bare escape would fail the test in a production
+    frame, which this repository does not accept as a measurement of the test's own claim.
+    """
+    try:
+        _finalize(scenario)
+    except DurableLedgerError as exc:
+        return exc
+    except Exception as exc:  # noqa: BLE001 — every other type is reported, not propagated
+        raise AssertionError(
+            "durable finalize 가 DurableLedgerError 가 아닌 예외를 냈다: "
+            f"{type(exc).__name__}: {exc}"
+        ) from exc
+    raise AssertionError(
+        "durable finalize 가 성공했다 — 자기일관적인(=checksum 이 결속하는) 잘못된 "
+        "사전등록 문장이 durable artifact 로 published 되었다"
+    )
+
+
+def _headline_scenario(
+    tmp_path: Path,
+    *,
+    sealed_axis: str = "PARTIAL",
+    additive_clears: bool = True,
+    flip: float | str = 1.1,
+    headline: object,
+) -> dict:
+    """A terminal whose summary/flip say one thing and whose carried sentence says another.
+
+    The summary swap re-derives ``registered_summary_checksum`` and
+    ``final_result_checksum``; the block swap re-derives ``band_sensitivity_checksum``; the
+    helper re-derives the whole-body ``terminal_payload_checksum`` through the shared
+    canonicalizer. So EVERY check the finalizer had before this task passes, and only a
+    semantic re-derivation of the sentence can fire.
+    """
+    scenario = _build_scenario(tmp_path)
+    summary = _registered_summary()
+    summary["sealed_axis"] = sealed_axis
+    summary["verdict_clauses"] = {**summary["verdict_clauses"], "additive_clears": additive_clears}
+    block = minimal_band_sensitivity_block()
+    block["flip_lambda"] = {"additive": flip}
+    block["headline"] = headline
+    _install_doctored_terminal(scenario["terminal_path"], summary=summary, band_sensitivity=block)
+    return scenario
+
+
+def _rendered(
+    *, sealed_axis: str, additive_clears: bool, flip: float | str, ladder_max: float = 1.25
+) -> dict:
+    """The sentence the renderer actually produces for these inputs (the honest one)."""
+    from alive.compose.headline import render_preregistered_headline
+
+    return dict(
+        render_preregistered_headline(
+            band_passes=additive_clears,
+            flip=flip,
+            ladder_max=ladder_max,
+            sealed_axis=sealed_axis,
+        )
+    )
+
+
+def test_a_headline_whose_branch_disagrees_with_the_flip_fails_closed(tmp_path: Path) -> None:
+    """A cleared band with a flip INSIDE the ladder selects (ii); (i) claims the opposite.
+
+    (i) says the margin holds across the WHOLE registered ladder. With
+    ``flip_lambda['additive'] = 1.1`` and a registered ladder max of 1.25 it does not — the
+    block's own numbers select (ii). Nothing before this task looked: the block's checksum
+    binds the wrong sentence exactly as happily as the right one.
+    """
+    forged = _rendered(sealed_axis="PARTIAL", additive_clears=True, flip="NEVER_FLIPS")
+    scenario = _headline_scenario(tmp_path, flip=1.1, headline=forged)
+
+    exc = _finalize_error(scenario)
+    assert isinstance(exc, DurableLedgerError), f"예외 타입이 다르다: {type(exc).__name__}"
+    assert "band_sensitivity.headline" in str(exc), (
+        f"에러가 어느 필드를 거부했는지 말하지 않는다: {exc}"
+    )
+    assert forged["band_branch"] == "i", "실험 설계 확인: 위조 문장은 (i) 여야 한다"
+
+
+def test_a_headline_that_still_carries_the_flip_placeholder_fails_closed(
+    tmp_path: Path,
+) -> None:
+    """The un-substituted `<flip>` is exactly the freedom D4 exists to close.
+
+    Sentence (ii) registers a placeholder for the inflation at which the clause flips.
+    Leaving it in means the number is still chosen by a human hand at report time — a
+    self-consistent block that says nothing, and published without a word before this task.
+    """
+    from alive.compose.headline import FLIP_PLACEHOLDER, REGISTERED_HEADLINE_SENTENCES
+
+    forged = _rendered(sealed_axis="PARTIAL", additive_clears=True, flip=1.1)
+    forged["band_sentence"] = REGISTERED_HEADLINE_SENTENCES["ii"]
+    assert FLIP_PLACEHOLDER in forged["band_sentence"], "실험 설계 확인: placeholder 가 남아야 한다"
+    scenario = _headline_scenario(tmp_path, flip=1.1, headline=forged)
+
+    exc = _finalize_error(scenario)
+    assert isinstance(exc, DurableLedgerError), f"예외 타입이 다르다: {type(exc).__name__}"
+    assert "band_sensitivity.headline" in str(exc), (
+        f"에러가 어느 필드를 거부했는지 말하지 않는다: {exc}"
+    )
+
+
+def test_a_learned_family_sentence_on_a_non_learnable_axis_fails_closed(
+    tmp_path: Path,
+) -> None:
+    """(iv) belongs to `GI_LEARNABLE_WIN` alone; on `PARTIAL` it is a claim never earned.
+
+    `PARTIAL` is precisely the axis where the additive margin cleared and the learned
+    family did NOT — attaching (iv) says the opposite of the verdict the same terminal
+    carries, and the block's checksum binds it without complaint.
+    """
+    from alive.compose.headline import HEADLINE_SENTENCE_IV
+
+    forged = _rendered(sealed_axis="PARTIAL", additive_clears=True, flip=1.1)
+    forged["learned_family_sentence"] = HEADLINE_SENTENCE_IV
+    scenario = _headline_scenario(tmp_path, flip=1.1, headline=forged)
+
+    exc = _finalize_error(scenario)
+    assert isinstance(exc, DurableLedgerError), f"예외 타입이 다르다: {type(exc).__name__}"
+    assert "band_sensitivity.headline" in str(exc), (
+        f"에러가 어느 필드를 거부했는지 말하지 않는다: {exc}"
+    )
+
+
+def test_a_headline_on_an_invalid_terminal_fails_closed(tmp_path: Path) -> None:
+    """An `INVALID` run is declared untrustworthy; it may carry a marker, never a sentence.
+
+    `INVALID` shares the COMPLETE terminal body and the swap carries the clauses through at
+    their original values, so a sentence built before the swap rides straight into the
+    durable artifact. §8's 2026-09-09 correction says the two no-verdict axes carry the
+    applicability marker only.
+    """
+    forged = _rendered(sealed_axis="PARTIAL", additive_clears=True, flip=1.1)
+    scenario = _headline_scenario(
+        tmp_path, sealed_axis="INVALID", additive_clears=True, flip=1.1, headline=forged
+    )
+
+    exc = _finalize_error(scenario)
+    assert isinstance(exc, DurableLedgerError), f"예외 타입이 다르다: {type(exc).__name__}"
+    assert "band_sensitivity.headline" in str(exc), (
+        f"에러가 어느 필드를 거부했는지 말하지 않는다: {exc}"
+    )
+    assert forged["applicable"] is True, "실험 설계 확인: 위조 문장은 적용 가능해야 한다"
+
+
+def test_an_inconsistent_headline_marker_fails_closed(tmp_path: Path) -> None:
+    """The renderer RECORDS an inconsistency instead of raising; durable must not publish it.
+
+    A cleared band with `FAILS_AT_REGISTERED_BAND` is unreachable by construction, so the
+    branch function calls it a bug. Raising during terminal assembly would abort a
+    legitimate write, so the renderer records a marker — which is self-consistent and
+    therefore survives an exact-equality check. Refusing it is a SEPARATE clause, and this
+    arm is the only one that measures it.
+    """
+    marker = _rendered(sealed_axis="PARTIAL", additive_clears=True, flip="FAILS_AT_REGISTERED_BAND")
+    assert marker.get("inconsistent") is True, "실험 설계 확인: renderer 가 marker 를 내야 한다"
+    scenario = _headline_scenario(tmp_path, flip="FAILS_AT_REGISTERED_BAND", headline=marker)
+
+    exc = _finalize_error(scenario)
+    assert isinstance(exc, DurableLedgerError), f"예외 타입이 다르다: {type(exc).__name__}"
+    assert "inconsistent" in str(exc), (
+        f"에러가 marker 자체를 거부했다고 말하지 않는다 (동등성 검사에서 죽었을 수 있다): {exc}"
+    )

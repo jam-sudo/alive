@@ -297,10 +297,15 @@ def _measured_branch(theta: dict[str, float], q: float) -> tuple[object, object,
         additive_margin=ADDITIVE_MARGIN,
         learned_margin=LEARNED_MARGIN,
     )
-    block = _band_sensitivity_block(sensitivity)
-    flip = block["flip_lambda"]["additive"]
     verdict = _verdict(bounds)
     band_passes = verdict is not SealedAxis.NO_DISTINCT_WIN
+    # Since `compose_band_sensitivity_v2` the block also renders the §8 sentence, so the
+    # producer needs the verdict's own two fields. Both come from the SAME real chain
+    # (`sealed_verdict` above), never from a reimplementation.
+    block = _band_sensitivity_block(
+        sensitivity, sealed_axis=verdict.value, additive_clears=band_passes
+    )
+    flip = block["flip_lambda"]["additive"]
     return (
         flip,
         verdict,

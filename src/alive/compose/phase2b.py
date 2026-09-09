@@ -82,6 +82,7 @@ from alive.compose.headline import (
     _FLIP_ALREADY_FAILED,
     _FLIP_NEVER,
     preregistered_headline_branch,  # noqa: F401
+    render_preregistered_headline,
 )
 from alive.compose.inference2 import ComposeBandSensitivity, band_sensitivity
 from alive.compose.outcome_store import (
@@ -761,7 +762,10 @@ def _finite_or_sentinel(value: float) -> float | str:
 
 
 #: Schema tag of the terminal's descriptive-only band-sensitivity block (Amendment B).
-BAND_SENSITIVITY_SCHEMA = "compose_band_sensitivity_v1"
+#: Bumped to ``_v2`` on 2026-09-09 when the block began CARRYING the pre-registered D4 §8
+#: headline sentence under ``headline`` (a NESTED addition -- the terminal's own top-level
+#: roster is unchanged). The block stays descriptive-only: it decides no verdict.
+BAND_SENSITIVITY_SCHEMA = "compose_band_sensitivity_v2"
 
 
 def _flip_or_label(value: float) -> float | str:
@@ -771,15 +775,42 @@ def _flip_or_label(value: float) -> float | str:
     return _FLIP_NEVER if number > 0 else _FLIP_ALREADY_FAILED
 
 
-def _band_sensitivity_block(sensitivity: ComposeBandSensitivity) -> dict[str, Any]:
+def _band_sensitivity_block(
+    sensitivity: ComposeBandSensitivity, *, sealed_axis: str, additive_clears: bool
+) -> dict[str, Any]:
     """Serialise the sensitivity for the terminal body: finite floats or labels only.
 
     Ordered by the registered ladder so ``by_lambda[0]`` is the registered band
     (``lambda = 1.0``) and equals the bounds the verdict used. Every float goes
     through the same finiteness discipline as the registered summary so a
     degenerate value can never abort a legitimate terminal write.
+
+    Since ``compose_band_sensitivity_v2`` the block also CARRIES the pre-registered D4 §8
+    headline sentence under ``headline``. A sentence that lives only in a report is bound
+    to nothing; nested here it rides inside the existing ``band_sensitivity_checksum``
+    without touching the terminal's top-level roster (spec §2.1 + Amendment B). The block
+    remains descriptive-only -- the sentence RESTATES the verdict, it never decides one.
+
+    Parameters
+    ----------
+    sensitivity : ComposeBandSensitivity
+        The one in-run computation, from the same bounds the verdict was decided on.
+    sealed_axis : str
+        The final verdict's ``SealedAxis`` VALUE (a plain string, exactly as the registered
+        summary carries it). Two axes carry no sentence at all (``INVALID`` /
+        ``FUTILITY_STOPPED``); one adds sentence (iv).
+    additive_clears : bool
+        The verdict's own ``additive_clears`` clause -- did the headline additive contrast
+        clear its material margin at the REGISTERED band? Authoritative for branch (iii).
+
+    Notes
+    -----
+    ``ladder_max`` is read back from the block's OWN ``by_lambda`` rather than from the
+    config: the durable finalizer re-derives the sentence from the published block and has
+    no config, so both sides must read the ladder from the same place (and no registered
+    value is hardcoded in production source, CLAUDE.md#repo).
     """
-    return {
+    block: dict[str, Any] = {
         "schema": BAND_SENSITIVITY_SCHEMA,
         "descriptive_only": True,
         "comparators": list(sensitivity.comparators),
@@ -799,6 +830,13 @@ def _band_sensitivity_block(sensitivity: ComposeBandSensitivity) -> dict[str, An
         },
         "verdict_holds_below_lambda": _flip_or_label(sensitivity.verdict_holds_below_lambda),
     }
+    block["headline"] = render_preregistered_headline(
+        band_passes=bool(additive_clears),
+        flip=block["flip_lambda"]["additive"],
+        ladder_max=max(float(entry["lambda"]) for entry in block["by_lambda"]),
+        sealed_axis=str(sealed_axis),
+    )
+    return block
 
 
 #: The registered-summary key carrying the pre-registered approximation-bias fairness
@@ -2150,7 +2188,11 @@ def _evaluate_inside_boundary(
     # The v2 COMPLETE / INVALID body: exactly the state-specific roster (spec §2.1).
     # The whole-body terminal_payload_checksum is computed by the terminal writer;
     # these are the inner content checksums over specific in-process dicts.
-    sensitivity_block = _band_sensitivity_block(sensitivity)
+    sensitivity_block = _band_sensitivity_block(
+        sensitivity,
+        sealed_axis=summary["sealed_axis"],
+        additive_clears=summary["verdict_clauses"]["additive_clears"],
+    )
     body = {
         "registered_summary": summary,
         "registered_summary_checksum": registered_summary_checksum,

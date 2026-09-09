@@ -57,6 +57,10 @@ from alive.compose.config2 import (
     _EXPECTED_COMPARATOR_FAMILY,
     _EXPECTED_METHOD_ROSTER,
 )
+
+# LEAF module (it imports only `verdict2`), so importing it here creates no cycle: `phase2b`
+# imports THIS module, which is exactly why the renderer could not stay in `phase2b`.
+from alive.compose.headline import render_preregistered_headline
 from alive.compose.provenance2 import (
     _DIGEST_ARTIFACTS,
     _EVIDENCE_ARTIFACTS,
@@ -857,6 +861,68 @@ def finalize_phase2b_durable_outputs(
         raise DurableLedgerError(
             "terminal band_sensitivity_checksum does not bind its band_sensitivity block "
             "(sha256_json(block) != band_sensitivity_checksum); fail closed."
+        )
+
+    # --- 2026-09-09: since `compose_band_sensitivity_v2` the block CARRIES the
+    # pre-registered D4 §8 headline sentence, and the binding above is not enough for it.
+    # A checksum binds the block to the terminal; it says nothing about whether the
+    # sentence is the one the result SELECTS. A writer that emits a self-consistent but
+    # WRONG sentence -- a branch the flip contradicts, an un-substituted `<flip>`, the
+    # learned-family sentence on an axis that never earned it -- passed every check this
+    # finalizer had (measured: all five published). So the sentence is RE-DERIVED here from
+    # the terminal's own verdict fields and the block's own ladder, and must match exactly.
+    verdict_clauses = registered_summary.get("verdict_clauses")
+    if not isinstance(verdict_clauses, dict) or "additive_clears" not in verdict_clauses:
+        raise DurableLedgerError(
+            "registered summary verdict_clauses is missing or carries no 'additive_clears' "
+            "clause, so band_sensitivity.headline cannot be re-derived; fail closed."
+        )
+    by_lambda = sensitivity_block.get("by_lambda")
+    if not isinstance(by_lambda, list) or not by_lambda:
+        raise DurableLedgerError(
+            "terminal band_sensitivity.by_lambda is missing or empty, so the registered "
+            "ladder maximum band_sensitivity.headline needs is unknown; fail closed."
+        )
+    try:
+        ladder_max = max(float(entry["lambda"]) for entry in by_lambda)
+        flip = sensitivity_block["flip_lambda"]["additive"]
+        sealed_axis = str(registered_summary["sealed_axis"])
+    except (AttributeError, KeyError, TypeError, ValueError) as exc:
+        raise DurableLedgerError(
+            "terminal band_sensitivity/registered_summary does not carry the fields "
+            f"band_sensitivity.headline is derived from ({exc}); fail closed."
+        ) from exc
+    # The renderer accepts a label or a number; anything else would reach `float()` inside
+    # it as an untyped crash, so it is refused here instead.
+    if isinstance(flip, bool) or not isinstance(flip, (str, int, float)):
+        raise DurableLedgerError(
+            f"terminal band_sensitivity.flip_lambda['additive'] is {type(flip).__name__}, "
+            "neither a registered label nor a number; fail closed."
+        )
+    expected_headline = render_preregistered_headline(
+        band_passes=bool(verdict_clauses["additive_clears"]),
+        flip=flip,
+        ladder_max=ladder_max,
+        sealed_axis=sealed_axis,
+    )
+    headline = sensitivity_block.get("headline")
+    if headline != expected_headline:
+        raise DurableLedgerError(
+            "terminal band_sensitivity.headline is not the pre-registered sentence its own "
+            f"result selects: re-derived from sealed_axis={sealed_axis!r}, "
+            f"verdict_clauses.additive_clears={bool(verdict_clauses['additive_clears'])!r}, "
+            f"flip_lambda['additive']={flip!r} and ladder_max={ladder_max!r}, the block "
+            "carries a different one (D4 §8); fail closed."
+        )
+    # The renderer RECORDS an unreachable (band_passes, flip) pair rather than raising, so a
+    # legitimate terminal write is never aborted by a diagnostic. Publishing it as a durable
+    # artifact is the other question, and the answer is no: a marker is a bug report.
+    if headline.get("inconsistent") is True:
+        raise DurableLedgerError(
+            "terminal band_sensitivity.headline carries the inconsistent marker "
+            f"(inconsistent: true, reason: {headline.get('reason')!r}); the result's band "
+            "verdict and flip point cannot both hold, so no pre-registered sentence "
+            "applies and this is not a publishable artifact; fail closed."
         )
 
     # --- Validate the registered-summary schema + method/comparator rosters (Task 5

@@ -1081,7 +1081,7 @@ def test_the_terminal_carries_the_sensitivity_outside_the_result_checksum_with_i
     body = _read_terminal(kit["run_dir"], "complete")
 
     block = body["band_sensitivity"]
-    assert block["schema"] == "compose_band_sensitivity_v1"
+    assert block["schema"] == "compose_band_sensitivity_v2"
     assert block["descriptive_only"] is True
     ladder = [entry["lambda"] for entry in block["by_lambda"]]
     assert ladder == [float(x) for x in kit["cfg"].sensitivity_band_inflation]
@@ -1096,6 +1096,46 @@ def test_the_terminal_carries_the_sensitivity_outside_the_result_checksum_with_i
             "provenance_checksum": body["provenance_checksum"],
         }
     )
+
+
+def test_the_terminal_nests_the_preregistered_headline_without_widening_its_roster(tmp_path):
+    """2026-09-09: the D4 §8 sentence rides INSIDE `band_sensitivity`, not beside it.
+
+    A sentence that exists only in a report is bound to nothing -- nobody can tell later
+    which one this run selected, and the substitution of `<flip>` was left to a hand at
+    report time. Nesting it under the already-rostered `band_sensitivity` puts it inside
+    the existing `band_sensitivity_checksum` while the terminal's own top-level roster
+    (spec §2.1 + Amendment B) stays byte-for-byte the same closed set -- which is what lets
+    this land without touching `terminal.py`. The sentence is a RESTATEMENT of the verdict,
+    so the block stays `descriptive_only`.
+    """
+    from alive.compose.headline import render_preregistered_headline
+    from alive.compose.terminal import _COMPLETE_INVALID_STATE_FIELDS
+
+    kit = _make_run(tmp_path)
+    result = run_phase2b_fixture(**_fixture_kwargs(kit))
+    body = _read_terminal(kit["run_dir"], "complete")
+    block = body["band_sensitivity"]
+    summary = body["registered_summary"]
+
+    # The sentence IS in the block, the roster did NOT widen.
+    assert "headline" in block, "band_sensitivity 블록이 사전등록 문장을 담지 않는다"
+    assert "headline" not in body, "문장이 terminal 최상위 roster 로 새어 나왔다"
+    assert _COMPLETE_INVALID_STATE_FIELDS <= set(body)
+    assert block["descriptive_only"] is True
+
+    # And it is exactly the sentence this run's OWN verdict fields select.
+    assert block["headline"] == render_preregistered_headline(
+        band_passes=summary["verdict_clauses"]["additive_clears"],
+        flip=block["flip_lambda"]["additive"],
+        ladder_max=max(entry["lambda"] for entry in block["by_lambda"]),
+        sealed_axis=summary["sealed_axis"],
+    ), "terminal 이 실은 문장이 자기 verdict 필드가 고르는 문장이 아니다"
+    assert block["headline"]["inconsistent"] is False
+    assert body["band_sensitivity_checksum"] == sha256_json(block), (
+        "기존 checksum 이 중첩된 문장을 함께 묶지 않는다"
+    )
+    assert result.terminal_state == TerminalState.COMPLETE
 
 
 def test_per_method_aggregate_mse_reports_both_regimes_unpooled(tmp_path):

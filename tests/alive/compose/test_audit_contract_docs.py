@@ -20,6 +20,7 @@ import pytest
 
 from alive.compose.config2 import load_compose_phase2_config
 from alive.compose.headline import (
+    FINITE_FLIP_NOTE,
     NO_HEADLINE_AXES,
     REGISTERED_HEADLINE_SENTENCES,
     render_preregistered_headline,
@@ -603,6 +604,61 @@ def test_the_registered_headline_sentences_match_the_code_constants():
         assert "<flip>" not in REGISTERED_HEADLINE_SENTENCES[key], (
             f"({key}) 에 치환 placeholder 가 있다 — 사전등록 문장에 없던 자유가 생긴다"
         )
+
+
+#: §8 의 2026-09-09 정정 문단: 문장이 어디에 실리고 누가 재검증하는지.
+_EMISSION_CORRECTION_MARK = "**[2026-09-09 정정 — 문장 emission 과 적용 범위]**"
+
+#: 유한 flip 병기 문구를 §8 에 **등록하는** 문단의 라벨. `**(i) ` 로 시작하지 않으므로
+#: :func:`_registered_headline_sentences` 의 네 문장 추출과 겹치지 않는다.
+_FINITE_FLIP_NOTE_MARK = "**(i-note) 유한 flip 외삽 병기 문구 (2026-09-09 등록).**"
+
+
+def test_the_registered_finite_flip_note_matches_the_code_constant():
+    """유한 flip 병기 문구도 이제 **등록된 문구**다 — 문서와 코드가 같은 바이트여야 한다.
+
+    2026-09-08 정정의 (i) bullet 은 "`λ=<flip>` 을 병기하고 claim 은 사다리 안" 이라는 **요구**만
+    적고 문구를 등록하지 않았다. 그래서 `FINITE_FLIP_NOTE` 는 구현자가 쓴 문장이었고, 사전등록
+    문장 옆에 사전등록되지 않은 문장이 함께 실리는 상태였다(Codex 리뷰 Minor). 2026-09-09 정정이
+    그 문구를 §8 에 등록했으므로, 서명된 네 문장과 **같은 정규화 뒤 완전 일치**를 여기서 요구한다 —
+    어느 쪽이 바뀌든 이 하나가 실패한다.
+    """
+    section = _headline_section()
+    paragraphs = section.split("\n\n")
+    matches = [p for p in paragraphs if p.startswith(_FINITE_FLIP_NOTE_MARK)]
+    assert len(matches) == 1, (
+        f"§8 에 `{_FINITE_FLIP_NOTE_MARK}` 로 시작하는 문단이 정확히 하나여야 한다"
+    )
+    body = matches[0]
+    registered = " ".join(body[body.index('"') + 1 : body.rindex('"')].split())
+    assert registered == " ".join(FINITE_FLIP_NOTE.split()), (
+        "§8 에 등록된 병기 문구와 `headline.py` 의 `FINITE_FLIP_NOTE` 가 다르다"
+    )
+    # 두 placeholder 가 모두 살아 있어야 치환이 의미를 갖는다.
+    for placeholder in ("<flip>", "<ladder_max>"):
+        assert placeholder in registered, f"등록 문구에 {placeholder} 가 없다"
+
+
+def test_the_emission_correction_records_where_the_sentence_is_written():
+    """문장을 어디에 싣고 누가 재검증하는지가 문서에 있어야 코드의 규정이 사전등록 안에 있다.
+
+    코드만 고치면 emission 위치·schema·치환 표기가 사전등록 **밖**의 규정이 된다. 그래서 문서가
+    세 가지를 이름으로 부르고(중첩 위치·schema v2·`repr(float(...))`), 그 셋이 실제 코드 값과
+    일치하는지 여기서 함께 본다.
+    """
+    from alive.compose.phase2b import BAND_SENSITIVITY_SCHEMA
+
+    section = _headline_section()
+    assert _EMISSION_CORRECTION_MARK in section, (
+        f"§8 에 emission 정정 문단({_EMISSION_CORRECTION_MARK})이 없다"
+    )
+    correction = " ".join(section.split(_EMISSION_CORRECTION_MARK, 1)[1].split())
+    assert "`band_sensitivity.headline`" in correction, "§8 이 emission 위치를 적지 않는다"
+    assert f"`{BAND_SENSITIVITY_SCHEMA}`" in correction, (
+        f"§8 이 현재 블록 schema({BAND_SENSITIVITY_SCHEMA}) 를 적지 않는다"
+    )
+    assert "`repr(float(...))`" in correction, "§8 이 canonical float 표기를 적지 않는다"
+    assert "`inconsistent: true`" in correction, "§8 이 marker 를 publish 하지 않음을 적지 않는다"
 
 
 #: §8 의 2026-09-09 정정 문단: 유효한 verdict 가 없는 terminal 에는 사전등록 문장을 싣지 않는다.

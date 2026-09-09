@@ -427,6 +427,19 @@ CASES: tuple[Case, ...] = (
         "tests/alive/compose/driver/test_sealed_source_integrity_e2e.py"
         "::test_in_place_mutation_during_materialization_aborts_and_recover_agrees",
     ),
+    Case(
+        # The finalizer verified the block's CHECKSUM and nothing else, so a
+        # self-consistent-but-WRONG pre-registered sentence published without a word
+        # (measured 2026-09-09: five such terminals, all successful). Deleting the
+        # re-derivation restores exactly that state -- and the pinned test, whose whole
+        # subject is a sentence its own flip contradicts, must be the one that notices.
+        "M20 durable takes the terminal's word for the pre-registered sentence it carries",
+        "alive.compose.durable",
+        "    if headline != expected_headline:",
+        "    if False:",
+        "tests/alive/compose/test_durable.py"
+        "::test_a_headline_whose_branch_disagrees_with_the_flip_fails_closed",
+    ),
 )
 
 
@@ -507,8 +520,9 @@ def _repo_frame(frames: list[str]) -> str | None:
     Frames inside the virtualenv are excluded, and that exclusion is the whole
     design: ``pytest.fail`` and an unfulfilled ``pytest.raises`` both leave
     ``_pytest/outcomes.py`` / ``_pytest/raises.py`` as the deepest frame -- 9 of
-    the 18 registered cases end there, all of them in-memory ones (measured
-    2026-09-09, not cited). A naive "the last frame must be the test module"
+    the 18 cases registered when this rule was added end there, all of them
+    in-memory ones (measured 2026-09-09, not cited; later cases add to the roster
+    without re-measuring it). A naive "the last frame must be the test module"
     rule would therefore break those 9 while proving nothing. What identifies
     the assertion's owner is the last frame the REPOSITORY owns: the test module
     for the test's own assertion, the production module for a bare ``assert``
