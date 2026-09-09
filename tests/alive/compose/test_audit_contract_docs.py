@@ -107,6 +107,35 @@ def _partition_historical(current: str) -> tuple[list[str], str]:
         cursor = end
 
 
+_DOC_RULES = Path(".claude/rules/documentation.md")
+
+
+def _missing_historical_sentinel_tokens(rule_text: str) -> list[str]:
+    """Return the tokens a written documentation rule must carry, in order.
+
+    Pure predicate: the assertion stays in the named test's own frame so a kill is
+    attested there (변이 규칙 6). The two markers are the very constants
+    ``_partition_historical`` computes the block extent with, so the written rule
+    cannot drift away from the enforced contract.
+    """
+    required = (_HISTORICAL_START, _HISTORICAL_END, "never sentence heuristics")
+    return [token for token in required if token not in rule_text]
+
+
+def test_documentation_rule_requires_the_explicit_historical_closing_sentinel():
+    """작성 규칙이 HISTORICAL 블록의 **종료 sentinel** 을 명시적으로 요구한다.
+
+    이 계약은 ``_partition_historical`` 의 범위 계산에만 살아 있었고 작성 규칙에는
+    없었다. sentinel 을 요구하지 않으면 배너만 단 문서가 규칙을 통과하고 격리 범위가
+    문장 추정(sentence heuristics)으로 넓어진다.
+    ``tests/test_claude_md_anchors.py`` 는 이 규칙 파일의 **존재**만 확인한다.
+    """
+    missing = _missing_historical_sentinel_tokens(_DOC_RULES.read_text(encoding="utf-8"))
+    assert not missing, (
+        f"{_DOC_RULES} 가 HISTORICAL 종료 sentinel 규칙의 토큰을 담지 않는다: {missing}"
+    )
+
+
 def test_the_current_normalization_contract_is_separate_from_its_history():
     text = _MAIN_SPEC.read_text(encoding="utf-8")
     current, history = text.split("## 부록 H — historical 문단 색인", 1)
