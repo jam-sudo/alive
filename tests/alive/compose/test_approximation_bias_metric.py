@@ -1164,6 +1164,62 @@ def test_a_log_normalized_probe_a_pass_does_not_admit_a_raw_count_report(tmp_pat
     assert report["provenance"]["probe_a_output_representation"] == "log_normalized_pseudobulk"
 
 
+def test_require_admitted_makes_a_not_admissible_report_a_nonzero_exit(tmp_path, capsys):
+    """``--require-admitted`` gives a strict caller the failure signal the exit code owes it.
+
+    Exit 0 on a ``NOT_ADMISSIBLE`` report is honest about the MEASUREMENT -- it ran, and the
+    refusal reason is on disk -- but a plain shell pipeline reads that 0 as "admissible".
+    The opt-in flag separates the two facts. Anti-tautology: the report must STILL be
+    written, and written byte-identically, because a flag that signalled refusal by
+    suppressing the record would destroy the very evidence that says why it refused.
+    """
+    module = _load_metric_module()
+    fixture = _write_main_cli_fixture(tmp_path)
+    probe_a_evidence_path = _write_probe_a_evidence(
+        tmp_path, "pass", git_commit=fixture["git_commit"]
+    )
+    default_out = tmp_path / "report_default.json"
+    strict_out = tmp_path / "report_strict.json"
+
+    assert module.main(_main_cli_argv(fixture, probe_a_evidence_path, default_out)) == 0
+    exit_code = module.main(
+        [*_main_cli_argv(fixture, probe_a_evidence_path, strict_out), "--require-admitted"]
+    )
+
+    assert exit_code == 4
+    assert strict_out.exists()
+    report = json.loads(strict_out.read_text(encoding="utf-8"))
+    assert report["admission_status"] == NOT_ADMISSIBLE
+    # The flag changes the exit code and NOTHING else about the artifact.
+    assert strict_out.read_bytes() == default_out.read_bytes()
+    stderr = capsys.readouterr().err
+    assert "--require-admitted" in stderr
+    assert NOT_ADMISSIBLE in stderr
+
+
+def test_without_the_flag_a_not_admissible_report_still_exits_zero(tmp_path, capsys):
+    """Control: without the flag the committed default is untouched -- exit 0, no refusal line.
+
+    Two committed tests pin "the measurement succeeded and the refusal reason is on disk"
+    as an exit-0 outcome, so the new signal has to be opt-in: the same argv minus the flag
+    must still return 0 and must not print the refusal.
+    """
+    module = _load_metric_module()
+    fixture = _write_main_cli_fixture(tmp_path)
+    probe_a_evidence_path = _write_probe_a_evidence(
+        tmp_path, "pass", git_commit=fixture["git_commit"]
+    )
+    out_path = tmp_path / "report.json"
+
+    exit_code = module.main(_main_cli_argv(fixture, probe_a_evidence_path, out_path))
+
+    assert exit_code == 0
+    assert out_path.exists()
+    report = json.loads(out_path.read_text(encoding="utf-8"))
+    assert report["admission_status"] == NOT_ADMISSIBLE
+    assert "--require-admitted" not in capsys.readouterr().err
+
+
 def test_probe_a_bare_pass_is_not_admission_grade(tmp_path):
     module = _load_metric_module()
     fixture = _write_main_cli_fixture(tmp_path)

@@ -995,6 +995,16 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--pod-instance", required=True)
     ap.add_argument("--bootstrap-replicates", type=int, default=2000)
     ap.add_argument("--out", required=True, type=Path)
+    ap.add_argument(
+        "--require-admitted",
+        action="store_true",
+        help=(
+            "exit non-zero when the report is NOT_ADMISSIBLE. The report is STILL "
+            "written -- the refusal reason belongs on disk. Default off, because the "
+            "measurement succeeding and the report being admissible are two different "
+            "facts, and two committed tests pin the default."
+        ),
+    )
     args = ap.parse_args(argv)
 
     probe_a_evidence = load_probe_a_evidence(
@@ -1035,6 +1045,12 @@ def main(argv: list[str] | None = None) -> int:
         f"fairness_flag={gi['fairness_flag']} "
         f"bias_to_signal_ratio_R={gi['bias_to_signal_ratio_R']}"
     )
+    if args.require_admitted and report["admission_status"] != ADMITTED:
+        print(
+            f"refusing: admission_status={report['admission_status']} (--require-admitted)",
+            file=sys.stderr,
+        )
+        return 4
     return 0
 
 
