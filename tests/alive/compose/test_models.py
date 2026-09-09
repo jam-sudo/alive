@@ -430,16 +430,23 @@ def _run_optimized_probe(which: str) -> tuple[str, str]:
 
 
 def test_the_l3_forward_refuses_an_uninitialised_weight_bank():
-    """models.py:360 — reached by calling `_forward_batch` directly on an unfitted model."""
-    with pytest.raises(RuntimeError, match="L3Model._forward_batch called before fit"):
+    """`L3Model._forward_batch` guard: reached by a direct call on an unfitted instance.
+
+    The message is compared HERE, by this module's own `assert`, rather than by
+    `pytest.raises(match=...)`: a wrong message must fail in the test's own frame, and the
+    comparison must be exact so a message that merely CONTAINS the expected text is caught.
+    """
+    with pytest.raises(RuntimeError) as raised:
         L3Model()._forward_batch(np.zeros((1, 6)))
+    assert str(raised.value) == "L3Model._forward_batch called before fit"
 
 
 def test_the_l3_fit_refuses_when_lazy_init_left_the_bank_unset(monkeypatch):
-    """models.py:397 — the line right after `_lazy_init`: only a no-op `_lazy_init` reaches it."""
+    """`L3Model.fit` guard on the line after `_lazy_init`: only a no-op `_lazy_init` reaches it."""
     monkeypatch.setattr(L3Model, "_lazy_init", lambda self, Z, pairs, eps_obs: None)
-    with pytest.raises(RuntimeError, match="L3Model.fit: _lazy_init left weights_ unset"):
+    with pytest.raises(RuntimeError) as raised:
         L3Model().fit(np.zeros((4, 3)), [(0, 1), (2, 3)], np.zeros((2, 2)), lam=0.0)
+    assert str(raised.value) == "L3Model.fit: _lazy_init left weights_ unset"
 
 
 def test_both_invariants_still_raise_under_optimized_python():
