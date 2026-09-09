@@ -62,6 +62,10 @@ _SPEC_PATH = (
 )
 _SENTINEL = "NON_FINITE"
 
+# The report schema this surface emits; the producer symbol must carry the
+# same version (see ``test_current_producer_symbol_is_v4_only``).
+_CURRENT_PRODUCER_VERSION = 4
+
 
 def _load_metric_module():
     """Import the metric script by path (mirrors the legacy metric test)."""
@@ -184,6 +188,34 @@ def _z_by_hand(row: np.ndarray, median_library: float) -> np.ndarray:
     lib = row.sum(axis=-1, keepdims=True)
     safe = np.where(lib > 0, lib, 1.0)
     return np.log1p(row * (median_library / safe))
+
+
+# ---------------------------------------------------------------------------
+# Naming contract: the current producer surface is v4, matching the schema.
+# ---------------------------------------------------------------------------
+
+
+def test_current_producer_symbol_is_v4_only():
+    """The live producer is ``measure_approximation_bias_v4`` and nothing else.
+
+    The emitted report schema has been ``compose_approximation_bias_report_v4``
+    since PR #15, so any other ``measure_approximation_bias_v*`` symbol would
+    name a version the current surface no longer emits. Superseded names must
+    be GONE, not merely aliased, so no caller can keep a stale version in its
+    vocabulary. Asserted over the module's whole namespace rather than against
+    one hard-coded predecessor, so a future ``_v5`` rename that forgets to
+    retire ``_v4`` fails here too.
+    """
+    module = _load_metric_module()
+    current = f"measure_approximation_bias_v{_CURRENT_PRODUCER_VERSION}"
+
+    assert hasattr(module, current), f"current producer symbol {current} is missing"
+    stale = sorted(
+        name
+        for name in dir(module)
+        if name.startswith("measure_approximation_bias_v") and name != current
+    )
+    assert not stale, f"superseded producer symbols still exposed: {stale}"
 
 
 # ---------------------------------------------------------------------------
@@ -608,7 +640,7 @@ def test_point_estimate_is_rng_free():
 # ALREADY excludes sealed rows and raises ``FitRoleArtifactError`` for a
 # ``control``-role or sealed-pair member. A negative test that builds its
 # input THROUGH that builder would credit the BUILDER, not the metric's own
-# guard -- it would pass even if ``measure_approximation_bias_v3``'s guards
+# guard -- it would pass even if ``measure_approximation_bias_v4``'s guards
 # did nothing. Every fixture below therefore writes a fit-role-shaped
 # ``.h5ad`` DIRECTLY via ``anndata.AnnData`` (bypassing
 # ``ComposeFitRoleExtractor``/``extract_fit_roles`` entirely), so the
@@ -659,7 +691,7 @@ def test_control_reference_rows_are_accepted_but_not_measured(tmp_path):
 
     artifact = _write_hand_built_artifact(tmp_path, genes, roles, perturbations, rows)
 
-    report = module.measure_approximation_bias_v3(
+    report = module.measure_approximation_bias_v4(
         fit_role_artifact=artifact,
         response_projection=block,
         sealed_pair_ids=[],
@@ -698,7 +730,7 @@ def test_sealed_pair_member_aborts(tmp_path):
     artifact = _write_hand_built_artifact(tmp_path, genes, roles, perturbations, rows)
 
     with pytest.raises(ValueError, match="overlaps sealed_pair_ids") as exc_info:
-        module.measure_approximation_bias_v3(
+        module.measure_approximation_bias_v4(
             fit_role_artifact=artifact,
             response_projection=block,
             sealed_pair_ids=sealed_pair_ids,
@@ -730,7 +762,7 @@ def test_gene_order_mismatch_aborts(tmp_path):
     artifact = _write_hand_built_artifact(tmp_path, genes, roles, perturbations, rows)
 
     with pytest.raises(ValueError, match="gene_order digest mismatch"):
-        module.measure_approximation_bias_v3(
+        module.measure_approximation_bias_v4(
             fit_role_artifact=artifact,
             response_projection=block,
             sealed_pair_ids=[],
@@ -753,7 +785,7 @@ def test_zero_overlap_recorded(tmp_path):
     rows = [[3.0, 7.0], [4.0, 6.0], [5.0, 5.0]]
     artifact = _write_hand_built_artifact(tmp_path, genes, roles, perturbations, rows)
 
-    result = module.measure_approximation_bias_v3(
+    result = module.measure_approximation_bias_v4(
         fit_role_artifact=artifact,
         response_projection=block,
         sealed_pair_ids=["ZZZ_YYY"],  # disjoint from the measured roster
@@ -853,7 +885,7 @@ def test_report_has_v2_schema_and_strata(tmp_path):
     module = _load_metric_module()
     kwargs = _full_report_fixture(tmp_path)
 
-    report = module.measure_approximation_bias_v3(**kwargs)
+    report = module.measure_approximation_bias_v4(**kwargs)
 
     assert report["schema"] == "compose_approximation_bias_report_v4"
     assert set(report["strata"]) == {"combo_calibration", "singles"}
@@ -924,7 +956,7 @@ def test_direct_producer_requires_probe_a_evidence(tmp_path):
     kwargs["probe_a_evidence"] = None
 
     with pytest.raises(ValueError, match="Probe-A evidence is required.*NOT_ADMISSIBLE"):
-        module.measure_approximation_bias_v3(**kwargs)
+        module.measure_approximation_bias_v4(**kwargs)
 
 
 def test_direct_producer_requires_matching_external_registration_pin(tmp_path):
@@ -933,13 +965,13 @@ def test_direct_producer_requires_matching_external_registration_pin(tmp_path):
     kwargs = _full_report_fixture(tmp_path)
     kwargs["probe_a_registration_sha256"] = None
     with pytest.raises(ValueError, match="registration SHA-256 is required.*NOT_ADMISSIBLE"):
-        module.measure_approximation_bias_v3(**kwargs)
+        module.measure_approximation_bias_v4(**kwargs)
 
     kwargs["probe_a_registration_sha256"] = "d" * 64
     with pytest.raises(
         ValueError, match="registration bytes do not match the externally frozen pin"
     ):
-        module.measure_approximation_bias_v3(**kwargs)
+        module.measure_approximation_bias_v4(**kwargs)
 
 
 def test_direct_producer_requires_matching_external_verification_pin(tmp_path):
@@ -947,13 +979,13 @@ def test_direct_producer_requires_matching_external_verification_pin(tmp_path):
     kwargs = _full_report_fixture(tmp_path)
     kwargs["probe_a_verification_sha256"] = None
     with pytest.raises(ValueError, match="verification SHA-256 is required.*NOT_ADMISSIBLE"):
-        module.measure_approximation_bias_v3(**kwargs)
+        module.measure_approximation_bias_v4(**kwargs)
 
     kwargs["probe_a_verification_sha256"] = "f" * 64
     with pytest.raises(
         ValueError, match="verification bytes do not match the externally frozen pin"
     ):
-        module.measure_approximation_bias_v3(**kwargs)
+        module.measure_approximation_bias_v4(**kwargs)
 
 
 def test_forged_admission_cannot_widen_registered_tolerance(tmp_path):
@@ -975,7 +1007,7 @@ def test_forged_admission_cannot_widen_registered_tolerance(tmp_path):
         verification_bytes=original.verification_bytes,
     )
     with pytest.raises(ValueError, match="differs from the pinned verification receipt"):
-        module.measure_approximation_bias_v3(**kwargs)
+        module.measure_approximation_bias_v4(**kwargs)
 
 
 @pytest.mark.parametrize(
@@ -1012,7 +1044,7 @@ def test_report_validator_recomputes_derived_aggregates(tmp_path, mutate, field)
 def test_self_checksum_detects_tampering(tmp_path):
     module = _load_metric_module()
     kwargs = _full_report_fixture(tmp_path)
-    report = module.measure_approximation_bias_v3(**kwargs)
+    report = module.measure_approximation_bias_v4(**kwargs)
 
     # Anti-tautology: recompute over the MUTATED object (a field the checksum
     # actually covers), not the original -- a test that merely re-hashed the
@@ -1029,7 +1061,7 @@ def test_self_checksum_detects_tampering(tmp_path):
 def test_final_config_sha_absent_from_report(tmp_path):
     module = _load_metric_module()
     kwargs = _full_report_fixture(tmp_path)
-    report = module.measure_approximation_bias_v3(**kwargs)
+    report = module.measure_approximation_bias_v4(**kwargs)
 
     final_sha = "f" * 64  # a distinct, fabricated "final config" SHA
     assert final_sha != kwargs["basis_config_sha256"]
@@ -1040,8 +1072,8 @@ def test_canonical_json_byte_reproducible(tmp_path):
     module = _load_metric_module()
     kwargs = _full_report_fixture(tmp_path)
 
-    report_1 = module.measure_approximation_bias_v3(**kwargs)
-    report_2 = module.measure_approximation_bias_v3(**kwargs)
+    report_1 = module.measure_approximation_bias_v4(**kwargs)
+    report_2 = module.measure_approximation_bias_v4(**kwargs)
 
     json_1 = json.dumps(report_1, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     json_2 = json.dumps(report_2, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
@@ -1063,7 +1095,7 @@ def _write_main_cli_fixture(tmp_path: Path) -> dict:
 
     Reuses the exact numeric roster of `_full_report_fixture` (already known
     to assemble a real, finite, non-degenerate report via direct calls to
-    `measure_approximation_bias_v3`) but serializes `response_projection` /
+    `measure_approximation_bias_v4`) but serializes `response_projection` /
     `sealed_pair_ids` / `basis_config` to actual files, since `main()` reads
     these from `--*` CLI paths rather than accepting in-memory objects.
     """
@@ -1299,7 +1331,7 @@ def _admitted_report_fixture(tmp_path: Path, kwargs: dict | None = None) -> dict
     amendment (Task 2 amendment D) would produce.
     """
     module = _load_metric_module()
-    report = module.measure_approximation_bias_v3(**(kwargs or _full_report_fixture(tmp_path)))
+    report = module.measure_approximation_bias_v4(**(kwargs or _full_report_fixture(tmp_path)))
     assert report["admission_status"] == NOT_ADMISSIBLE  # what the producer really emits today
     report["admission_status"] = ADMITTED
     report["provenance"]["probe_a_output_representation"] = REPRESENTATION
@@ -1337,7 +1369,7 @@ def test_a_mismatched_bridge_is_legal_while_the_report_is_not_admitted(tmp_path)
     writes today. Only ``admitted`` + mismatch is forbidden.
     """
     module = _load_metric_module()
-    report = module.measure_approximation_bias_v3(**_full_report_fixture(tmp_path))
+    report = module.measure_approximation_bias_v4(**_full_report_fixture(tmp_path))
 
     assert report["admission_status"] == NOT_ADMISSIBLE
     assert report["provenance"]["probe_a_output_representation"] == PROBE_A_REPRESENTATION

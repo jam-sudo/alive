@@ -2105,7 +2105,7 @@ def _write_bias_report(
     """Write a REAL-shaped ``compose_approximation_bias_report_v4`` report and return
     its ``sha256_file`` content SHA.
 
-    Faithful to the true on-disk contract that ``measure_approximation_bias_v3`` /
+    Faithful to the true on-disk contract that ``measure_approximation_bias_v4`` /
     ``measure_pseudobulk_approximation_bias.py::main`` produce — NOT a flat,
     newline-free stub: the fairness fields are NESTED under ``gi_and_fairness``, the
     ``bootstrap_95_interval`` is a DICT of three sub-intervals (the loader carries only
@@ -2382,7 +2382,7 @@ def _probe_a_evidence_snapshot() -> ProbeAEvidence:
 
 
 def _build_real_bias_report(tmp_path, *, admitted: bool = True):
-    """Build a REAL v4 report via ``measure_approximation_bias_v3`` on a small
+    """Build a REAL v4 report via ``measure_approximation_bias_v4`` on a small
     synthetic control-free fit-role artifact + identity projection block, bound to a
     bias-NULL basis config. Writes the report EXACTLY as the metric CLI does
     (canonical JSON + trailing newline). Also writes the three Probe-A byte
@@ -2469,7 +2469,7 @@ def _build_real_bias_report(tmp_path, *, admitted: bool = True):
     probe["probe_a_evidence_path"].write_bytes(probe_a_evidence.evidence_bytes)
     probe["probe_a_registration_path"].write_bytes(probe_a_evidence.registration_bytes)
     probe["probe_a_verification_path"].write_bytes(probe_a_evidence.verification_bytes)
-    report = metric.measure_approximation_bias_v3(
+    report = metric.measure_approximation_bias_v4(
         fit_role_artifact=str(artifact),
         response_projection=block,
         sealed_pair_ids=["ZZZ_YYY"],
