@@ -19,6 +19,16 @@ from pathlib import Path
 import pytest
 
 from alive.compose.config2 import load_compose_phase2_config
+from alive.compose.headline import (
+    NO_HEADLINE_AXES,
+    REGISTERED_HEADLINE_SENTENCES,
+    render_preregistered_headline,
+)
+
+# Imported through `phase2b` ON PURPOSE: §8 cites the dotted path
+# `alive.compose.phase2b.preregistered_headline_branch`, and the branch now lives in
+# `alive.compose.headline`. This import is what keeps that citation from going stale silently --
+# if the re-export is dropped, this module fails to import at all.
 from alive.compose.phase2b import (
     _FLIP_ALREADY_FAILED,
     _FLIP_NEVER,
@@ -391,6 +401,9 @@ def test_the_three_consumption_failure_enforcement_roles_are_documented():
 
 _PAIR_DEPENDENCE = Path("docs/superpowers/2026-08-29-compose-pair-dependence-decision.md")
 _PHASE2B_SOURCE = Path("src/alive/compose/phase2b.py")
+#: Where the branch and the four sentences live since 2026-09-09 (leaf module: `durable`
+#: has to import them, and `phase2b` already imports `durable`).
+_HEADLINE_SOURCE = Path("src/alive/compose/headline.py")
 _HEADLINE_SECTION = "8. seal 전에 확정된 headline 문장"
 
 #: §8 이 claim 으로 써서는 안 되는 네 토큰. 결정문 §8 의 금지 문장이 이들을 이름으로 부르므로
@@ -450,19 +463,32 @@ def test_the_preregistered_headline_uses_the_codes_own_flip_vocabulary():
     유한 2.5(사다리 밖)·0.5(밴드 미통과)는 §8 의 어느 조건에도 배정되지 않았다(**1 passed** 였다).
     그래서 이제 §8 이 **분기 함수 이름과 세 경계**를 부르고, 그 함수가 소스에 실재할 것을 요구한다 —
     분기를 문서가 아니라 코드가 소유한다는 것이 정정의 내용이기 때문이다.
+
+    2026-09-09 부터 그 소스는 leaf 모듈 `headline.py` 다(`durable` 이 문장을 재도출해야 하는데
+    `phase2b` 가 이미 `durable` 을 import 하므로 순환이다 — 실측). §8 이 인용하는 dotted path 는
+    여전히 `alive.compose.phase2b.…` 이므로, **정의는 leaf 에**·**re-export 는 phase2b 에** 있을
+    것을 둘 다 요구한다: 한쪽만 만족시키면 문서의 인용이나 durable 의 import 중 하나가 죽는다.
     """
     section = _headline_section()
-    source = _PHASE2B_SOURCE.read_text(encoding="utf-8")
+    source = _HEADLINE_SOURCE.read_text(encoding="utf-8")
     for token in ("NEVER_FLIPS", "FAILS_AT_REGISTERED_BAND", "sensitivity_band_inflation"):
         assert token in section, f"§8 이 `{token}` 를 부르지 않는다"
-        assert token in source, f"`{token}` 가 {_PHASE2B_SOURCE} 에 없다 — 문장이 코드와 어긋난다"
+        assert token in source, f"`{token}` 가 {_HEADLINE_SOURCE} 에 없다 — 문장이 코드와 어긋난다"
 
     # 분기를 소유하는 함수: §8 이 이름으로 부르고, 그 이름이 소스에 정의되어 있어야 한다.
     assert "preregistered_headline_branch" in section, (
         "§8 이 결과군 분기를 소유하는 함수를 이름으로 부르지 않는다"
     )
     assert "def preregistered_headline_branch(" in source, (
-        f"`preregistered_headline_branch` 가 {_PHASE2B_SOURCE} 에 정의돼 있지 않다"
+        f"`preregistered_headline_branch` 가 {_HEADLINE_SOURCE} 에 정의돼 있지 않다"
+    )
+    # §8 이 적는 dotted path 는 `phase2b` 다 — re-export 가 사라지면 그 인용이 거짓이 된다.
+    assert "alive.compose.phase2b.preregistered_headline_branch" in " ".join(section.split()), (
+        "§8 이 분기 함수의 dotted path 를 적지 않는다"
+    )
+    assert "preregistered_headline_branch" in _PHASE2B_SOURCE.read_text(encoding="utf-8"), (
+        f"`preregistered_headline_branch` 가 {_PHASE2B_SOURCE} 에서 re-export 되지 않는다 — "
+        "§8 이 인용하는 경로가 죽는다"
     )
     # 세 경계 — 이것들이 없으면 (i)/(ii)/(iii) 의 적용 구간이 다시 미정이 된다.
     flat_section = " ".join(section.split())
@@ -535,6 +561,82 @@ def test_the_headline_correction_states_the_same_partition_the_code_implements()
             preregistered_headline_branch(band_passes=True, flip=flip, ladder_max=ladder_max)
             == "ii"
         ), f"등록 사다리 안에서 뒤집히는데 flip={flip!r} 가 (ii) 가 아니다"
+
+
+def _registered_headline_sentences() -> dict[str, str]:
+    """§8 의 네 논리 문장을 Markdown prefix 없이, 줄바꿈을 공백 하나로 정규화해 뽑는다.
+
+    (i)~(iii) 은 각 문단의 **따옴표 안**이 논리 문장이고 (iv) 는 blockquote 다. 인용부호 밖의
+    라벨(``**(ii) 등록 밴드에서는 승리, 상위 λ 에서 뒤집힘.**``)은 문장이 아니라 색인이므로 뺀다 —
+    코드 상수는 문장만 담는다. 문단 수를 함께 고정하므로 문장이 삭제되거나 복제되면 여기서 먼저
+    걸린다.
+    """
+    paragraphs = _headline_section().split("\n\n")
+    sentences: dict[str, str] = {}
+    for key in ("i", "ii", "iii"):
+        prefix = f"**({key}) "
+        matches = [p for p in paragraphs if p.startswith(prefix)]
+        assert len(matches) == 1, f"§8 에 `{prefix}` 로 시작하는 문단이 정확히 하나여야 한다"
+        body = matches[0]
+        sentences[key] = " ".join(body[body.index('"') + 1 : body.rindex('"')].split())
+    quotes = [p for p in paragraphs if p.startswith("> ")]
+    assert len(quotes) == 1, "§8 의 (iv) blockquote 가 정확히 하나여야 한다"
+    body = "\n".join(line.removeprefix("> ") for line in quotes[0].splitlines())
+    sentences["iv"] = " ".join(body[body.index('"') + 1 : body.rindex('"')].split())
+    return sentences
+
+
+def test_the_registered_headline_sentences_match_the_code_constants():
+    """문서가 정본, `headline.py` 상수는 그 복사본 — 같은 정규화 뒤 **완전 일치**여야 한다.
+
+    2026-09-09 이전에는 문장을 내보내는 코드가 아예 없었으므로 drift 가 불가능했다. 이제
+    renderer 가 문장을 terminal 로 내보내므로 사본이 생겼고, 사본은 조용히 떠내려간다: 서명된
+    문장의 한 글자가 코드에서 바뀌어도 문서 검사는 전부 통과한다(문서를 안 보므로). 그래서
+    equality 를 여기 둔다 — 어느 쪽이 바뀌든 이 하나가 실패한다.
+    """
+    assert _registered_headline_sentences() == REGISTERED_HEADLINE_SENTENCES, (
+        "§8 의 서명된 문장과 `headline.py` 상수가 다르다 — 사본이 정본에서 떠내려갔다"
+    )
+    # placeholder 는 (ii) 에만 있다. (i) 의 유한 flip 병기는 별도 note 이고 문장이 아니다.
+    assert "<flip>" in REGISTERED_HEADLINE_SENTENCES["ii"]
+    for key in ("i", "iii", "iv"):
+        assert "<flip>" not in REGISTERED_HEADLINE_SENTENCES[key], (
+            f"({key}) 에 치환 placeholder 가 있다 — 사전등록 문장에 없던 자유가 생긴다"
+        )
+
+
+#: §8 의 2026-09-09 정정 문단: 유효한 verdict 가 없는 terminal 에는 사전등록 문장을 싣지 않는다.
+_NO_VERDICT_CORRECTION_MARK = "**[2026-09-09 정정 — 유효한 verdict 가 없는 terminal]**"
+
+
+def test_the_two_no_verdict_axes_carry_no_sentence_in_the_document_and_in_the_code():
+    """문서가 두 axis 를 예외로 적고, renderer 가 실제로 문장을 만들지 않아야 한다.
+
+    D4 는 이 규정을 적지 않았다 — `INVALID` 는 `COMPLETE` 와 **같은 terminal body** 를 쓰고
+    swap 시 clause 가 원값 그대로 실리므로, 그대로 두면 "신뢰할 수 없음" 으로 선언된 run 에
+    headline claim 이 붙는다. 오너 승인(2026-09-09) 아래 날짜 붙은 정정 문단으로 닫았고, 서명된
+    네 문장은 한 글자도 바뀌지 않았다. 문서만 고치면 코드가 여전히 문장을 싣고, 코드만 고치면
+    사전등록 밖의 규정이 되므로 **둘 다** 요구한다.
+    """
+    section = _headline_section()
+    assert _NO_VERDICT_CORRECTION_MARK in section, (
+        f"§8 에 유효한 verdict 없는 terminal 의 정정 문단({_NO_VERDICT_CORRECTION_MARK})이 없다"
+    )
+    correction = " ".join(section.split(_NO_VERDICT_CORRECTION_MARK, 1)[1].split())
+    for axis in ("INVALID", "FUTILITY_STOPPED"):
+        assert f"`{axis}`" in correction, f"§8 정정이 `{axis}` 를 이름으로 적지 않는다"
+        assert axis in NO_HEADLINE_AXES, f"코드가 `{axis}` 를 예외 axis 로 등록하지 않았다"
+        marker = render_preregistered_headline(
+            band_passes=True, flip=_FLIP_NEVER, ladder_max=1.25, sealed_axis=axis
+        )
+        assert marker == {"applicable": False, "reason": axis}
+        for key, sentence in REGISTERED_HEADLINE_SENTENCES.items():
+            assert sentence not in repr(marker), f"{axis} terminal 에 문장 ({key}) 이 실렸다"
+    # 비-예외 axis 는 여전히 문장을 받는다 — 규정이 전부를 삼키지 않았음을 실측으로 고정한다.
+    kept = render_preregistered_headline(
+        band_passes=True, flip=_FLIP_NEVER, ladder_max=1.25, sealed_axis="PARTIAL"
+    )
+    assert kept["band_sentence"] == REGISTERED_HEADLINE_SENTENCES["i"]
 
 
 def test_the_preregistered_headline_never_asserts_a_prohibited_claim():

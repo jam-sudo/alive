@@ -186,5 +186,16 @@ sensitivity 사다리의 다른 λ 를 verdict gate 로 승격하지 않는다."
 
 네 문장의 본문과 (iv) 는 그대로다. 이 정정은 어느 문장이 언제 적용되는지만 완전하게 만든다.
 
+**[2026-09-09 정정 — 유효한 verdict 가 없는 terminal]** 위 네 문장은 verdict 가 실제로 내려진
+결과군에만 적용된다. `sealed_axis` 가 `INVALID` 또는 `FUTILITY_STOPPED` 인 terminal 에는 사전등록
+문장을 **싣지 않는다**: `INVALID` 는 무결성 precondition 실패로 신뢰할 수 없다고 선언된 run 이고
+(COMPLETE 와 같은 terminal body 를 쓰므로 그대로 두면 그 run 에 headline 이 붙는다), futility 로
+멈춘 run 은 negative verdict 가 아니다(`CLAUDE.md#seal`). 두 경우에 남는 것은 문장이 아니라 적용
+불가 marker 뿐이다. 분기 함수와 네 문장은 leaf 모듈 `alive.compose.headline` 로 옮겼고
+`alive.compose.phase2b` 가 그대로 re-export 하므로 위에서 인용한 경로는 유효하다 — `durable` 이
+문장을 재도출해야 하는데 `phase2b` 가 이미 `durable` 을 import 하므로 순환이기 때문이다(실측).
+이 정정은 네 문장의 본문도 (i)~(iii) 의 분기 조건도 바꾸지 않고, 문장이 **적용되지 않는** 두 axis
+를 명시할 뿐이다. (오너 승인 2026-09-09.)
+
 네 문장 어디에도 "mechanistic" · "causal" · "context transfer" · "unconditional 95%" 를 **긍정 claim 으로** 쓰지 않는다(명시적 비주장 절에서만 등장한다).
 calibration in-sample ICC 의 double-unseen 이식과 λ=1.15 를 새 nominal gate 로 쓰는 것은 금지(결정문 §2, 불변식 7).
