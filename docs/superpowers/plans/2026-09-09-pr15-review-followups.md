@@ -389,6 +389,14 @@ Produces: exit `0`(기본, 불변) / exit `4`(플래그 + 비-admitted). **보�
 
 ## Task 4 — finalizer 를 Probe-A evidence bytes 에 결속한다 (item 2) · T1 이후
 
+> **[2026-09-09 as-run 정정 — 이 task 의 아래 step 들 중 다음은 실행 중 판정으로 대체되었다. 원문은 역사로 보존한다.]**
+> 1. **성공 경로 부재.** 실측: 오늘 존재할 수 있는 Probe-A evidence 는 전부 `log_normalized_pseudobulk` bridge 이고, validator 가 수용하는 report 는 전부 `raw` 를 선언하며, `bridge_admits(raw, log)` 는 False 다. 따라서 finalizer 는 현 owner policy 아래 성공 경로가 없다(R1 representation 결정, readiness `:118` 뒤에만 열린다). 기존 성공 테스트 셋(`test_finalization_changes_only_the_one_leaf`·`test_final_sha_absent_from_report`·`test_main_cli_writes_finalized_config`)과 `test_metric_finalize_phase2b_roundtrip` 은 finalizer 가 report 의 자기 선언을 신뢰했기 때문에만 green 이었다 → 앞 셋은 representation 불일치 **거부** 테스트로 재작성, `test_the_finalizer_cannot_succeed_under_the_current_owner_policy` 추가, round-trip 은 guard 없는 `_write_single_leaf` helper 로 `sha256_file` 레시피만 증명한다.
+> 2. **guard 순서 (e) → (d).** step 4 의 순서((d) representation 비교 → (e) `bridge_admits`)에서는 (e) 가 어떤 입력에서도 도달 불가다. 구현은 (e) 를 먼저, (d) 를 뒤에 둔다. (d) 는 (e) 통과 시 구성상 도달 불가한 **중복 방어**(`bridge_admits` 는 `bridged == REPRESENTATION` 등가, validator 는 `report_leaf == REPRESENTATION` 을 핀)이며, 저장소의 중복 강제 규칙에 따라 유지한다.
+> 3. **guard mock 금지.** step 1 의 (e) "monkeypatch arm" 과 (d) 도달을 위한 permissive patch 는 **쓰지 않는다**. representation 비교는 순수 helper `_require_representation_matches(report_leaf, bridged)` 로 추출해 finalizer 가 같은 지점에서 호출하고, (d) 의 negative 는 그 helper 를 직접 호출하며, 호출 배선은 `co_names` 검사로 고정한다.
+> 4. **M19 = helper 의 비교 제거 → (d) negative 의 nodeid**(step 6 의 "(b)" 는 오기). 실행 결과 20/20(T7b 의 M20 포함).
+> 근거 커밋: `978a3d4`(구현) · `9e32646`(fix round 1). 판정 기록: SDD 원장(저장소 밖) 및 PR #16 본문.
+
+
 **Files**
 - Modify: `scripts/compose/finalize_approximation_bias_config.py` — imports(`:60-65`),
   module Usage(`:40-45`), `finalize_bias_config`(`:172-288`), argparse(`:307-311`), `main`(`:290-`)
@@ -718,6 +726,9 @@ Produces: 작성 규칙 한 줄과 그 문구를 고정하는 contract test. 기
 ---
 
 ## Task 7b — terminal 중첩 + durable 의미 재검증 + schema v2 (item 7, 후반) · T7a·T4 이후
+
+> **[2026-09-09 as-run 정정.]** step 5 의 첫 문단이 요구하는 "INVALID·FUTILITY_STOPPED terminal 에는 사전등록 문장을 싣지 않는다" 는 **T7a 가 이미** 날짜 붙은 문단으로 §8 에 넣었다(`4690855`). T7b 의 `[2026-09-09 정정 — 문장 emission 과 적용 범위]` 문단은 그 규정을 **중복하지 않고** emission 위치(`band_sensitivity.headline`)·schema v2·canonical float(`repr(float(flip))`)·`FINITE_FLIP_NOTE` 의 정본 문안 등록만 더한다(`3841ed4`). renderer 호출 시 `sealed_axis` 는 enum 이 아니라 `.value` 문자열로 넘긴다.
+
 
 **Files**
 - Modify: `src/alive/compose/phase2b.py:753`(`BAND_SENSITIVITY_SCHEMA` v1→v2), `:847-874`(`_band_sensitivity_block`),
