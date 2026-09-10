@@ -16,6 +16,7 @@ import json
 import shutil
 from pathlib import Path
 
+import anndata as ad
 import pytest
 
 from alive.compose import smoke_evidence
@@ -45,7 +46,7 @@ from alive.compose.smoke_evidence import (
     reclaim_unbound_sidecars,
 )
 from alive.compose.split import build_split_manifest
-from alive.provenance import sha256_json
+from alive.provenance import sha256_file, sha256_json
 from tests.alive.compose.smoke_evidence_support import (
     TINY_CALIBRATION_FRACTION,
     TINY_ELIGIBLE_PAIRS,
@@ -874,15 +875,93 @@ def test_promotion_refuses_backends_not_bound_to_one_pair_manifest(tmp_path, mut
     it: both backends must carry it and both must carry the SAME one. COMPOSE-K562-v1
     has one pair universe, and a lock whose two smokes were cut against different
     split manifests would certify two different seals as one run.
+
+    Capture-and-assert rather than `pytest.raises`: the claim is about WHICH check
+    refused and with what message, so the outcome is captured and every verdict is
+    an `AssertionError` raised here, never a production error reaching the frame.
     """
     staged = _staged_evidence(tmp_path)
     backends = _backends_for(tmp_path)
     mutate(backends["cpa"]["record"])
 
-    with pytest.raises(ValueError) as refusal:
-        _promote(staged, tmp_path, backends)
+    refusal = None
+    promotion = None
+    try:
+        promotion = _promote(staged, tmp_path, backends)
+    except Exception as exc:  # noqa: BLE001 - the type is part of the claim, so capture any
+        refusal = exc
 
-    assert expected in str(refusal.value)
+    assert isinstance(refusal, ValueError), (
+        "promotion must refuse two backends that are not bound to one pair manifest, but it "
+        f"returned {type(promotion).__name__} without raising"
+        if refusal is None
+        else f"expected ValueError, got {type(refusal).__name__}: {refusal}"
+    )
+    assert expected in str(refusal), f"refusal did not name the failing check: {refusal}"
+
+
+def test_the_promotion_spends_the_pair_manifest_digest_and_keeps_the_hashed_chain(tmp_path):
+    """The accepted deviation's POSITIVE shape, measured here instead of downstream.
+
+    `activation_evidence._RUN_EVIDENCE_KEYS` is an exact key roster inside the
+    frozen kernel-isolation closure, so the verified split-manifest checksum has
+    no direct slot in the lock: promotion spends it as a cross-backend check and
+    leaves it out of `required_evidence`. Without this test the exclusion is only
+    noticed by `validate_dependency_lock` raising from inside production code --
+    which is not a kill under this repository's rule -- and the chain that DOES
+    persist the digest is asserted nowhere.
+
+    Three things are established per backend, all in this frame: (a) the record
+    the producer built carries the verified checksum but the promoted lock's
+    evidence record does not, (b) the lock's `fit_role_artifact_sha256` is the
+    hash of the exact artifact bytes, and (c) those bytes carry the same verified
+    checksum in the artifact's own `uns["provenance"]`. So the digest is bound as
+    `pair_manifest_sha256 -> .h5ad provenance -> fit_role_artifact_sha256 -> lock`,
+    and the publish still validates COMPLETE.
+    """
+    staged = _staged_evidence(tmp_path)
+    backends = _backends_for(tmp_path)
+    for backend in ("gears", "cpa"):
+        assert (
+            backends[backend]["record"]["pair_manifest_sha256"] == (TINY_PAIR_MANIFEST["checksum"])
+        ), "the producer must hand promotion the verified checksum for it to spend"
+
+    promotion, refused = None, None
+    try:
+        promotion = _promote(staged, tmp_path, backends)
+    except Exception as exc:  # noqa: BLE001 - the claim is that nothing is raised
+        refused = exc
+    assert refused is None, (
+        f"one shared pair manifest must promote, but it raised {type(refused).__name__}: {refused}"
+    )
+
+    required = promotion.lock["run_gate"]["required_evidence"]
+    for backend in ("gears", "cpa"):
+        record = required[backend]
+        assert "pair_manifest_sha256" not in record, (
+            "the verified split-manifest checksum has no slot in the lock's evidence record "
+            f"(the validator's key roster is exact), but {backend} carries it: {sorted(record)}"
+        )
+        artifact_path = tmp_path / backend / "fit_role_artifact.h5ad"
+        assert record["fit_role_artifact_sha256"] == sha256_file(artifact_path), (
+            f"{backend}.fit_role_artifact_sha256 must be the hash of the artifact's own bytes"
+        )
+        provenance = dict(ad.read_h5ad(artifact_path).uns["provenance"])
+        assert provenance["pair_manifest_sha256"] == TINY_PAIR_MANIFEST["checksum"], (
+            f"{backend}'s hashed artifact bytes must still carry the verified checksum; "
+            "that indirection is the only place the lock keeps it"
+        )
+
+    published, publish_refused = None, None
+    try:
+        published = publish_promotion(promotion, evidence_dir=staged)
+    except Exception as exc:  # noqa: BLE001 - the claim is that nothing is raised
+        publish_refused = exc
+    assert publish_refused is None, (
+        "the promoted lock must still validate, but publishing raised "
+        f"{type(publish_refused).__name__}: {publish_refused}"
+    )
+    assert published["run_gate"]["evidence_status"] == "COMPLETE"
 
 
 @pytest.mark.parametrize("builder_backend", ["GEARS", "scgpt"])
