@@ -23,7 +23,12 @@ jobs:
   suite:
     name: Full suite on Linux x86_64
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    # 75, not 45: the suite grew from 1822 to 2533 test functions between 85e9749 and
+    # 2026-09-10 while this cap stayed put. Measured: the last green run on this runner
+    # class took 44m04s (43a1964) and run 34505058006 was cancelled by the cap at 98% with
+    # zero failures. A cap that a green suite cannot reliably fit under stops being a hang
+    # detector and becomes a coin flip; 75 keeps ~1.7x headroom over the measured green.
+    timeout-minutes: 75
     permissions:
       contents: read
     steps:
