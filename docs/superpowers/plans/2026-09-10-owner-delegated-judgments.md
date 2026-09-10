@@ -14,10 +14,9 @@
 **Architecture:** (1) 판단 기록은 날짜 붙은 결정문 하나(`docs/superpowers/2026-09-10-compose-owner-delegated-judgments.md`)와
 기존 amendments 문서의 재확인 문단으로 남긴다. (2) §6.3 은 write-once 를 유지한 채 CLI `reclaim-unbound` 하위명령으로
 "손으로 정리" 만 없앤다. (3) sealed roster 는 caller 입력이 아니라 fit-role artifact 가 가리키는 **split manifest**
-(`verify_split_manifest` 로 digest 대조)에서 유도한다. (4) slot ID·run_id 는 협력 루프의 로컬 전용 ledger 에 5·6열로 덧붙인다
-— 이 저장소 밖(`audit-log` 워크트리) 이며 git 에 올리지 않는다.
+(`verify_split_manifest` 로 digest 대조)에서 유도한다. (4) slot ID·run_id 는 저장소 밖 로컬 전용 ledger 에 5·6열로 덧붙인다 — git 에 올리지 않는다.
 
-**Tech Stack:** Python 3.12 · `uv run --locked` · pytest · Ruff. bash(협력 루프 latch 스크립트).
+**Tech Stack:** Python 3.12 · `uv run --locked` · pytest · Ruff.
 
 **Spec:** [split manifest](../../../src/alive/compose/split.py) `build_split_manifest`/`verify_split_manifest` ·
 [smoke evidence](../../../src/alive/compose/smoke_evidence.py) `build_smoke_pair_roster`/`publish_promotion` ·
@@ -52,10 +51,10 @@ governance [CLAUDE.md](../../../CLAUDE.md#seal-immutability) (`#seal-immutabilit
 
 | # | 질문 | 실측 | 판정 | 비용(틀렸을 때) |
 |---|---|---|---|---|
-| 1 | §6.1 — B·C 의 위임 서명과 A 의 서명 후 정정을 오너가 자기 손으로 재서명해야 하는가 | `2026-08-30-compose-spec-10-5-amendments.md:9,22-24,46-49`: A 는 오너 서명(09-03) + 위임 정정(09-05), B·C 는 위임 서명(09-05). 사실 관계 이견 없음(Codex M1 도 사실은 합의, 절차만 권고). 오너가 2026-09-10 에 이 판단 자체를 서면 위임 | **재서명 불요.** 오너의 09-10 위임이 곧 재확인이다 — amendments 문서에 날짜 붙은 "재확인 기록" 문단 추가, DISPUTED 종결. 오너가 자기 손 서명을 원하면 **추가**로 넣으면 되고 아무것도 되돌리지 않는다 | 0 (문서) |
+| 1 | §6.1 — B·C 의 위임 서명과 A 의 서명 후 정정을 오너가 자기 손으로 재서명해야 하는가 | `2026-08-30-compose-spec-10-5-amendments.md:9,22-24,46-49`: A 는 오너 서명(09-03) + 위임 정정(09-05), B·C 는 위임 서명(09-05). 사실 관계 이견 없음(2026-09-06 외부 검토 M1 도 사실은 합의, 절차만 권고). 오너가 2026-09-10 에 이 판단 자체를 서면 위임 | **재서명 불요.** 오너의 09-10 위임이 곧 재확인이다 — amendments 문서에 날짜 붙은 "재확인 기록" 문단 추가, DISPUTED 종결. 오너가 자기 손 서명을 원하면 **추가**로 넣으면 되고 아무것도 되돌리지 않는다 | 0 (문서) |
 | 2 | §6.3 — crash 뒤 unbound sidecar: fail-closed+수동 정리 vs atomic directory publish | `publish_promotion` 은 sidecar 를 write-once 로 먼저, lock 을 atomic rename 으로 **마지막**에 쓴다(`smoke_evidence.py:753-`); 그 사이 crash → sidecar 만 남고 재실행은 `FileExistsError` 로 거부 → 손으로 지워야 했다. evidence 디렉터리는 다른 committed 파일과 공존하므로 directory swap 은 과하다 | **현행 유지 + `reclaim-unbound`** 하위명령: `LOCK_NAME` 이 INCOMPLETE(또는 `evidence_status != COMPLETE`) 이고 lock 의 어느 필드도 참조하지 않는, **이 promotion 이 만들 이름의** sidecar 만 제거. 실패 주입 테스트로 고정. write-once 불변식 유지 | S — 하위명령 하나; 조건이 틀리면 지우지 말아야 할 파일을 지울 수 있으므로 세 조건을 각각 negative 로 핀 |
 | 3 | sealed roster 를 split manifest 에서 유도할 것인가(seal-guard 경로 착수) | `build_smoke_pair_roster` 는 `sealed_pair_ids` 를 **caller 에게서** 받고 training roster 와 overlap 만 센다(`:189-289`); artifact block 의 `pair_manifest_sha256` 은 scientific 경로에서 split manifest 의 `checksum`(`phase2b.py:710`)이고 driver 는 `carrier_loader._preseal_json(spec, "pair_manifest")` 로 그 manifest 를 읽는다. 결속 코드 0(09/06 검토 (b) 인정) | **승인·구현.** manifest 를 `verify_split_manifest` 로 검증하고 그 checksum 이 artifact block 의 `pair_manifest_sha256` 과 같을 때만 sealed roster = manifest 의 두 sealed role. caller 의 `sealed_pair_ids` 는 **optional 교차검증**(주어지면 유도값과 정확히 같아야 함)으로 강등. dev-smoke 의 sentinel digest 경로는 promotion 불가임을 명시(원래 release evidence 가 아니다) | M — inputs bundle 에 `pair_manifest` 경로 추가; 테스트 fixture 가 실제 tiny manifest 를 만들어야 함 |
-| 4 | review-state ledger 에 slot ID·run_id(M7) | ledger = `ALIVE-audit-log/logs/review-state.tsv`, 4열 `(ET date, time, state, detail)`; reader 는 `$1`·`$3` 만 본다(`bin/review_latch.sh`). 루프는 09/05 이후 Codex 판 부재로 DEGRADED_STALE_AUDIT 상태 | **구현(로컬 전용).** `latch_record` 가 5열 `slot_id`(`<ET date>T<ET hour>`) · 6열 `run_id`(launchd 기동별 uuid; 없으면 `$$-epoch`) 를 덧붙인다. reader 무변경(호환). `audit-log` 워크트리에 커밋, **push 금지**. Codex 침묵 자체는 이 플랜 밖(오너 통지) | S — 열 추가; 틀리면 reader 가 못 읽는 것이 아니라 열이 비는 것 |
+| 4 | 저장소 밖 로컬 전용 ledger 에 slot ID·run_id(M7) | 로컬 전용 ledger(저장소 밖) 는 4열 `(ET date, time, state, detail)` 이고 소비자는 첫째(date)·셋째(state) 열만 읽는다(실측). 외부 감사판은 2026-09-05 이후 부재 | **구현(저장소 밖, 로컬 전용).** 기록 지점이 5열 `slot_id`(`<ET date>T<ET hour>`) · 6열 `run_id`(기동별 식별자) 를 덧붙인다. 소비자 무변경(호환). git 에 올리지 않는다. 외부 감사판 부재 자체는 이 플랜 밖(오너 통지) | S — 열 추가; 틀리면 소비자가 못 읽는 것이 아니라 열이 비는 것 |
 
 **게이트 없음.** 네 판단 모두 오너가 위임했고, 어느 것도 config·seal·claim 을 움직이지 않는다.
 
@@ -117,14 +116,14 @@ Produces: roster `sealed_pair_ids` = manifest 의 두 sealed role 을 `combo_sep
 - [ ] 5. 참/거짓: digest 비교 제거 → 첫 negative red; role 유도 제거(빈 roster) → 첫 positive red.
 - [ ] 6. Commit `feat(compose): smoke evidence 의 sealed roster 를 caller 가 아니라 split manifest 에서 유도한다 — artifact 의 pair_manifest_sha256 과 digest 대조`.
 
-## Task 4 — review-state ledger 에 slot ID·run_id (item 4; 저장소 밖, 로컬 전용)
+## Task 4 — 로컬 전용 ledger 에 slot ID·run_id (item 4; 저장소 밖)
 
-**Files(워크트리 `/Users/jam/ALIVE-audit-log`, 브랜치 `audit-log`)**
-- Modify: `bin/review_latch.sh` `latch_record` — 5열 `slot_id`, 6열 `run_id`; `bin/daily_review.sh` — `RUN_ID` 를 기동 시 한 번 생성(`uuidgen` 없으면 `$$-$(date +%s)`), `SLOT_ID="${ET_D}T${ET_H}"`
-- Test: `bin/test_review_latch.sh`(있으면 확장, 없으면 신설) — 임시 state 파일에 기록 → 6열, `latch_attempts_today`/`latch_succeeded_today`/`latch_should_run` 결과가 열 추가 전후 동일(기존 4열 줄과 섞여도)
+**Files(저장소 밖 로컬 전용 워크트리 — 이 저장소에는 아무것도 쓰지 않는다)**
+- Modify: ledger 의 기록 지점 — 5열 `slot_id`(`<ET date>T<ET hour>`), 6열 `run_id`(기동 시 한 번 생성한 식별자)
+- Test: 임시 state 파일에 기록 → 6열; 소비자 함수들의 결과가 열 추가 전후 동일(기존 4열 줄과 섞여도)
 
 **Steps**
-- [ ] 1. 현재 reader 가 `$1`·`$3` 만 쓰는지 grep 으로 재확인. 2. 테스트 스크립트(red: 5·6열 부재). 3. 구현. 4. green + 기존 4열 줄 호환 실측. 5. `audit-log` 브랜치에 커밋(**push 금지**). 6. 이 저장소에는 아무것도 쓰지 않는다 — 보고서에만 결과.
+- [ ] 1. 소비자가 첫째·셋째 열만 쓰는지 grep 으로 재확인. 2. 테스트(red: 5·6열 부재). 3. 구현. 4. green + 기존 4열 줄 호환 실측. 5. 저장소 밖에 커밋(**push 금지**). 6. 이 저장소에는 아무것도 쓰지 않는다 — 보고서에만 결과.
 
 ---
 
@@ -140,5 +139,5 @@ Produces: roster `sealed_pair_ids` = manifest 의 두 sealed role 을 `combo_sep
 T1 ∥ T4(저장소 밖) → T2 → T3(같은 파일) → 사다리 → whole-branch 리뷰 → PR → 독립 리뷰 → 병합.
 
 ## 부록 — 닫지 않는 것
-- Codex 감사판 5일 부재(루프 DEGRADED_STALE_AUDIT) — 오너 통지 사항, 이 플랜 밖.
+- 외부 감사판 부재(2026-09-05 이후) — 오너 통지 사항, 이 플랜 밖.
 - pod-gated 목록(커널 재증명·`.pyz` parity·D3 runtime 증거·R1 representation·D1-c λ*) 은 그대로.

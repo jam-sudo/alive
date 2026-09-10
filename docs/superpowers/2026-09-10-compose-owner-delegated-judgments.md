@@ -86,6 +86,8 @@ lock 이 commit point 이므로 그 사이의 crash 는 **sidecar 만 남긴** �
 committed 파일들과 공존하므로 디렉터리 전체를 swap 하는 설계는 그 파일들까지 교체 대상으로 만든다 —
 문제의 크기에 비해 과하고, write-once 불변식을 디렉터리 단위로 옮겨 놓는다.
 
+> **[2026-09-10 정정 — 인용 기준·라벨]** 위 실측의 줄번호는 `21bc56a` 기준이다. T2(`319229a`)·T3(`cec759c`) 뒤 `publish_promotion` 은 `:869` 로 이동했다(+116); 심볼이 정본이다. 또한 아래 판정의 (b)/(c) 라벨은 플랜·코드와 순서가 바뀌어 있다 — 플랜과 코드의 오류 메시지(`condition (b) fails` / `condition (c) fails`)에서 **(b) = 이름이 이번 promotion 의 파일 집합에 속함, (c) = lock 의 어느 필드도 참조하지 않음**이다. 세 조건의 내용은 같고 라벨만 다르다; 운영자는 코드의 라벨을 따른다.
+
 **판정 — 현행 유지 + `reclaim-unbound`.** `publish_promotion` 의 거부는 **그대로** 두고, 별도 경로로
 `reclaim-unbound` 하위명령을 더한다. 세 조건이 **모두** 참일 때만, **이 promotion 이 만들 이름의**
 sidecar 만 지운다: (a) `LOCK_NAME` 이 있고 `run_gate.evidence_status != "COMPLETE"`, (b) lock 의 어느
@@ -120,6 +122,8 @@ artifact 가 가리키는 **split manifest** 에서 유도할 것인가(seal-gua
 - 결속 코드는 **0** 이다: `grep -rn "verify_split_manifest" src/` 는 정의 파일(`split.py:274`·`:278`)을
   빼면 `phase2b.py:125`·`:1692` 와 `outcome_store.py:68`·`:388` 뿐이고, `smoke_evidence.py` 는 그 함수를
   import 조차 하지 않는다(`:22-44` import 블록). 2026-09-06 검토도 (b) 항에서 이를 인정했다.
+
+> **[2026-09-10 정정 — 인용 기준]** 위 실측의 줄번호는 `21bc56a` 기준이다. T3(`cec759c`) 뒤 `build_smoke_pair_roster` 는 `:250` 로 이동했고, `smoke_evidence.py:43` 은 이제 `verify_split_manifest` 를 **import 한다** — "import 조차 하지 않는다" 는 판정 당시의 사실이며 그 결속 부재가 바로 이 판정이 닫은 것이다. 심볼이 정본이다.
 
 **판정 — 승인·구현.** manifest 를 `verify_split_manifest` 로 검증하고, 그 checksum 이 artifact block 의
 `pair_manifest_sha256` 과 **같을 때만** sealed roster = manifest 의 두 sealed role 로 유도한다. caller 의

@@ -1252,7 +1252,7 @@ def test_reclaim_finds_nothing_to_do_in_a_directory_no_publish_touched(tmp_path)
 
     This test's claim is a NEGATIVE about raising, and a version that simply
     called the function proved it only by letting the exception escape into the
-    production frame -- which this repository does not count as a kill (Codex
+    production frame -- which this repository does not count as a kill (an external
     review of 319229a, Important 1). The call is captured, so "it raised" becomes
     a named failure in this test's own frame that says what was raised; the
     success path still asserts both what came back and that not one byte of the
