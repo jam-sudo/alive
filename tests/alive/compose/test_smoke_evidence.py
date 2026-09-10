@@ -10,6 +10,7 @@ sides of every cross-check from one computation.
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import shutil
@@ -27,6 +28,11 @@ from alive.compose.activation_evidence import (
     validate_dependency_lock,
 )
 from alive.compose.fit_role import FitRoleArtifactError
+from alive.compose.roles import (
+    CALIBRATION_ROLE_NAME,
+    SEALED_DOUBLE_UNSEEN_ROLE_NAME,
+    SEALED_SINGLE_UNSEEN_ROLE_NAME,
+)
 from alive.compose.smoke_evidence import (
     _SIDECAR_NAMES,
     LOCK_NAME,
@@ -38,8 +44,14 @@ from alive.compose.smoke_evidence import (
     publish_promotion,
     reclaim_unbound_sidecars,
 )
+from alive.compose.split import build_split_manifest
+from alive.provenance import sha256_json
 from tests.alive.compose.smoke_evidence_support import (
+    TINY_CALIBRATION_FRACTION,
+    TINY_ELIGIBLE_PAIRS,
+    TINY_PAIR_MANIFEST,
     TINY_SEALED_PAIRS,
+    TINY_SPLIT_SEED,
     TINY_TRAINING_TOKENS,
     write_tiny_fit_role_artifact,
 )
@@ -57,6 +69,7 @@ def _roster_from(tmp_path, *, backend="gears", sealed=TINY_SEALED_PAIRS, **kwarg
         backend=backend,
         fit_role_artifact=artifact.to_payload_block(),
         approved_root=tmp_path,
+        pair_manifest=TINY_PAIR_MANIFEST,
         sealed_pair_ids=sealed,
     )
     return artifact, roster, record
@@ -76,7 +89,7 @@ def test_the_training_roster_is_derived_from_the_verified_fit_role_artifact(tmp_
     artifact, roster, record = _roster_from(tmp_path)
 
     assert roster["training_pair_ids"] == list(TINY_TRAINING_TOKENS)
-    assert roster["sealed_pair_ids"] == ["AAA_BBB"]
+    assert roster["sealed_pair_ids"] == _expected_sealed_tokens(TINY_PAIR_MANIFEST)
     assert record["sealed_pair_overlap_count"] == 0
     assert record["fit_role_artifact_sha256"] == artifact.sha256.removeprefix("sha256:")
     _validate_pair_roster_manifest(_write(tmp_path, roster), backend="gears", record=record)
@@ -91,8 +104,10 @@ def test_sealed_pairs_are_canonicalised_to_the_artifact_s_token_form(tmp_path):
     overlap for a training roster that contained the sealed pair -- the
     `e3b0c442` shape: two things equal only because neither was measured.
     """
-    _, roster, _ = _roster_from(tmp_path, sealed=[("BBB", "AAA"), ["AAA", "BBB"]])
-    assert roster["sealed_pair_ids"] == ["AAA_BBB"]
+    scrambled = [list(reversed(pair)) for pair in TINY_SEALED_PAIRS]
+    scrambled.append(list(TINY_SEALED_PAIRS[0]))  # a duplicate in the other spelling
+    _, roster, _ = _roster_from(tmp_path, sealed=scrambled)
+    assert roster["sealed_pair_ids"] == _expected_sealed_tokens(TINY_PAIR_MANIFEST)
 
 
 def test_the_sealed_token_form_follows_the_artifact_s_combo_separator(tmp_path):
@@ -112,10 +127,12 @@ def test_the_sealed_token_form_follows_the_artifact_s_combo_separator(tmp_path):
         backend="gears",
         fit_role_artifact=artifact.to_payload_block(),
         approved_root=tmp_path,
+        pair_manifest=TINY_PAIR_MANIFEST,
         sealed_pair_ids=TINY_SEALED_PAIRS,
         combo_sep="+",
     )
-    assert roster["sealed_pair_ids"] == ["AAA+BBB"]
+    assert roster["sealed_pair_ids"] == _expected_sealed_tokens(TINY_PAIR_MANIFEST, "+")
+    assert "AAA+BBB" in roster["sealed_pair_ids"]
     assert "CEBPE+KLF1" in roster["training_pair_ids"]
     assert record["sealed_pair_overlap_count"] == 0
 
@@ -147,6 +164,7 @@ def test_a_harness_roster_that_disagrees_with_the_artifact_is_refused(tmp_path):
             backend="gears",
             fit_role_artifact=artifact.to_payload_block(),
             approved_root=tmp_path,
+            pair_manifest=TINY_PAIR_MANIFEST,
             sealed_pair_ids=TINY_SEALED_PAIRS,
             harness_training_pair_ids=claimed,
         )
@@ -173,6 +191,7 @@ def test_an_artifact_whose_bytes_are_not_the_spec_s_is_refused(tmp_path):
             backend="gears",
             fit_role_artifact=artifact.to_payload_block(),
             approved_root=tmp_path,
+            pair_manifest=TINY_PAIR_MANIFEST,
             sealed_pair_ids=TINY_SEALED_PAIRS,
         )
 
@@ -192,6 +211,159 @@ def test_merge_refuses_a_manifest_hashed_from_a_different_artifact_than_the_rost
             artifact_record={"fit_role_artifact_sha256": "b" * 64},
             exit_code=0,
         )
+
+
+def _expected_sealed_tokens(manifest, combo_sep="_"):
+    """The sealed roster a manifest implies, spelled independently of the producer.
+
+    Deliberately not `smoke_evidence._canonical_sealed_tokens`: an expectation
+    computed with the function under test agrees with every mutation of it. Both
+    sealed roles are named here one by one, so a derivation that forgets either
+    one produces a shorter roster than this and the test says which token is gone.
+    """
+    tokens = []
+    for role in (SEALED_DOUBLE_UNSEEN_ROLE_NAME, SEALED_SINGLE_UNSEEN_ROLE_NAME):
+        for gene_a, gene_b in manifest["roles"][role]:
+            first, second = (
+                (gene_a, gene_b)
+                if gene_a.encode("utf-8") < gene_b.encode("utf-8")
+                else (gene_b, gene_a)
+            )
+            tokens.append(f"{first}{combo_sep}{second}")
+    return sorted(tokens)
+
+
+def test_the_sealed_roster_is_derived_from_the_split_manifest(tmp_path):
+    """The caller supplies no sealed roster and still gets the protocol's own.
+
+    Judgment 3 (2026-09-10): `sealed_pair_ids` used to arrive from the caller and
+    the producer only counted its overlap with the training roster -- so the
+    thing the lock certifies `VERIFIED_ZERO_OVERLAP` against was typed by the
+    operator, and a roster that omitted a sealed pair would have been certified
+    disjoint from a seal it never described. The roster is now read out of the
+    split manifest whose verified checksum equals the fit-role artifact's own
+    `pair_manifest_sha256`, so the two sides are one object.
+    """
+    artifact = write_tiny_fit_role_artifact(tmp_path / "fit_role_artifact.h5ad")
+
+    roster, record = build_smoke_pair_roster(
+        backend="gears",
+        fit_role_artifact=artifact.to_payload_block(),
+        approved_root=tmp_path,
+        pair_manifest=TINY_PAIR_MANIFEST,
+    )
+
+    expected = _expected_sealed_tokens(TINY_PAIR_MANIFEST)
+    # The fixture universe puts one pair in EACH sealed role, so a derivation that
+    # reads only the headline double-unseen role is short by a measured token.
+    assert TINY_PAIR_MANIFEST["roles"][SEALED_DOUBLE_UNSEEN_ROLE_NAME]
+    assert TINY_PAIR_MANIFEST["roles"][SEALED_SINGLE_UNSEEN_ROLE_NAME]
+    assert len(expected) == 2
+    assert roster["sealed_pair_ids"] == expected
+    assert record["pair_manifest_sha256"] == TINY_PAIR_MANIFEST["checksum"]
+    assert record["sealed_pair_overlap_count"] == 0
+    _validate_pair_roster_manifest(_write(tmp_path, roster), backend="gears", record=record)
+
+
+def test_a_manifest_whose_checksum_differs_from_the_artifact_is_refused(tmp_path):
+    """A manifest with the SAME roles but a different identity is still the wrong one.
+
+    The decoy here is built from the same pair universe at the next seed, which
+    (measured) reproduces role-for-role -- so nothing about its content betrays
+    it. Only the digest does: the artifact records the checksum of the manifest
+    the smoke was cut against, and a roster derived from any other manifest is a
+    roster for a different split even when the two happen to agree today.
+    """
+    artifact = write_tiny_fit_role_artifact(tmp_path / "fit_role_artifact.h5ad")
+    decoy = build_split_manifest(
+        list(TINY_ELIGIBLE_PAIRS),
+        seed=TINY_SPLIT_SEED + 1,
+        calibration_fraction=TINY_CALIBRATION_FRACTION,
+    )
+    assert decoy["roles"] == TINY_PAIR_MANIFEST["roles"], "the decoy must differ ONLY in identity"
+    assert decoy["checksum"] != TINY_PAIR_MANIFEST["checksum"]
+
+    with pytest.raises(ValueError) as refusal:
+        build_smoke_pair_roster(
+            backend="gears",
+            fit_role_artifact=artifact.to_payload_block(),
+            approved_root=tmp_path,
+            pair_manifest=decoy,
+        )
+
+    message = str(refusal.value)
+    assert "pair_manifest_sha256" in message
+    assert decoy["checksum"] in message
+    assert TINY_PAIR_MANIFEST["checksum"] in message
+
+
+@pytest.mark.parametrize(
+    ("recompute_checksum", "expected_reason"),
+    [
+        (False, "checksum mismatch"),
+        (True, "does not reproduce from seed/fraction"),
+    ],
+    ids=["checksum-left-alone", "checksum-recomputed"],
+)
+def test_a_tampered_manifest_is_refused_by_verify_split_manifest(
+    tmp_path, recompute_checksum, expected_reason
+):
+    """Moving a pair out of a sealed role does not quietly shrink the seal.
+
+    Two forgers: one edits the roles and leaves the checksum (caught by the
+    self-excluding checksum), one edits the roles AND recomputes the checksum
+    (caught because the seed and fraction no longer reproduce that membership).
+    The producer does not re-implement either check -- it runs the committed
+    `verify_split_manifest` and refuses with the reason that function gives.
+    """
+    artifact = write_tiny_fit_role_artifact(tmp_path / "fit_role_artifact.h5ad")
+    tampered = copy.deepcopy(TINY_PAIR_MANIFEST)
+    moved = tampered["roles"][SEALED_DOUBLE_UNSEEN_ROLE_NAME].pop()
+    tampered["roles"][CALIBRATION_ROLE_NAME].append(moved)
+    tampered["roles"][CALIBRATION_ROLE_NAME].sort()
+    if recompute_checksum:
+        tampered["checksum"] = sha256_json(
+            {key: value for key, value in tampered.items() if key != "checksum"}
+        )
+
+    with pytest.raises(ValueError) as refusal:
+        build_smoke_pair_roster(
+            backend="gears",
+            fit_role_artifact=artifact.to_payload_block(),
+            approved_root=tmp_path,
+            pair_manifest=tampered,
+        )
+
+    message = str(refusal.value)
+    assert "pair manifest does not verify" in message
+    assert expected_reason in message
+
+
+def test_a_harness_sealed_roster_that_disagrees_with_the_manifest_is_refused(tmp_path):
+    """`sealed_pair_ids` survives as an OPTIONAL cross-check, never as the source.
+
+    A harness that reports the sealed pairs it was told about is useful evidence
+    that it was told the right ones -- but only if a disagreement refuses. The
+    roster dropped here is the single-unseen pair, the one an implementation that
+    read only the headline double-unseen role would also drop.
+    """
+    artifact = write_tiny_fit_role_artifact(tmp_path / "fit_role_artifact.h5ad")
+    dropped = tuple(TINY_PAIR_MANIFEST["roles"][SEALED_SINGLE_UNSEEN_ROLE_NAME][0])
+    short = [pair for pair in TINY_SEALED_PAIRS if tuple(pair) != dropped]
+    assert short and len(short) < len(TINY_SEALED_PAIRS)
+
+    with pytest.raises(ValueError) as refusal:
+        build_smoke_pair_roster(
+            backend="gears",
+            fit_role_artifact=artifact.to_payload_block(),
+            approved_root=tmp_path,
+            pair_manifest=TINY_PAIR_MANIFEST,
+            sealed_pair_ids=short,
+        )
+
+    message = str(refusal.value)
+    assert "disagrees with the split manifest" in message
+    assert f"{dropped[0]}_{dropped[1]}" in message
 
 
 _ARTIFACT_NAMES = (
@@ -380,6 +552,7 @@ def _backends_for(tmp_path, *, overlap=False, exit_code=0):
             backend=backend,
             fit_role_artifact=artifact.to_payload_block(),
             approved_root=tmp_path,
+            pair_manifest=TINY_PAIR_MANIFEST,
             sealed_pair_ids=TINY_SEALED_PAIRS,
         )
         artifacts, artifact_record = build_smoke_artifact_manifest(
@@ -681,6 +854,37 @@ def test_promotion_refuses_a_backend_record_filed_under_the_other_backend(tmp_pa
         _promote(staged, tmp_path, backends)
 
 
+@pytest.mark.parametrize(
+    ("mutate", "expected"),
+    [
+        (lambda record: record.pop("pair_manifest_sha256"), "must carry pair_manifest_sha256"),
+        (
+            lambda record: record.__setitem__("pair_manifest_sha256", "c" * 64),
+            "different pair manifests",
+        ),
+    ],
+    ids=["absent", "disagreeing"],
+)
+def test_promotion_refuses_backends_not_bound_to_one_pair_manifest(tmp_path, mutate, expected):
+    """`pair_manifest_sha256` is spent here, so it cannot be a field nobody reads.
+
+    The validator's `_RUN_EVIDENCE_KEYS` is exact and lives in the frozen
+    kernel-isolation closure, so the promoted lock has no slot for the verified
+    split-manifest checksum. Rather than record it nowhere, the promotion spends
+    it: both backends must carry it and both must carry the SAME one. COMPOSE-K562-v1
+    has one pair universe, and a lock whose two smokes were cut against different
+    split manifests would certify two different seals as one run.
+    """
+    staged = _staged_evidence(tmp_path)
+    backends = _backends_for(tmp_path)
+    mutate(backends["cpa"]["record"])
+
+    with pytest.raises(ValueError) as refusal:
+        _promote(staged, tmp_path, backends)
+
+    assert expected in str(refusal.value)
+
+
 @pytest.mark.parametrize("builder_backend", ["GEARS", "scgpt"])
 def test_the_builders_refuse_a_backend_outside_the_protocol_roster(tmp_path, builder_backend):
     """`backend` names a position in the lock; anything else has nowhere to go."""
@@ -689,6 +893,7 @@ def test_the_builders_refuse_a_backend_outside_the_protocol_roster(tmp_path, bui
             backend=builder_backend,
             fit_role_artifact={},
             approved_root=tmp_path,
+            pair_manifest=TINY_PAIR_MANIFEST,
             sealed_pair_ids=TINY_SEALED_PAIRS,
         )
     with pytest.raises(ValueError, match="backend"):

@@ -15,7 +15,11 @@ import sys
 from pathlib import Path
 
 from alive.compose.activation_evidence import validate_dependency_lock
-from tests.alive.compose.smoke_evidence_support import write_tiny_fit_role_artifact
+from tests.alive.compose.smoke_evidence_support import (
+    TINY_SEALED_PAIRS,
+    write_tiny_fit_role_artifact,
+    write_tiny_pair_manifest,
+)
 
 REPO = Path(__file__).resolve().parents[1]
 CLI = REPO / "scripts" / "compose_smoke_evidence.py"
@@ -41,6 +45,9 @@ def _bundle(tmp_path, *, overlap=False, drift=False):
     """
     staged = tmp_path / "compose"
     shutil.copytree(EVIDENCE, staged)
+    # The split manifest the tiny artifacts were cut against, on disk where the
+    # bundle can point at it: the CLI derives the sealed roster from this file.
+    pair_manifest = write_tiny_pair_manifest(tmp_path / "pair_manifest.json")
 
     backends = {}
     for backend in ("gears", "cpa"):
@@ -64,7 +71,8 @@ def _bundle(tmp_path, *, overlap=False, drift=False):
         backends[backend] = {
             "fit_role_artifact": artifact.to_payload_block(),
             "approved_root": str(tmp_path),
-            "sealed_pair_ids": [["AAA", "BBB"]],
+            "pair_manifest": str(pair_manifest),
+            "sealed_pair_ids": [list(pair) for pair in TINY_SEALED_PAIRS],
             "exit_code": 0,
             "artifacts": objects,
         }
@@ -235,6 +243,30 @@ def test_a_bundle_missing_a_field_is_a_usage_error_not_a_traceback(tmp_path):
     assert result.returncode == 2
     assert "git_sha" in result.stderr
     assert "Traceback" not in result.stderr
+
+
+def test_a_bundle_without_a_pair_manifest_is_a_usage_error(tmp_path):
+    """`pair_manifest` is required per backend; a bundle without one cannot be read.
+
+    The sealed roster is derived from the split manifest the fit-role artifact
+    names, so a bundle that does not say where that manifest is has not described
+    a promotion at all. That is exit 2 (the tool could not read the inputs), not
+    exit 1 (the inputs were understood and refused) -- an operator reading `$?`
+    must be sent to the bundle, not to the evidence.
+    """
+    staged, inputs = _bundle(tmp_path)
+    bundle = json.loads(inputs.read_text(encoding="utf-8"))
+    del bundle["backends"]["cpa"]["pair_manifest"]
+    inputs.write_text(json.dumps(bundle), encoding="utf-8")
+
+    result = _run(inputs, staged)
+
+    assert result.returncode == 2, result.stderr
+    assert "pair_manifest" in result.stderr
+    assert "Traceback" not in result.stderr
+    assert json.loads((staged / LOCK_NAME).read_text())["run_gate"]["evidence_status"] == (
+        "INCOMPLETE"
+    )
 
 
 def test_a_malformed_lock_is_a_refusal_not_an_inputs_bundle_usage_error(tmp_path):

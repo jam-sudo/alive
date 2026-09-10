@@ -37,7 +37,8 @@ The inputs bundle is one JSON object::
         "gears": {
           "fit_role_artifact": {...},     # the payload-v2 block the worker consumed
           "approved_root": "...",         # the worker's --approved-root
-          "sealed_pair_ids": [["GENEA", "GENEB"], ...],   # the payload's pair_ids
+          "pair_manifest": "...",         # path to the protocol's split manifest JSON
+          "sealed_pair_ids": [["GENEA", "GENEB"], ...],  # OPTIONAL cross-check; must match
           "training_pair_ids": [...],     # OPTIONAL: the harness's own report; must match
           "exit_code": 0,
           "artifacts": {"<name>": {"path": ..., "uri": ..., "immutable_version": ...}}
@@ -55,7 +56,13 @@ The training roster is DERIVED from the fit-role artifact (review C2): the
 artifact named by ``fit_role_artifact`` is read through the worker's own guard
 (``read_verified_fit_role_artifact``) and the roster is what its ``singles`` /
 ``combo_calibration`` rows carry. ``training_pair_ids`` in the bundle is optional
-and, when present, must equal the derived roster. Still operator-attested:
+and, when present, must equal the derived roster.
+
+The SEALED roster is derived too (judgment 3, 2026-09-10): ``pair_manifest`` names
+the protocol's split manifest, which must verify and whose checksum must equal the
+artifact block's ``pair_manifest_sha256``; the roster is then that manifest's two
+sealed roles. ``sealed_pair_ids`` is therefore optional and, when present, a
+cross-check that must equal the derived roster exactly. Still operator-attested:
 ``exit_code`` and the content of the ``fit_role_row_identity`` object (only its
 bytes are hashed).
 
@@ -100,11 +107,16 @@ def _promotion_from_bundle(bundle: dict, lock_path: Path) -> Promotion:
     """
     backends = {}
     for backend, supplied in bundle["backends"].items():
+        # A missing `pair_manifest` key is a KeyError and an unreadable file an
+        # OSError, and both leave `main` at exit 2 -- a bundle that does not say
+        # which split the smoke was cut against has not described a promotion.
+        manifest_path = Path(supplied["pair_manifest"])
         roster, roster_record = build_smoke_pair_roster(
             backend=backend,
             fit_role_artifact=supplied["fit_role_artifact"],
             approved_root=supplied["approved_root"],
-            sealed_pair_ids=supplied["sealed_pair_ids"],
+            pair_manifest=json.loads(manifest_path.read_text(encoding="utf-8")),
+            sealed_pair_ids=supplied.get("sealed_pair_ids"),
             harness_training_pair_ids=supplied.get("training_pair_ids"),
             combo_sep=supplied.get("combo_sep", "_"),
         )

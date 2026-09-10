@@ -39,7 +39,8 @@ from alive.compose.activation_evidence import (
     validate_dependency_lock,
 )
 from alive.compose.fit_role import FitRoleArtifactSpec, read_verified_fit_role_artifact
-from alive.compose.roles import CALIBRATION_ROLE_NAME
+from alive.compose.roles import CALIBRATION_ROLE_NAME, SEALED_ROLE_NAMES
+from alive.compose.split import verify_split_manifest
 from alive.io import atomic_write_once
 from alive.provenance import sha256_file, sha256_json
 
@@ -198,12 +199,61 @@ def _canonical_sealed_tokens(sealed_pair_ids: Sequence[Sequence[str]], combo_sep
     return sorted(tokens)
 
 
+def _sealed_roster_from_manifest(
+    pair_manifest: Mapping[str, Any],
+    *,
+    artifact_digest: str,
+    backend: str,
+    combo_sep: str,
+) -> tuple[list[str], str]:
+    """The sealed roster the artifact's OWN split manifest defines, or a refusal.
+
+    Two things have to hold before a manifest may name the seal. It must verify --
+    :func:`alive.compose.split.verify_split_manifest` recomputes the self-excluding
+    checksum, reconstructs the eligible universe from the role union and reproduces
+    the membership from the recorded seed and fraction, so neither an edited role
+    nor an edited-and-re-checksummed one survives. And its verified checksum must
+    equal the ``pair_manifest_sha256`` the fit-role artifact carries, which is what
+    binds the roster to the split the smoke was actually cut against: a manifest
+    that verifies perfectly and belongs to another split describes another seal.
+
+    The roster is the union of BOTH sealed roles (``SEALED_ROLE_NAMES``), not the
+    headline double-unseen one -- a single-unseen pair is sealed too, and a roster
+    missing it would let the lock certify ``VERIFIED_ZERO_OVERLAP`` against a
+    smaller seal than the protocol holds.
+
+    Returns
+    -------
+    tuple of (list of str, str)
+        The canonical sealed tokens, and the verified manifest checksum.
+    """
+    try:
+        checksum = verify_split_manifest(dict(pair_manifest))
+    except (TypeError, ValueError, AttributeError) as exc:
+        raise ValueError(
+            f"{backend} pair manifest does not verify: {exc}; the sealed roster is read out "
+            "of this manifest, so an unverified one has no roster to give"
+        ) from exc
+    if checksum != artifact_digest:
+        raise ValueError(
+            f"{backend} pair manifest verifies to {checksum!r} but the fit-role artifact "
+            f"records pair_manifest_sha256={artifact_digest!r}; the roster must come from "
+            "the split the smoke was cut against, and any other manifest -- however valid "
+            "-- describes a different seal"
+        )
+    sealed_pairs = [
+        tuple(pair) for role in SEALED_ROLE_NAMES for pair in pair_manifest["roles"][role]
+    ]
+    return _canonical_sealed_tokens(sealed_pairs, combo_sep), checksum
+
+
 def build_smoke_pair_roster(
     *,
     backend: str,
     fit_role_artifact: Mapping[str, Any],
     approved_root: str | Path,
-    sealed_pair_ids: Sequence[Sequence[str]],
+    pair_manifest: Mapping[str, Any],
+    sealed_pair_ids: Sequence[Sequence[str]] | None = None,
     harness_training_pair_ids: Sequence[str] | None = None,
     combo_sep: str = "_",
 ) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -227,9 +277,14 @@ def build_smoke_pair_roster(
         digests) the worker consumed.
     approved_root : str or Path
         Directory the artifact must live inside (the worker's ``--approved-root``).
-    sealed_pair_ids : Sequence of pair
-        The protocol's sealed pairs, as ``[gene_a, gene_b]`` in either order (the
-        payload's ``pair_ids``). Canonicalised to the artifact's token form.
+    pair_manifest : Mapping
+        The protocol's split manifest (:func:`alive.compose.split.build_split_manifest`).
+        It must verify and its checksum must equal the artifact block's
+        ``pair_manifest_sha256``; the sealed roster is then its two sealed roles.
+    sealed_pair_ids : Sequence of pair, optional
+        What the harness reports the sealed pairs were, as ``[gene_a, gene_b]`` in
+        either order. Not a source of the roster (judgment 3, 2026-09-10); when
+        given it must equal the derived roster exactly.
     harness_training_pair_ids : Sequence of str, optional
         What the smoke harness itself reports it fitted on. Not a source of the
         roster; when given it must equal the derived roster exactly.
@@ -241,14 +296,17 @@ def build_smoke_pair_roster(
     tuple of (dict, dict)
         The ``compose_smoke_pair_roster_v1`` manifest, and the fragment of
         ``run_gate.required_evidence[backend]`` it determines -- including
-        ``fit_role_artifact_sha256``, the digest of the bytes the roster came from.
+        ``fit_role_artifact_sha256``, the digest of the bytes the roster came from,
+        and ``pair_manifest_sha256``, the verified checksum of the split manifest
+        the sealed roster came from.
 
     Raises
     ------
     ValueError
         If ``backend`` is not one of the protocol's two backends, if the block is
-        malformed, if the artifact lacks one of the two fit roles, if a sealed pair
-        is malformed, or if the harness roster disagrees with the artifact.
+        malformed, if the pair manifest does not verify or is not the artifact's
+        own, if the artifact lacks one of the two fit roles, if a sealed pair is
+        malformed, or if a harness roster disagrees with what was derived.
     FitRoleArtifactError
         If the artifact does not match its spec (path policy, bytes, identity).
     """
@@ -257,7 +315,20 @@ def build_smoke_pair_roster(
     artifact_sha256 = spec.sha256.removeprefix("sha256:")
     if _HEX64.fullmatch(artifact_sha256) is None:
         raise ValueError(f"fit_role_artifact.sha256 must be sha256:<64 hex>, got {spec.sha256!r}")
-    sealed_tokens = _canonical_sealed_tokens(sealed_pair_ids, combo_sep)
+    sealed_tokens, pair_manifest_sha256 = _sealed_roster_from_manifest(
+        pair_manifest,
+        artifact_digest=spec.pair_manifest_sha256,
+        backend=backend,
+        combo_sep=combo_sep,
+    )
+    if sealed_pair_ids is not None:
+        claimed_sealed = _canonical_sealed_tokens(sealed_pair_ids, combo_sep)
+        if claimed_sealed != sealed_tokens:
+            raise ValueError(
+                f"{backend} harness sealed roster disagrees with the split manifest — "
+                f"missing_from_harness={sorted(set(sealed_tokens) - set(claimed_sealed))} "
+                f"not_in_manifest={sorted(set(claimed_sealed) - set(sealed_tokens))}"
+            )
 
     adata = read_verified_fit_role_artifact(spec.path, spec=spec, approved_root=str(approved_root))
     training_rows = [
@@ -297,6 +368,7 @@ def build_smoke_pair_roster(
         "sealed_pair_roster_sha256": sha256_json(roster["sealed_pair_ids"]),
         "sealed_pair_overlap_count": len(set(training_tokens) & set(sealed_tokens)),
         "fit_role_artifact_sha256": artifact_sha256,
+        "pair_manifest_sha256": pair_manifest_sha256,
     }
     return roster, record
 
@@ -644,8 +716,9 @@ def promote_lock_to_complete(
     ValueError
         If the lock is not INCOMPLETE, if the backends are not exactly
         ``{"gears", "cpa"}`` or a record is filed under the other backend, if any
-        roster overlaps the sealed pairs, if any smoke did not exit 0, or if the
-        run identity or prose is malformed.
+        roster overlaps the sealed pairs, if any smoke did not exit 0, if a record
+        carries no ``pair_manifest_sha256`` or the two carry different ones, or if
+        the run identity or prose is malformed.
     """
     status = lock["run_gate"]["evidence_status"]
     if status != "INCOMPLETE":
@@ -692,6 +765,28 @@ def promote_lock_to_complete(
                 "not exit 0 is not evidence that it ran"
             )
 
+    # COMPOSE-K562-v1 has ONE pair universe. Each roster was derived from the split
+    # manifest its own backend's artifact names, so the two derivations agree only if
+    # both smokes were cut against the same manifest -- a lock recording two would
+    # certify two different seals as one run's VERIFIED_ZERO_OVERLAP.
+    pair_manifests = {
+        backend: backends[backend]["record"].get("pair_manifest_sha256")
+        for backend in sorted(_BACKENDS)
+    }
+    absent = sorted(backend for backend, digest in pair_manifests.items() if digest is None)
+    if absent:
+        raise ValueError(
+            f"{absent} must carry pair_manifest_sha256; build_smoke_pair_roster derives it "
+            "from the verified split manifest, and a record without it describes a sealed "
+            "roster whose origin was never established"
+        )
+    if len(set(pair_manifests.values())) != 1:
+        raise ValueError(
+            f"the backends were cut against different pair manifests: {pair_manifests}; "
+            "one protocol has one pair universe, and a lock recording two would certify "
+            "two different seals as one run"
+        )
+
     promoted = copy.deepcopy(lock)
     run_gate = promoted["run_gate"]
     required: dict[str, Any] = {}
@@ -707,7 +802,16 @@ def promote_lock_to_complete(
         files[roster_path] = roster_text
         files[artifact_path] = artifact_text
         required[backend] = {
-            **supplied["record"],
+            # `pair_manifest_sha256` is established above and then left out here.
+            # `activation_evidence._RUN_EVIDENCE_KEYS` is an EXACT key roster and
+            # that module is a member of the frozen kernel-isolation closure, so
+            # the lock has no slot for the split-manifest checksum: it is spent as
+            # a check on this promotion rather than carried as a field.
+            **{
+                key: value
+                for key, value in supplied["record"].items()
+                if key != "pair_manifest_sha256"
+            },
             "pair_roster_manifest_path": roster_path,
             "pair_roster_manifest_sha256": roster_sha,
             "artifact_manifest_path": artifact_path,

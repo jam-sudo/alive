@@ -21,6 +21,8 @@ import pytest
 from scipy import sparse
 
 from alive.compose.baseline_subprocess import read_payload
+from alive.compose.smoke_evidence import build_smoke_pair_roster
+from alive.compose.split import build_split_manifest
 
 _REPO = Path(__file__).resolve().parents[3]
 _HARNESS = _REPO / "scripts" / "compose" / "build_dev_smoke_payload.py"
@@ -93,6 +95,41 @@ def test_dev_smoke_payload_is_contract_valid_and_leakage_safe(tmp_path):
     assert sealed_tokens.isdisjoint(set(art.obs["perturbation"].astype(str)))
     assert set(art.obs["role"].astype(str)) <= {"control", "singles", "combo_calibration"}
     assert manifest["role_counts"]["control"] >= 1
+
+
+def test_the_dev_sentinel_artifact_cannot_be_promoted(tmp_path):
+    """A dev fixture is not release evidence, and now nothing can mistake it for one.
+
+    This harness stamps `pair_manifest_sha256` with a `dev-smoke:` sentinel --
+    correct for a local fixture, which is cut against no protocol split manifest
+    at all. Since the smoke-evidence producer derives the sealed roster from the
+    manifest whose verified checksum EQUALS that field, a sentinel is
+    unpromotable by construction: no split manifest verifies to it, so there is
+    no manifest that could unlock this artifact. The refusal is measured here
+    rather than left as a property nobody exercised, and the harness itself is
+    untouched -- the sentinel is right where it is.
+    """
+    harness = _load_harness()
+    dev = _build(harness, _synthetic_adata(), tmp_path, "sentinel")
+    block = read_payload(str(tmp_path / "sentinel" / "work"))["fit_role_artifact"]
+    assert block["pair_manifest_sha256"].startswith("dev-smoke:")
+
+    payload = read_payload(str(tmp_path / "sentinel" / "work"))
+    universe = [tuple(pair) for pair in payload["pair_ids"] + payload["calibration_pair_ids"]]
+    manifest = build_split_manifest(universe, seed=11, calibration_fraction=0.5)
+
+    with pytest.raises(ValueError) as refusal:
+        build_smoke_pair_roster(
+            backend="gears",
+            fit_role_artifact=block,
+            approved_root=dev["approved_root"],
+            pair_manifest=manifest,
+        )
+
+    message = str(refusal.value)
+    assert "pair_manifest_sha256" in message
+    assert block["pair_manifest_sha256"] in message
+    assert manifest["checksum"] in message
 
 
 def test_dev_smoke_content_identity_is_path_independent(tmp_path):
