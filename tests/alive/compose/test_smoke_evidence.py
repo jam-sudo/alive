@@ -964,9 +964,31 @@ def test_reclaim_leaves_the_directory_byte_identical_when_it_refuses(tmp_path):
 
 
 def test_reclaim_finds_nothing_to_do_in_a_directory_no_publish_touched(tmp_path):
-    """Nothing present is not an error: reclaim is safe to run before every retry."""
+    """Nothing present is not an error: reclaim is safe to run before every retry.
+
+    This test's claim is a NEGATIVE about raising, and a version that simply
+    called the function proved it only by letting the exception escape into the
+    production frame -- which this repository does not count as a kill (Codex
+    review of 319229a, Important 1). The call is captured, so "it raised" becomes
+    a named failure in this test's own frame that says what was raised; the
+    success path still asserts both what came back and that not one byte of the
+    directory moved.
+    """
     staged = _staged_evidence(tmp_path)
     before = _digests(staged)
 
-    assert reclaim_unbound_sidecars(evidence_dir=staged, sidecar_names=_SIDECAR_NAMES) == []
+    raised: Exception | None = None
+    removed: list[str] | None = None
+    # Broad on purpose: the claim is that NOTHING is raised, so narrowing the
+    # except would let the next unexpected type escape the frame again.
+    try:
+        removed = reclaim_unbound_sidecars(evidence_dir=staged, sidecar_names=_SIDECAR_NAMES)
+    except Exception as exc:
+        raised = exc
+
+    assert raised is None, (
+        f"reclaim must not raise when nothing is present, but raised "
+        f"{type(raised).__name__}: {raised}"
+    )
+    assert removed == []
     assert _digests(staged) == before
