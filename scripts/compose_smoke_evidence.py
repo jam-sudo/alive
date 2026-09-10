@@ -193,7 +193,16 @@ def _reclaim_unbound(inputs_path: Path, evidence_dir: Path) -> int:
     before `reclaim_unbound_sidecars` gets to refuse on the same fact.
     """
     bundle = json.loads(inputs_path.read_text(encoding="utf-8"))
-    promotion = _promotion_from_bundle(bundle, evidence_dir / LOCK_NAME)
+    try:
+        promotion = _promotion_from_bundle(bundle, evidence_dir / LOCK_NAME)
+    except (ValueError, ActivationEvidenceError) as exc:
+        # The name computation reuses the promotion path, so its refusals speak of
+        # "promoting". An operator running reclaim-unbound must read a refusal about
+        # reclaiming (2026-09-10 whole-branch review, Minor 4). Same class, so `main`'s
+        # exit-code mapping is unchanged.
+        raise type(exc)(
+            f"reclaim-unbound: this bundle cannot name a promotion's sidecars — {exc}"
+        ) from exc
     removed = reclaim_unbound_sidecars(
         evidence_dir=evidence_dir, sidecar_names=set(promotion.files)
     )

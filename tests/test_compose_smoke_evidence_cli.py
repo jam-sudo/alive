@@ -354,4 +354,8 @@ def test_reclaim_unbound_subcommand_exit_codes(tmp_path):
     assert refused.returncode == 1, refused.stdout
     assert "REFUSED" in refused.stderr
     assert "COMPLETE" in refused.stderr
+    # The refusal must speak of THIS command: the promotion guard fires first, and
+    # without the prefix its message says "promoting" to an operator who ran
+    # reclaim-unbound (2026-09-10 whole-branch review, Minor 4).
+    assert "reclaim-unbound:" in refused.stderr, refused.stderr
     assert _snapshot(staged) == published
