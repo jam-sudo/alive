@@ -440,6 +440,22 @@ CASES: tuple[Case, ...] = (
         "tests/alive/compose/test_durable.py"
         "::test_a_headline_whose_branch_disagrees_with_the_flip_fails_closed",
     ),
+    Case(
+        # The smoke producer used to take the SEALED roster from its caller. It now
+        # reads it out of a split manifest -- but a manifest that verifies is not
+        # automatically the one the smoke was cut against, and only this comparison
+        # says so. The pinned test's decoy is built from the same universe at the
+        # next seed and reproduces role for role, so nothing in its CONTENT betrays
+        # it; without the comparison the roster is derived happily from another
+        # split and the lock certifies VERIFIED_ZERO_OVERLAP against a seal the
+        # smoke never saw.
+        "M21 the sealed roster is derived from any manifest that merely verifies",
+        "alive.compose.smoke_evidence",
+        "    if checksum != artifact_digest:",
+        "    if False:",
+        "tests/alive/compose/test_smoke_evidence.py"
+        "::test_a_manifest_whose_checksum_differs_from_the_artifact_is_refused",
+    ),
 )
 
 
