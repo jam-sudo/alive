@@ -23,6 +23,11 @@ from alive.compose.fit_role import (
     extract_fit_roles,
     generate_fit_role_artifact,
 )
+from alive.compose.roles import (
+    CALIBRATION_ROLE_NAME,
+    SEALED_DOUBLE_UNSEEN_ROLE_NAME,
+    SEALED_SINGLE_UNSEEN_ROLE_NAME,
+)
 from alive.compose.smoke_evidence import (
     LOCK_NAME,
     build_smoke_artifact_manifest,
@@ -32,12 +37,82 @@ from alive.compose.smoke_evidence import (
     promote_lock_to_complete,
     publish_promotion,
 )
+from alive.compose.split import build_split_manifest
 from tests.alive.compose.test_fit_role import _extractor
 
-#: The one sealed pair the tiny artifact's extractor registers (test_fit_role._extractor).
-TINY_SEALED_PAIRS: tuple[tuple[str, str], ...] = (("AAA", "BBB"),)
+#: The tiny pair universe the fixture's split manifest is cut over. Three pairs on
+#: four genes -- the smallest universe that can hold one pair in each of the three
+#: roles, which is what makes "the sealed roster is BOTH sealed roles" measurable.
+TINY_ELIGIBLE_PAIRS: tuple[tuple[str, str], ...] = (
+    ("AAA", "BBB"),
+    ("AAA", "KLF1"),
+    ("CEBPE", "KLF1"),
+)
+#: MEASURED, not chosen. `build_pair_split` -- not this file -- decides which pair
+#: takes which role, so the seed was searched for and the constants below follow
+#: its answer. Over this universe at f=0.5: seed 0 leaves the calibration and
+#: double-unseen roles EMPTY (all three pairs single-unseen), seed 1 puts
+#: (AAA, BBB) in calibration and (CEBPE, KLF1) in the seal, and seed 2 is the
+#: first that gives one pair to each role -- calibration (CEBPE, KLF1),
+#: double-unseen (AAA, BBB), single-unseen (AAA, KLF1).
+TINY_SPLIT_SEED = 2
+TINY_CALIBRATION_FRACTION = 0.5
+
+#: The real split manifest -- built by the committed builder, checksum and all.
+#: `build_split_manifest` verifies what it returns, so importing this module is
+#: itself a check that the seed still reproduces the split it is pinned to.
+TINY_PAIR_MANIFEST: dict = build_split_manifest(
+    list(TINY_ELIGIBLE_PAIRS),
+    seed=TINY_SPLIT_SEED,
+    calibration_fraction=TINY_CALIBRATION_FRACTION,
+)
+#: The digest the tiny fit-role artifact carries as its `pair_manifest_sha256`; the
+#: producer derives the sealed roster only from a manifest that verifies TO THIS.
+TINY_PAIR_MANIFEST_SHA256: str = TINY_PAIR_MANIFEST["checksum"]
+
+
+def _role_pairs(role: str) -> tuple[tuple[str, str], ...]:
+    """The manifest's own membership for one role, as canonical tuples."""
+    return tuple((str(a), str(b)) for a, b in TINY_PAIR_MANIFEST["roles"][role])
+
+
+#: Every constant below is DERIVED from the manifest above. A hand-set roster that
+#: disagreed with `build_pair_split` would be a fixture asserting a split the
+#: algorithm does not produce, and the producer under test now refuses exactly that.
+TINY_CALIBRATION_PAIRS: tuple[tuple[str, str], ...] = _role_pairs(CALIBRATION_ROLE_NAME)
+#: Both sealed roles, in the order the producer reads them.
+TINY_SEALED_PAIRS: tuple[tuple[str, str], ...] = _role_pairs(
+    SEALED_DOUBLE_UNSEEN_ROLE_NAME
+) + _role_pairs(SEALED_SINGLE_UNSEEN_ROLE_NAME)
+#: The double-unseen pair whose combo cell the tiny artifact must exclude.
+TINY_SEALED_COMBO_PAIR: tuple[str, str] = _role_pairs(SEALED_DOUBLE_UNSEEN_ROLE_NAME)[0]
+#: The universe's genes, UTF-8 byte-ordered; every one is a retained single.
+TINY_GENES: tuple[str, ...] = tuple(
+    sorted({gene for pair in TINY_ELIGIBLE_PAIRS for gene in pair}, key=lambda s: s.encode("utf-8"))
+)
+
+
+def tiny_training_tokens(combo_sep: str = "_") -> tuple[str, ...]:
+    """What the tiny artifact's fit rows carry, sorted unique, in one separator's spelling."""
+    combos = {f"{a}{combo_sep}{b}" for a, b in TINY_CALIBRATION_PAIRS}
+    return tuple(sorted(set(TINY_GENES) | combos))
+
+
 #: What the tiny artifact's non-control rows carry, sorted unique, as the roster records it.
-TINY_TRAINING_TOKENS: tuple[str, ...] = ("AAA", "BBB", "CEBPE", "CEBPE_KLF1", "KLF1")
+TINY_TRAINING_TOKENS: tuple[str, ...] = tiny_training_tokens()
+
+
+def write_tiny_pair_manifest(path: Path) -> Path:
+    """Write :data:`TINY_PAIR_MANIFEST` to ``path`` as JSON and return it.
+
+    The CLI reads the split manifest from a path in the inputs bundle, so a test
+    that drives the CLI needs the same manifest on disk that the tiny artifact
+    was cut against.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(TINY_PAIR_MANIFEST, sort_keys=True), encoding="utf-8")
+    return path
+
 
 _EVIDENCE_ROOT = Path(__file__).resolve().parents[3] / "docs/activation-evidence/compose"
 _LINEAGE_FILES = (
@@ -64,40 +139,45 @@ def write_tiny_fit_role_artifact(
 ) -> FitRoleArtifactSpec:
     """Write a real (tiny) fit-role ``.h5ad`` at ``path`` and return its spec.
 
-    Rows come from ``test_fit_role._extractor``: control, KLF1, CEBPE, CEBPE_KLF1
-    (calibration combo), AAA, BBB; the sealed pair is (AAA, BBB). ``with_sealed_row``
-    appends a row carrying the sealed combo token under the ``combo_calibration``
-    role -- the leak Task 0.1's negative test must see refused. ``without_combo_rows``
-    drops the calibration combo so the artifact lacks one of the two fit roles.
+    The rows and the registered pair sets come from :data:`TINY_PAIR_MANIFEST`,
+    not from this file: control, one single per gene in :data:`TINY_GENES`, one
+    row per calibration combo, and last the double-unseen combo cell that must be
+    excluded and never read. The artifact records the manifest's own ``checksum``
+    as its ``pair_manifest_sha256`` and its ``eligibility_hash``, which is what
+    lets :func:`~alive.compose.smoke_evidence.build_smoke_pair_roster` derive the
+    sealed roster from the manifest instead of taking one from a caller.
+
+    ``with_sealed_row`` appends a row carrying the sealed combo token under the
+    ``combo_calibration`` role -- the leak Task 0.1's negative test must see
+    refused. ``without_combo_rows`` drops the calibration combos so the artifact
+    lacks one of the two fit roles.
     """
-    if without_combo_rows:
-        extractor = _extractor(
-            obs_source_row_id=[f"r{i}" for i in range(6)],
-            obs_perturbation=["control", "KLF1", "CEBPE", "AAA", "BBB", "KLF1"],
-            combo_sep=combo_sep,
-        )
-    else:
-        extractor = _extractor(
-            obs_perturbation=[
-                "control",
-                "KLF1",
-                "CEBPE",
-                f"CEBPE{combo_sep}KLF1",
-                "AAA",
-                "BBB",
-                f"AAA{combo_sep}BBB",
-            ],
-            combo_sep=combo_sep,
-        )
+    sealed_combo_token = f"{TINY_SEALED_COMBO_PAIR[0]}{combo_sep}{TINY_SEALED_COMBO_PAIR[1]}"
+    perturbations = ["control", *TINY_GENES]
+    if not without_combo_rows:
+        perturbations += [f"{a}{combo_sep}{b}" for a, b in TINY_CALIBRATION_PAIRS]
+    # Last. In the default (7-row) shape that puts the sealed combo at index 6,
+    # which is the row `test_fit_role._extractor`'s reader raises on if anything
+    # ever reads it -- so "the sealed cell is never read" stays a measured claim.
+    perturbations.append(sealed_combo_token)
+    extractor = _extractor(
+        obs_source_row_id=[f"r{i}" for i in range(len(perturbations))],
+        obs_perturbation=perturbations,
+        calibration_pair_ids=list(TINY_CALIBRATION_PAIRS),
+        sealed_pair_ids=list(TINY_SEALED_PAIRS),
+        pair_manifest_sha256=TINY_PAIR_MANIFEST_SHA256,
+        eligibility_hash=TINY_PAIR_MANIFEST["eligibility_hash"],
+        combo_sep=combo_sep,
+    )
     extraction = extract_fit_roles(extractor=extractor)
     if with_sealed_row:
         import numpy as np
         from scipy import sparse
 
-        leaked = ("r9", "combo_calibration", f"AAA{combo_sep}BBB")
+        leaked = ("r9", CALIBRATION_ROLE_NAME, sealed_combo_token)
         extra = sparse.csr_matrix(np.ones((1, extraction.X.shape[1])))
         counts = dict(extraction.role_counts)
-        counts["combo_calibration"] += 1
+        counts[CALIBRATION_ROLE_NAME] += 1
         extraction = FitRoleExtraction(
             X=sparse.vstack([extraction.X, extra]).tocsr(),
             var_names=extraction.var_names,
@@ -152,6 +232,7 @@ def publish_synthetic_complete_lock(
             backend=backend,
             fit_role_artifact=artifact.to_payload_block(),
             approved_root=objects_dir,
+            pair_manifest=TINY_PAIR_MANIFEST,
             sealed_pair_ids=TINY_SEALED_PAIRS,
         )
         objects = {}

@@ -15,7 +15,11 @@ import sys
 from pathlib import Path
 
 from alive.compose.activation_evidence import validate_dependency_lock
-from tests.alive.compose.smoke_evidence_support import write_tiny_fit_role_artifact
+from tests.alive.compose.smoke_evidence_support import (
+    TINY_SEALED_PAIRS,
+    write_tiny_fit_role_artifact,
+    write_tiny_pair_manifest,
+)
 
 REPO = Path(__file__).resolve().parents[1]
 CLI = REPO / "scripts" / "compose_smoke_evidence.py"
@@ -41,6 +45,9 @@ def _bundle(tmp_path, *, overlap=False, drift=False):
     """
     staged = tmp_path / "compose"
     shutil.copytree(EVIDENCE, staged)
+    # The split manifest the tiny artifacts were cut against, on disk where the
+    # bundle can point at it: the CLI derives the sealed roster from this file.
+    pair_manifest = write_tiny_pair_manifest(tmp_path / "pair_manifest.json")
 
     backends = {}
     for backend in ("gears", "cpa"):
@@ -64,7 +71,8 @@ def _bundle(tmp_path, *, overlap=False, drift=False):
         backends[backend] = {
             "fit_role_artifact": artifact.to_payload_block(),
             "approved_root": str(tmp_path),
-            "sealed_pair_ids": [["AAA", "BBB"]],
+            "pair_manifest": str(pair_manifest),
+            "sealed_pair_ids": [list(pair) for pair in TINY_SEALED_PAIRS],
             "exit_code": 0,
             "artifacts": objects,
         }
@@ -237,6 +245,30 @@ def test_a_bundle_missing_a_field_is_a_usage_error_not_a_traceback(tmp_path):
     assert "Traceback" not in result.stderr
 
 
+def test_a_bundle_without_a_pair_manifest_is_a_usage_error(tmp_path):
+    """`pair_manifest` is required per backend; a bundle without one cannot be read.
+
+    The sealed roster is derived from the split manifest the fit-role artifact
+    names, so a bundle that does not say where that manifest is has not described
+    a promotion at all. That is exit 2 (the tool could not read the inputs), not
+    exit 1 (the inputs were understood and refused) -- an operator reading `$?`
+    must be sent to the bundle, not to the evidence.
+    """
+    staged, inputs = _bundle(tmp_path)
+    bundle = json.loads(inputs.read_text(encoding="utf-8"))
+    del bundle["backends"]["cpa"]["pair_manifest"]
+    inputs.write_text(json.dumps(bundle), encoding="utf-8")
+
+    result = _run(inputs, staged)
+
+    assert result.returncode == 2, result.stderr
+    assert "pair_manifest" in result.stderr
+    assert "Traceback" not in result.stderr
+    assert json.loads((staged / LOCK_NAME).read_text())["run_gate"]["evidence_status"] == (
+        "INCOMPLETE"
+    )
+
+
 def test_a_malformed_lock_is_a_refusal_not_an_inputs_bundle_usage_error(tmp_path):
     """A `KeyError` from the LOCK must not be reported as a missing bundle key.
 
@@ -275,3 +307,55 @@ def test_a_harness_roster_in_the_bundle_that_disagrees_with_the_artifact_is_refu
     assert json.loads((staged / LOCK_NAME).read_text())["run_gate"]["evidence_status"] == (
         "INCOMPLETE"
     )
+
+
+def _run_reclaim(inputs, staged):
+    return subprocess.run(
+        [
+            sys.executable,
+            str(CLI),
+            "reclaim-unbound",
+            "--inputs",
+            str(inputs),
+            "--evidence-dir",
+            str(staged),
+        ],
+        capture_output=True,
+        text=True,
+        cwd=REPO,
+    )
+
+
+def test_reclaim_unbound_subcommand_exit_codes(tmp_path):
+    """0 when it reclaims a crashed publish's leftover, 1 when it refuses.
+
+    The operator reads `$?`, not the prose. A sidecar left under an INCOMPLETE
+    lock is what a publish that died between the write-once sidecars and the
+    final lock rename leaves behind, and reclaiming it must report success; the
+    same command against the COMPLETE lock the next run publishes must refuse,
+    and a refusal that exited 0 would leave the operator believing a published
+    evidence directory had just been cleaned up.
+    """
+    staged, inputs = _bundle(tmp_path)
+    leftover = staged / "cpa_smoke_pair_roster.json"
+    leftover.write_text("{}\n", encoding="utf-8")
+
+    reclaimed = _run_reclaim(inputs, staged)
+
+    assert reclaimed.returncode == 0, reclaimed.stderr
+    assert "cpa_smoke_pair_roster.json" in reclaimed.stdout
+    assert not leftover.exists()
+
+    assert _run(inputs, staged).returncode == 0, "the reclaimed name must be free again"
+    published = _snapshot(staged)
+
+    refused = _run_reclaim(inputs, staged)
+
+    assert refused.returncode == 1, refused.stdout
+    assert "REFUSED" in refused.stderr
+    assert "COMPLETE" in refused.stderr
+    # The refusal must speak of THIS command: the promotion guard fires first, and
+    # without the prefix its message says "promoting" to an operator who ran
+    # reclaim-unbound (2026-09-10 whole-branch review, Minor 4).
+    assert "reclaim-unbound:" in refused.stderr, refused.stderr
+    assert _snapshot(staged) == published

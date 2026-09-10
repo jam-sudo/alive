@@ -8,7 +8,7 @@
 > **이 문서는 아무것도 정의하지 않는다** — 세부(task)는 plan, claim은 spec, exact param은 config,
 > 시간순 audit는 git이 authoritative다([sources of truth](../../CLAUDE.md#sources)). 상태 행이 authoritative
 > 문서와 어긋나면 **authoritative 문서가 옳다**; 이 인덱스를 갱신한다.
-> **Updated:** 2026-09-09 @ `36f069a` (branch `compose-pr15-followups`)
+> **Updated:** 2026-09-10 @ `78419d1` (branch `compose-owner-judgments-2026-09-10`)
 > `scripts/bump-readiness-stamp.sh` / the pre-commit hook from `HEAD` at commit time, so it names the
 > **parent** of the commit that carries it and can never name itself. Reading it as "one commit stale" is a
 > misreading; git is authoritative for when this file actually changed.
@@ -91,6 +91,7 @@ sub-project id 다.
 | Amendment E | main spec §10.5 — primary metric 식 | SIGNED → EFFECTIVE (Task 3) | 〃 |
 | Amendment F | main spec §3.3 — ladder claim 상한 | SIGNED → EFFECTIVE (Task 11) | 〃 |
 | Amendment G | `CLAUDE.md` (+ D2-b 의 `#data-eval` ablation-의무 처분) | SIGNED → EFFECTIVE (Task 8 + 12) | 〃 |
+| `J1`~`J4` | 2026-09-06 검토가 남긴 오너 판단 4건(위임 서명 지위 · unbound sidecar · sealed roster 유도 · 로컬 ledger slot ID) | **위임 판정 2026-09-10** — 네 건 모두 결정됨; 구현은 Task 1~4 | [2026-09-10-compose-owner-delegated-judgments.md](2026-09-10-compose-owner-delegated-judgments.md) |
 
 서명·처분·digest 이동의 authoritative 기록은 결정문 자신이다. 이 표는 인덱스일 뿐이며 어긋나면
 결정문이 옳다.

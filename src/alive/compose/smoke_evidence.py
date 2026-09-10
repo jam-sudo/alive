@@ -21,14 +21,17 @@ Nothing in this module writes into the evidence directory except
 
 from __future__ import annotations
 
+import contextlib
 import copy
+import errno
+import fcntl
 import hashlib
 import json
 import os
 import re
 import shutil
 import tempfile
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -39,7 +42,8 @@ from alive.compose.activation_evidence import (
     validate_dependency_lock,
 )
 from alive.compose.fit_role import FitRoleArtifactSpec, read_verified_fit_role_artifact
-from alive.compose.roles import CALIBRATION_ROLE_NAME
+from alive.compose.roles import CALIBRATION_ROLE_NAME, SEALED_ROLE_NAMES
+from alive.compose.split import verify_split_manifest
 from alive.io import atomic_write_once
 from alive.provenance import sha256_file, sha256_json
 
@@ -55,6 +59,7 @@ __all__ = [
     "merge_backend_record",
     "promote_lock_to_complete",
     "publish_promotion",
+    "reclaim_unbound_sidecars",
 ]
 
 #: The dependency lock's fixed name inside the evidence directory.
@@ -65,6 +70,17 @@ ARTIFACT_MANIFEST_SCHEMA = "compose_backend_smoke_artifact_manifest_v1"
 WHEELHOUSE_SCHEMA = "compose_python_artifact_manifest_v1"
 _WHEELHOUSE_ENVIRONMENTS = frozenset({"gears_env", "cpa_env"})
 _BACKENDS = frozenset({"gears", "cpa"})
+#: Every filename a promotion publishes beside the lock -- the only names
+#: :func:`reclaim_unbound_sidecars` will remove. Built from the same backends and
+#: suffixes :func:`promote_lock_to_complete` spells its names from, and bound to
+#: that function's own output by a round-trip test, because the reclaimer needs a
+#: roster it knows on its own: a caller that supplied both the names and the
+#: permission to delete them would be checking itself.
+_SIDECAR_NAMES = frozenset(
+    {"python_artifact_manifest.json"}
+    | {f"{backend}_smoke_pair_roster.json" for backend in _BACKENDS}
+    | {f"{backend}_smoke_artifacts.json" for backend in _BACKENDS}
+)
 #: The six objects the validator requires, mapped to their run-gate record field.
 #: Spelled here to match the validator's own table; the round-trip test binds them.
 _ARTIFACT_RECORD_FIELDS = {
@@ -186,12 +202,61 @@ def _canonical_sealed_tokens(sealed_pair_ids: Sequence[Sequence[str]], combo_sep
     return sorted(tokens)
 
 
+def _sealed_roster_from_manifest(
+    pair_manifest: Mapping[str, Any],
+    *,
+    artifact_digest: str,
+    backend: str,
+    combo_sep: str,
+) -> tuple[list[str], str]:
+    """The sealed roster the artifact's OWN split manifest defines, or a refusal.
+
+    Two things have to hold before a manifest may name the seal. It must verify --
+    :func:`alive.compose.split.verify_split_manifest` recomputes the self-excluding
+    checksum, reconstructs the eligible universe from the role union and reproduces
+    the membership from the recorded seed and fraction, so neither an edited role
+    nor an edited-and-re-checksummed one survives. And its verified checksum must
+    equal the ``pair_manifest_sha256`` the fit-role artifact carries, which is what
+    binds the roster to the split the smoke was actually cut against: a manifest
+    that verifies perfectly and belongs to another split describes another seal.
+
+    The roster is the union of BOTH sealed roles (``SEALED_ROLE_NAMES``), not the
+    headline double-unseen one -- a single-unseen pair is sealed too, and a roster
+    missing it would let the lock certify ``VERIFIED_ZERO_OVERLAP`` against a
+    smaller seal than the protocol holds.
+
+    Returns
+    -------
+    tuple of (list of str, str)
+        The canonical sealed tokens, and the verified manifest checksum.
+    """
+    try:
+        checksum = verify_split_manifest(dict(pair_manifest))
+    except (TypeError, ValueError, AttributeError) as exc:
+        raise ValueError(
+            f"{backend} pair manifest does not verify: {exc}; the sealed roster is read out "
+            "of this manifest, so an unverified one has no roster to give"
+        ) from exc
+    if checksum != artifact_digest:
+        raise ValueError(
+            f"{backend} pair manifest verifies to {checksum!r} but the fit-role artifact "
+            f"records pair_manifest_sha256={artifact_digest!r}; the roster must come from "
+            "the split the smoke was cut against, and any other manifest -- however valid "
+            "-- describes a different seal"
+        )
+    sealed_pairs = [
+        tuple(pair) for role in SEALED_ROLE_NAMES for pair in pair_manifest["roles"][role]
+    ]
+    return _canonical_sealed_tokens(sealed_pairs, combo_sep), checksum
+
+
 def build_smoke_pair_roster(
     *,
     backend: str,
     fit_role_artifact: Mapping[str, Any],
     approved_root: str | Path,
-    sealed_pair_ids: Sequence[Sequence[str]],
+    pair_manifest: Mapping[str, Any],
+    sealed_pair_ids: Sequence[Sequence[str]] | None = None,
     harness_training_pair_ids: Sequence[str] | None = None,
     combo_sep: str = "_",
 ) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -215,9 +280,14 @@ def build_smoke_pair_roster(
         digests) the worker consumed.
     approved_root : str or Path
         Directory the artifact must live inside (the worker's ``--approved-root``).
-    sealed_pair_ids : Sequence of pair
-        The protocol's sealed pairs, as ``[gene_a, gene_b]`` in either order (the
-        payload's ``pair_ids``). Canonicalised to the artifact's token form.
+    pair_manifest : Mapping
+        The protocol's split manifest (:func:`alive.compose.split.build_split_manifest`).
+        It must verify and its checksum must equal the artifact block's
+        ``pair_manifest_sha256``; the sealed roster is then its two sealed roles.
+    sealed_pair_ids : Sequence of pair, optional
+        What the harness reports the sealed pairs were, as ``[gene_a, gene_b]`` in
+        either order. Not a source of the roster (judgment 3, 2026-09-10); when
+        given it must equal the derived roster exactly.
     harness_training_pair_ids : Sequence of str, optional
         What the smoke harness itself reports it fitted on. Not a source of the
         roster; when given it must equal the derived roster exactly.
@@ -229,14 +299,17 @@ def build_smoke_pair_roster(
     tuple of (dict, dict)
         The ``compose_smoke_pair_roster_v1`` manifest, and the fragment of
         ``run_gate.required_evidence[backend]`` it determines -- including
-        ``fit_role_artifact_sha256``, the digest of the bytes the roster came from.
+        ``fit_role_artifact_sha256``, the digest of the bytes the roster came from,
+        and ``pair_manifest_sha256``, the verified checksum of the split manifest
+        the sealed roster came from.
 
     Raises
     ------
     ValueError
         If ``backend`` is not one of the protocol's two backends, if the block is
-        malformed, if the artifact lacks one of the two fit roles, if a sealed pair
-        is malformed, or if the harness roster disagrees with the artifact.
+        malformed, if the pair manifest does not verify or is not the artifact's
+        own, if the artifact lacks one of the two fit roles, if a sealed pair is
+        malformed, or if a harness roster disagrees with what was derived.
     FitRoleArtifactError
         If the artifact does not match its spec (path policy, bytes, identity).
     """
@@ -245,7 +318,20 @@ def build_smoke_pair_roster(
     artifact_sha256 = spec.sha256.removeprefix("sha256:")
     if _HEX64.fullmatch(artifact_sha256) is None:
         raise ValueError(f"fit_role_artifact.sha256 must be sha256:<64 hex>, got {spec.sha256!r}")
-    sealed_tokens = _canonical_sealed_tokens(sealed_pair_ids, combo_sep)
+    sealed_tokens, pair_manifest_sha256 = _sealed_roster_from_manifest(
+        pair_manifest,
+        artifact_digest=spec.pair_manifest_sha256,
+        backend=backend,
+        combo_sep=combo_sep,
+    )
+    if sealed_pair_ids is not None:
+        claimed_sealed = _canonical_sealed_tokens(sealed_pair_ids, combo_sep)
+        if claimed_sealed != sealed_tokens:
+            raise ValueError(
+                f"{backend} harness sealed roster disagrees with the split manifest — "
+                f"missing_from_harness={sorted(set(sealed_tokens) - set(claimed_sealed))} "
+                f"not_in_manifest={sorted(set(claimed_sealed) - set(sealed_tokens))}"
+            )
 
     adata = read_verified_fit_role_artifact(spec.path, spec=spec, approved_root=str(approved_root))
     training_rows = [
@@ -285,6 +371,7 @@ def build_smoke_pair_roster(
         "sealed_pair_roster_sha256": sha256_json(roster["sealed_pair_ids"]),
         "sealed_pair_overlap_count": len(set(training_tokens) & set(sealed_tokens)),
         "fit_role_artifact_sha256": artifact_sha256,
+        "pair_manifest_sha256": pair_manifest_sha256,
     }
     return roster, record
 
@@ -632,8 +719,9 @@ def promote_lock_to_complete(
     ValueError
         If the lock is not INCOMPLETE, if the backends are not exactly
         ``{"gears", "cpa"}`` or a record is filed under the other backend, if any
-        roster overlaps the sealed pairs, if any smoke did not exit 0, or if the
-        run identity or prose is malformed.
+        roster overlaps the sealed pairs, if any smoke did not exit 0, if a record
+        carries no ``pair_manifest_sha256`` or the two carry different ones, or if
+        the run identity or prose is malformed.
     """
     status = lock["run_gate"]["evidence_status"]
     if status != "INCOMPLETE":
@@ -680,6 +768,28 @@ def promote_lock_to_complete(
                 "not exit 0 is not evidence that it ran"
             )
 
+    # COMPOSE-K562-v1 has ONE pair universe. Each roster was derived from the split
+    # manifest its own backend's artifact names, so the two derivations agree only if
+    # both smokes were cut against the same manifest -- a lock recording two would
+    # certify two different seals as one run's VERIFIED_ZERO_OVERLAP.
+    pair_manifests = {
+        backend: backends[backend]["record"].get("pair_manifest_sha256")
+        for backend in sorted(_BACKENDS)
+    }
+    absent = sorted(backend for backend, digest in pair_manifests.items() if digest is None)
+    if absent:
+        raise ValueError(
+            f"{absent} must carry pair_manifest_sha256; build_smoke_pair_roster derives it "
+            "from the verified split manifest, and a record without it describes a sealed "
+            "roster whose origin was never established"
+        )
+    if len(set(pair_manifests.values())) != 1:
+        raise ValueError(
+            f"the backends were cut against different pair manifests: {pair_manifests}; "
+            "one protocol has one pair universe, and a lock recording two would certify "
+            "two different seals as one run"
+        )
+
     promoted = copy.deepcopy(lock)
     run_gate = promoted["run_gate"]
     required: dict[str, Any] = {}
@@ -695,7 +805,16 @@ def promote_lock_to_complete(
         files[roster_path] = roster_text
         files[artifact_path] = artifact_text
         required[backend] = {
-            **supplied["record"],
+            # `pair_manifest_sha256` is established above and then left out here.
+            # `activation_evidence._RUN_EVIDENCE_KEYS` is an EXACT key roster and
+            # that module is a member of the frozen kernel-isolation closure, so
+            # the lock has no slot for the split-manifest checksum: it is spent as
+            # a check on this promotion rather than carried as a field.
+            **{
+                key: value
+                for key, value in supplied["record"].items()
+                if key != "pair_manifest_sha256"
+            },
             "pair_roster_manifest_path": roster_path,
             "pair_roster_manifest_sha256": roster_sha,
             "artifact_manifest_path": artifact_path,
@@ -750,6 +869,75 @@ def _atomic_replace(path: Path, text: str) -> None:
         temporary.unlink(missing_ok=True)
 
 
+#: ``flock`` refuses a contended lock with one of these; anything else means the
+#: exclusion could not be established at all, which is a different refusal.
+_CONTENDED = frozenset({errno.EWOULDBLOCK, errno.EAGAIN, errno.EACCES})
+
+
+@contextlib.contextmanager
+def _evidence_directory_lock(evidence_dir: Path) -> Iterator[None]:
+    """Hold the evidence directory's own exclusive advisory lock, or refuse at once.
+
+    :func:`publish_promotion` and :func:`reclaim_unbound_sidecars` are each safe
+    alone and were not safe against each other. The publisher writes its sidecars
+    write-once and commits by replacing the lock LAST; the reclaimer decides what
+    is unbound from a snapshot of that same lock. So a reclaimer that read the
+    INCOMPLETE lock before the publisher's first sidecar landed would see that
+    fresh sidecar as an unbound leftover and delete it inside the publisher's
+    window -- and the publisher would then commit a COMPLETE lock binding a file
+    that is gone. Past the rename there is no rollback, and condition (a) makes
+    the result unreachable by reclaim: a COMPLETE lock is never reclaimed. The
+    two critical sections therefore share one lock (PR #17 review, Critical 1).
+
+    The lock is taken on a descriptor of the DIRECTORY itself. A lock FILE would
+    have to live inside a committed evidence directory -- a new artifact beside
+    the manifests, needing an ignore rule and answering to nobody's schema --
+    while a directory descriptor creates nothing, is released by the kernel when
+    the holder dies (the crashed publisher of the sequential test releases it by
+    dying), and is the same primitive and the same failure mode the driver
+    already uses (``LOCK_EX | LOCK_NB`` in
+    ``alive.compose.driver.recover_cmd._recover_lock``).
+
+    Contention fails CLOSED and immediately: this never blocks, because a caller
+    that waits is a caller whose snapshot of the directory is ageing while it
+    waits. A failure that is not contention -- a platform that will not lock a
+    directory descriptor, a permission error -- is also a refusal, and says so
+    differently: running unserialised is the one outcome that is not available.
+
+    Raises
+    ------
+    ActivationEvidenceError
+        If another publish or reclaim holds the directory, or if the lock cannot
+        be established at all.
+    """
+    directory = Path(evidence_dir)
+    try:
+        fd = os.open(directory, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0))
+    except OSError as exc:
+        raise ActivationEvidenceError(
+            f"cannot open {directory} to serialise this operation ({exc}); publish and reclaim "
+            "run only while one of them holds this directory"
+        ) from exc
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            if exc.errno in _CONTENDED:
+                raise ActivationEvidenceError(
+                    f"another publish or reclaim holds {directory}; retry after it exits -- "
+                    "these two are only safe against each other one at a time"
+                ) from exc
+            raise ActivationEvidenceError(
+                f"cannot lock {directory} ({exc}); refusing rather than running unserialised"
+            ) from exc
+        try:
+            yield
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
+
+
 def publish_promotion(promotion: Promotion, *, evidence_dir: Path) -> dict[str, Any]:
     """Validate a promotion in a staging copy, then publish it; refuse without a trace.
 
@@ -762,6 +950,12 @@ def publish_promotion(promotion: Promotion, *, evidence_dir: Path) -> dict[str, 
     sidecars are then published write-once (:func:`alive.io.atomic_write_once`)
     and the lock last, by atomic rename, so the lock is the commit point and a
     refusal at any earlier step leaves the directory byte-identical.
+
+    The whole transaction -- the pre-existence scan through the final validation
+    -- runs while this process holds :func:`_evidence_directory_lock`, so a
+    concurrent :func:`reclaim_unbound_sidecars` cannot decide that a sidecar
+    written a moment ago is unbound and delete it before the lock that binds it
+    is committed.
 
     Parameters
     ----------
@@ -782,29 +976,146 @@ def publish_promotion(promotion: Promotion, *, evidence_dir: Path) -> dict[str, 
         If any sidecar name is already taken under ``evidence_dir``. Established
         for every name before the first write, so no partial set is published.
     ActivationEvidenceError
-        If the staged lock does not validate COMPLETE. Nothing has been written.
+        If the staged lock does not validate COMPLETE, or if another publish or
+        reclaim holds the evidence directory. Nothing has been written.
     """
-    for filename in sorted(promotion.files):
-        if (evidence_dir / filename).exists():
-            raise FileExistsError(
-                f"{filename} already exists under {evidence_dir}; a sidecar is published "
-                "write-once and an existing file is either a stray or the remains of an "
-                "earlier run, and either way not this run's to overwrite"
+    with _evidence_directory_lock(evidence_dir):
+        for filename in sorted(promotion.files):
+            if (evidence_dir / filename).exists():
+                raise FileExistsError(
+                    f"{filename} already exists under {evidence_dir}; a sidecar is published "
+                    "write-once and an existing file is either a stray or the remains of an "
+                    "earlier run, and either way not this run's to overwrite"
+                )
+
+        lock_text = _serialize(promotion.lock)
+        with tempfile.TemporaryDirectory(prefix="compose-promotion-") as scratch:
+            staging = Path(scratch) / evidence_dir.name
+            shutil.copytree(evidence_dir, staging)
+            for filename, text in promotion.files.items():
+                (staging / filename).write_text(text, encoding="utf-8")
+            (staging / LOCK_NAME).write_text(lock_text, encoding="utf-8")
+            staged = validate_dependency_lock(staging / LOCK_NAME)
+            status = staged["run_gate"]["evidence_status"]
+            if status != "COMPLETE":
+                raise ActivationEvidenceError(f"staged lock validates as {status}, not COMPLETE")
+
+        for filename, text in promotion.files.items():
+            atomic_write_once(evidence_dir / filename, text)
+        _atomic_replace(evidence_dir / LOCK_NAME, lock_text)
+        return validate_dependency_lock(evidence_dir / LOCK_NAME)
+
+
+def reclaim_unbound_sidecars(*, evidence_dir: Path, sidecar_names: Iterable[str]) -> list[str]:
+    """Remove sidecars a crashed publish left unbound, and refuse everything else.
+
+    :func:`publish_promotion` writes the sidecars write-once and the lock last, so
+    the lock is the commit point -- and a process that dies between them leaves
+    sidecars on disk that no lock binds, with every retry refused by the
+    write-once guard (``FileExistsError``) until someone deletes the files. That
+    deletion was a ``rm`` typed by hand inside an evidence directory, which is the
+    least reviewable operation this repository has. It is made a named one here,
+    with its conditions checked and its result reported, and the write-once
+    invariant is untouched: nothing about publishing changes, and a file that is
+    bound, or that no promotion would have written, is not deleted at all.
+
+    Three conditions must ALL hold, and a violation refuses the whole request
+    without removing anything:
+
+    (a) ``evidence_dir/LOCK_NAME`` exists, parses, and does not read ``COMPLETE``.
+        A COMPLETE lock is a published result whose record binds these files by
+        SHA-256; its directory is never reclaimed.
+    (b) every supplied name is one a promotion publishes (:data:`_SIDECAR_NAMES`).
+        The caller passes ``Promotion.files``; a name from anywhere else is
+        refused rather than deleted, so the parameter cannot become an arbitrary
+        delete list with a conditions story attached.
+    (c) the lock's text does not mention the name anywhere. A sidecar the lock
+        names is bound evidence whatever the lock's status says -- a half-filled
+        INCOMPLETE lock is exactly the state a hand-written record leaves.
+
+    A violation on ONE name refuses the whole request. A partial reclaim is
+    hand-deletion with extra steps: the operator is left with a half-cleaned
+    directory, an error, and no record of which half went.
+
+    The lock snapshot through the last unlink runs while this process holds
+    :func:`_evidence_directory_lock` -- the same lock :func:`publish_promotion`
+    holds for its whole transaction. Without it, the three conditions are answers
+    about a directory that a publisher may be changing underneath them, and the
+    file this function decides is unbound may be one a publisher is about to bind
+    (PR #17 review, Critical 1). A crashed publisher's lock died with it, so the
+    leftovers this function exists for are still reachable.
+
+    The lock is read as text and parsed here rather than passed through
+    :func:`validate_dependency_lock`. The directory this function exists for is
+    one a crash left half-published, where the validator refuses for reasons that
+    say nothing about whether these particular files are bound; the status is read
+    from the parsed object and condition (c) searches the exact bytes on disk.
+
+    Parameters
+    ----------
+    evidence_dir : Path
+        The directory holding the lock and the sidecars.
+    sidecar_names : Iterable of str
+        The names this promotion publishes -- ``Promotion.files`` from
+        :func:`promote_lock_to_complete`. Names not present on disk are not
+        candidates; a name that is not a sidecar of a promotion is refused.
+
+    Returns
+    -------
+    list of str
+        The filenames removed, sorted. Empty when nothing was there to reclaim,
+        which is not an error: the command is safe to run before every retry.
+
+    Raises
+    ------
+    ActivationEvidenceError
+        If any of the three conditions fails, naming the condition and the files
+        that failed it, or if another publish or reclaim holds the evidence
+        directory. Nothing has been removed.
+    """
+    directory = Path(evidence_dir)
+    with _evidence_directory_lock(directory):
+        lock_path = directory / LOCK_NAME
+        try:
+            lock_text = lock_path.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise ActivationEvidenceError(
+                f"condition (a) fails: {LOCK_NAME} could not be read under {directory} ({exc}); "
+                "without the lock nothing establishes that these sidecars are unbound"
+            ) from exc
+        try:
+            status = json.loads(lock_text)["run_gate"]["evidence_status"]
+        except (ValueError, LookupError, TypeError) as exc:
+            raise ActivationEvidenceError(
+                f"condition (a) fails: {LOCK_NAME} under {directory} carries no readable "
+                f"run_gate.evidence_status ({exc!r}); a lock this function cannot read is a lock "
+                "whose claim on these files it cannot rule out"
+            ) from exc
+        if status == "COMPLETE":
+            raise ActivationEvidenceError(
+                f"condition (a) fails: {LOCK_NAME} under {directory} reads "
+                "evidence_status=COMPLETE; a COMPLETE lock is a published result whose record "
+                "binds its sidecars by SHA-256, and its directory is never reclaimed"
             )
 
-    lock_text = _serialize(promotion.lock)
-    with tempfile.TemporaryDirectory(prefix="compose-promotion-") as scratch:
-        staging = Path(scratch) / evidence_dir.name
-        shutil.copytree(evidence_dir, staging)
-        for filename, text in promotion.files.items():
-            (staging / filename).write_text(text, encoding="utf-8")
-        (staging / LOCK_NAME).write_text(lock_text, encoding="utf-8")
-        staged = validate_dependency_lock(staging / LOCK_NAME)
-        status = staged["run_gate"]["evidence_status"]
-        if status != "COMPLETE":
-            raise ActivationEvidenceError(f"staged lock validates as {status}, not COMPLETE")
+        requested = sorted(set(sidecar_names))
+        outside = [name for name in requested if name not in _SIDECAR_NAMES]
+        if outside:
+            raise ActivationEvidenceError(
+                f"condition (b) fails: {outside} are not sidecars a promotion publishes "
+                f"({sorted(_SIDECAR_NAMES)}); reclaim removes this producer's own leftovers, "
+                "not whatever name it is handed"
+            )
 
-    for filename, text in promotion.files.items():
-        atomic_write_once(evidence_dir / filename, text)
-    _atomic_replace(evidence_dir / LOCK_NAME, lock_text)
-    return validate_dependency_lock(evidence_dir / LOCK_NAME)
+        candidates = [name for name in requested if (directory / name).is_file()]
+        referenced = [name for name in candidates if name in lock_text]
+        if referenced:
+            raise ActivationEvidenceError(
+                f"condition (c) fails: {LOCK_NAME} under {directory} references {referenced}; a "
+                "sidecar the lock names is bound evidence, not an unbound leftover, and the whole "
+                f"request ({candidates}) is refused rather than partly applied"
+            )
+
+        for name in candidates:
+            (directory / name).unlink()
+        return candidates

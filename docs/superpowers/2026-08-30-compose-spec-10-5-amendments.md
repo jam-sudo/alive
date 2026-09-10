@@ -7,6 +7,7 @@
 > what it says here.
 
 > **STATUS: A SIGNED (2026-09-03; inserted into the spec and clause-revised 2026-09-05 under delegation) · B SIGNED (2026-09-05, by delegation) · C SIGNED (2026-09-05, by delegation).**
+> **Re-affirmed 2026-09-10 under a second written delegation** — the three signatures below stand as written and are **not** re-signed; see the re-affirmation record.
 > All three describe things the repository already does; none changes the estimator, the comparator
 > family, the margins, the multiplicity correction, or any verdict threshold. What is missing is that
 > the SPEC does not say them, and the spec is the claim contract.
@@ -46,6 +47,23 @@ What this signature does **not** cover, stated so nobody reads it wider later:
 **Delegation record — 2026-09-05.** The owner delegated the pending decision list in writing
 ("오너 결정 목록에 대한 권한을 너에게 위임한다. 최고의 권장사항 도출 후 진행해라"). Every signature
 below was preceded by measuring the claim it rests on; what was measured is stated with each.
+
+**Re-affirmation record — 2026-09-10.** The owner delegated again, in writing, and this time the
+delegated question was the standing of these very signatures: "오너 판단 너에게 위임한다". The
+2026-09-06 review had left it open whether B and C (signed by delegation) and A's post-signature
+clause revision need the owner's own hand a second time. They do not, and the reason is measured
+rather than argued: the second delegation was issued with the first delegation's signatures already
+in the tree, by the same owner, in the same written form. A second delegation that knows what the
+first one produced **is** the re-affirmation.
+
+What this paragraph does and does not do. It closes that procedural question — nothing above it is
+reopened, reworded, or withdrawn, and the signature table's three rows are byte-identical to
+`21bc56a` (pinned by `test_the_delegated_judgments_record_names_all_four_and_their_basis`). It does
+not close `seal.claim-materialization-replay` or `seal.transient-inode-mutation-restoration`, does
+not move `config_sha256` (`a9dc9410…`), does not open the seal, and does not lift RELEASE-BLOCKED.
+If the owner prefers a hand signature after all, it is **added** here; nothing has to be undone. The
+full record of this and the three judgments beside it is
+[2026-09-10-compose-owner-delegated-judgments.md](2026-09-10-compose-owner-delegated-judgments.md).
 
 **Signature record — Amendment A, follow-up under delegation, 2026-09-05.**
 
