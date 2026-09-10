@@ -765,3 +765,75 @@ def test_readiness_names_every_release_gate_and_stays_an_index():
         f"readiness 가 {lines} 줄이다 — 자기 maintainer note 가 선언한 index-only 형태가 아니다; "
         "시간순 서술은 journal 아카이브와 git log 가 authoritative 다"
     )
+
+
+_DELEGATED_JUDGMENTS = Path("docs/superpowers/2026-09-10-compose-owner-delegated-judgments.md")
+_AMENDMENTS = Path("docs/superpowers/2026-08-30-compose-spec-10-5-amendments.md")
+
+# id → (판정 토큰, 구현 task). §0 이 등록한 네 판단이며, 토큰은 각 판정이 실제로 고른 것을
+# 이름으로 부르는 문자열이다 — "결정했다" 같은 서술어가 아니라 판정 자체가 지목한 대상.
+_DELEGATED_JUDGMENT_ROWS = (
+    ("J1", "재서명 불요", "Task 1"),
+    ("J2", "`reclaim-unbound`", "Task 2"),
+    ("J3", "`verify_split_manifest`", "Task 3"),
+    ("J4", "`slot_id`", "Task 4"),
+)
+
+# Byte-for-byte from the base commit `21bc56a` — that file's rows 22-24, read with
+#   git show 21bc56a:docs/superpowers/2026-08-30-...-amendments.md | sed -n '22,24p'
+# 2026-09-10 재확인은 **날짜 붙은 문단을 더하는 것**이지 서명된 줄을 다시 쓰는 것이 아니다 —
+# 그 "추가만" 을 의도가 아니라 실측으로 만드는 것이 이 세 상수다.
+_SIGNED_AMENDMENT_ROWS = (
+    "| **A** — the consumption boundary is the claim | §10.6 (moved from §10.5, see record) | "
+    "**SIGNED — Jae Min Yoon / 2026-09-03**; inserted + clause revised 2026-09-05 by delegation |",
+    "| **B** — the coverage claim is conditional, and where the sensitivity is reported | §10.5 + "
+    "durable-ledger spec roster | **SIGNED — by delegation (Claude, authorised by Jae Min Yoon) / "
+    "2026-09-05** |",
+    "| **C** — preflight stdout | driver spec §3.2 | **SIGNED — by delegation (Claude, authorised "
+    "by Jae Min Yoon) / 2026-09-05** |",
+)
+
+
+def test_the_delegated_judgments_record_names_all_four_and_their_basis():
+    """네 판단이 하나의 날짜 붙은 기록으로 서고, 그 기록이 위임 근거를 축자로 인용한다.
+
+    이 검사가 고정하는 것은 **선택이 아니라 기록의 형태**다. 오너가 2026-09-10 에 판단을
+    위임했으므로 판정 자체는 이 저장소가 채점할 대상이 아니지만, 판정이 어느 질문에 대한
+    것인지·무엇을 근거로 했는지·어느 task 가 그것을 구현하는지가 적혀 있지 않으면 나중에
+    읽는 사람이 판정을 재구성할 수 없다. 그래서 네 절의 존재, 각 절이 지목한 대상,
+    구현 task, 그리고 위임 문구의 축자 인용을 함께 요구한다.
+
+    amendments 문서 쪽은 반대 방향의 요구다: 재확인 문단은 **더해지기만** 해야 하고 서명된
+    세 줄은 한 바이트도 움직이면 안 된다. 두 요구를 한 검사에 두는 이유는 하나가 다른 하나의
+    대가로 통과할 수 있기 때문이다 — 재확인을 서명 표 안에 써 넣으면 "재확인이 있다" 는
+    참이 되지만 서명된 줄은 다시 쓰인 것이다.
+    """
+    assert _DELEGATED_JUDGMENTS.exists(), (
+        f"위임 판단 결정문이 없다 — {_DELEGATED_JUDGMENTS} 가 네 판단의 authoritative 기록이다"
+    )
+    text = _DELEGATED_JUDGMENTS.read_text(encoding="utf-8")
+    assert "위임 근거" in text, "결정문이 자기 권한의 출처를 이름으로 부르지 않는다"
+    assert "오너 판단 너에게 위임한다" in text, (
+        "결정문이 2026-09-10 위임 지시를 축자로 인용하지 않는다 — 요약은 근거가 아니다"
+    )
+    for judgment_id, verdict, task in _DELEGATED_JUDGMENT_ROWS:
+        head = f"## {judgment_id} — "
+        assert head in text, f"결정문에 `{judgment_id}` 절이 없다"
+        section = text.split(head, 1)[1].split("\n## ", 1)[0]
+        assert verdict in section, (
+            f"`{judgment_id}` 절이 판정 대상 {verdict} 을 이름으로 부르지 않는다"
+        )
+        assert task in section, f"`{judgment_id}` 절이 구현 task({task})를 가리키지 않는다"
+    # 판단 기록은 상태를 움직이지 않는다 — 세 축을 자기 입으로 말하게 한다.
+    for token in ("a9dc9410", "UNOPENED", "RELEASE-BLOCKED"):
+        assert token in text, f"결정문이 `{token}` 불변을 명시하지 않는다"
+
+    amendments = _AMENDMENTS.read_text(encoding="utf-8")
+    assert "Re-affirmation record — 2026-09-10" in amendments, (
+        "amendments 문서에 2026-09-10 재확인 기록이 없다 — J1 은 그 문단으로만 종결된다"
+    )
+    for row in _SIGNED_AMENDMENT_ROWS:
+        assert row in amendments, (
+            "서명 표의 줄이 base `21bc56a` 와 byte 단위로 달라졌다 — 재확인은 문단 추가이지 "
+            f"서명 줄의 재작성이 아니다:\n  {row}"
+        )
