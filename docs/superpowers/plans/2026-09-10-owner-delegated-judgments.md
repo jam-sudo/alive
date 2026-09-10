@@ -19,8 +19,8 @@
 
 **Tech Stack:** Python 3.12 · `uv run --locked` · pytest · Ruff. bash(협력 루프 latch 스크립트).
 
-**Spec:** [split manifest](../../src/alive/compose/split.py) `build_split_manifest`/`verify_split_manifest` ·
-[smoke evidence](../../src/alive/compose/smoke_evidence.py) `build_smoke_pair_roster`/`publish_promotion` ·
+**Spec:** [split manifest](../../../src/alive/compose/split.py) `build_split_manifest`/`verify_split_manifest` ·
+[smoke evidence](../../../src/alive/compose/smoke_evidence.py) `build_smoke_pair_roster`/`publish_promotion` ·
 [amendments record](../2026-08-30-compose-spec-10-5-amendments.md) · [readiness](../COMPOSE-SEAL-READINESS.md) ·
 governance [CLAUDE.md](../../../CLAUDE.md#seal-immutability) (`#seal-immutability`, `#provenance`, `#agent`).
 
