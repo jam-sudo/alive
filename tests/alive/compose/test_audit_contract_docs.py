@@ -793,6 +793,17 @@ _SIGNED_AMENDMENT_ROWS = (
     "by Jae Min Yoon) / 2026-09-05** |",
 )
 
+# J4 의 판정("뒤에 열을 붙여도 소비자는 안 바뀐다")은 **소비자가 어느 열을 읽는가**에 통째로
+# 걸려 있다. 그 계약은 첫째(ET date)와 셋째(state) — `awk -F'\t'` 의 `$1`·`$3` — 이고, 둘째는
+# time 이다. `0fc1448` 은 이것을 "앞쪽 두 열" 이라고 적었다: 판정은 우연히 같지만 근거가
+# 틀렸고, 틀린 근거는 나중에 이 기록만 읽고 판정을 재구성하는 사람을 다른 결론으로 데려간다
+# (2026-09-10 Codex 리뷰 Important 1). 판정 토큰만 세는 검사는 이 오기를 잡지 못했으므로,
+# J4 절이 계약을 **열 번호로** 말하도록 요구한다.
+_J4_READER_CONTRACT = ("`$1`", "`$3`", "첫째", "셋째")
+# 그리고 틀린 문구 자체를 되돌아오지 못하게 한다 — 같은 절에 두 서술이 공존하면 어느 쪽이
+# 계약인지 읽는 사람이 고르게 된다.
+_J4_WRONG_READER_PHRASE = "앞쪽 두 열"
+
 
 def test_the_delegated_judgments_record_names_all_four_and_their_basis():
     """네 판단이 하나의 날짜 붙은 기록으로 서고, 그 기록이 위임 근거를 축자로 인용한다.
@@ -802,6 +813,11 @@ def test_the_delegated_judgments_record_names_all_four_and_their_basis():
     것인지·무엇을 근거로 했는지·어느 task 가 그것을 구현하는지가 적혀 있지 않으면 나중에
     읽는 사람이 판정을 재구성할 수 없다. 그래서 네 절의 존재, 각 절이 지목한 대상,
     구현 task, 그리고 위임 문구의 축자 인용을 함께 요구한다.
+
+    `J4` 는 한 가지를 더 요구한다. 그 판정("뒤에 열을 붙여도 소비자는 바뀌지 않는다")은
+    소비자가 **어느 열을 읽는가**에 통째로 걸려 있으므로, 절이 그 계약을 열 번호로 말해야
+    한다 — 첫째(ET date)와 셋째(state), 즉 `$1`·`$3`. 판정 토큰만 세던 첫 판은 이 문장이
+    "앞쪽 두 열" 로 틀려 있어도 통과했다.
 
     amendments 문서 쪽은 반대 방향의 요구다: 재확인 문단은 **더해지기만** 해야 하고 서명된
     세 줄은 한 바이트도 움직이면 안 된다. 두 요구를 한 검사에 두는 이유는 하나가 다른 하나의
@@ -816,10 +832,12 @@ def test_the_delegated_judgments_record_names_all_four_and_their_basis():
     assert "오너 판단 너에게 위임한다" in text, (
         "결정문이 2026-09-10 위임 지시를 축자로 인용하지 않는다 — 요약은 근거가 아니다"
     )
+    sections: dict[str, str] = {}
     for judgment_id, verdict, task in _DELEGATED_JUDGMENT_ROWS:
         head = f"## {judgment_id} — "
         assert head in text, f"결정문에 `{judgment_id}` 절이 없다"
         section = text.split(head, 1)[1].split("\n## ", 1)[0]
+        sections[judgment_id] = section
         assert verdict in section, (
             f"`{judgment_id}` 절이 판정 대상 {verdict} 을 이름으로 부르지 않는다"
         )
@@ -827,6 +845,18 @@ def test_the_delegated_judgments_record_names_all_four_and_their_basis():
     # 판단 기록은 상태를 움직이지 않는다 — 세 축을 자기 입으로 말하게 한다.
     for token in ("a9dc9410", "UNOPENED", "RELEASE-BLOCKED"):
         assert token in text, f"결정문이 `{token}` 불변을 명시하지 않는다"
+
+    # J4 의 판정은 소비자가 읽는 열이 무엇인지에 통째로 걸려 있다 — 열 번호로 말하게 한다.
+    j4 = sections["J4"]
+    for token in _J4_READER_CONTRACT:
+        assert token in j4, (
+            f"`J4` 절이 ledger 소비자의 열 계약을 {token} 로 말하지 않는다 — 판정"
+            "('뒤에 열을 붙여도 소비자는 바뀌지 않는다')은 그 계약 위에만 선다"
+        )
+    assert _J4_WRONG_READER_PHRASE not in j4, (
+        f"`J4` 절이 다시 {_J4_WRONG_READER_PHRASE!r} 라고 적는다 — 소비자가 읽는 것은 첫째와 "
+        "셋째 열이고, 둘째는 time 이라 읽히지 않는다"
+    )
 
     amendments = _AMENDMENTS.read_text(encoding="utf-8")
     assert "Re-affirmation record — 2026-09-10" in amendments, (
