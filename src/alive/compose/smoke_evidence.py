@@ -21,14 +21,17 @@ Nothing in this module writes into the evidence directory except
 
 from __future__ import annotations
 
+import contextlib
 import copy
+import errno
+import fcntl
 import hashlib
 import json
 import os
 import re
 import shutil
 import tempfile
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -866,6 +869,75 @@ def _atomic_replace(path: Path, text: str) -> None:
         temporary.unlink(missing_ok=True)
 
 
+#: ``flock`` refuses a contended lock with one of these; anything else means the
+#: exclusion could not be established at all, which is a different refusal.
+_CONTENDED = frozenset({errno.EWOULDBLOCK, errno.EAGAIN, errno.EACCES})
+
+
+@contextlib.contextmanager
+def _evidence_directory_lock(evidence_dir: Path) -> Iterator[None]:
+    """Hold the evidence directory's own exclusive advisory lock, or refuse at once.
+
+    :func:`publish_promotion` and :func:`reclaim_unbound_sidecars` are each safe
+    alone and were not safe against each other. The publisher writes its sidecars
+    write-once and commits by replacing the lock LAST; the reclaimer decides what
+    is unbound from a snapshot of that same lock. So a reclaimer that read the
+    INCOMPLETE lock before the publisher's first sidecar landed would see that
+    fresh sidecar as an unbound leftover and delete it inside the publisher's
+    window -- and the publisher would then commit a COMPLETE lock binding a file
+    that is gone. Past the rename there is no rollback, and condition (a) makes
+    the result unreachable by reclaim: a COMPLETE lock is never reclaimed. The
+    two critical sections therefore share one lock (PR #17 review, Critical 1).
+
+    The lock is taken on a descriptor of the DIRECTORY itself. A lock FILE would
+    have to live inside a committed evidence directory -- a new artifact beside
+    the manifests, needing an ignore rule and answering to nobody's schema --
+    while a directory descriptor creates nothing, is released by the kernel when
+    the holder dies (the crashed publisher of the sequential test releases it by
+    dying), and is the same primitive and the same failure mode the driver
+    already uses (``LOCK_EX | LOCK_NB`` in
+    ``alive.compose.driver.recover_cmd._recover_lock``).
+
+    Contention fails CLOSED and immediately: this never blocks, because a caller
+    that waits is a caller whose snapshot of the directory is ageing while it
+    waits. A failure that is not contention -- a platform that will not lock a
+    directory descriptor, a permission error -- is also a refusal, and says so
+    differently: running unserialised is the one outcome that is not available.
+
+    Raises
+    ------
+    ActivationEvidenceError
+        If another publish or reclaim holds the directory, or if the lock cannot
+        be established at all.
+    """
+    directory = Path(evidence_dir)
+    try:
+        fd = os.open(directory, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0))
+    except OSError as exc:
+        raise ActivationEvidenceError(
+            f"cannot open {directory} to serialise this operation ({exc}); publish and reclaim "
+            "run only while one of them holds this directory"
+        ) from exc
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            if exc.errno in _CONTENDED:
+                raise ActivationEvidenceError(
+                    f"another publish or reclaim holds {directory}; retry after it exits -- "
+                    "these two are only safe against each other one at a time"
+                ) from exc
+            raise ActivationEvidenceError(
+                f"cannot lock {directory} ({exc}); refusing rather than running unserialised"
+            ) from exc
+        try:
+            yield
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
+
+
 def publish_promotion(promotion: Promotion, *, evidence_dir: Path) -> dict[str, Any]:
     """Validate a promotion in a staging copy, then publish it; refuse without a trace.
 
@@ -878,6 +950,12 @@ def publish_promotion(promotion: Promotion, *, evidence_dir: Path) -> dict[str, 
     sidecars are then published write-once (:func:`alive.io.atomic_write_once`)
     and the lock last, by atomic rename, so the lock is the commit point and a
     refusal at any earlier step leaves the directory byte-identical.
+
+    The whole transaction -- the pre-existence scan through the final validation
+    -- runs while this process holds :func:`_evidence_directory_lock`, so a
+    concurrent :func:`reclaim_unbound_sidecars` cannot decide that a sidecar
+    written a moment ago is unbound and delete it before the lock that binds it
+    is committed.
 
     Parameters
     ----------
@@ -898,32 +976,34 @@ def publish_promotion(promotion: Promotion, *, evidence_dir: Path) -> dict[str, 
         If any sidecar name is already taken under ``evidence_dir``. Established
         for every name before the first write, so no partial set is published.
     ActivationEvidenceError
-        If the staged lock does not validate COMPLETE. Nothing has been written.
+        If the staged lock does not validate COMPLETE, or if another publish or
+        reclaim holds the evidence directory. Nothing has been written.
     """
-    for filename in sorted(promotion.files):
-        if (evidence_dir / filename).exists():
-            raise FileExistsError(
-                f"{filename} already exists under {evidence_dir}; a sidecar is published "
-                "write-once and an existing file is either a stray or the remains of an "
-                "earlier run, and either way not this run's to overwrite"
-            )
+    with _evidence_directory_lock(evidence_dir):
+        for filename in sorted(promotion.files):
+            if (evidence_dir / filename).exists():
+                raise FileExistsError(
+                    f"{filename} already exists under {evidence_dir}; a sidecar is published "
+                    "write-once and an existing file is either a stray or the remains of an "
+                    "earlier run, and either way not this run's to overwrite"
+                )
 
-    lock_text = _serialize(promotion.lock)
-    with tempfile.TemporaryDirectory(prefix="compose-promotion-") as scratch:
-        staging = Path(scratch) / evidence_dir.name
-        shutil.copytree(evidence_dir, staging)
+        lock_text = _serialize(promotion.lock)
+        with tempfile.TemporaryDirectory(prefix="compose-promotion-") as scratch:
+            staging = Path(scratch) / evidence_dir.name
+            shutil.copytree(evidence_dir, staging)
+            for filename, text in promotion.files.items():
+                (staging / filename).write_text(text, encoding="utf-8")
+            (staging / LOCK_NAME).write_text(lock_text, encoding="utf-8")
+            staged = validate_dependency_lock(staging / LOCK_NAME)
+            status = staged["run_gate"]["evidence_status"]
+            if status != "COMPLETE":
+                raise ActivationEvidenceError(f"staged lock validates as {status}, not COMPLETE")
+
         for filename, text in promotion.files.items():
-            (staging / filename).write_text(text, encoding="utf-8")
-        (staging / LOCK_NAME).write_text(lock_text, encoding="utf-8")
-        staged = validate_dependency_lock(staging / LOCK_NAME)
-        status = staged["run_gate"]["evidence_status"]
-        if status != "COMPLETE":
-            raise ActivationEvidenceError(f"staged lock validates as {status}, not COMPLETE")
-
-    for filename, text in promotion.files.items():
-        atomic_write_once(evidence_dir / filename, text)
-    _atomic_replace(evidence_dir / LOCK_NAME, lock_text)
-    return validate_dependency_lock(evidence_dir / LOCK_NAME)
+            atomic_write_once(evidence_dir / filename, text)
+        _atomic_replace(evidence_dir / LOCK_NAME, lock_text)
+        return validate_dependency_lock(evidence_dir / LOCK_NAME)
 
 
 def reclaim_unbound_sidecars(*, evidence_dir: Path, sidecar_names: Iterable[str]) -> list[str]:
@@ -957,6 +1037,14 @@ def reclaim_unbound_sidecars(*, evidence_dir: Path, sidecar_names: Iterable[str]
     hand-deletion with extra steps: the operator is left with a half-cleaned
     directory, an error, and no record of which half went.
 
+    The lock snapshot through the last unlink runs while this process holds
+    :func:`_evidence_directory_lock` -- the same lock :func:`publish_promotion`
+    holds for its whole transaction. Without it, the three conditions are answers
+    about a directory that a publisher may be changing underneath them, and the
+    file this function decides is unbound may be one a publisher is about to bind
+    (PR #17 review, Critical 1). A crashed publisher's lock died with it, so the
+    leftovers this function exists for are still reachable.
+
     The lock is read as text and parsed here rather than passed through
     :func:`validate_dependency_lock`. The directory this function exists for is
     one a crash left half-published, where the validator refuses for reasons that
@@ -982,50 +1070,52 @@ def reclaim_unbound_sidecars(*, evidence_dir: Path, sidecar_names: Iterable[str]
     ------
     ActivationEvidenceError
         If any of the three conditions fails, naming the condition and the files
-        that failed it. Nothing has been removed.
+        that failed it, or if another publish or reclaim holds the evidence
+        directory. Nothing has been removed.
     """
     directory = Path(evidence_dir)
-    lock_path = directory / LOCK_NAME
-    try:
-        lock_text = lock_path.read_text(encoding="utf-8")
-    except OSError as exc:
-        raise ActivationEvidenceError(
-            f"condition (a) fails: {LOCK_NAME} could not be read under {directory} ({exc}); "
-            "without the lock nothing establishes that these sidecars are unbound"
-        ) from exc
-    try:
-        status = json.loads(lock_text)["run_gate"]["evidence_status"]
-    except (ValueError, LookupError, TypeError) as exc:
-        raise ActivationEvidenceError(
-            f"condition (a) fails: {LOCK_NAME} under {directory} carries no readable "
-            f"run_gate.evidence_status ({exc!r}); a lock this function cannot read is a lock "
-            "whose claim on these files it cannot rule out"
-        ) from exc
-    if status == "COMPLETE":
-        raise ActivationEvidenceError(
-            f"condition (a) fails: {LOCK_NAME} under {directory} reads "
-            "evidence_status=COMPLETE; a COMPLETE lock is a published result whose record "
-            "binds its sidecars by SHA-256, and its directory is never reclaimed"
-        )
+    with _evidence_directory_lock(directory):
+        lock_path = directory / LOCK_NAME
+        try:
+            lock_text = lock_path.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise ActivationEvidenceError(
+                f"condition (a) fails: {LOCK_NAME} could not be read under {directory} ({exc}); "
+                "without the lock nothing establishes that these sidecars are unbound"
+            ) from exc
+        try:
+            status = json.loads(lock_text)["run_gate"]["evidence_status"]
+        except (ValueError, LookupError, TypeError) as exc:
+            raise ActivationEvidenceError(
+                f"condition (a) fails: {LOCK_NAME} under {directory} carries no readable "
+                f"run_gate.evidence_status ({exc!r}); a lock this function cannot read is a lock "
+                "whose claim on these files it cannot rule out"
+            ) from exc
+        if status == "COMPLETE":
+            raise ActivationEvidenceError(
+                f"condition (a) fails: {LOCK_NAME} under {directory} reads "
+                "evidence_status=COMPLETE; a COMPLETE lock is a published result whose record "
+                "binds its sidecars by SHA-256, and its directory is never reclaimed"
+            )
 
-    requested = sorted(set(sidecar_names))
-    outside = [name for name in requested if name not in _SIDECAR_NAMES]
-    if outside:
-        raise ActivationEvidenceError(
-            f"condition (b) fails: {outside} are not sidecars a promotion publishes "
-            f"({sorted(_SIDECAR_NAMES)}); reclaim removes this producer's own leftovers, "
-            "not whatever name it is handed"
-        )
+        requested = sorted(set(sidecar_names))
+        outside = [name for name in requested if name not in _SIDECAR_NAMES]
+        if outside:
+            raise ActivationEvidenceError(
+                f"condition (b) fails: {outside} are not sidecars a promotion publishes "
+                f"({sorted(_SIDECAR_NAMES)}); reclaim removes this producer's own leftovers, "
+                "not whatever name it is handed"
+            )
 
-    candidates = [name for name in requested if (directory / name).is_file()]
-    referenced = [name for name in candidates if name in lock_text]
-    if referenced:
-        raise ActivationEvidenceError(
-            f"condition (c) fails: {LOCK_NAME} under {directory} references {referenced}; a "
-            "sidecar the lock names is bound evidence, not an unbound leftover, and the whole "
-            f"request ({candidates}) is refused rather than partly applied"
-        )
+        candidates = [name for name in requested if (directory / name).is_file()]
+        referenced = [name for name in candidates if name in lock_text]
+        if referenced:
+            raise ActivationEvidenceError(
+                f"condition (c) fails: {LOCK_NAME} under {directory} references {referenced}; a "
+                "sidecar the lock names is bound evidence, not an unbound leftover, and the whole "
+                f"request ({candidates}) is refused rather than partly applied"
+            )
 
-    for name in candidates:
-        (directory / name).unlink()
-    return candidates
+        for name in candidates:
+            (directory / name).unlink()
+        return candidates

@@ -14,6 +14,8 @@ import copy
 import hashlib
 import json
 import shutil
+import subprocess
+import sys
 from pathlib import Path
 
 import anndata as ad
@@ -1276,3 +1278,194 @@ def test_reclaim_finds_nothing_to_do_in_a_directory_no_publish_touched(tmp_path)
     )
     assert removed == []
     assert _digests(staged) == before
+
+
+#: A real second process that takes the SAME lock the library takes -- an exclusive
+#: `flock` on the evidence directory's own descriptor -- and holds it until a sentinel
+#: file appears. Nothing is mocked: the library's guard meets a genuine concurrent
+#: holder, which is the only way to observe an exclusion that exists between processes.
+_HOLDER = """
+import fcntl, os, sys, time
+directory, sentinel = sys.argv[1], sys.argv[2]
+fd = os.open(directory, os.O_RDONLY)
+fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+print("held", flush=True)
+deadline = time.time() + 60
+while not os.path.exists(sentinel) and time.time() < deadline:
+    time.sleep(0.005)
+"""
+
+#: A real publisher, parked INSIDE its critical section. The wrapper is installed in
+#: the CHILD only and interrupts nothing: it lets the committed `atomic_write_once`
+#: write the first sidecar and then waits, so the parent observes the exact window the
+#: race lives in -- after a sidecar exists and before the lock that binds it is
+#: committed. The parent's own `publish_promotion` is untouched.
+_PARKED_PUBLISHER = """
+import json, sys, time
+from pathlib import Path
+from alive.compose import smoke_evidence
+
+payload = json.loads(Path(sys.argv[1]).read_text())
+sentinel = Path(payload["sentinel"])
+real = smoke_evidence.atomic_write_once
+state = {"parked": False}
+
+def park_after_the_first_sidecar(path, text, **kwargs):
+    real(path, text, **kwargs)
+    if not state["parked"]:
+        state["parked"] = True
+        print("first-sidecar:" + Path(path).name, flush=True)
+        deadline = time.time() + 60
+        while not sentinel.exists() and time.time() < deadline:
+            time.sleep(0.005)
+
+smoke_evidence.atomic_write_once = park_after_the_first_sidecar
+validated = smoke_evidence.publish_promotion(
+    smoke_evidence.Promotion(lock=payload["lock"], files=payload["files"]),
+    evidence_dir=Path(payload["evidence_dir"]),
+)
+print("published:" + validated["run_gate"]["evidence_status"], flush=True)
+"""
+
+
+def _start_holder(directory, sentinel):
+    """Start the holder and return it only once it actually holds the lock."""
+    process = subprocess.Popen(
+        [sys.executable, "-c", _HOLDER, str(directory), str(sentinel)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    assert process.stdout.readline().strip() == "held"
+    return process
+
+
+def _release(process, sentinel):
+    sentinel.write_text("go", encoding="utf-8")
+    assert process.wait(timeout=60) == 0, process.stderr.read()
+
+
+def test_reclaim_is_refused_while_another_process_holds_the_evidence_directory(tmp_path):
+    """Reclaim decides what is unbound from a snapshot; it may not take one alone.
+
+    The three conditions answer questions about a directory a publisher may be
+    changing underneath them, so the snapshot and the unlink must happen while
+    this process holds the directory. Contention fails closed and immediately --
+    waiting would only age the snapshot -- and, crucially, removes nothing.
+    """
+    staged = _staged_evidence(tmp_path)
+    leftover = staged / "cpa_smoke_pair_roster.json"
+    leftover.write_text("{}\n", encoding="utf-8")
+    before = _digests(staged)
+    sentinel = tmp_path / "release-holder"
+    holder = _start_holder(staged, sentinel)
+
+    try:
+        with pytest.raises(ActivationEvidenceError) as refusal:
+            reclaim_unbound_sidecars(
+                evidence_dir=staged, sidecar_names={"cpa_smoke_pair_roster.json"}
+            )
+    finally:
+        _release(holder, sentinel)
+
+    assert "another publish or reclaim holds" in str(refusal.value)
+    assert str(staged) in str(refusal.value)
+    assert _digests(staged) == before
+
+    assert reclaim_unbound_sidecars(
+        evidence_dir=staged, sidecar_names={"cpa_smoke_pair_roster.json"}
+    ) == ["cpa_smoke_pair_roster.json"]
+
+
+def test_publish_is_refused_while_another_process_holds_the_evidence_directory(tmp_path):
+    """The publisher's whole transaction is inside the lock, starting before its scan.
+
+    Its pre-existence scan is a check whose answer another process can invalidate
+    a line later, so the lock has to be held before the scan, not just around the
+    writes. A refusal here must cost exactly what every other refusal in this
+    module costs: nothing.
+    """
+    staged = _staged_evidence(tmp_path)
+    promotion = _promote(staged, tmp_path, _backends_for(tmp_path))
+    before = _digests(staged)
+    sentinel = tmp_path / "release-holder"
+    holder = _start_holder(staged, sentinel)
+
+    try:
+        with pytest.raises(ActivationEvidenceError) as refusal:
+            publish_promotion(promotion, evidence_dir=staged)
+    finally:
+        _release(holder, sentinel)
+
+    assert "another publish or reclaim holds" in str(refusal.value)
+    assert _digests(staged) == before
+    assert (
+        json.loads((staged / LOCK_NAME).read_text(encoding="utf-8"))["run_gate"]["evidence_status"]
+        == "INCOMPLETE"
+    )
+
+    assert publish_promotion(promotion, evidence_dir=staged)["run_gate"]["evidence_status"] == (
+        "COMPLETE"
+    )
+
+
+def test_the_publish_reclaim_race_cannot_delete_a_sidecar_the_publisher_is_binding(tmp_path):
+    """The Critical itself: a live publisher's fresh sidecar is not an unbound leftover.
+
+    A publisher parked after its first sidecar leaves the directory in the exact
+    state the reclaimer is built for -- a sidecar present, the lock still
+    INCOMPLETE and naming nothing -- so conditions (a), (b) and (c) ALL pass and
+    the reclaimer would delete a file the publisher is about to bind. The
+    publisher would then commit a COMPLETE lock pointing at a file that is gone,
+    past the only commit point there is, into a state condition (a) refuses to
+    touch ever again. What must stop it is the directory lock, and the refusal
+    must say so rather than mentioning a condition.
+    """
+    staged = _staged_evidence(tmp_path)
+    promotion = _promote(staged, tmp_path, _backends_for(tmp_path))
+    sentinel = tmp_path / "release-publisher"
+    payload = tmp_path / "publisher.json"
+    payload.write_text(
+        json.dumps(
+            {
+                "lock": promotion.lock,
+                "files": promotion.files,
+                "evidence_dir": str(staged),
+                "sentinel": str(sentinel),
+            }
+        ),
+        encoding="utf-8",
+    )
+    publisher = subprocess.Popen(
+        [sys.executable, "-c", _PARKED_PUBLISHER, str(payload)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+    try:
+        parked = publisher.stdout.readline().strip()
+        assert parked.startswith("first-sidecar:"), publisher.stderr.read()
+        first = parked.split(":", 1)[1]
+        assert (staged / first).is_file()
+        assert (
+            json.loads((staged / LOCK_NAME).read_text(encoding="utf-8"))["run_gate"][
+                "evidence_status"
+            ]
+            == "INCOMPLETE"
+        )
+        assert first not in (staged / LOCK_NAME).read_text(encoding="utf-8")
+
+        with pytest.raises(ActivationEvidenceError) as refusal:
+            reclaim_unbound_sidecars(evidence_dir=staged, sidecar_names=set(promotion.files))
+    finally:
+        sentinel.write_text("go", encoding="utf-8")
+        published = publisher.stdout.readline().strip()
+        assert publisher.wait(timeout=60) == 0, publisher.stderr.read()
+
+    assert "another publish or reclaim holds" in str(refusal.value)
+    assert "condition (" not in str(refusal.value)
+    assert (staged / first).is_file()
+    assert published == "published:COMPLETE"
+    assert set(promotion.files) <= {path.name for path in staged.iterdir()}
+    assert validate_dependency_lock(staged / LOCK_NAME)["run_gate"]["evidence_status"] == "COMPLETE"
