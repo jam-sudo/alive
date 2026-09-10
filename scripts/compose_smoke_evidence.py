@@ -11,6 +11,19 @@ Usage
         --inputs  /workspace/smoke/inputs.json \
         --evidence-dir docs/activation-evidence/compose
 
+A publish that dies between the write-once sidecars and the final lock rename
+leaves sidecars nothing binds, and every retry is then refused (`FileExistsError`)
+until they are gone. Reclaim them with the SAME bundle, which is what names the
+files this promotion would have written::
+
+    python scripts/compose_smoke_evidence.py reclaim-unbound \
+        --inputs  /workspace/smoke/inputs.json \
+        --evidence-dir docs/activation-evidence/compose
+
+It removes nothing under a COMPLETE lock, nothing the lock's text mentions, and
+nothing outside this promotion's own sidecar names -- and refuses the whole
+request rather than applying part of it.
+
 The inputs bundle is one JSON object::
 
     {
@@ -50,6 +63,9 @@ Exit codes
 ----------
 0 promoted and validated COMPLETE · 1 refused (nothing written) · 2 usage error
 (unreadable or incomplete bundle, I/O failure; nothing written).
+
+For ``reclaim-unbound``: 0 reclaimed (possibly nothing to reclaim, which is not an
+error) · 1 refused (nothing removed) · 2 usage error.
 """
 
 from __future__ import annotations
@@ -62,19 +78,26 @@ from pathlib import Path
 from alive.compose.activation_evidence import ActivationEvidenceError
 from alive.compose.smoke_evidence import (
     LOCK_NAME,
+    Promotion,
     build_smoke_artifact_manifest,
     build_smoke_pair_roster,
     build_wheelhouse_manifest,
     merge_backend_record,
     promote_lock_to_complete,
     publish_promotion,
+    reclaim_unbound_sidecars,
 )
 
 
-def _promote(inputs_path: Path, evidence_dir: Path) -> int:
-    bundle = json.loads(inputs_path.read_text(encoding="utf-8"))
-    lock_path = evidence_dir / LOCK_NAME
+def _promotion_from_bundle(bundle: dict, lock_path: Path) -> Promotion:
+    """Build the promotion the bundle describes, writing nothing.
 
+    Shared by both subcommands. `promote` publishes the result; `reclaim-unbound`
+    wants only the names of the sidecars this promotion WOULD publish, and takes
+    them from the same computation rather than from a second spelling of the file
+    names -- a reclaim list assembled independently of the promotion is a list of
+    files nobody proved this run would have written.
+    """
     backends = {}
     for backend, supplied in bundle["backends"].items():
         roster, roster_record = build_smoke_pair_roster(
@@ -118,12 +141,21 @@ def _promote(inputs_path: Path, evidence_dir: Path) -> int:
     # reported as "inputs bundle is missing 'run_gate'" and exit 2 (PR #15 fable Minor 6).
     # A malformed lock is a REFUSAL (exit 1), which is what an operator reading `$?` needs.
     try:
-        promotion = promote_lock_to_complete(
+        return promote_lock_to_complete(
             lock=json.loads(lock_path.read_text(encoding="utf-8")),
             backends=backends,
             wheelhouse=wheelhouse,
             **promotion_fields,
         )
+    except KeyError as exc:
+        raise ValueError(f"the staged {LOCK_NAME} is malformed: missing key {exc}") from exc
+
+
+def _promote(inputs_path: Path, evidence_dir: Path) -> int:
+    bundle = json.loads(inputs_path.read_text(encoding="utf-8"))
+    lock_path = evidence_dir / LOCK_NAME
+    promotion = _promotion_from_bundle(bundle, lock_path)
+    try:
         validated = publish_promotion(promotion, evidence_dir=evidence_dir)
     except KeyError as exc:
         raise ValueError(f"the staged {LOCK_NAME} is malformed: missing key {exc}") from exc
@@ -134,15 +166,49 @@ def _promote(inputs_path: Path, evidence_dir: Path) -> int:
     return 0
 
 
+def _reclaim_unbound(inputs_path: Path, evidence_dir: Path) -> int:
+    """Reclaim the sidecars a publish that died before the lock rename left behind.
+
+    The sidecars are published write-once and the lock last, so a crash between
+    them leaves files that no lock binds and that the write-once guard then
+    refuses to overwrite. This removes exactly those -- under an INCOMPLETE lock,
+    among the names THIS promotion publishes, and only when the lock's text
+    mentions none of them -- so the recovery is a checked command instead of an
+    `rm` typed inside an evidence directory.
+
+    Nothing about publishing is weakened: the promotion built here is thrown
+    away, and if the lock is already COMPLETE the name computation itself refuses
+    before `reclaim_unbound_sidecars` gets to refuse on the same fact.
+    """
+    bundle = json.loads(inputs_path.read_text(encoding="utf-8"))
+    promotion = _promotion_from_bundle(bundle, evidence_dir / LOCK_NAME)
+    removed = reclaim_unbound_sidecars(
+        evidence_dir=evidence_dir, sidecar_names=set(promotion.files)
+    )
+    if removed:
+        print(f"OK: reclaimed {len(removed)} unbound sidecar(s) under {evidence_dir}: {removed}")
+    else:
+        print(f"OK: no unbound sidecar of this promotion under {evidence_dir}; nothing removed.")
+    return 0
+
+
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="command", required=True)
     promote = sub.add_parser("promote", help="assemble the evidence and validate the lock")
     promote.add_argument("--inputs", required=True, type=Path)
     promote.add_argument("--evidence-dir", required=True, type=Path)
+    reclaim = sub.add_parser(
+        "reclaim-unbound",
+        help="remove sidecars a crashed publish left behind, under an INCOMPLETE lock only",
+    )
+    reclaim.add_argument("--inputs", required=True, type=Path)
+    reclaim.add_argument("--evidence-dir", required=True, type=Path)
     args = parser.parse_args(argv)
 
     try:
+        if args.command == "reclaim-unbound":
+            return _reclaim_unbound(args.inputs, args.evidence_dir)
         return _promote(args.inputs, args.evidence_dir)
     except (ValueError, ActivationEvidenceError, FileExistsError) as exc:
         print(f"REFUSED: {exc}", file=sys.stderr)

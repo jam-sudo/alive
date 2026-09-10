@@ -17,6 +17,7 @@ from pathlib import Path
 
 import pytest
 
+from alive.compose import smoke_evidence
 from alive.compose.activation_evidence import (
     ActivationEvidenceError,
     _validate_pair_roster_manifest,
@@ -27,12 +28,15 @@ from alive.compose.activation_evidence import (
 )
 from alive.compose.fit_role import FitRoleArtifactError
 from alive.compose.smoke_evidence import (
+    _SIDECAR_NAMES,
+    LOCK_NAME,
     build_smoke_artifact_manifest,
     build_smoke_pair_roster,
     build_wheelhouse_manifest,
     merge_backend_record,
     promote_lock_to_complete,
     publish_promotion,
+    reclaim_unbound_sidecars,
 )
 from tests.alive.compose.smoke_evidence_support import (
     TINY_SEALED_PAIRS,
@@ -765,3 +769,204 @@ def test_a_wheel_entry_with_an_unexpected_key_is_refused(tmp_path):
     wheels["torch"]["sha256"] = "0" * 64
     with pytest.raises(ValueError, match="sha256"):
         build_wheelhouse_manifest(environments=envs)
+
+
+def _digests(directory):
+    """Every file under `directory` with the SHA-256 of its bytes.
+
+    A refusal must cost nothing, and "nothing" is measured, not asserted: the
+    same digest under the same name for every file the directory holds.
+    """
+    return {
+        str(path.relative_to(directory)): hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in sorted(directory.rglob("*"))
+        if path.is_file()
+    }
+
+
+def _half_published(staged, *, named="gears_smoke_pair_roster.json"):
+    """Rewrite the staged INCOMPLETE lock so it already names one sidecar.
+
+    A pod operator filling `required_evidence` by hand -- the habit this producer
+    exists to end -- leaves exactly this: a lock still reading INCOMPLETE that
+    nonetheless names a roster manifest. Condition (a) passes on such a lock, so
+    only the text search stands between a named file and its deletion.
+    """
+    lock_path = staged / LOCK_NAME
+    lock = json.loads(lock_path.read_text(encoding="utf-8"))
+    lock["run_gate"]["required_evidence"]["gears"]["pair_roster_manifest_path"] = named
+    lock_path.write_text(json.dumps(lock, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return lock_path
+
+
+def test_the_reclaimable_names_are_exactly_the_ones_a_promotion_publishes(tmp_path):
+    """`_SIDECAR_NAMES` is a second spelling of what `promote_lock_to_complete` builds.
+
+    Condition (b) needs a name set the reclaimer knows on its own: a caller that
+    supplied both the names and the permission to delete them would be checking
+    itself. That means two spellings of one roster, and this binds them, so a
+    renamed sidecar cannot leave the guard refusing the very files it exists to
+    reclaim -- or, worse, accepting a name no promotion writes.
+    """
+    staged = _staged_evidence(tmp_path)
+    promotion = _promote(staged, tmp_path, _backends_for(tmp_path))
+
+    assert set(promotion.files) == _SIDECAR_NAMES
+
+
+def test_reclaim_removes_only_sidecars_left_by_a_crashed_publish(tmp_path, monkeypatch):
+    """The crash `publish_promotion` cannot avoid, and the recovery that used to be `rm`.
+
+    The sidecars are published write-once and the lock last, so a process that
+    dies between them leaves sidecars nothing binds, and every retry is refused
+    by the write-once guard until someone deletes the files by hand.
+
+    The failure is injected at `alive.compose.smoke_evidence.atomic_write_once`
+    -- the name this module imported -- and it INTERRUPTS THE I/O rather than
+    mocking a guard away: the write-once publish, the `FileExistsError` refusal
+    and the reclaim conditions below are all the committed ones, and what is
+    simulated is only a machine that stopped mid-publish.
+    """
+    staged = _staged_evidence(tmp_path)
+    promotion = _promote(staged, tmp_path, _backends_for(tmp_path))
+    stray = staged / "operator_notes.txt"
+    stray.write_bytes(b"not a sidecar")
+    written = []
+    real_atomic_write_once = smoke_evidence.atomic_write_once
+
+    def dies_on_the_second_write(path, text, **kwargs):
+        if len(written) == 1:
+            raise OSError("the pod lost its volume between two sidecars")
+        written.append(Path(path).name)
+        real_atomic_write_once(path, text, **kwargs)
+
+    monkeypatch.setattr(smoke_evidence, "atomic_write_once", dies_on_the_second_write)
+    with pytest.raises(OSError, match="lost its volume"):
+        publish_promotion(promotion, evidence_dir=staged)
+    monkeypatch.undo()
+
+    assert written == ["cpa_smoke_pair_roster.json"]
+    assert (staged / "cpa_smoke_pair_roster.json").is_file()
+    assert (
+        json.loads((staged / LOCK_NAME).read_text(encoding="utf-8"))["run_gate"]["evidence_status"]
+        == "INCOMPLETE"
+    )
+    with pytest.raises(FileExistsError) as blocked:
+        publish_promotion(promotion, evidence_dir=staged)
+    assert "cpa_smoke_pair_roster.json" in str(blocked.value)
+
+    removed = reclaim_unbound_sidecars(evidence_dir=staged, sidecar_names=set(promotion.files))
+
+    assert removed == ["cpa_smoke_pair_roster.json"]
+    assert not (staged / "cpa_smoke_pair_roster.json").exists()
+    assert stray.is_file()
+    assert stray.read_bytes() == b"not a sidecar"
+    republished = publish_promotion(promotion, evidence_dir=staged)
+    assert republished["run_gate"]["evidence_status"] == "COMPLETE"
+    assert republished["run_gate"]["seal_safety_status"] == "VERIFIED_ZERO_OVERLAP"
+
+
+def test_reclaim_refuses_under_a_complete_lock(tmp_path):
+    """A COMPLETE lock's record binds these five files by SHA-256; nothing there is loose.
+
+    The reclaim path is the one place in this module that deletes, so its first
+    question is about the lock, not about the files: under a published result
+    every sidecar is bound evidence and the directory is never touched. The
+    refusal must say THAT -- the lock is COMPLETE -- because it is the condition
+    that makes the whole request wrong, not merely each file.
+    """
+    staged = _staged_evidence(tmp_path)
+    promotion = _promote(staged, tmp_path, _backends_for(tmp_path))
+    publish_promotion(promotion, evidence_dir=staged)
+    published = _digests(staged)
+
+    with pytest.raises(ActivationEvidenceError) as refusal:
+        reclaim_unbound_sidecars(evidence_dir=staged, sidecar_names=set(promotion.files))
+
+    assert "condition (a)" in str(refusal.value)
+    assert "evidence_status=COMPLETE" in str(refusal.value)
+    assert _digests(staged) == published
+
+
+def test_reclaim_refuses_a_name_outside_this_promotion(tmp_path):
+    """The name set is a permission, not a target list handed in with the request.
+
+    `sidecar_names` comes from `Promotion.files`, so the caller names the files a
+    promotion would write. A name from anywhere else is refused rather than
+    deleted; otherwise the parameter is an `rm` list under an evidence directory
+    with a checked-conditions story attached.
+    """
+    staged = _staged_evidence(tmp_path)
+    promotion = _promote(staged, tmp_path, _backends_for(tmp_path))
+    stray = staged / "operator_scratch.json"
+    stray.write_bytes(b"{}\n")
+
+    with pytest.raises(ActivationEvidenceError) as refusal:
+        reclaim_unbound_sidecars(
+            evidence_dir=staged,
+            sidecar_names={*promotion.files, "operator_scratch.json"},
+        )
+
+    assert "condition (b)" in str(refusal.value)
+    assert "operator_scratch.json" in str(refusal.value)
+    assert stray.is_file()
+    assert stray.read_bytes() == b"{}\n"
+
+
+def test_reclaim_refuses_a_sidecar_the_lock_references(tmp_path):
+    """A sidecar the lock names is bound, whatever the lock's status says.
+
+    Condition (a) only establishes that the lock is not a published result; it
+    does not establish that the lock has no claim on these bytes. A half-filled
+    INCOMPLETE lock naming a roster manifest is a real state -- the record was
+    being written by hand -- and deleting the file it names would leave the lock
+    pointing at nothing.
+    """
+    staged = _staged_evidence(tmp_path)
+    _half_published(staged)
+    named = staged / "gears_smoke_pair_roster.json"
+    named.write_bytes(b"half-published roster")
+
+    with pytest.raises(ActivationEvidenceError) as refusal:
+        reclaim_unbound_sidecars(
+            evidence_dir=staged, sidecar_names={"gears_smoke_pair_roster.json"}
+        )
+
+    assert "condition (c)" in str(refusal.value)
+    assert "gears_smoke_pair_roster.json" in str(refusal.value)
+    assert named.is_file()
+    assert named.read_bytes() == b"half-published roster"
+
+
+def test_reclaim_leaves_the_directory_byte_identical_when_it_refuses(tmp_path):
+    """A refused reclaim is a WHOLE refusal: not even the clean candidate goes.
+
+    Two leftovers, one of them named by the lock. Checking condition (c) inside
+    the deletion loop would remove the first (it sorts first and is genuinely
+    unbound) and refuse the second, which is hand-deletion with extra steps: the
+    operator is left with a half-reclaimed directory and an error, and no record
+    of which half went.
+    """
+    staged = _staged_evidence(tmp_path)
+    _half_published(staged)
+    (staged / "cpa_smoke_artifacts.json").write_bytes(b"unbound leftover")
+    (staged / "gears_smoke_pair_roster.json").write_bytes(b"named by the lock")
+    before = _digests(staged)
+
+    with pytest.raises(ActivationEvidenceError) as refusal:
+        reclaim_unbound_sidecars(
+            evidence_dir=staged,
+            sidecar_names={"cpa_smoke_artifacts.json", "gears_smoke_pair_roster.json"},
+        )
+
+    assert "condition (c)" in str(refusal.value)
+    assert _digests(staged) == before
+
+
+def test_reclaim_finds_nothing_to_do_in_a_directory_no_publish_touched(tmp_path):
+    """Nothing present is not an error: reclaim is safe to run before every retry."""
+    staged = _staged_evidence(tmp_path)
+    before = _digests(staged)
+
+    assert reclaim_unbound_sidecars(evidence_dir=staged, sidecar_names=_SIDECAR_NAMES) == []
+    assert _digests(staged) == before

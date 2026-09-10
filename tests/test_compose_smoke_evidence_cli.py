@@ -275,3 +275,51 @@ def test_a_harness_roster_in_the_bundle_that_disagrees_with_the_artifact_is_refu
     assert json.loads((staged / LOCK_NAME).read_text())["run_gate"]["evidence_status"] == (
         "INCOMPLETE"
     )
+
+
+def _run_reclaim(inputs, staged):
+    return subprocess.run(
+        [
+            sys.executable,
+            str(CLI),
+            "reclaim-unbound",
+            "--inputs",
+            str(inputs),
+            "--evidence-dir",
+            str(staged),
+        ],
+        capture_output=True,
+        text=True,
+        cwd=REPO,
+    )
+
+
+def test_reclaim_unbound_subcommand_exit_codes(tmp_path):
+    """0 when it reclaims a crashed publish's leftover, 1 when it refuses.
+
+    The operator reads `$?`, not the prose. A sidecar left under an INCOMPLETE
+    lock is what a publish that died between the write-once sidecars and the
+    final lock rename leaves behind, and reclaiming it must report success; the
+    same command against the COMPLETE lock the next run publishes must refuse,
+    and a refusal that exited 0 would leave the operator believing a published
+    evidence directory had just been cleaned up.
+    """
+    staged, inputs = _bundle(tmp_path)
+    leftover = staged / "cpa_smoke_pair_roster.json"
+    leftover.write_text("{}\n", encoding="utf-8")
+
+    reclaimed = _run_reclaim(inputs, staged)
+
+    assert reclaimed.returncode == 0, reclaimed.stderr
+    assert "cpa_smoke_pair_roster.json" in reclaimed.stdout
+    assert not leftover.exists()
+
+    assert _run(inputs, staged).returncode == 0, "the reclaimed name must be free again"
+    published = _snapshot(staged)
+
+    refused = _run_reclaim(inputs, staged)
+
+    assert refused.returncode == 1, refused.stdout
+    assert "REFUSED" in refused.stderr
+    assert "COMPLETE" in refused.stderr
+    assert _snapshot(staged) == published

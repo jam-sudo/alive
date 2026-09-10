@@ -28,7 +28,7 @@ import os
 import re
 import shutil
 import tempfile
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -55,6 +55,7 @@ __all__ = [
     "merge_backend_record",
     "promote_lock_to_complete",
     "publish_promotion",
+    "reclaim_unbound_sidecars",
 ]
 
 #: The dependency lock's fixed name inside the evidence directory.
@@ -65,6 +66,17 @@ ARTIFACT_MANIFEST_SCHEMA = "compose_backend_smoke_artifact_manifest_v1"
 WHEELHOUSE_SCHEMA = "compose_python_artifact_manifest_v1"
 _WHEELHOUSE_ENVIRONMENTS = frozenset({"gears_env", "cpa_env"})
 _BACKENDS = frozenset({"gears", "cpa"})
+#: Every filename a promotion publishes beside the lock -- the only names
+#: :func:`reclaim_unbound_sidecars` will remove. Built from the same backends and
+#: suffixes :func:`promote_lock_to_complete` spells its names from, and bound to
+#: that function's own output by a round-trip test, because the reclaimer needs a
+#: roster it knows on its own: a caller that supplied both the names and the
+#: permission to delete them would be checking itself.
+_SIDECAR_NAMES = frozenset(
+    {"python_artifact_manifest.json"}
+    | {f"{backend}_smoke_pair_roster.json" for backend in _BACKENDS}
+    | {f"{backend}_smoke_artifacts.json" for backend in _BACKENDS}
+)
 #: The six objects the validator requires, mapped to their run-gate record field.
 #: Spelled here to match the validator's own table; the round-trip test binds them.
 _ARTIFACT_RECORD_FIELDS = {
@@ -808,3 +820,108 @@ def publish_promotion(promotion: Promotion, *, evidence_dir: Path) -> dict[str, 
         atomic_write_once(evidence_dir / filename, text)
     _atomic_replace(evidence_dir / LOCK_NAME, lock_text)
     return validate_dependency_lock(evidence_dir / LOCK_NAME)
+
+
+def reclaim_unbound_sidecars(*, evidence_dir: Path, sidecar_names: Iterable[str]) -> list[str]:
+    """Remove sidecars a crashed publish left unbound, and refuse everything else.
+
+    :func:`publish_promotion` writes the sidecars write-once and the lock last, so
+    the lock is the commit point -- and a process that dies between them leaves
+    sidecars on disk that no lock binds, with every retry refused by the
+    write-once guard (``FileExistsError``) until someone deletes the files. That
+    deletion was a ``rm`` typed by hand inside an evidence directory, which is the
+    least reviewable operation this repository has. It is made a named one here,
+    with its conditions checked and its result reported, and the write-once
+    invariant is untouched: nothing about publishing changes, and a file that is
+    bound, or that no promotion would have written, is not deleted at all.
+
+    Three conditions must ALL hold, and a violation refuses the whole request
+    without removing anything:
+
+    (a) ``evidence_dir/LOCK_NAME`` exists, parses, and does not read ``COMPLETE``.
+        A COMPLETE lock is a published result whose record binds these files by
+        SHA-256; its directory is never reclaimed.
+    (b) every supplied name is one a promotion publishes (:data:`_SIDECAR_NAMES`).
+        The caller passes ``Promotion.files``; a name from anywhere else is
+        refused rather than deleted, so the parameter cannot become an arbitrary
+        delete list with a conditions story attached.
+    (c) the lock's text does not mention the name anywhere. A sidecar the lock
+        names is bound evidence whatever the lock's status says -- a half-filled
+        INCOMPLETE lock is exactly the state a hand-written record leaves.
+
+    A violation on ONE name refuses the whole request. A partial reclaim is
+    hand-deletion with extra steps: the operator is left with a half-cleaned
+    directory, an error, and no record of which half went.
+
+    The lock is read as text and parsed here rather than passed through
+    :func:`validate_dependency_lock`. The directory this function exists for is
+    one a crash left half-published, where the validator refuses for reasons that
+    say nothing about whether these particular files are bound; the status is read
+    from the parsed object and condition (c) searches the exact bytes on disk.
+
+    Parameters
+    ----------
+    evidence_dir : Path
+        The directory holding the lock and the sidecars.
+    sidecar_names : Iterable of str
+        The names this promotion publishes -- ``Promotion.files`` from
+        :func:`promote_lock_to_complete`. Names not present on disk are not
+        candidates; a name that is not a sidecar of a promotion is refused.
+
+    Returns
+    -------
+    list of str
+        The filenames removed, sorted. Empty when nothing was there to reclaim,
+        which is not an error: the command is safe to run before every retry.
+
+    Raises
+    ------
+    ActivationEvidenceError
+        If any of the three conditions fails, naming the condition and the files
+        that failed it. Nothing has been removed.
+    """
+    directory = Path(evidence_dir)
+    lock_path = directory / LOCK_NAME
+    try:
+        lock_text = lock_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ActivationEvidenceError(
+            f"condition (a) fails: {LOCK_NAME} could not be read under {directory} ({exc}); "
+            "without the lock nothing establishes that these sidecars are unbound"
+        ) from exc
+    try:
+        status = json.loads(lock_text)["run_gate"]["evidence_status"]
+    except (ValueError, LookupError, TypeError) as exc:
+        raise ActivationEvidenceError(
+            f"condition (a) fails: {LOCK_NAME} under {directory} carries no readable "
+            f"run_gate.evidence_status ({exc!r}); a lock this function cannot read is a lock "
+            "whose claim on these files it cannot rule out"
+        ) from exc
+    if status == "COMPLETE":
+        raise ActivationEvidenceError(
+            f"condition (a) fails: {LOCK_NAME} under {directory} reads "
+            "evidence_status=COMPLETE; a COMPLETE lock is a published result whose record "
+            "binds its sidecars by SHA-256, and its directory is never reclaimed"
+        )
+
+    requested = sorted(set(sidecar_names))
+    outside = [name for name in requested if name not in _SIDECAR_NAMES]
+    if outside:
+        raise ActivationEvidenceError(
+            f"condition (b) fails: {outside} are not sidecars a promotion publishes "
+            f"({sorted(_SIDECAR_NAMES)}); reclaim removes this producer's own leftovers, "
+            "not whatever name it is handed"
+        )
+
+    candidates = [name for name in requested if (directory / name).is_file()]
+    referenced = [name for name in candidates if name in lock_text]
+    if referenced:
+        raise ActivationEvidenceError(
+            f"condition (c) fails: {LOCK_NAME} under {directory} references {referenced}; a "
+            "sidecar the lock names is bound evidence, not an unbound leftover, and the whole "
+            f"request ({candidates}) is refused rather than partly applied"
+        )
+
+    for name in candidates:
+        (directory / name).unlink()
+    return candidates
