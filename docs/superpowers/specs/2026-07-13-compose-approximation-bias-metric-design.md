@@ -388,3 +388,25 @@ a synthetic frozen projection block (no `gears`, no Norman):
   shapes the pre-registered GEARS interpretation.
 - **Not local-runnable end-to-end.** Real cells are pod-only; only the known-answer tests run on the
   MacBook (`CLAUDE.md` #compute).
+
+## 9. R1 design adoption — 2026-09-11
+
+Owner의 “그렇게 진행해”에 따라 [R1 상세 계약안](2026-09-11-compose-baseline-checkpoint-r1-draft.md)의
+log 기반 입력·출력 방향과 projection/sampling/model error의 분리를 채택한다. Full-library
+normalization은 frozen response target을 사용하고 registered roster로 subset한다. Signed native
+출력에는 두 번째 normalization/log 또는 clipping 없이 frozen response projection을 적용한다.
+Upstream 대비 normalization/roster 차이는 COMPOSE adaptation으로 명시한다.
+
+Integrity·projection·sampler 계약 위반은 admission 거부 대상으로 설계한다. 유효한 측정의 큰
+sampling 오차는 보존하고 한계로 보고하며, comparator 교체나 성공을 위한 실패 삭제에 사용하지 않는다.
+구체적인 metric/schema/admission·flag 소비 규칙과 수치 판정 기준은 **아직 미결**이다.
+반복 수는 임의 고정하지 않고 사전 정밀도·검증 오류율·비용 근거로 정한다. 기존 R_star를 새
+sampling estimand에 자동 승계하지 않는다.
+
+이는 representation의 scientific admission이나 현 raw report의 대체 승인이 아니다. §1의 R1
+일치 guard와 기존 report/finalizer 계약은 유지한다. 과거 Probe-A FAIL, raw metric의 역사적 정의와
+signed evidence는 보존한다. Config 변경·pod evidence·seal은 별도 승인 대상으로 남는다.
+
+이 추가 조문으로 이 파일의 measurement-contract bytes/SHA는 달라진다. Config bytes가 불변이어도
+과거 report의 contract digest를 새 문서의 digest로 덮어쓰지 않는다. 기존 evidence는 생성 당시
+lineage로 보존하며, 향후 report는 승인된 code/spec/config identity에 새로 결속해야 한다.

@@ -8,7 +8,7 @@
 > **이 문서는 아무것도 정의하지 않는다** — 세부(task)는 plan, claim은 spec, exact param은 config,
 > 시간순 audit는 git이 authoritative다([sources of truth](../../CLAUDE.md#sources)). 상태 행이 authoritative
 > 문서와 어긋나면 **authoritative 문서가 옳다**; 이 인덱스를 갱신한다.
-> **Updated:** 2026-09-10 @ `78419d1` (branch `compose-owner-judgments-2026-09-10`)
+> **Updated:** 2026-09-11 @ `f3ce1d3` (branch `main`)
 > `scripts/bump-readiness-stamp.sh` / the pre-commit hook from `HEAD` at commit time, so it names the
 > **parent** of the commit that carries it and can never name itself. Reading it as "one commit stale" is a
 > misreading; git is authoritative for when this file actually changed.
@@ -149,3 +149,20 @@ unit green 을 READY 로 번역하지 않는다.
 
 <!-- maintainer note: index-only. 새 sub-project나 상태 전이 시 위 표의 '상태' 열과 critical-path만 갱신하고,
      Updated 스탬프(date @ commit)를 함께 바꾼다. 세부/claim/param을 여기에 복제하지 않는다. seal 개봉 시 frozen. -->
+
+## 2026-09-11 설계 방향 승인 — release gate 상태 불변
+
+[Owner-approved baseline 설계 방향](2026-09-11-compose-baseline-design-direction.md)을 따른다.
+버전 선택 유지, checkpoint/OOF 계약 정합화, log 기반 R1 새 설계, CPA claim 한계 명시의 범위다.
+상세 representation 계약·admission과 exact 실행 설정은 여전히 미결이다. 위 여섯 activation blocker와
+최종 owner gate를 해소한 기록이 아니며 COMPOSE ACTIVE / RELEASE-BLOCKED / seal UNOPENED를 유지한다.
+
+후속 [checkpoint/OOF·R1 상세 초안](specs/2026-09-11-compose-baseline-checkpoint-r1-draft.md)은
+DRAFT / NOT EFFECTIVE다. CPA 내부 callback 예외와 R1 metric/admission·측정 수치는 채택 전 미결이며,
+초안 작성으로 위 gate 상태를 변경하지 않는다.
+
+**2026-09-11 후속 처분:** owner가 checkpoint 정책(GEARS final epoch, CPA predefined callback 예외)과
+R1 log 입력·출력 설계 방향을 채택했다. 위 문단의 그 두 정책에 대한 미결 표기는
+[상세 문서 §7](specs/2026-09-11-compose-baseline-checkpoint-r1-draft.md) 및 연결된 authoritative
+spec amendment로 갱신한다. Exact 실행 설정·metric/admission·sampling 수치와 runtime 증명은 남아
+있으며 여섯 activation blocker 및 RELEASE-BLOCKED / UNOPENED 상태는 불변이다.

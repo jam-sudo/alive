@@ -188,3 +188,24 @@ pod 단계에서만 가능한 것(real gears/cpa import·GO-graph·real fit·min
 - seam·guard: `src/alive/compose/baselines_combo.py`.
 - 바인딩 지점: `src/alive/compose/phase2b.py`(provenance 조립, post-access 정합성), `src/alive/compose/provenance2.py`(`Phase2bProvenance`, self-checksum), `src/alive/compose/freeze.py`(roster-completeness fail-closed).
 - env lock: `docs/activation-evidence/compose/gears_cpa_dependency_lock.json`.
+
+## 8. Checkpoint policy amendment — 2026-09-11
+
+**OWNER-ADOPTED policy; runtime/release remains blocked.** Owner의 “그렇게 진행해”에 따라
+[상세 계약안 §1](2026-09-11-compose-baseline-checkpoint-r1-draft.md)의 다음 조문을 채택한다.
+이 추가 조문은 §1.6의 outcome 기반 선택 금지에 대한 CPA 내부 fitting 예외를 명시하며,
+기존 문장과 서명을 삭제하지 않는다.
+
+- GEARS는 fixed final epoch를 유지한다. Duplicate monitoring으로 checkpoint를 선택하지 않는다.
+  이 정책은 명시적 COMPOSE adaptation이며 upstream 전체 학습 절차의 완전 재현이라고 주장하지 않는다.
+- CPA는 version-bound library-default callback을 사전 고정한 내부 fitting 알고리즘으로 허용한다.
+  내부 validation outcome을 통한 checkpoint 선택을 인정하는 제한적 예외다. Callback·split·seed를
+  outcome을 본 뒤 탐색하거나 여러 run에서 좋은 checkpoint를 고르는 것은 계속 금지한다.
+- CPA validation expression은 train-only DEG preprocessing에 사용하지 않는다. 등록된 metadata의
+  category/split/epoch 행 수 계산과 expression 사용을 구분한다. Control은 reference-only다.
+- Operator hyperparameter의 calibration gene-disjoint OOF 계약은 불변이다. 내부 cell validation을
+  pair-level OOF 성능 또는 unseen-pair 일반화 증거로 보고하지 않는다. 현 production 경로가
+  deep-baseline별 OOF 재학습을 구현했다는 주장도 하지 않는다.
+
+버전 선택은 기존 승인대로 유지한다. Exact training config·installed artifact 증명·adapter parity는
+별도 완료 조건이며, 이 정책 채택은 config 변경, 실험, exact SHA 또는 seal 승인이 아니다.

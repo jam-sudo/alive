@@ -384,3 +384,10 @@ Every citation above was checked against the committed file, not transcribed fro
   file: the only change in the working tree is this new document. **No edit was made to
   `configs/compose_k562_v1_phase2.yaml`** or to any other committed file — verified directly, not
   inferred.
+
+## 8. Dated addendum — 2026-09-11 design direction
+
+Owner의 “최종 권고로 진행”은 [baseline 설계 방향 기록](2026-09-11-compose-baseline-design-direction.md)의
+범위로 반영한다. §6.2의 버전 선택은 유지하며, checkpoint/OOF 계약 정합화와 log 기반 R1 새 설계를
+진행한다. 이는 exact training config, representation admission, config digest 이동, pod 실행 또는
+seal 승인이 아니다. 기존 서명과 negative evidence는 변경하지 않는다.
