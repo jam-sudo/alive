@@ -8,7 +8,7 @@
 > **이 문서는 아무것도 정의하지 않는다** — 세부(task)는 plan, claim은 spec, exact param은 config,
 > 시간순 audit는 git이 authoritative다([sources of truth](../../CLAUDE.md#sources)). 상태 행이 authoritative
 > 문서와 어긋나면 **authoritative 문서가 옳다**; 이 인덱스를 갱신한다.
-> **Updated:** 2026-09-11 @ `ff6229f` (branch `main`)
+> **Updated:** 2026-09-11 @ `be06a59` (branch `main`)
 > `scripts/bump-readiness-stamp.sh` / the pre-commit hook from `HEAD` at commit time, so it names the
 > **parent** of the commit that carries it and can never name itself. Reading it as "one commit stale" is a
 > misreading; git is authoritative for when this file actually changed.
@@ -176,3 +176,8 @@ spec amendment로 갱신한다. Exact 실행 설정·metric/admission·sampling 
 후속 [scientific report 계약](specs/2026-09-11-compose-r1-scientific-report-contract-draft.md)은
 DRAFT / NOT EFFECTIVE이며 nested schema·numeric/runtime·consumer 계약은 미완이다.
 Activation blocker, RELEASE-BLOCKED / UNOPENED 및 kernel-isolation re-proof 상태는 불변이다.
+
+**2026-09-11 coverage 로컬 검증 완료:** [로컬 validator](plans/2026-09-11-compose-r1-coverage-validator.md)는
+draft nested identity/model/schedule의 구조·외부 기대값 결속만 검증한다. Scientific schema 전체,
+progress ledger·runtime·consumer 검증은 아니며 release gate 상태를 바꾸지 않는다.
+COMPOSE 회귀검사는 통과했고 Linux seccomp 검사는 Mac에서 skip됐다. 상세 결과는 위 작업 기록에 둔다.
