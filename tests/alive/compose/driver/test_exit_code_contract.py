@@ -80,6 +80,12 @@ _VALID_CLASSIFICATIONS = frozenset({PRESEAL_REJECTION, POSTSEAL, BUG, UNREACHABL
 #: ``MetricError``). Every entry's justification says WHY, in one line, so a
 #: reviewer can refute it without re-deriving the call graph.
 _CLASSIFICATION: dict[str, tuple[str, str]] = {
+    # 2026-09-11: additive registration for the development-only R1 kernel.
+    "alive.compose.log_sampling_report::LogSamplingDiagnosticError": (
+        UNREACHABLE_FROM_DRIVER,
+        "Pure caller-supplied-array diagnostic; not imported by the scientific driver "
+        "or admission/finalizer paths. It grants no source/runtime verification.",
+    ),
     # ---- driver layer: carrier assembly and the four subcommands ----------------
     "alive.compose.driver.run_spec::RunSpecError": (
         PRESEAL_REJECTION,
@@ -728,8 +734,10 @@ def test_the_enumeration_counts_are_pinned():
     # descriptor-pinned read moved here so the pre-seal bias lane could reuse it without
     # editing a file inside the frozen kernel-isolation closure. Roster still 42, same
     # reason: it is converted at every call site and must never reach the CLI.
-    assert len(_CLASSES) == 77, f"exception classes under src/alive: {len(_CLASSES)}"
-    assert len(_CLASSIFICATION) == 77, f"classification entries: {len(_CLASSIFICATION)}"
+    # 2026-09-11: 77 -> 78 for the development-only LogSamplingDiagnosticError.
+    # It is outside the driver import graph, so the runtime roster stays 42.
+    assert len(_CLASSES) == 78, f"exception classes under src/alive: {len(_CLASSES)}"
+    assert len(_CLASSIFICATION) == 78, f"classification entries: {len(_CLASSIFICATION)}"
     assert len(cli._KNOWN_PRESEAL_REJECTIONS) == 42, (
         f"roster size: {len(cli._KNOWN_PRESEAL_REJECTIONS)}"
     )

@@ -174,3 +174,17 @@ Owner의 “채택할게”에 따라 다음 검증 역할과 처분 정책을 �
 default로 발명하거나 현재 finalizer를 새 schema에 대해 열어 두는 것은 허용하지 않는다.
 Schema·numeric 정책·runtime evidence가 완성되기 전 scientific admission은 계속 불가다.
 이 채택은 config 변경, report finalization, pod 실행, exact SHA 또는 seal 승인이 아니다.
+
+## 5. Local implementation increment — 2026-09-11
+
+Owner의 “커밋하고 다음으로 넘어가자”에 따라
+[diagnostic kernel 계약](../plans/2026-09-11-compose-r1-diagnostic-kernel.md)을 작성하고
+[strict 개발용 모듈](../../../src/alive/compose/log_sampling_report.py)과
+[negative/known-answer tests](../../../tests/alive/compose/test_log_sampling_report.py)를 추가했다.
+별도 `compose_gears_log_sampling_diagnostic_v1` schema로 한 pair × training seed의 arithmetic,
+exact N, ordered-input digest와 외부 expected registration을 결속한다.
+
+이 schema는 항상 `UNVERIFIED` / `NOT_ADMISSIBLE`이며 성공해도 structural/runtime 증명이 아니다.
+Scientific `compose_gears_log_sampling_report_v1`, multi-pair/seed 통합, attestations, actual sampler
+검증, numeric/budget 정책과 consumer/admission wiring은 구현되지 않았다. Raw bias validator나
+finalizer를 수정하지 않았으므로 개발용 report는 기존 scientific 경로에서 거부된다.
