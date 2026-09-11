@@ -8,7 +8,7 @@
 > **이 문서는 아무것도 정의하지 않는다** — 세부(task)는 plan, claim은 spec, exact param은 config,
 > 시간순 audit는 git이 authoritative다([sources of truth](../../CLAUDE.md#sources)). 상태 행이 authoritative
 > 문서와 어긋나면 **authoritative 문서가 옳다**; 이 인덱스를 갱신한다.
-> **Updated:** 2026-09-11 @ `a178b34` (branch `main`)
+> **Updated:** 2026-09-11 @ `ff6229f` (branch `main`)
 > `scripts/bump-readiness-stamp.sh` / the pre-commit hook from `HEAD` at commit time, so it names the
 > **parent** of the commit that carries it and can never name itself. Reading it as "one commit stale" is a
 > misreading; git is authoritative for when this file actually changed.
@@ -170,3 +170,9 @@ spec amendment로 갱신한다. Exact 실행 설정·metric/admission·sampling 
 **2026-09-11 report 정책 채택:** structural/analytic 검증 필수, budget-limited public 반복 보조,
 모순 시 admission 보류를 [bias spec §10](specs/2026-07-13-compose-approximation-bias-metric-design.md)에
 반영했다. Exact 수치·schema/consumer·runtime evidence는 여전히 미완이며 release gate 상태는 불변이다.
+
+**2026-09-11 local diagnostic 구현:** [R1 diagnostic kernel](plans/2026-09-11-compose-r1-diagnostic-kernel.md)은
+`832d341`에 커밋되어 local COMPOSE 회귀검사를 통과했다. Scientific admission을 생성하지 않는다.
+후속 [scientific report 계약](specs/2026-09-11-compose-r1-scientific-report-contract-draft.md)은
+DRAFT / NOT EFFECTIVE이며 nested schema·numeric/runtime·consumer 계약은 미완이다.
+Activation blocker, RELEASE-BLOCKED / UNOPENED 및 kernel-isolation re-proof 상태는 불변이다.
