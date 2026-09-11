@@ -410,3 +410,19 @@ signed evidence는 보존한다. Config 변경·pod evidence·seal은 별도 승
 이 추가 조문으로 이 파일의 measurement-contract bytes/SHA는 달라진다. Config bytes가 불변이어도
 과거 report의 contract digest를 새 문서의 digest로 덮어쓰지 않는다. 기존 evidence는 생성 당시
 lineage로 보존하며, 향후 report는 승인된 code/spec/config identity에 새로 결속해야 한다.
+
+## 10. R1 verification-role policy — owner adoption 2026-09-11
+
+Owner의 “채택할게”에 따라 [report 선택안 §4](2026-09-11-compose-r1-report-measurement-proposal.md)의
+검증 역할·처분 정책을 채택한다. §9에서 미결로 남긴 역할 구분에 대한 추가 결정이며 기존 조문을
+삭제하지 않는다.
+
+Structural/analytic 검증과 재계산 가능성은 필수다. Public 반복의 precision 달성은 사전 예산이
+제한된 보조 검증으로 두며, `INCONCLUSIVE`/`NOT_RUN_BUDGET`을 PASS나 구조적 증명의 대체로
+사용하지 않는다. Public 결과와 분석적 설명의 모순은 원인 규명 전 admission 보류 사유다.
+유효한 큰 sampling 오차는 한계로 보존하며 comparator 제거·실패 삭제·threshold 조정에 쓰지 않는다.
+
+Exact alpha/eta·budget·반복 수·numeric bound·zero-V·strict schema와 consumer 연결은 미결이다.
+현재 raw report/representation guard 및 finalizer는 그대로 유지한다. 새 정책은 기존 failed Probe-A의
+재해석이나 scientific admission이 아니며, 별도 승인된 새 계약·evidence lineage가 필요하다.
+이 추가 조문 역시 contract SHA를 바꾸므로 과거 evidence의 digest를 덮어쓰지 않는다.

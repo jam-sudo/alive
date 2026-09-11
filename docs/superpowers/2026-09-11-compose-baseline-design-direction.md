@@ -128,3 +128,19 @@ m=1/2/3, constant/nonconstant 입력을 다룬다. 이는 sampling 수식 검증
 Production code·configs·dependency lock은 변경하지 않았다. 저장소 전체 full suite와 real sampler,
 fresh pod smoke, scientific run은 실행하지 않았다. COMPOSE 전체 회귀의 local green을 READY로
 승격하지 않으며, 상세 admission/측정 설정과 runtime evidence는 남아 있다.
+
+## 9. Report·측정 선택안 — 2026-09-11
+
+Owner의 “순서대로 진행”에 따라 [R1 report·측정 설정 선택안](specs/2026-09-11-compose-r1-report-measurement-proposal.md)을
+작성했다. Structural validity와 analytic V를 주 측정으로, budget-limited public 반복을 보조 검증으로
+분리하는 안이다. Schema·admission 연결·alpha/eta·budget·numeric tolerance는 제안이며 미채택이다.
+반복 수 공식의 비용 예시를 계산했지만 실제 Norman 결과나 pod timing을 생성하지 않았다.
+해당 선택안의 채택 전에는 다음 schema/validator 구현과 scientific 실행으로 넘어가지 않는다.
+
+## 10. Report 검증 역할 채택 — 2026-09-11
+
+Owner의 “채택할게”로 [report 선택안 §4](specs/2026-09-11-compose-r1-report-measurement-proposal.md)의
+structural/analytic 필수·public 반복 보조·모순 시 admission 보류 정책을 채택했다.
+§9의 해당 역할 구분에 대한 미채택 상태는 이 기록으로 갱신한다. 수치 후보·budget·numeric bound·
+strict schema와 consumer 계약은 남아 있다. 다음은 로컬 schema/validator·negative 검증이며
+config 변경과 scientific 실행 승인은 포함하지 않는다.
