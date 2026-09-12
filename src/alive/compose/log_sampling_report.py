@@ -12,7 +12,7 @@ import json
 import math
 import re
 from copy import deepcopy
-from decimal import Decimal
+from decimal import Decimal, DecimalException
 from typing import Any
 
 import numpy as np
@@ -272,7 +272,7 @@ def decode_log_sampling_diagnostic(payload: str) -> dict[str, Any]:
 
     try:
         value = json.loads(payload, object_pairs_hook=pairs, parse_float=number)
-    except (ValueError, RecursionError) as error:
+    except (ValueError, RecursionError, DecimalException) as error:
         raise LogSamplingDiagnosticError("invalid diagnostic JSON") from error
     _json(value)
     if type(value) is not dict:

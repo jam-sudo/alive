@@ -294,3 +294,13 @@ def test_recursive_report_is_rejected_as_invalid_json(case):
     except LogSamplingDiagnosticError as error:
         caught = error
     assert caught is not None
+
+
+@pytest.mark.parametrize("token", ["1e-9999999999999999999999999", "-0e-9999999999999999999999999"])
+def test_extreme_decimal_conversion_uses_the_documented_error_type(token):
+    caught = None
+    try:
+        decode_log_sampling_diagnostic('{"value":' + token + "}")
+    except LogSamplingDiagnosticError as error:
+        caught = error
+    assert caught is not None

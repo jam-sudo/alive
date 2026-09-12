@@ -46,3 +46,10 @@ claimed yet. Linux isolation, mutation harness and actual runtime/ledger custody
 
 Next integration requires independently verified unit-bound row/repeat ledgers, not the report's own
 progress fields. This increment neither authenticates those records nor establishes a scientific verdict.
+
+## Full regression result received — 2026-09-11
+
+The previously pending `uv run --locked pytest -q -rs tests/alive/compose` completed with
+2695 passed, 2 skipped, 1 warning in 1217.23 seconds. The two skips are Linux seccomp checks unavailable
+on Mac; the warning is the CPA fixture's AnnData string-index conversion. This run was collected before
+the subsequent transcript tests existed and does not validate that later increment's full test set.
