@@ -1,0 +1,13 @@
+canonical split: training=2 sealed=28
+pair hidden from the declaration: G00_G01
+
+A  hidden: a genuinely sealed pair is trained on and left out of the declaration
+  A: ACCEPTED (sealed_pair_overlap_count=0)
+
+B  control: same training roster, the declaration names every sealed pair
+  B: REFUSED  -- gears smoke training roster overlaps sealed pairs
+
+C  ground truth: the split manifest verifies and names the hidden pair as sealed
+  C: verify_split_manifest -> 8ff7fe188cd39301…  hidden_is_sealed=True
+
+verdict: RESIDUAL CONFIRMED -- concealment passes, honest declaration is refused, and the canonical answer was available all along.
