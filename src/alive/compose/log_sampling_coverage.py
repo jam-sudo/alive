@@ -135,3 +135,105 @@ def validate_synthetic_log_sampling_coverage(
     _coverage(units, models)
     if _json([units, models]) != _json([expected_units, expected_models]):
         raise LogSamplingDiagnosticError("coverage differs from external expectations")
+
+
+_PROGRESS_REASONS = frozenset(
+    {
+        "IDENTITY_MISMATCH",
+        "ROLE_VIOLATION",
+        "EVIDENCE_MISSING",
+        "EVIDENCE_HASH_MISMATCH",
+        "ROSTER_COVERAGE_MISMATCH",
+        "PROJECTION_MISMATCH",
+        "RUNTIME_CONTRACT_MISMATCH",
+        "NUMERIC_UNREPRESENTABLE",
+        "MEASUREMENT_INCOMPLETE",
+        "PUBLIC_DISCREPANCY",
+        "PUBLIC_INCONCLUSIVE",
+        "PUBLIC_NOT_RUN_BUDGET",
+        "VERIFICATION_PENDING",
+    }
+)
+
+
+def _counter(value: Any) -> int | None:
+    if type(value) is not dict:
+        raise LogSamplingDiagnosticError("progress counter must be a tagged object")
+    if value.get("status") == "KNOWN":
+        _keys(value, {"status", "value"})
+        _natural(value["value"])
+        return value["value"]
+    if value.get("status") == "UNKNOWN":
+        _keys(value, {"status", "reason_codes"})
+        reasons = value["reason_codes"]
+        if (
+            type(reasons) is not list
+            or not reasons
+            or any(type(reason) is not str or reason not in _PROGRESS_REASONS for reason in reasons)
+            or reasons != sorted(set(reasons))
+        ):
+            raise LogSamplingDiagnosticError("unknown counter requires sorted unique reason codes")
+        return None
+    raise LogSamplingDiagnosticError("unknown progress counter tag")
+
+
+def _progress(value: Any, unit_status: str) -> None:
+    _json(value)
+    _keys(
+        value,
+        {
+            "requested_control_rows",
+            "completed_control_rows",
+            "requested_repeats",
+            "attempted_repeats",
+            "completed_repeats",
+        },
+    )
+    rows, repeats = value["requested_control_rows"], value["requested_repeats"]
+    _natural(rows)
+    _natural(repeats)
+    done_rows = _counter(value["completed_control_rows"])
+    attempted = _counter(value["attempted_repeats"])
+    completed = _counter(value["completed_repeats"])
+    for observed, requested in ((done_rows, rows), (attempted, repeats), (completed, repeats)):
+        if observed is not None and observed > requested:
+            raise LogSamplingDiagnosticError("observed progress exceeds registered request")
+    if attempted is not None and completed is not None and completed > attempted:
+        raise LogSamplingDiagnosticError("completed repeats exceed attempted repeats")
+    if unit_status == "COMPLETE" and (done_rows, attempted, completed) != (rows, repeats, repeats):
+        raise LogSamplingDiagnosticError("COMPLETE requires known fully completed counts")
+    if unit_status == "NOT_EXECUTED" and (done_rows, attempted, completed) != (0, 0, 0):
+        raise LogSamplingDiagnosticError("NOT_EXECUTED requires known zero counts")
+
+
+def validate_synthetic_log_sampling_progress(
+    progress: Any, *, unit_status: str, expected_progress: Any
+) -> None:
+    """Validate draft progress structure against independent caller expectations.
+
+    Parameters
+    ----------
+    progress
+        Untrusted progress object, including requested and tagged observed counts.
+    unit_status
+        Caller-supplied COMPLETE, FAILED or NOT_EXECUTED unit status.
+    expected_progress
+        Independently supplied expected progress, not read from the candidate.
+
+    Raises
+    ------
+    LogSamplingDiagnosticError
+        On malformed counters, impossible counts/status or expectation mismatch.
+
+    Notes
+    -----
+    This does not verify a ledger, actual execution or source provenance. In
+    particular, syntactic KNOWN zero is not proof that a runtime never started.
+    No receipt, scientific validity or admission is produced.
+    """
+    if type(unit_status) is not str or unit_status not in {"COMPLETE", "FAILED", "NOT_EXECUTED"}:
+        raise LogSamplingDiagnosticError("unsupported unit status")
+    _progress(expected_progress, unit_status)
+    _progress(progress, unit_status)
+    if _json(progress) != _json(expected_progress):
+        raise LogSamplingDiagnosticError("progress differs from external expectations")

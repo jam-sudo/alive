@@ -8,7 +8,7 @@
 > **이 문서는 아무것도 정의하지 않는다** — 세부(task)는 plan, claim은 spec, exact param은 config,
 > 시간순 audit는 git이 authoritative다([sources of truth](../../CLAUDE.md#sources)). 상태 행이 authoritative
 > 문서와 어긋나면 **authoritative 문서가 옳다**; 이 인덱스를 갱신한다.
-> **Updated:** 2026-09-11 @ `be06a59` (branch `main`)
+> **Updated:** 2026-09-11 @ `fd46673` (branch `main`)
 > `scripts/bump-readiness-stamp.sh` / the pre-commit hook from `HEAD` at commit time, so it names the
 > **parent** of the commit that carries it and can never name itself. Reading it as "one commit stale" is a
 > misreading; git is authoritative for when this file actually changed.
@@ -181,3 +181,7 @@ Activation blocker, RELEASE-BLOCKED / UNOPENED 및 kernel-isolation re-proof 상
 draft nested identity/model/schedule의 구조·외부 기대값 결속만 검증한다. Scientific schema 전체,
 progress ledger·runtime·consumer 검증은 아니며 release gate 상태를 바꾸지 않는다.
 COMPOSE 회귀검사는 통과했고 Linux seccomp 검사는 Mac에서 skip됐다. 상세 결과는 위 작업 기록에 둔다.
+
+**2026-09-11 progress 구현 진행:** [Synthetic progress validator](plans/2026-09-11-compose-r1-progress-validator.md)는
+실패/미실행 count의 KNOWN·UNKNOWN 구분과 외부 기대값 결속을 검사한다. 실제 ledger custody나
+scientific admission 검증은 아니며 전체 회귀검사 결과는 아직 대기 중이다. Release gate 상태는 불변이다.
