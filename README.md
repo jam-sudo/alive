@@ -115,6 +115,8 @@ uv run alive cartographer report       --run-id "$RUN_ID"
 
 ### The `--data-card` file (`prepare`)
 
+**Upstream h5ad.** The Perturb-seq AnnData consumed here can be produced from raw FASTQ by [jam-sudo/ngspipeline](https://github.com/jam-sudo/ngspipeline) (Nextflow DSL2, nf-core conventions): FASTQ → kallisto|bustools gene counts + kite sgRNA counts → per-cell guide assignment → `alive/<sample>.h5ad` (or `alive/pooled.h5ad` across GEM groups) with `obs['gene']` as `perturbation_key`, `non-targeting` as `control_value` and raw counts in `X`; its schema note is [`docs/alive_schema.md`](https://github.com/jam-sudo/ngspipeline/blob/dev/docs/alive_schema.md). ALIVE's loader is not modified for it.
+
 `prepare` reads a small JSON descriptor so no dataset paths are hardcoded in source:
 
 ```json
