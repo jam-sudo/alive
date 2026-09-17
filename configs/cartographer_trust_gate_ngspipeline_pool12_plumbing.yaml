@@ -1,0 +1,55 @@
+# CARTOGRAPHER Trust-Gate — PLUMBING config for the ngspipeline-produced h5ad (NOT a scientific run).
+#
+# Purpose (ngspipeline F9): show that ALIVE's loader and the prepare/fit stages consume
+# alive/pooled.h5ad (12 GEM groups of Replogle 2022 K562 essential, produced from FASTQ by
+# jam-sudo/ngspipeline) with zero loader changes. Parameters are a copy of the k562_mini
+# plumbing config; no scientific verdict is claimed.
+experiment: cartographer_trust_gate_ngspipeline_pool12_plumbing
+manifest_seed: 20260621
+split_fractions:
+  base_train: 0.45
+  method_development: 0.25
+  conformal_calibration: 0.15
+  sealed_evaluation: 0.15
+response_space:           # identical to full
+  normalization: library_size_10000_log1p
+  hvg_count: 2000
+  pca_dims: 50
+  cell_cap: 96
+  min_cells: 64
+  cell_sampling_repeats: 8
+  energy_block_size: 256
+perturbation_features:    # identical to full
+  primary: esm2_t33_650M_UR50D_mean_pool
+  standardize_on: base_train
+  missing_policy: exclude_before_split
+base_model:
+  family: additive_ridge
+  ridge_grid: [0.01, 0.1, 1.0, 10.0, 100.0]
+  cv_folds: 3             # scaled down (few base_train perts in the mini)
+  ensemble_members: 5     # scaled down for speed
+method_development:
+  cv_folds: 3             # scaled down
+  k_grid: [5, 10, 20, 40]
+  feature_weight_grid: [0.25, 0.5, 0.75, 1.0]
+  gbm_estimators_grid: [50, 100]   # scaled down for speed
+  ridge_grid: [0.01, 0.1, 1.0, 10.0, 100.0]
+  registered_seeds: [11, 23]        # scaled down for speed
+decision:
+  target_selection_coverage: 0.70   # identical to full
+  conformal_alpha: 0.10             # identical to full
+  minimum_sealed_perturbations: 3   # scaled down (mini sealed cohort)
+inference:
+  bootstrap_replicates: 2000        # floor enforced by load_config (>= 2000)
+  family_confidence: 0.95           # identical to full
+  secondary_augrc_noninferiority_margin: 0.02  # identical to full
+futility:
+  enabled: true
+  comparators: [gbm_error, residual_only]
+  minimum_relevant_delta: 0.01
+  family_confidence: 0.90
+  rule: stop_if_any_simultaneous_upper_bound_le_minimum
+feature_extraction:       # identical to full (real ESM batching)
+  max_residues: 1022
+  long_sequence_policy: truncate  # matches full config (long K562-essential proteins)
+  max_batch_tokens: 16384
