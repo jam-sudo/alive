@@ -1,0 +1,11 @@
+{
+  "control_value": "non-targeting",
+  "counts_layer": null,
+  "gene_id_key": null,
+  "h5ad": "data/ngspipeline/pooled.h5ad",
+  "id_mapping_version": "uniprotkb-search/symbol/organism=9606/reviewed",
+  "perturbation_key": "gene",
+  "raw_data_uri": "replogle2022:K562_essential GEM groups 1-12 (SRA PRJNA831566) via jam-sudo/ngspipeline dev 21204d9 --pool_alive, Discovery run 2026-09-16",
+  "sequence_source": "uniprotkb-2026_03",
+  "sequences": "data/ngspipeline/k562_library_gene_sequences.json"
+}
