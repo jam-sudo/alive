@@ -30,7 +30,9 @@ reconcile하게 하고, (4) 변경된 lineage에는 새 run identity를 사용�
 
 ## 2. Mission과 claim 경계 {#mission}
 
-ALIVE는 단계적으로 causal virtual-cell world model을 구축한다:
+현재 목적은 **고정된 perturbation predictor의 신뢰도를 평가하는 Cartographer**다. [재정렬 계획](docs/superpowers/plans/2026-09-22-cartographer-realignment.md)은 개발 순서만 변경하며 기존 claim·verdict·seal·실행 권한은 보존한다.
+**목표 정렬 규칙 (2026-09-23):** owner가 목표를 변경하기 전까지 작업은 [현재 milestone](docs/superpowers/plans/2026-09-22-cartographer-realignment.md#goal-alignment)의 입증된 결손을 직접 줄여야 한다. 새 predictor·약물 확장·시간/환경 전이·독립 holdout을 자동 선행조건으로 추가하지 않는다. 개발 보고 milestone과 confirmatory/release 판정을 구분하되 scientific invariant나 실제 필수 근거를 면제하지 않는다.
+다음 식은 장기 causal virtual-cell 연구 비전이며 현재 Cartographer의 완성 조건이 아니다:
 
 $$p(X_{post}\mid P_{control}, A, C)$$
 
@@ -194,5 +196,4 @@ RULE: claim · split · seal · manifest · run identity · report는 protocol �
 STATE: COMPOSE ACTIVE, RELEASE-BLOCKED, seal UNOPENED. Readiness gate가 READY가 되기 전 실행 금지.
 ```
 
-<!-- maintainer: root는 200줄 미만의 always-on invariant만 유지한다. 상태 전이는 header/registry와 readiness를
-동시에 갱신하고, 세부 규칙은 path-scoped rule/spec/config/runbook에 둔다. -->
+<!-- maintainer: root는 200줄 미만. 상태 전이는 header/registry/readiness에 함께 반영하고 세부 규칙은 path-scoped rule/spec/config/runbook에 둔다. -->

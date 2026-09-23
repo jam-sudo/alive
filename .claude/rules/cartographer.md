@@ -25,6 +25,7 @@ paths:
 
 # TG-K562 / CARTOGRAPHER rules
 
+- Current work follows [mission](../../CLAUDE.md#mission) and the [goal-alignment contract](../../docs/superpowers/plans/2026-09-22-cartographer-realignment.md#goal-alignment). New-source/time-shift feasibility is optional unless a demonstrated milestone gap requires it; it is not the default continuation of a reporting audit.
 - `TG-K562-v1` is COMPLETE. Its seal was opened once and the registered verdict is
   `NO_DISTINCT_WIN`; never re-run or reinterpret that evaluation as a new protocol.
 - This pipeline uses versioned Replogle K562 CRISPRi processed Perturb-seq AnnData and preserves

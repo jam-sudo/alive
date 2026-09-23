@@ -1,8 +1,8 @@
 # ALIVE — Codex 작업 계약
 
-ALIVE는 `p(X_post | P_control, A, C)`로 표현하는 causal virtual-cell world model을 단계적으로 연구한다.
-`P_control`은 control-cell population, `A`는 intervention, `C`는 context다.
-이는 연구 목표이며 현재 구현의 causal·mechanistic 성질을 입증한 식이 아니다.
+ALIVE의 현재 개발 목적은 고정된 perturbation predictor의 예측 신뢰도를 평가하는 Cartographer다.
+새 predictor 개발이나 약물 데이터 확장은 그 자체로 필수 선행조건이 아니다.
+장기 virtual-cell 연구 비전과 현재 제공 범위는 [mission](CLAUDE.md#mission)에서 구분한다.
 개별 protocol의 claim은 실제 split과 estimand가 검증하는 범위로 제한한다.
 
 이 파일은 Codex 진입점이다. 과학적 계약은 [CLAUDE.md](CLAUDE.md)에 두고 여기서 재정의하지 않는다.
@@ -10,6 +10,9 @@ Threshold·seed·metric·roster·blocker·실험 명령은 해당 원문을 참�
 
 ## 1. 작업 방식과 skill
 
+- 모든 작업 선택은 [mission](CLAUDE.md#mission)과 [현재 목표·판정 기준](docs/superpowers/plans/2026-09-22-cartographer-realignment.md#goal-alignment)에 연결한다. 연결할 수 없는 작업은 현재 목표의 필수조건으로 만들지 않는다.
+- 자율진행 범위의 중대한 결정은 추가 검토 2회와 수정 반영 후 진행한다. 별도 승인이 명시된 scientific action만 해당 경계에서 확인하며, 선택적 확장 과제의 승인을 전체 목표의 blocker로 삼지 않는다.
+- 진척은 목표에 필요한 구현·검증·실데이터 근거의 변화로 판단한다. 같은 문서 요약·완료된 검사·승인 요청을 반복하는 것으로 대체하지 않는다.
 - 시작할 때 `git status --short`로 기존 변경을 확인하고 사용자 수정·미추적 파일을 보존한다.
 - [CLAUDE.md](CLAUDE.md)를 읽고 대상 protocol과 affected invariant를 식별한다. 같은 작업에서 이미 읽은
   변경 없는 문서는 반복 로딩하지 않는다. 아래 경로 규칙과 작업에 필요한 spec/plan/config, 구현·테스트를 확인한다.

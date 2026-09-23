@@ -7,6 +7,7 @@ paths:
 
 # Documentation hygiene
 
+- Link milestone blockers to the owner's actual deliverable and applicable authority. Distinguish historical confirmatory defects, present development-report requirements, and optional future validation; do not silently promote one category into another. Correct superseded next-action/blocker guidance with a dated notice while preserving evidence.
 - Preserve the source hierarchy: CLAUDE governance; spec claims; plan/runbook execution; config/data
   card exact values; readiness current release state; git/evidence historical record.
 - Use stable `CLAUDE.md#sources`, `#registry`, `#invariants`, `#seal`, `#provenance`, `#data-eval`,
