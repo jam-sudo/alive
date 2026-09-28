@@ -1,0 +1,66 @@
+# CART-K562-D8-v1 — registered 2026-09-27 (owner approval "승인"). Protocol:
+# docs/contracts/2026-09-27-cart-k562-d8-v1-protocol.md. Changing any field is a new lineage.
+protocol_id: CART-K562-D8-v1
+source:
+  figshare_file_id: 35775507
+  name: K562_gwps_raw_singlecell_01.h5ad
+  size_bytes: 65830941948
+  etag: '"e85ededd1213eae9405a2f2422edef5d-252"'
+  perturbation_key: gene
+  control_value: non-targeting
+  batch_key: gem_group
+controls:
+  role_manifest_sha256: 2bb32d78da1ead0bb16cc97addbbafa9e34103d409e1d78615e3e641a546f7dd
+  control_rows_sha256: 63a825e321a6f3c2b2204c2fad73b2d82702189bc2f95b659594cb51e543cae3
+  control_matrix_sha256: 90147de4ab2cceebbd1fc1423a309652bc3687bcf01368db0548b4435e0a478a
+  reference_role: C_ref
+  input_role: C_input
+  audit_role: C_audit
+predictors:
+  P1:
+    name: arc-state-ST-HVG-Replogle-fewshot-k562-final
+    checkpoint_sha256: 121ff54db0e6f9f53b2777bbf45139757367ed827a111824213e6bf3777b2618
+    pert_index_sha256: a8d8be0caf702b6724a73dae3cd31f00c5c373fd94992b1f0118c6e1f8d98789
+    adapter_sha256: 202c34c736b74885d31485d76dd1296de9a5c3dc0e1d718b929b7cad53e4449e
+    run_spec_sha256: a69fb94ca81db87eb74d2672307fb56fecfd48a9efdfde38022e60b09017ab27
+    predicted_change_sha256: 12a3215b15e5b7cbc301c8b809cd8f4e958c23140294dca371b67b237d762580
+    estimand: anchored_nontargeting_uniform_56_batch_tokens_R16
+  P2:
+    name: tg-k562-v1-base-ridge-decoded
+    base_json_sha256: dc526f52d47efc4568fcc600671733805beedb9a7995773879042ae93994fdec
+    adapter_sha256: 117275a3a6773369bbebe5a5115c6b721edaf0e05a1be644869b8429f6bc5d0f
+    predicted_change_sha256: e3ca7b26d81e46cad8bff0c9a7011ea23e6bbc7cb95b1701751e7ba04b2fdc55
+eligibility:
+  min_cells: 30
+  primary_population: supported_and_day6_labelled
+  tg_sealed_evaluation_targets: include_disclosed_stratum
+events:
+  tau: 0.2
+  epsilon: 0.2
+  sensitivity_grid: [0.1, 0.3]
+  scale: log1p_cp10k_over_8248_gene_axis
+split:
+  seed: 20260928
+  fractions: {D: 0.4, C: 0.2, E: 0.4}
+  strata: [tg_exposure_group, cell_count_band]
+  cell_count_bands: [[30, 100], [100, 260], [260, null]]
+trust:
+  alive_l: {model: logistic, C: 1.0, max_iter: 1000, calibration: isotonic_on_C, weights: target_equal}
+  features: [abs_predicted, predicted_class, n_cells, control_noise_sd, control_mean, p1_token_sd, p1_set_sd, exposure_stratum]
+  baselines: [B0_constant, B1_noise_analytic, B2_random_ranking, B3_no_change_diagnostic]
+acceptance:
+  bins: 10
+  min_targets_per_bin: 30
+  calibration_margin: 0.10
+  operating_budget_on_C: 0.10
+  risk_ucb_max: 0.15
+  use_lcb_min: 0.30
+  alpha: 0.05
+  multiplicity: bonferroni
+  n_boot: 2000
+  comparator: B1_noise_analytic
+  co_primary_strata: [all_outputs, predicted_non_negligible]
+sealing:
+  run_id: CART-K562-D8-v1
+  sealed_role: E
+  e_opening: once_per_protocol_after_freeze
