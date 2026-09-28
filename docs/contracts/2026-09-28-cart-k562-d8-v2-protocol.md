@@ -1,5 +1,8 @@
 # CART-K562-D8-v2 — direction and magnitude trust protocol (REGISTERED)
 
+> **2026-09-28 status update: E OPENED ONCE and EVALUATED.** All six predictor × event verdicts are
+> FAIL; see [results](2026-09-28-cart-k562-d8-v2-results.md). The registered text below is unchanged.
+
 > **Status 2026-09-28: REGISTERED / E SEALED until freeze / single E opening.** Registered under
 > owner-delegated decision authority ("결정권한 위임한다", 2026-09-28). Exact values:
 > [`configs/cart_k562_d8_v2.yaml`](../../configs/cart_k562_d8_v2.yaml).
