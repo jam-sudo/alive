@@ -1,0 +1,24 @@
+# CART-K562-D8-v2 — registered 2026-09-28 under owner-delegated authority. Protocol:
+# docs/contracts/2026-09-28-cart-k562-d8-v2-protocol.md. Inherits every v1 value not listed here.
+protocol_id: CART-K562-D8-v2
+inherits: configs/cart_k562_d8_v1.yaml
+inherits_sha256: 685b276a85275cd2af7fac01ee33396fa5edcfa45e5ad67f90fc8d513f9a0ff5
+manifest_checksum: d84e0ae78a6fa96ab60f7f93baaadfaa8a478ceac29c2aeac0d85b8855bc2cd3
+predictors:
+  P1: {predicted_change_sha256: 12a3215b15e5b7cbc301c8b809cd8f4e958c23140294dca371b67b237d762580}
+  P2: {predicted_change_sha256: e3ca7b26d81e46cad8bff0c9a7011ea23e6bbc7cb95b1701751e7ba04b2fdc55}
+  P3:
+    checkpoint_sha256: 5d34e5c38aa2b87f016782d4b1fad27aa2952eb9e2b2a0e22606b2b57bda865f
+    se_weights_sha256: 3ebec58bd9e9c07f0a76de25b900dad13d015768fbff1e68e5dcbdfb3b2245de
+    se_seed: 20260928
+    adapter_sha256: 38f923d6a9d92b6f59a11ab1734fe960df2c52324844d86c05ddc4d93bd4b58d
+    predicted_change_sha256: 967d1327484cfa936cd9c6edd56ecd2176d05e9249e2d1ce2bef36a64894103e
+    axis: P1
+events:
+  stratum: predicted_non_negligible
+  primary: [sign, magnitude]
+  secondary: [joint]
+  attenuation_estimand: ols_slope_d_on_h_target_bootstrap_ci
+sealing:
+  run_id: CART-K562-D8-v2
+  e_opening: once_per_protocol_after_freeze
