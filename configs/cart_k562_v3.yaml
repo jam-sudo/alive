@@ -1,0 +1,50 @@
+# CART-K562-V3 — pre-registered 2026-09-29 (owner adopted option (a)). Protocol:
+# docs/contracts/2026-09-29-cart-k562-v3-preregistration.md. Awaiting new independent data.
+protocol_id: CART-K562-V3
+predictor:
+  name: arc-state-ST-HVG-Replogle-fewshot-k562-final
+  checkpoint_sha256: 121ff54db0e6f9f53b2777bbf45139757367ed827a111824213e6bf3777b2618
+  adapter_sha256: 202c34c736b74885d31485d76dd1296de9a5c3dc0e1d718b929b7cad53e4449e
+  estimand: anchored_nontargeting_uniform_56_batch_tokens_R16
+targets:
+  roster_sha256: 28d57589f2722e6b4e8a1124eab45a433f2cd32fb8a7e13042744f08a35825bd
+  n: 240
+  sampling_seed: 20260929
+  adaptive_change: false
+replication:
+  unit: independent_lentiviral_transduction
+  min_units: 2
+  per_unit_min_cells_eligibility: 30
+  target_cells_per_unit: 150
+  min_controls_per_unit: 5000
+split:
+  seed: 20260930
+  fractions: {D: 0.4, C: 0.2, E: 0.4}
+controls:
+  roles: {C_ref: 0.4, C_input: 0.4, C_audit: 0.2}
+  within: [transduction, gem_group]
+events:
+  tau: 0.2
+  epsilon: 0.2
+  primary: sign_on_predicted_non_negligible
+  warning_estimands: [magnitude_success, attenuation_slope]
+  scale: log1p_cp10k_over_all_genes_filtered_matrix
+  sensitivity_scale: log1p_cp10k_over_day8_8248_gene_axis
+product_rule:
+  order: [B0_constant, B1_noise_analytic, ALIVE_L]
+  selection_role: C
+  alive_l_requires_distinct_win: true
+acceptance:
+  bins: 10
+  min_targets_per_bin: 30
+  calibration_margin: 0.10
+  operating_budget_on_C: 0.10
+  risk_ucb_max: 0.15
+  use_lcb_min: 0.30
+  alpha: 0.05
+  multiplicity: bonferroni_over_family_and_transductions
+  n_boot: 2000
+  pass_requires: every_independent_transduction
+sealing:
+  run_id: CART-K562-V3
+  e_opening: once_per_protocol_after_freeze
