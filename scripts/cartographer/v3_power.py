@@ -193,10 +193,21 @@ def main() -> None:
     ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--sims", type=int, required=True)
     ap.add_argument("--workers", type=int, default=max(1, mp.cpu_count() - 1))
+    ap.add_argument("--only", help="confirmation run of one design: N,T,D,C,b0_policy")
+    ap.add_argument("--run-definition", type=Path, help="required with --only")
+    ap.add_argument("--run-definition-sha256", help="required with --only")
     args = ap.parse_args()
 
     if sha256(args.design_doc) != args.design_sha256:
         raise SystemExit("design doc SHA256 mismatch: the fixed design changed")
+    designs = DESIGNS
+    if args.only:
+        if not args.run_definition or sha256(args.run_definition) != args.run_definition_sha256:
+            raise SystemExit("--only needs a run definition with matching SHA256")
+        n, t, fd, fc, policy = args.only.split(",")
+        designs = [(int(n), int(t), (float(fd), float(fc)), policy)]
+        if designs[0] not in DESIGNS:
+            raise SystemExit(f"{designs[0]} is not a design candidate of the fixed design doc")
     cfg = yaml.safe_load(args.config.read_text())
     if sha256(args.roster) != cfg["targets"]["roster_sha256"]:
         raise SystemExit("roster SHA256 differs from the registered config")
@@ -213,7 +224,7 @@ def main() -> None:
     rules = v3.resolve_rules({**cfg, "v3_1_rules": {**INTERIM, "b0_policy": "c_gate"}})
 
     jobs = []
-    for d in DESIGNS:
+    for d in designs:
         for mu, sd, rho in itertools.product(MUS, SDS, RHOS):
             jobs.append((d, {"mu": mu, "sd": sd, "rho": rho, "shift": 0.0, "drop": 0.0}))
     n_primary = len(jobs)
@@ -221,10 +232,10 @@ def main() -> None:
         cells = pool.map(
             run_cell, [(i, counts, d, s, rules, args.sims) for i, (d, s) in enumerate(jobs)]
         )
-        picks = {p: adequacy(cells, p) for p in ("c_gate", "accept_all")}
-        sens_designs = {(*REGISTERED, p) for p in picks}
+        picks = {p: adequacy(cells, p) for p in sorted({d[3] for d in designs})}
+        sens_designs = set(designs) if args.only else {(*REGISTERED, p) for p in picks}
         for p, (_, best) in picks.items():
-            if best:
+            if best and not args.only:
                 sens_designs.add((best["N"], best["T"], tuple(best["DC"]), p))
         sens = [
             (d, {"mu": mu, "sd": CRIT["sd"], "rho": rho, **v})
@@ -243,6 +254,8 @@ def main() -> None:
     result = {
         "run_id": args.out.name,
         "design_doc_sha256": args.design_sha256,
+        "only": args.only,
+        "run_definition_sha256": args.run_definition_sha256,
         "inputs": {
             "config_sha256": sha256(args.config),
             "roster_sha256": sha256(args.roster),

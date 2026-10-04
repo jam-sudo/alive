@@ -1,5 +1,9 @@
 # CART-K562-V3 — prospective independent validation (PRE-REGISTERED, awaiting data)
 
+> **2026-10-04: SUPERSEDED before any data by [CART-K562-V3.1](2026-10-04-cart-k562-v3-1-addendum.md).**
+> The power analysis gave this design about a 10% chance of PASS, so it is not executed. The
+> registered text below is unchanged.
+
 > **Status 2026-09-29: PRE-REGISTERED before any new data exists.** The owner adopted option (a) on
 > 2026-09-29 (“진행”): a **predictor-level, direction-only, gene-level** reliability card is the minimum
 > S6 product. Query-specific trust, magnitude reliability and gene-set claims remain future work.
