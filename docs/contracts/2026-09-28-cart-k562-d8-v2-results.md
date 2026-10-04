@@ -1,5 +1,10 @@
 # CART-K562-D8-v2 — registered evaluation results (role E, single opening)
 
+> **2026-10-04 erratum:** two implementation deviations are recorded in the
+> [erratum](2026-10-04-cart-k562-d8-v2-erratum.md). The operating-point search was checked on role C
+> and is identical to the registered definition in all six cells. The B0 weighting effect is not
+> evaluated. The verdicts and the text below are unchanged.
+
 > **2026-09-28. Registered verdicts: FAIL for all 6 predictor × event cells.** E was opened
 > once under run_id `CART-K562-D8-v2`: 911 supported E targets out of a 3,885-target E roster, seal
 > audit count 1. Protocol: [CART-K562-D8-v2](2026-09-28-cart-k562-d8-v2-protocol.md). S4 has now
