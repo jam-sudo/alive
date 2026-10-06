@@ -68,3 +68,32 @@ a43db2e9d43ae8b08cf488f46173e0efce6b12fa6d665b3909b704be63a57631  identity_rule.
 8dca188257e751c5aa840c346f8db3d386bd29d0172f0200e6cbf988c2f2db64  test_extract_flex.py
 ```
   - VIPerturb용 `extract_seurat.R`는 먼저 `names` 모드로 열 이름만 본다. 그 이름으로 허용 목록 대응(map.json)을 이 기록에 덧붙인 뒤에 `export` 모드를 쓴다.
+
+## E. 10x Flex 정체 규칙 결과 (2026-10-06, 설계 정보만 사용, outcome 미사용)
+
+- **참조:**
+  - GRCh38 no-alt bowtie2 index `GRCh38_noalt_as.zip` sha256 `f12495639adbc9bc676eba68044c6bfb1145e0ca587beaf6c7c41446f9d3c573`
+  - GENCODE v46 basic GTF sha256 `d620d548ad23dad6c2d67486b7679d12f00f02f66dd5787183d8e6678dceb9b4`
+  - 주 TSS는 MANE_Select, 없으면 Ensembl_canonical로 정한다.
+- **기술 정정 (날짜 붙임, outcome 무관):**
+  - 첫 실행에서는 20 nt 그대로 정렬했고, 정확히 정렬된 guide가 약 27%뿐이었다. 정체 규칙 통과 target은 847개 중 5개였다.
+  - 원인: feature reference 서열 6,903개가 **모두 C로 끝난다.** 20번째 염기는 library의 고정 염기이며 게놈 서열이 아니다.
+  - 그래서 앞 19 nt로 정렬한다(bowtie2 `-3 1`, 정확 일치). 그러면 97.4%가 정렬된다(87% 유일).
+  - 이 정정은 설계 정보(서열 조성)만으로 정했다.
+- **결과(정정 후):** 정체 규칙 통과 target은 847개 중 75개다.
+  - P1 지원 target: 74개 중 **1개** 통과.
+  - P1 지원 밖: 773개 중 74개 통과.
+  - 탈락 사유: guide가 TSS ±500 bp 밖 439개, 다중 정렬 186개, ±1 kb 안에 다른 유전자 TSS 97개, 주 TSS 없음 50개.
+  - 해석: 이 library의 단백질 코딩 유전자 이름은 대부분 lncRNA TSS guide에 붙은 근처 유전자 재주석이다.
+  - 결과 파일 sha256 `82117960ed5f4c34020394b7a0f36a7d6c03628fe070f555707ede892d3fb070`.
+- script(정정 후):
+```
+15d0f4a556259a3536c3a0726dc71540c1e5574dd90f12a90d7e3a806cfdb664  scripts/cartographer/zero_cost/identity_rule.py
+```
+- **0a 규칙에 따른 기계적 귀결:**
+  1. **δ 측정:** 정체 규칙을 통과한 P1 지원 target이 1개(30개 미만)다. 그래서 Flex 기반 δ 측정을 쓰지 않고, 대체 규칙(TG/D8 + assay 0.1)을 적용한다. 10x Flex의 δ용 행은 열지 않는다.
+  2. **트랙 P:** T의 상한은 13개다. 이는 Flex 정체 통과 74개 중 VIPerturb에 있고 30 cells 이상인 target 수이며, VIPerturb manifest 세포 수(이미 읽은 메타데이터)로 계산했다.
+     D/C/E로 나누면 bin당 최소 30 target(G-A(i))을 원리상 채울 수 없다. **트랙 P는 등록하지 않는다**(seal 없음, ledger #6 "미등록(실현성)").
+     후보 집합 중 GWPS를 포함하는 것은 owner 판정(§1a)으로 쓰지 않는다.
+  3. **트랙 K의 PIE 팔:** 트랙 P가 등록되지 않으므로 고정 순서 gatekeeping으로 판정에 참여한다(1b S11).
+- 10x Flex 봉인 store는 열지 않은 채 audit count 0으로 유지한다.

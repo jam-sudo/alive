@@ -1,6 +1,7 @@
 """10x K562 Flex identity rule (0a §5): design-only, outcome-free.
 
-Every guide of a target must align exactly to GRCh38 within +-500 bp of the target gene's
+Every guide of a target must align exactly to GRCh38 (first 19 nt: the 20th base is a constant
+library base, C in all 6,903 guides, not genomic; step-1 record E) within +-500 bp of the target gene's
 primary TSS (GENCODE v46 basic, MANE_Select tag, else Ensembl_canonical), and no other gene's
 primary TSS may lie within +-1 kb of any of its guides.
 """
@@ -43,7 +44,7 @@ with open(fa, "w") as fh:
     for r in guides:
         fh.write(f">{r['id']}\n{r['sequence']}\n")
 sam = subprocess.run(["bowtie2", "-f", "-x", IDX, "-U", fa, "--end-to-end", "--very-sensitive",
-                      "--score-min", "C,0,0", "-k", "2", "--no-unal", "--no-hd", "-p", "8"],
+                      "--score-min", "C,0,0", "-k", "2", "-3", "1", "--no-unal", "--no-hd", "-p", "8"],
                      capture_output=True, text=True, check=True).stdout
 hits = collections.defaultdict(list)
 for line in sam.splitlines():
