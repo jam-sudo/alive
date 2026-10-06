@@ -29,26 +29,37 @@ keep <- data.frame(barcode = bc, guide = as.character(md[[m$guide]]),
                    stringsAsFactors = FALSE)
 is_ntc <- !is.na(keep$target) & keep$target == m$ntc_label
 counts <- LayerData(obj, assay = "RNA", layer = "counts")
+dropped_assays <- setdiff(Assays(obj), "RNA"); dropped_red <- Reductions(obj); md_names <- colnames(md)
+rm(obj); invisible(gc())
 stopifnot(identical(colnames(counts), rownames(md)))
 genes <- rownames(counts)
-write_part <- function(dir, idx, with_ncount) {
-  m <- as(counts[, idx, drop = FALSE], "CsparseMatrix")  # genes x cells, CSC slots in binary
-  writeBin(as.integer(m@i), file.path(dir, "counts_i.int32"), size = 4)
-  writeBin(as.integer(m@p), file.path(dir, "counts_p.int32"), size = 4)
-  writeBin(as.numeric(m@x), file.path(dir, "counts_x.float64"), size = 8)
-  writeLines(as.character(dim(m)), file.path(dir, "counts_dim.txt"))
+write_part <- function(dir, idx, with_ncount, chunk = as.integer(Sys.getenv("CHUNK", "20000"))) {
+  # genes x cells CSC slots in binary, appended chunk by chunk to bound memory
+  ci <- file(file.path(dir, "counts_i.int32"), "wb"); cx <- file(file.path(dir, "counts_x.float64"), "wb")
+  p <- 0; nnz <- 0; ncount <- numeric(0)
+  for (s in seq(1, max(length(idx), 1), by = chunk)) {
+    if (!length(idx)) break
+    m <- as(counts[, idx[s:min(s + chunk - 1, length(idx))], drop = FALSE], "CsparseMatrix")
+    writeBin(as.integer(m@i), ci, size = 4); writeBin(as.numeric(m@x), cx, size = 8)
+    p <- c(p, nnz + m@p[-1]); nnz <- nnz + length(m@x)
+    if (with_ncount) ncount <- c(ncount, Matrix::colSums(m))
+    rm(m); invisible(gc())
+  }
+  close(ci); close(cx)
+  writeBin(as.integer(p), file.path(dir, "counts_p.int32"), size = 4)
+  writeLines(as.character(c(length(genes), length(idx))), file.path(dir, "counts_dim.txt"))
   writeLines(genes, file.path(dir, "genes.txt"))
   meta <- keep[idx, ]
-  if (with_ncount) meta$nCount <- Matrix::colSums(counts[, idx, drop = FALSE])
+  if (with_ncount) meta$nCount <- ncount
   write.csv(meta, file.path(dir, "meta.csv"), row.names = FALSE)
 }
 write_part(open_dir, which(is_ntc), TRUE)
 write_part(sealed_dir, which(!is_ntc), FALSE)
 # integer check on NTC rows only (raw counts)
-ntc_counts <- counts[, which(is_ntc), drop = FALSE]
+ntc_x <- readBin(file.path(open_dir, "counts_x.float64"), "double", n = 2^31 - 1)
 cat("ntc_cells:", sum(is_ntc), " sealed_cells:", sum(!is_ntc),
-    " ntc_counts_integer:", all(ntc_counts@x == round(ntc_counts@x)), "\n")
-writeLines(c(sprintf("dropped_meta_columns=%s", paste(setdiff(colnames(md), unlist(m[c("barcode","guide","target","batch")])), collapse = ",")),
-             sprintf("dropped_assays=%s", paste(setdiff(Assays(obj), "RNA"), collapse = ",")),
-             sprintf("dropped_reductions=%s", paste(Reductions(obj), collapse = ","))),
+    " ntc_counts_integer:", all(ntc_x == round(ntc_x)), "\n")
+writeLines(c(sprintf("dropped_meta_columns=%s", paste(setdiff(md_names, unlist(m[c("barcode","guide","target","batch")])), collapse = ",")),
+             sprintf("dropped_assays=%s", paste(dropped_assays, collapse = ",")),
+             sprintf("dropped_reductions=%s", paste(dropped_red, collapse = ","))),
            file.path(open_dir, "dropped_names.txt"))
