@@ -5,7 +5,15 @@ library base, C in all 6,903 guides, not genomic; step-1 record E) within +-500 
 primary TSS (GENCODE v46 basic, MANE_Select tag, else Ensembl_canonical), and no other gene's
 primary TSS may lie within +-1 kb of any of its guides.
 """
-import csv, gzip, json, subprocess, sys, collections, hashlib, bisect
+
+import bisect
+import collections
+import csv
+import gzip
+import hashlib
+import json
+import subprocess
+import sys
 
 FR, GTF, IDX, P1, OUT = sys.argv[1:6]
 
@@ -43,9 +51,31 @@ fa = OUT + ".guides.fa"
 with open(fa, "w") as fh:
     for r in guides:
         fh.write(f">{r['id']}\n{r['sequence']}\n")
-sam = subprocess.run(["bowtie2", "-f", "-x", IDX, "-U", fa, "--end-to-end", "--very-sensitive",
-                      "--score-min", "C,0,0", "-k", "2", "-3", "1", "--no-unal", "--no-hd", "-p", "8"],
-                     capture_output=True, text=True, check=True).stdout
+sam = subprocess.run(
+    [
+        "bowtie2",
+        "-f",
+        "-x",
+        IDX,
+        "-U",
+        fa,
+        "--end-to-end",
+        "--very-sensitive",
+        "--score-min",
+        "C,0,0",
+        "-k",
+        "2",
+        "-3",
+        "1",
+        "--no-unal",
+        "--no-hd",
+        "-p",
+        "8",
+    ],
+    capture_output=True,
+    text=True,
+    check=True,
+).stdout
 hits = collections.defaultdict(list)
 for line in sam.splitlines():
     f = line.split("\t")
@@ -55,13 +85,16 @@ for line in sam.splitlines():
     cut = int(f[3]) + (17 if strand == "+" else 3)  # approx Cas9 cut site within 20-nt protospacer
     hits[f[0]].append((f[2], cut))
 
+
 def near(chrom, pos, w):
     lst = by_chrom.get(chrom, [])
     i = bisect.bisect_left(lst, (pos - w, ""))
     out = []
     while i < len(lst) and lst[i][0] <= pos + w:
-        out.append(lst[i][1]); i += 1
+        out.append(lst[i][1])
+        i += 1
     return out
+
 
 by_target = collections.defaultdict(list)
 for r in guides:
@@ -80,19 +113,29 @@ for (gid, gname), ids in by_target.items():
         for g in ids:
             h = hits.get(g, [])
             if len(h) != 1:
-                ok, why = False, f"alignments={len(h)}"; break
+                ok, why = False, f"alignments={len(h)}"
+                break
             hc, hp = h[0]
             if hc != c or abs(hp - p) > 500:
-                ok, why = False, "guide_far_from_tss"; break
+                ok, why = False, "guide_far_from_tss"
+                break
             others = [x for x in near(hc, hp, 1000) if x != gid0]
             if others:
-                ok, why = False, "other_tss_within_1kb"; break
-    res[gname] = {"gene_id": gid, "n_guides": len(ids), "pass": ok, "reason": why,
-                  "p1_supported": gname in p1}
+                ok, why = False, "other_tss_within_1kb"
+                break
+    res[gname] = {
+        "gene_id": gid,
+        "n_guides": len(ids),
+        "pass": ok,
+        "reason": why,
+        "p1_supported": gname in p1,
+    }
 json.dump(res, open(OUT, "w"), indent=1, sort_keys=True)
 c = collections.Counter((v["p1_supported"], v["pass"]) for v in res.values())
 print("targets", len(res), "pass", sum(v["pass"] for v in res.values()))
 print("P1-supported pass/total", c[(True, True)], c[(True, True)] + c[(True, False)])
 print("non-P1 pass/total", c[(False, True)], c[(False, True)] + c[(False, False)])
-print("reasons", collections.Counter(v["reason"] for v in res.values() if not v["pass"]).most_common())
+print(
+    "reasons", collections.Counter(v["reason"] for v in res.values() if not v["pass"]).most_common()
+)
 print("sha256", hashlib.sha256(open(OUT, "rb").read()).hexdigest())
