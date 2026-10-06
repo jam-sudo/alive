@@ -22,6 +22,13 @@ assert len(s) == 14 and all(r["target"] != "non-targeting" for r in s), "sealed 
 assert "nCount" in o[0] and "nCount" not in s[0], "nCount only for NTC"
 assert "secret_score" not in o[0] and "secret_score" not in s[0], "non-allowlisted column must be dropped"
 assert "secret_score" in open(f"{T}/open/dropped_names.txt").read()
+import numpy as np, scipy.sparse as sp
+def load(d):
+    g, c = map(int, open(f"{d}/counts_dim.txt").read().split())
+    return sp.csc_matrix((np.fromfile(f"{d}/counts_x.float64"), np.fromfile(f"{d}/counts_i.int32", np.int32),
+                          np.fromfile(f"{d}/counts_p.int32", np.int32)), shape=(g, c))
+assert load(f"{T}/open").shape == (50, 6) and load(f"{T}/sealed").shape == (50, 14)
+assert abs(load(f"{T}/open").sum(0).A1 - np.array([float(r["nCount"]) for r in o])).max() < 1e-9
 print("SYNTHETIC TEST PASS")
 PY
 rm -rf "$T"

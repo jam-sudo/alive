@@ -2,7 +2,7 @@
 #   names  <rds>                         -> prints slot/assay/layer/meta.data column NAMES only (no values)
 #   export <rds> <map.json> <open_dir> <sealed_dir>
 #       map.json: {"barcode": null|"col", "guide": "col", "target": "col", "batch": "col", "ntc_label": "..."}
-#       open_dir   <- NTC cells only: counts (MatrixMarket), barcodes, genes, allowlisted meta, nCount
+#       open_dir   <- NTC cells only: counts (CSC slots, binary), genes, allowlisted meta, nCount
 #       sealed_dir <- non-NTC cells: counts + allowlisted meta (no nCount); never summarised here
 suppressPackageStartupMessages({ library(SeuratObject); library(Matrix); library(jsonlite) })
 args <- commandArgs(trailingOnly = TRUE)
@@ -32,7 +32,11 @@ counts <- LayerData(obj, assay = "RNA", layer = "counts")
 stopifnot(identical(colnames(counts), rownames(md)))
 genes <- rownames(counts)
 write_part <- function(dir, idx, with_ncount) {
-  writeMM(counts[, idx, drop = FALSE], file.path(dir, "counts.mtx"))
+  m <- as(counts[, idx, drop = FALSE], "CsparseMatrix")  # genes x cells, CSC slots in binary
+  writeBin(as.integer(m@i), file.path(dir, "counts_i.int32"), size = 4)
+  writeBin(as.integer(m@p), file.path(dir, "counts_p.int32"), size = 4)
+  writeBin(as.numeric(m@x), file.path(dir, "counts_x.float64"), size = 8)
+  writeLines(as.character(dim(m)), file.path(dir, "counts_dim.txt"))
   writeLines(genes, file.path(dir, "genes.txt"))
   meta <- keep[idx, ]
   if (with_ncount) meta$nCount <- Matrix::colSums(counts[, idx, drop = FALSE])
