@@ -161,3 +161,34 @@ a43db2e9d43ae8b08cf488f46173e0efce6b12fa6d665b3909b704be63a57631  identity_rule.
   - TSS target 381개 중 P1 지원 135개(P1-test 61)다.
   - 결과 파일(deg_results, pair_table)과 발현 자료는 열지 않았다.
   - 0a 범위 밖이므로 쓰려면 새 사전 명세가 필요하다.
+
+## H. 트랙 K G-A 판정: 미등록(실현성) (2026-10-06)
+
+- **입력:**
+  - pilot은 GWPS D/C 중 P1 지원 target이다: D 774개(152,708 cells, `pilot_D.npz` `293f5cd27ff535f01b99f5c4e7ab5d39fe9a360717585bfce5a1ffd987343231`), C 398개(79,548 cells, `801943eab6470556981384bc99ebf7225d8bce7948f8960c94665802292294b8`). D8 audit은 전후 모두 1이다.
+  - slot은 기록 G를 따른다. NTC 7,949개.
+  - V3.1 판정 기준을 쓰며 단위는 1개다.
+- **코드:**
+  - `power_k.py` sha256 `f03353ee31853b2bc16b8abceae7dae6afc2867d34cd69af294a182dd981d373`
+  - 라이브러리는 main checkout HEAD `e29e6e6`의 수정되지 않은 파일이다. 이 파일들은 아직 push하지 않았다.
+    - `v3_run.py` `d899038d7dbef10229e1b8ba23c0734db9656d9a616915fcbbe1ab461d377321`
+    - `v3_protocol.py` `decd0018fef68b00fb889cbba77cb1e14c161579008da16b602c00e188d9a59b`
+    - `day8_protocol.py` `0cfd6698deac86b29a03a363db52a76c444ef1dbcbc4026ce6fe43f16b6061d4`
+- **평가 가능 구조(outcome 무관):**
+  - slot 1,090개 중 P1이 |h|>0.2인 출력을 하나라도 예측하는 target은 511개다.
+  - on-target·cis를 빼도 511개로 그대로다. VIPerturb에서 측정되지 않는 출력을 빼면 **425개**(D/C/E = 127/127/171)가 남는다.
+  - 평가 행은 9,584개이고 target당 중앙값은 9다.
+- **상한(실측 δ = 0, test δ 0.2 / train δ 0.3, G-B 없음), seed 20261006, 시뮬레이션 200회:**
+  - **P(PASS) = 0/200**(95% 상한 약 1.8%). 200회 모두 NO_PRODUCT. `power.json` sha256 `c0d60cdc0dd4ff57e8984a38c04f43a795b9b95ffe6454a7406329b319ae5388`
+  - B0: 성공률 test 0.68 / train 0.55, risk UCB 중앙값 0.43 > 0.15.
+  - B1: calibration 통과 0/200.
+  - ALIVE-L: calibration 통과 18/200, use LCB 중앙값 0.0, distinct win 2/200.
+- **판정:** G-A(i)의 검정력 기준 0.8에 미달한다. **트랙 K는 등록하지 않는다**(seal 없음, ledger #5 "미등록(실현성)", 1b S5에 따라 시도 1회를 소모).
+  - 실측 δ는 상한을 더 낮추기만 하므로 TG/D8 측정은 하지 않는다.
+  - PIE 팔은 P1 PASS가 고정 순서의 선행 조건이므로 함께 미등록이다.
+- **탐색 진단(판정 아님, 표기 EXPLORATORY):** test δ 0, train δ 0.1로, 곧 자료 간 전이 손실이 없다고 가정해 200회를 돌렸다.
+  - P(PASS) = 1/200. `power.json` sha256 `4bdf27549ce9f84995da4cae3c61e5cd853c244698ee561b195f5befc63cd1ce`
+  - 성공률은 test 0.89 / train 0.76, B0 risk UCB 중앙값은 0.22다.
+  - ALIVE-L은 calibration 71/200, use LCB 중앙값 0.17, distinct win 17/200이다.
+  - 해석: 미달의 주원인은 δ 가정이 아니다. **단위 하나(평가 가능 target 425개, target당 세포 중앙값 47)로는 V3.1 유용성 기준(risk UCB ≤ 0.15, use LCB ≥ 0.30)과 bin별 calibration을 동시에 넘을 수 없다**는 점이다.
+- 0a의 두 트랙(K·P)이 모두 미등록으로 끝났다. 봉인 store 4개(Flex 1, VIPerturb 3)는 audit count 0인 채 열지 않는다.
