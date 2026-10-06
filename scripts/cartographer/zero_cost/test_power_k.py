@@ -52,6 +52,8 @@ def build(T, agree):
     np.save(f"{T}/pred/per_set_sd.npy", np.full((nt, ng), 0.1))
     json.dump({"supported": tg}, open(f"{T}/pred/record.json", "w"))
     json.dump({"genes": genes}, open(f"{T}/hvg.json", "w"))
+    # the unit does not measure G0: its outputs must drop
+    open(f"{T}/unit_genes.txt", "w").write("\n".join(g["gene_name"] for g in genes[1:]))
     open(f"{T}/hvg_names.txt", "w").write("\n".join(g["gene_name"] for g in genes))
     open(f"{T}/s.toml", "w").write('[fewshot."replogle.k562"]\ntest = %s\n' % json.dumps(tg[::2]))
     with gzip.open(f"{T}/g.gtf.gz", "wt") as f:  # every gene on its own chromosome: no cis removal
@@ -83,6 +85,8 @@ def run(T):
             f"{T}/g.gtf.gz",
             "--slots",
             f"{T}/slots.json",
+            "--unit-genes",
+            f"{T}/unit_genes.txt",
             "--n-ctrl",
             "10000",
             "--v31-config",
@@ -113,6 +117,7 @@ build(T, 1.0)
 res = run(T)
 zt = np.mean([s["z_mean"]["1"] for s in res["sims"]])
 zr = np.mean([s["z_mean"]["0"] for s in res["sims"]])
+assert res["summary"]["outputs_unmeasured_in_unit"] == 1
 assert abs(zt - 0.8) < 0.03 and abs(zr - 0.7) < 0.03, (zt, zr)
 # 3. coin-flip pilot: no shift below 0.5, nothing can pass
 T = tempfile.mkdtemp()
