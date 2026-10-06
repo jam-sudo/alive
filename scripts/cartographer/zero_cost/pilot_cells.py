@@ -43,6 +43,7 @@ with h5py.File(h5ad, "r") as f:
     barcodes = f["obs"][f["obs"].attrs["_index"]].asstr()[:]
 wanted = set(json.loads(Path(targets_p).read_text()))
 targets = [t for t in manifest.ids_for(ROLE[role]) if t in wanted]
+audit_before = store.sealed_access_count  # D8 persisted count (its single E opening)
 X, G, B, offsets = [], [], [], [0]
 for s in range(0, len(targets), 50):
     batch = targets[s : s + 50]
@@ -53,7 +54,7 @@ for s in range(0, len(targets), 50):
         G.append(gem[rows])
         B.append(barcodes[rows])
         offsets.append(offsets[-1] + len(rows))
-if store.sealed_access_count != 0:
+if store.sealed_access_count != audit_before:
     raise SystemExit("sealed access during pilot read")
 out.mkdir(parents=True, exist_ok=False)
 np.savez(
@@ -71,7 +72,7 @@ digest = hashlib.sha256((out / f"pilot_{role}.npz").read_bytes()).hexdigest()
             "role": role,
             "n_targets": len(targets),
             "n_cells": offsets[-1],
-            "sealed_access_count": 0,
+            "d8_audit_count_before_after": [audit_before, store.sealed_access_count],
             "sha256": digest,
         },
         indent=1,
