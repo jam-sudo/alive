@@ -35,3 +35,17 @@
 - "Non-Targeting"이면 NTC다. 그 밖에는 target 세포이며, target은 정체 규칙(0a §5)을 통과해야 쓴다.
 - batch 단위는 probe-barcode 시료다. barcode 접미사에서 추출하며, 추출 방식은 이 기록 C절에 덧붙인다.
 - 이 규칙은 VIPerturb에는 적용하지 않는다(VIPerturb는 RDS의 저자 할당을 허용 목록 열로 쓴다).
+
+## C. PIE 고정 확인 (2026-10-06)
+
+- checkpoint `best_auprc.ckpt` sha256 `e60a1304d074706405939bde94c5edf9851e78070f2d584c6b5025a002ed9a7c` — 고정값과 일치한다.
+- code: `ArcInstitute/pie` commit `b26dd17e72ce25b6dbc17568d4f626c8050aea29`(tag v1.0.0).
+  격리 venv(Python 3.12, torch 2.10.0, MPS 사용 가능)에 설치했으며, ALIVE의 lock은 바꾸지 않았다.
+- **alias 해석:** config의 legacy 경로 `data/sources/aliases.yaml`를 코드가 `src/pie/sources/curated_aliases.yaml`로 연결한다(`src/pie/config.py` `LEGACY_ALIASES_PATH`).
+  그 sha256은 `17505cb3c77ab265345ad8982a84e3d0313acc6f7d18ee38329296894015b8e5`이다. 0a의 alias 규칙은 이 파일로 충족된다.
+- `PIE_splits@0eeae378…/replogle_xdataset/train.json` sha256 `8d050f28aebf482135d42f758f6b440e0333b3dec8efc0dddab9dcc3099d4be4` — checkpoint의 `train_json_sha256`과 일치한다.
+- **학습·검증 맥락:** train과 val에 K562(CVCL_0004)가 없다.
+  - train: VCC25 H1, Jiang A549·BXPC3·HAP1·HT29·MCF7, Orion HCT116·HEK293T, Tahoe 45개 세포주.
+  - val: VCC25 H1_VAL, Jiang HT29, Orion, Tahoe 4개 세포주.
+  - VIPerturb와 10x Flex 자료는 어디에도 없다. PIE 적격성 조건을 충족한다.
+- 받은 PIE 학습 자산은 pie_jiang·pie_arc_vcc_25·pie_x_atlas_orion·pie_tahoe100m(`preprocessed/`)과 pie_sources로, 모두 고정 revision이다. **pie_replogle_nadig_essential는 받지 않았다.**
