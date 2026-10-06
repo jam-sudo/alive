@@ -114,3 +114,50 @@ a43db2e9d43ae8b08cf488f46173e0efce6b12fa6d665b3909b704be63a57631  identity_rule.
 - 봉인 store `tenx_flex_prestore`: 50개 파일, 쓰기 금지(`a-w`), audit count 0.
   - 정렬한 파일별 sha256 목록의 sha256: `01df526ea1ef607addba7c27aa37c1491007c0ddaaf325ed7f2c398ba2c4ae67`
 - 트랙 P는 등록하지 않으므로(기록 E) 이 store는 열지 않는다. δ용 행도 열지 않는다(Flex 기반 δ 미사용).
+
+## G. VIPerturb 파일 고정·봉인 추출·트랙 K 설계값 (2026-10-06)
+
+- **파일:** md5는 모두 0a §2와 일치한다. sha256:
+  - manifest `753a9215bfd693e8b5af47e4312bf53c5c7bae1f6625e463bd61dffb6354417b`
+  - binA `eb88c050ffd9f757092f6c3747e19f0b63337e9ac79ab7de64d6c9384e514585`
+  - binB `990da0c47fd7c6619e70e5aca57ffa7ff75b0c30c5525afeee808791ea52ab31`
+  - binC `0f24d2839285c98d5d7d8217a16c77af376102d279b1797055220828f037954b`
+- **이름 검사(`names` 모드, 값 미열람):**
+  - assay: RNA(counts), GDO(counts, data)
+  - meta 열: orig.ident, nCount_RNA, nFeature_RNA, nCount_GDO, guide, gene, sample, nFeature_GDO
+  - binA: 321,022 cells × 19,068 genes
+- **허용 목록 대응** `viperturb_map.json` (sha256 `86f07b00949d2f07b6be7ee9b2502d00fe6e36fc28a53a4d70856951a3efb4de`):
+  - guide=`guide`, target=`gene`, batch=`sample`, NTC 표지 `NO-TARGET`
+  - batch는 GEM lane 단위다. sample 이름(예: FXB1A01_L1)이 well과 lane을 함께 담는다.
+- **구조(메타데이터):**
+  - binA sample 48개가 모두 `FXB1` 단일 batch다(24 well × lane 2개).
+  - Zenodo 설명에 따르면 각 bin은 NTC 전체와 perturbation의 무작위 부분집합을 담는다.
+  - 따라서 VIPerturb는 **독립 단위 1개**다. 1b S1과 일치하며, P1의 반복 근거가 되지 않는다.
+- **추출:**
+  - script 정정 2건(날짜 붙임, outcome 무관): MatrixMarket 대신 binary CSC를 쓰고, 메모리 상한 때문에 chunk로 나눠 쓴다. 실행 시 `R_MAX_VSIZE=60Gb`.
+  - 첫 두 시도는 메모리 한도로 중단됐고, 봉인 store에는 아무것도 쓰지 않았다(빈 디렉터리를 지웠다).
+  - script sha256: `b85e4fcaf0d3a8b1c4e6abf11d08ba39980019da9ebe312ab4ae1b03d4d39334`
+- **결과:**
+  - NTC: bin마다 7,949개이며 세 bin의 공개 영역 파일이 byte 단위로 같다 → 한 벌(binA)만 쓴다.
+  - 봉인 세포: A 313,073 · B 333,233 · C 252,582. target 18,885개는 bin 간에 겹치지 않는다.
+  - 봉인 store `viperturb_prestore/bin{A,B,C}`: 쓰기 금지, audit count 0. 디렉터리 hash:
+    - A `3f3239b3dfeac6112a2af5e6bc798eeb540aaec65c15d19d26d7d1219fa57785`
+    - B `861a11ed383609e60f7d542b1c628ca3d0b2dea0f19d9038ca9f4c5f3f50ea42`
+    - C `a27ee74cc46c000a984d2013167892b37daf781b147acc6ebc70539204072ce4`
+- **트랙 K 설계값(guide 할당 메타데이터만 사용):**
+  - P1 지원 2,022 중 VIPerturb에 정확한 기호로 있는 target 1,980개, 30 cells 이상 **1,090개**(P1-test 499).
+  - 세포 수 중앙값 47(하위 10% 33, 상위 10% 74).
+  - slot 파일 sha256 `82a44c0e0568fd64881197b41d5dec598e110ae2f87cb21e4af77f44b52f5815`
+- **G-A 부분 판정:**
+  - (iii) P1 HVG 결측: 기호 일치 기준 154/2000 = 7.7% ≤ 10% → **통과**. 결측 출력은 평가 행에서 뺀다.
+  - (iv) NTC 7,949 ≥ 5,000 → **통과**. C_ref는 약 3,180이다.
+- **GWPS pilot 추출(분석 없음, 자료 이동만):**
+  - D8의 `read_unsealed`로 D/C만 읽는다. 소모된 E 911개는 D8 seal audit을 우회해야 읽을 수 있어 쓰지 않는다. 0a §2 대비 **보수적 편차**다(pilot이 작아진다).
+  - D8 seal audit은 추출 전후로 1줄, sha256 `fc8a71fb…1558` 그대로다.
+  - C_ref(P1 축) `pilot_REF.npz` sha256 `9dbc8f4aa10fd7eef6770129b5ec9876338fb5834b34f93030ed863c5faeed77`
+  - script sha256 `59fbcf3bc5265c07defa4b8605f975c701af504af99965cf7f88b22a4d63f210`
+  - 추출은 이 기록보다 먼저 시작했다. 검정력 계산은 이 기록을 push한 뒤에 한다.
+- **후보 탐색(노출 기록):** Gasperini 2019 GEO GSE120861의 `grna_groups.at_scale.txt.gz`(설계 표, sha256 `40e996f072c0ca3664d6aea92f2b85d996f6ce0c17f0808ef09ab4ff8953da82`)만 읽었다.
+  - TSS target 381개 중 P1 지원 135개(P1-test 61)다.
+  - 결과 파일(deg_results, pair_table)과 발현 자료는 열지 않았다.
+  - 0a 범위 밖이므로 쓰려면 새 사전 명세가 필요하다.
