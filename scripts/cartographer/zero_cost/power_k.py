@@ -127,6 +127,18 @@ def one_sim(i):
         "delta_measured": float(dm),
         "capped_slots": int(capped),
         "product": method["product"],
+        "c_checks": [
+            {
+                "candidate": c["candidate"],
+                "supported_bins": len(c["supported_bins"]),
+                "calibration": c["calibration"]["pass"],
+                "brier": c.get("brier_vs_constant", {}).get("pass"),
+                "risk_ucb": round(c["selected"]["risk_ucb"], 4),
+                "use_lcb": round(c["selected"]["use_lcb"], 4),
+                "distinct_win": c.get("distinct_win", {}).get("pass"),
+            }
+            for c in method["selection_checks"]
+        ],
         "z_mean": {s: float(z[A["s"] == s].mean()) for s in (0, 1) if (A["s"] == s).any()},
     }
     if method["product"] is None:
