@@ -97,3 +97,20 @@ a43db2e9d43ae8b08cf488f46173e0efce6b12fa6d665b3909b704be63a57631  identity_rule.
      후보 집합 중 GWPS를 포함하는 것은 owner 판정(§1a)으로 쓰지 않는다.
   3. **트랙 K의 PIE 팔:** 트랙 P가 등록되지 않으므로 고정 순서 gatekeeping으로 판정에 참여한다(1b S11).
 - 10x Flex 봉인 store는 열지 않은 채 audit count 0으로 유지한다.
+
+## F. 10x Flex 봉인 추출 (2026-10-06T16:23:29Z 완료)
+
+- script: `extract_flex.py`(기록 D의 hash). chunk 50,000. 등록 guide 호출 규칙(기록 B)을 썼다.
+- 세포 1,233,421개:
+  - NTC 17,612
+  - target 393,560
+  - Ignore 260,133
+  - 미할당 562,116
+- 공개 영역(NTC GEX와 guide 메타데이터만) sha256:
+  - `ntc_gex.npz` `c2cfd953fae3da1ef3d7b1d9be3f1f6a51d3b784e35e00b5e0b0596fc145f807`
+  - `ntc_meta.csv` `b79e6e401bd7823b33c161a82569a6619527db6c8a38027cb89f8097941f0bba`
+  - `guide_calls.csv` `f55e2516c17c6864000c0e09b38228f7212d9b76efe5b528300956f3850a17f4`
+  - `genes.txt` `d97c3df0ccb22401b5081424f47ced99cfd237aa4bf0bb20d6d5ad72d54d4aac`
+- 봉인 store `tenx_flex_prestore`: 50개 파일, 쓰기 금지(`a-w`), audit count 0.
+  - 정렬한 파일별 sha256 목록의 sha256: `01df526ea1ef607addba7c27aa37c1491007c0ddaaf325ed7f2c398ba2c4ae67`
+- 트랙 P는 등록하지 않으므로(기록 E) 이 store는 열지 않는다. δ용 행도 열지 않는다(Flex 기반 δ 미사용).
