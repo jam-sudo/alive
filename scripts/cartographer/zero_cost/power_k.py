@@ -174,6 +174,9 @@ def main():
     ap.add_argument("--n-ctrl", type=int, required=True, help="unit NTC count (C_ref = 0.4 of it)")
     ap.add_argument("--v31-config", type=Path, required=True)
     ap.add_argument("--delta-measured", type=Path, required=True, help="npy of δ_measured draws")
+    ap.add_argument(
+        "--unit-genes", type=Path, required=True, help="gene symbols measured in the unit"
+    )
     ap.add_argument("--gb", choices=["none"], required=True)
     ap.add_argument("--n-sim", type=int, default=2000)
     ap.add_argument("--seed", type=int, default=20261006)
@@ -194,11 +197,13 @@ def main():
     hvg = json.loads(a.hvg.read_text())["genes"]
     ids, names = [g["gene_id"] for g in hvg], [g["gene_name"] for g in hvg]
     by_id, by_name = tk.primary_tss(a.gtf)
+    unit_genes = set(a.unit_genes.read_text().split())
+    measured = np.array([n in unit_genes for n in names])  # outputs the unit cannot observe drop
     audit = np.load(a.audit)
 
     def rows_for(t):
         keep, found = tk.cis_keep(t, ids, names, by_id, by_name)
-        return np.flatnonzero((np.abs(H[sup[t]]) > TAU) & keep), found
+        return np.flatnonzero((np.abs(H[sup[t]]) > TAU) & keep & measured), found
 
     # pilot
     parts = [np.load(a.pilot_dir / f"pilot_{r}.npz", allow_pickle=True) for r in ("D", "C")]
@@ -291,6 +296,7 @@ def main():
         "n_sim": a.n_sim,
         "seed": a.seed,
         "delta_measured_draws": len(G["delta_measured"]),
+        "outputs_unmeasured_in_unit": int((~measured).sum()),
     }
     a.out.mkdir(parents=True)
     (a.out / "power.json").write_text(

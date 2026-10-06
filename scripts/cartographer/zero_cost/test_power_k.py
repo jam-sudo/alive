@@ -52,6 +52,7 @@ def build(T, agree):
     np.save(f"{T}/pred/per_set_sd.npy", np.full((nt, ng), 0.1))
     json.dump({"supported": tg}, open(f"{T}/pred/record.json", "w"))
     json.dump({"genes": genes}, open(f"{T}/hvg.json", "w"))
+    open(f"{T}/hvg_names.txt", "w").write("\n".join(g["gene_name"] for g in genes))
     open(f"{T}/s.toml", "w").write('[fewshot."replogle.k562"]\ntest = %s\n' % json.dumps(tg[::2]))
     with gzip.open(f"{T}/g.gtf.gz", "wt") as f:  # every gene on its own chromosome: no cis removal
         for i, g in enumerate(genes):
