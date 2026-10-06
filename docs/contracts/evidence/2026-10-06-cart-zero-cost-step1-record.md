@@ -49,3 +49,22 @@
   - val: VCC25 H1_VAL, Jiang HT29, Orion, Tahoe 4개 세포주.
   - VIPerturb와 10x Flex 자료는 어디에도 없다. PIE 적격성 조건을 충족한다.
 - 받은 PIE 학습 자산은 pie_jiang·pie_arc_vcc_25·pie_x_atlas_orion·pie_tahoe100m(`preprocessed/`)과 pie_sources로, 모두 고정 revision이다. **pie_replogle_nadig_essential는 받지 않았다.**
+
+## D. 자료 파일 hash와 봉인 추출 script 고정 (2026-10-06, 추출 전)
+
+- **10x Flex sha256:**
+  - `count_filtered_feature_bc_matrix.h5`: `e5f26ef95ef7ff5194fd84f80cb0ebde02a34e21f23a0994171c311ba816d2ad`
+  - `count_feature_reference.csv`: `5d13b79d3cd159bd68dce60d6e952e0ca341adbc024a9e060f094b185e4a609e`
+- **10x Flex 구조(이름·모양만 확인):**
+  - 행렬은 25,349 feature × 1,233,421 세포다. Gene Expression이 18,446개, CRISPR Guide Capture가 6,903개다.
+  - barcode는 24 nt에 `-N` 접미사가 붙는다. **batch 단위(probe-barcode 시료)는 24 nt 중 17–24번째 8 nt다.** 이 항목은 B절의 "C절에 덧붙인다"를 대신한다.
+- **VIPerturb:** manifest의 md5가 일치한다. bin A–C는 받는 중이며, 다 받은 뒤 이 기록에 sha256을 덧붙인다.
+- **봉인 추출 script:** `scripts/cartographer/zero_cost/`, 합성 자료 시험 통과.
+```
+aedf0113bf60e1d31973326a52c8ca5403477a495395286d0b026d2655027fb7  extract_seurat.R
+3f44ad89acbd13f20d84867e7821d13fafe2ae6348b0f195417608f99df5e07f  extract_flex.py
+a43db2e9d43ae8b08cf488f46173e0efce6b12fa6d665b3909b704be63a57631  identity_rule.py
+3b205422a498d73a4613b026d448870973c307120d17f83c58af5d841b1d9bcb  test_extract_seurat.sh
+8dca188257e751c5aa840c346f8db3d386bd29d0172f0200e6cbf988c2f2db64  test_extract_flex.py
+```
+  - VIPerturb용 `extract_seurat.R`는 먼저 `names` 모드로 열 이름만 본다. 그 이름으로 허용 목록 대응(map.json)을 이 기록에 덧붙인 뒤에 `export` 모드를 쓴다.
