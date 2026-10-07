@@ -192,3 +192,35 @@ a43db2e9d43ae8b08cf488f46173e0efce6b12fa6d665b3909b704be63a57631  identity_rule.
   - ALIVE-L은 calibration 71/200, use LCB 중앙값 0.17, distinct win 17/200이다.
   - 해석: 미달의 주원인은 δ 가정이 아니다. **단위 하나(평가 가능 target 425개, target당 세포 중앙값 47)로는 V3.1 유용성 기준(risk UCB ≤ 0.15, use LCB ≥ 0.30)과 bin별 calibration을 동시에 넘을 수 없다**는 점이다.
 - 0a의 두 트랙(K·P)이 모두 미등록으로 끝났다. 봉인 store 4개(Flex 1, VIPerturb 3)는 audit count 0인 채 열지 않는다.
+
+## I. 0b 서명 전 설계값: Gasperini 2019(GSE120861) 노출 범위와 정체 규칙 (2026-10-06, outcome 미사용)
+
+- **읽은 파일(그 밖은 열지 않았다):**
+  - `GSE120861_grna_groups.at_scale.txt.gz` 127,092 B, sha256 `40e996f072c0ca3664d6aea92f2b85d996f6ce0c17f0808ef09ab4ff8953da82`
+  - `GSE120861_at_scale_screen.genes.txt.gz` 43,493 B, sha256 `4abc4df4f755147856f5921eb68cb5994d5cc75e7a27d061012e9c5624b7a020`, Ensembl ID 13,135개(측정 축)
+  - 크기 확인만 한 파일(HEAD 요청): phenoData 86,726,316 B, exprs 9,574,113,337 B
+  - 결과 파일, 세포 메타데이터, 논문·보충표는 열지 않았다.
+- **설계 표 구조:** group 13,189행(spacer 1개 = 1행). TSS group 381개 × spacer 2개, `pos_control_*` 14, `scrambled_*` 50, `random_*` 50, `bassik_mch` 1, 나머지 `chr*` enhancer 12,312.
+- **spacer 형식:**
+  - 모두 20 nt다. 전체의 3′ 말단 염기는 G 6,335 · A 4,811 · T 1,190 · C 853으로 치우쳐 있다.
+  - TSS spacer 762개의 정확 정렬 수는 다음과 같다. 20 nt 전체 244, 5′ 1 nt 제거 247, **3′ 1 nt 제거 730**, 양끝 1 nt씩 제거 730.
+  - 결론: 3′ 말단 1 nt는 게놈 서열이 아니다. 따라서 0b 규칙은 **3′ 1 nt를 자르고 19 nt를 정렬**한다(서명 전 확정, outcome 무관).
+  - 20 nt 전체로 돌린 첫 실행(통과 24/365, sha256 `6a6c60f2b5c2bf10a22aa6c4e57a74a9268cc6471cafd4354561139dfe50e06e`)은 대체됐다.
+- **기호 대응:** TSS group 이름을 GENCODE v46 `gene_name`과 정확히 맞추면 381 중 365가 일치한다.
+  - 일치하지 않는 구 기호 16개는 뺀다: ATP5F1, ATP5J2, ATPIF1, C16orf91, C21orf59, C6orf48, CCDC58, FAM96A, FAM96B, H3F3B, MTRNR2L8, NARS, SEPT11, TARS, TMEM99, WDR61.
+  - 다대일 대응은 0개다.
+  - 정체 규칙 입력 `tss_feature_reference.csv` sha256 `0cf00b24a47bc510d0a70e169f1acd8afecf1401848ca36480c44fd20994edd0`
+- **정체 규칙(script sha256 `15b273864b4fa4eabf5073bd93abfd23f9f5df1f52b70b885628dce25ed234fc`, trim 인자 추가):**
+  - 기본값 trim 1로 Flex 결과가 재현된다(`82117960…` byte 일치).
+  - Gasperini(trim 1) 통과는 **188/365**다. P1 지원 63/132, P1 지원 밖 125/233.
+  - 탈락 사유: ±1 kb 안 다른 TSS 142, TSS에서 먼 guide 22, 다중 정렬 13.
+  - 결과 파일 sha256 `d5239f02099b82101277f4abc3aeb8fe0dabbf8fd7f251d37b4210f3cb277922`
+- **트랙 PG 후보(PIE vocab, CPM, U2 세포 수 적용 전):**
+  - P1 지원 밖 ∩ 정체 통과 ∩ VIPerturb 30 cells 이상 = **99개**
+  - 목록 sha256 `6b7793a6e88e679c1d77dd35fca9299585664ba3f0430fdf53dbd615e909ec88`
+  - 0.3/0.3/0.4로 나누면 단위당 E는 약 39 target이라 판정 bin이 1개 이하다.
+- **0b §1의 "P1 87"의 산출식:**
+  - 조건: TSS 이름이 P1 지원 vocab과 정확히 일치(135) ∩ P1 예측(GWPS 대조 기준) |h| > 0.2 ∩ on-target·cis(±1 Mb) 밖 ∩ Gasperini 측정 축(Ensembl ID)에 있는 출력이 1개 이상. 결과는 87(P1-test 39)이다.
+  - 쓴 자료는 P1 예측, GENCODE v46, `genes.at_scale`뿐이다. 세포 수는 쓰지 않았다.
+  - 정체 규칙을 적용하면 이 수는 더 줄어든다(P1 지원 정체 통과 63). 결론(P1 반복 불가)은 그대로다.
+- 외장 SSD를 다시 연결한 뒤 봉인 store hash를 다시 확인했다. Flex 1개와 VIPerturb 3개 모두 기록 F·G와 같다.

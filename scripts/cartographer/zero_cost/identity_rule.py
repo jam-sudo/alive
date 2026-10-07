@@ -16,6 +16,8 @@ import subprocess
 import sys
 
 FR, GTF, IDX, P1, OUT = sys.argv[1:6]
+# 3' bases trimmed before alignment: 1 for the 10x Flex library (constant C, record E), 0 for Gasperini
+TRIM = sys.argv[6] if len(sys.argv) > 6 else "1"
 
 # primary TSS per gene from GENCODE v46 basic
 tss = {}  # gene_id -> (chrom, pos, strand, name, priority)
@@ -66,7 +68,7 @@ sam = subprocess.run(
         "-k",
         "2",
         "-3",
-        "1",
+        TRIM,
         "--no-unal",
         "--no-hd",
         "-p",
