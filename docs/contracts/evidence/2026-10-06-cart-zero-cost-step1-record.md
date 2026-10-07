@@ -224,3 +224,37 @@ a43db2e9d43ae8b08cf488f46173e0efce6b12fa6d665b3909b704be63a57631  identity_rule.
   - 쓴 자료는 P1 예측, GENCODE v46, `genes.at_scale`뿐이다. 세포 수는 쓰지 않았다.
   - 정체 규칙을 적용하면 이 수는 더 줄어든다(P1 지원 정체 통과 63). 결론(P1 반복 불가)은 그대로다.
 - 외장 SSD를 다시 연결한 뒤 봉인 store hash를 다시 확인했다. Flex 1개와 VIPerturb 3개 모두 기록 F·G와 같다.
+
+## J. 트랙 PG(0b) 판정: 미등록(실현성, futility 규칙 §5 (3)) (2026-10-06)
+
+- **outcome 무관 설계값(U1 = VIPerturb):**
+  - C_input 역할 hash의 `{dataset}`은 `viperturb_k562`로 정했다(계산 전에 고정). 그 결과 C_ref 3,174 · C_input 3,201 · C_audit 1,574.
+  - 유전자 적격성(C_input 평균 CPM ≥ 5)을 통과한 유전자는 9,412/19,068.
+  - **T 근사**는 다음 조건을 모두 충족하는 **91개**다: 후보 99(기록 I) ∩ target 유전자 C_input CPM ≥ 5 ∩ PIE 지원.
+    - PIE 지원은 "PIE가 예측을 낸다"로 해석했다. PIE는 빠진 knowledge source를 mask로 처리하므로 99/99가 해당한다. 모든 source가 있어야 한다고 엄격하게 읽으면 `perturbation_text`가 54/99를 덮어 더 적어진다.
+  - 세포 수 중앙값은 45다. 설계 파일 `u1_design.json` sha256 `ae603f91547b622c02199008dab3bf8c20f11534bd53a43d17aa58187fdc789b`
+- **split:** `CART-K562-PIE-X2|{gene_name}` hash로 나누면 D 28 · **C 21** · E 42다.
+- **판정 근거(결정적, 시뮬레이션 불필요):**
+  - 실제 T는 근사 T에 U2 세포 수 조건만 더한 부분집합이다. split은 target마다 고정된 hash로 정해지므로 실제 C도 21개 이하다.
+  - pooled C에서 같은 target은 한 cluster로 센다(0b §4). 따라서 C의 distinct target도 21개 이하다.
+  - V3.1 제품 규칙은 C에 `min_targets_per_bin` 30 이상인 bin이 하나는 있어야 calibration을 통과한다(`requirements`: `cal_pass = bool(sup) and …`). 그러므로 모든 후보가 NO_PRODUCT이고 **P(PASS) = 0**이다.
+  - 코드 확인: `v3_protocol.select_product`에 성공률 0.97의 B0를 넣었을 때, C가 21 target이면 product None·supported bins []이다. 대조로 40 target이면 B0가 선택된다(bins [9]).
+- **결과:**
+  - 트랙 PG는 등록하지 않는다(ledger #7 "미등록(실현성)", T5에 따라 시도 1회 소모).
+  - **U2 발현 자료(Gasperini 9.7 GB)는 받지 않았다.**
+  - PIE pilot 예측과 G-A (ii)는 판정에 불필요해져 실행하지 않았다.
+- **실행 흔적(공개):**
+  - **로컬 PIE smoke 실행:** 메모리 부족으로 중단됐고 parquet 출력은 없다.
+    - evidence cache 디렉터리가 key `87a01957365041383ac2cbae3a9cf44be6f48e5dbc69ca045f14fa270441d151`로 생성됐다. 이는 Replogle 디렉터리 없이 계산한 key가 pin과 같다는 관찰이다.
+    - 이후 owner 지시(2026-10-06)에 따라 RAM이 많이 드는 작업은 Explorer HPC로 옮겼다.
+  - **Explorer:**
+    - setup job 10883807: PIE 고정 commit `b26dd17e…` clone, alias sha 일치, 자산 일부 다운로드.
+    - inference job 10883934: 시작 전에 취소했다.
+    - 올린 파일은 대조군 평균 `ctrl_means.npy` 2개, query 2개, adapter뿐이다. 봉인 자료는 올리지 않았다.
+  - **GWPS 전체 축 pilot 추출:** 판정이 확정돼 중단했다. 부분 파일만 SSD에 남아 있다.
+  - D8 seal audit은 1줄, `fc8a71fb…1558` 그대로다.
+- **script sha256:**
+  - `pie_controls.py` `41b3fa8650a715cbe594d11d0489343b341d747953c3bed7269bed14c131eb13`
+  - `pie_predict.py` `32b058a308470b5a7777692ce06bd5ae4c5e0ba5e903f12395c6291455009c39`
+  - `pilot_counts_full.py` `cd5e6b4af2058c96e3ffa461ff0482098f62f447fb2d5eca11091ee175485b7e`
+  - `identity_rule.py` `15b273864b4fa4eabf5073bd93abfd23f9f5df1f52b70b885628dce25ed234fc`
